@@ -1205,6 +1205,11 @@ struct export_var_t{
         int64_t innodb_scrub_log;
 };
 
+extern uint64_t mutex_destroy_stat[LATCH_ID_MAX];
+void srv_mutex_destroy_stat_print();
+const char* mutex_name(uint64_t id);
+
+
 /** Thread slot in the thread table.  */
 struct srv_slot_t{
 	srv_thread_type type;			/*!< thread type: user,

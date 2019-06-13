@@ -32,6 +32,25 @@ Created 2013-03-26 Sunny Bains.
 #include "ut0rnd.h"
 #include "os0event.h"
 
+extern uint64_t mutex_destroy_stat[LATCH_ID_MAX];
+/** Shutdown state */
+enum srv_shutdown_t {
+        SRV_SHUTDOWN_NONE = 0,  /*!< Database running normally */
+        SRV_SHUTDOWN_CLEANUP,   /*!< Cleaning up in
+                                logs_empty_and_mark_files_at_shutdown() */
+        SRV_SHUTDOWN_FLUSH_PHASE,/*!< At this phase the master and the
+                                purge threads must have completed their
+                                work. Once we enter this phase the
+                                page_cleaner can clean up the buffer
+                                pool and exit */
+        SRV_SHUTDOWN_LAST_PHASE,/*!< Last phase after ensuring that
+                                the buffer pool can be freed: flush
+                                all file spaces and close all files */
+        SRV_SHUTDOWN_EXIT_THREADS/*!< Exit all threads */
+};
+
+extern enum srv_shutdown_t     srv_shutdown_state;
+
 /** OS mutex for tracking lock/unlock for debugging */
 template <template <typename> class Policy = NoPolicy>
 struct OSTrackMutex {
@@ -76,6 +95,10 @@ struct OSTrackMutex {
 	{
 		ut_ad(!m_locked);
 		ut_ad(innodb_calling_exit || !m_freed);
+
+		const uint64_t id =  m_policy.get_id();
+		if (srv_shutdown_state >= SRV_SHUTDOWN_CLEANUP)
+		++mutex_destroy_stat[id];
 
 		m_mutex.destroy();
 
@@ -216,6 +239,11 @@ struct TTASFutexMutex {
 	{
 		/* The destructor can be called at shutdown. */
 		ut_a(m_lock_word == MUTEX_STATE_UNLOCKED);
+
+		const uint64_t id =  m_policy.get_id();
+		if (srv_shutdown_state >= SRV_SHUTDOWN_CLEANUP)
+		++mutex_destroy_stat[id];
+
 		m_policy.destroy();
 	}
 
@@ -461,6 +489,11 @@ struct TTASMutex {
 	{
 		/* The destructor can be called at shutdown. */
 		ut_ad(m_lock_word == MUTEX_STATE_UNLOCKED);
+
+		const uint64_t id =  m_policy.get_id();
+		if (srv_shutdown_state >= SRV_SHUTDOWN_CLEANUP)
+		++mutex_destroy_stat[id];
+
 		m_policy.destroy();
 	}
 
@@ -649,6 +682,10 @@ struct TTASEventMutex {
 		UNIV_NOTHROW
 	{
 		ut_ad(m_lock_word == MUTEX_STATE_UNLOCKED);
+
+		const uint64_t id =  m_policy.get_id();
+		if (srv_shutdown_state >= SRV_SHUTDOWN_CLEANUP)
+		++mutex_destroy_stat[id];
 
 		m_policy.destroy();
 	}

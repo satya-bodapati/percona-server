@@ -4835,6 +4835,8 @@ innobase_end(
 		mysql_mutex_destroy(&innobase_share_mutex);
 		mysql_mutex_destroy(&commit_cond_m);
 		mysql_cond_destroy(&commit_cond);
+
+		srv_mutex_destroy_stat_print();
 	}
 
 	DBUG_RETURN(err);

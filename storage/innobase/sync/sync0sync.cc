@@ -33,6 +33,7 @@ Created 9/5/1995 Heikki Tuuri
 #include "univ.i"
 #include "sync0rw.h"
 #include "sync0sync.h"
+#include "srv0srv.h"
 
 /** Keeps count of number of Performance Schema keys defined. */
 unsigned int mysql_pfs_key_t::s_count;
@@ -306,4 +307,27 @@ MutexMonitor::reset()
 	}
 
 	mutex_exit(&rw_lock_list_mutex);
+}
+
+/** Deregister a single instance counter
+@param[in]	count		The count instance to deregister */
+void LatchCounter::single_deregister(latch_id_t m_id, Count* count)
+	UNIV_NOTHROW
+{
+	m_mutex.enter();
+
+	if (srv_shutdown_state >= SRV_SHUTDOWN_CLEANUP) {
+		ib::info() << "Skipping degister for this mutex: " << mutex_name(m_id);
+		m_counters.clear();
+		m_mutex.exit();
+		return;
+	}
+
+	m_counters.erase(
+		std::remove(
+			m_counters.begin(),
+			m_counters.end(), count),
+		m_counters.end());
+
+	m_mutex.exit();
 }

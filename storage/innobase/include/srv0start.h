@@ -163,6 +163,8 @@ extern	ibool	srv_start_raw_disk_in_use;
 /** UNDO tablespaces starts with space id. */
 extern	ulint	srv_undo_space_id_start;
 
+
+#if 0
 /** Shutdown state */
 enum srv_shutdown_t {
 	SRV_SHUTDOWN_NONE = 0,	/*!< Database running normally */
@@ -178,10 +180,13 @@ enum srv_shutdown_t {
 				all file spaces and close all files */
 	SRV_SHUTDOWN_EXIT_THREADS/*!< Exit all threads */
 };
+#endif
 
 /** At a shutdown this value climbs from SRV_SHUTDOWN_NONE to
 SRV_SHUTDOWN_CLEANUP and then to SRV_SHUTDOWN_LAST_PHASE, and so on */
 extern	enum srv_shutdown_t	srv_shutdown_state;
+
+
 #endif /* !UNIV_HOTBACKUP */
 
 #endif /* !UNIV_INNOCHECKSUM */

@@ -777,6 +777,7 @@ dict_table_autoinc_lock(
 /*====================*/
 	dict_table_t*	table)	/*!< in/out: table */
 {
+	ut_ad(!dict_table_is_intrinsic(table));
 	os_once::do_or_wait_for_done(
 		&table->autoinc_mutex_created,
 		dict_table_autoinc_alloc, table);

@@ -304,7 +304,7 @@ public:
 	{
 		latch_meta_t&	meta = sync_latch_get_meta(m_id);
 
-		meta.get_counter()->single_deregister(&m_count);
+		meta.get_counter()->single_deregister(m_id, &m_count);
 
 		sync_file_created_deregister(this);
 

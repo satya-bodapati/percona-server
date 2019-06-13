@@ -81,6 +81,8 @@ Created 10/8/1995 Heikki Tuuri
 #include "fil0crypt.h"
 
 
+uint64_t mutex_destroy_stat[LATCH_ID_MAX]={0};
+
 #ifndef UNIV_PFS_THREAD
 #define create_thd(x,y,z,PFS_KEY)	create_thd(x,y,z,PFS_NOT_INSTRUMENTED.m_value)
 #endif /* UNIV_PFS_THREAD */
@@ -3684,5 +3686,210 @@ function: */
 				<< space_id << ".";
 		}
 		mtr_commit(&mtr);
+	}
+}
+
+const char* mutex_name(uint64_t id) {
+
+switch (id) {
+   case	LATCH_ID_NONE:
+   return("LATCH_ID_NONE");
+   case	LATCH_ID_AUTOINC:
+   return("LATCH_ID_AUTOINC");
+   case	LATCH_ID_BUF_BLOCK_MUTEX:
+   return("LATCH_ID_BUF_BLOCK_MUTEX");
+   case	LATCH_ID_BUF_POOL_LRU_LIST:
+   return("LATCH_ID_BUF_POOL_LRU_LIST");
+   case	LATCH_ID_BUF_POOL_FREE_LIST:
+   return("LATCH_ID_BUF_POOL_FREE_LIST");
+   case	LATCH_ID_BUF_POOL_ZIP_FREE:
+   return("LATCH_ID_BUF_POOL_ZIP_FREE");
+   case	LATCH_ID_BUF_POOL_ZIP_HASH:
+   return("LATCH_ID_BUF_POOL_ZIP_HASH");
+   case	LATCH_ID_BUF_POOL_FLUSH_STATE:
+   return("LATCH_ID_BUF_POOL_FLUSH_STATE");
+   case	LATCH_ID_BUF_POOL_ZIP:
+   return("LATCH_ID_BUF_POOL_ZIP");
+   case	LATCH_ID_CACHE_LAST_READ:
+   return("LATCH_ID_CACHE_LAST_READ");
+   case	LATCH_ID_DICT_FOREIGN_ERR:
+   return("LATCH_ID_DICT_FOREIGN_ERR");
+   case	LATCH_ID_DICT_SYS:
+   return("LATCH_ID_DICT_SYS");
+   case	LATCH_ID_FILE_FORMAT_MAX:
+   return("LATCH_ID_FILE_FORMAT_MAX");
+   case	LATCH_ID_FIL_SYSTEM:
+   return("LATCH_ID_FIL_SYSTEM");
+   case	LATCH_ID_FLUSH_LIST:
+   return("LATCH_ID_FLUSH_LIST");
+   case	LATCH_ID_FTS_BG_THREADS:
+   return("LATCH_ID_FTS_BG_THREADS");
+   case	LATCH_ID_FTS_DELETE:
+   return("LATCH_ID_FTS_DELETE");
+   case	LATCH_ID_FTS_OPTIMIZE:
+   return("LATCH_ID_FTS_OPTIMIZE");
+   case	LATCH_ID_FTS_DOC_ID:
+   return("LATCH_ID_FTS_DOC_ID");
+   case	LATCH_ID_FTS_PLL_TOKENIZE:
+   return("LATCH_ID_FTS_PLL_TOKENIZE");
+   case	LATCH_ID_HASH_TABLE_MUTEX:
+   return("LATCH_ID_HASH_TABLE_MUTEX");
+   case	LATCH_ID_IBUF_BITMAP:
+   return("LATCH_ID_IBUF_BITMAP");
+   case	LATCH_ID_IBUF:
+   return("LATCH_ID_IBUF");
+   case	LATCH_ID_IBUF_PESSIMISTIC_INSERT:
+   return("LATCH_ID_IBUF_PESSIMISTIC_INSERT");
+   case	LATCH_ID_LOG_SYS:
+   return("LATCH_ID_LOG_SYS");
+   case	LATCH_ID_LOG_ONLINE:
+   return("LATCH_ID_LOG_ONLINE");
+   case	LATCH_ID_LOG_WRITE:
+   return("LATCH_ID_LOG_WRITE");
+   case	LATCH_ID_LOG_FLUSH_ORDER:
+   return("LATCH_ID_LOG_FLUSH_ORDER");
+   case	LATCH_ID_LIST:
+   return("LATCH_ID_LIST");
+   case	LATCH_ID_MUTEX_LIST:
+   return("LATCH_ID_MUTEX_LIST");
+   case	LATCH_ID_PAGE_CLEANER:
+   return("LATCH_ID_PAGE_CLEANER");
+   case	LATCH_ID_PURGE_SYS_PQ:
+   return("LATCH_ID_PURGE_SYS_PQ");
+   case	LATCH_ID_RECALC_POOL:
+   return("LATCH_ID_RECALC_POOL");
+   case	LATCH_ID_RECV_SYS:
+   return("LATCH_ID_RECV_SYS");
+   case	LATCH_ID_REDO_RSEG:
+   return("LATCH_ID_REDO_RSEG");
+   case	LATCH_ID_NOREDO_RSEG:
+   return("LATCH_ID_NOREDO_RSEG");
+   case	LATCH_ID_RW_LOCK_DEBUG:
+   return("LATCH_ID_RW_LOCK_DEBUG");
+   case	LATCH_ID_RTR_SSN_MUTEX:
+   return("LATCH_ID_RTR_SSN_MUTEX");
+   case	LATCH_ID_RTR_ACTIVE_MUTEX:
+   return("LATCH_ID_RTR_ACTIVE_MUTEX");
+   case	LATCH_ID_RTR_MATCH_MUTEX:
+   return("LATCH_ID_RTR_MATCH_MUTEX");
+   case	LATCH_ID_RTR_PATH_MUTEX:
+   return("LATCH_ID_RTR_PATH_MUTEX");
+   case	LATCH_ID_RW_LOCK_LIST:
+   return("LATCH_ID_RW_LOCK_LIST");
+   case	LATCH_ID_RW_LOCK_MUTEX:
+   return("LATCH_ID_RW_LOCK_MUTEX");
+   case	LATCH_ID_SRV_DICT_TMPFILE:
+   return("LATCH_ID_SRV_DICT_TMPFILE");
+   case	LATCH_ID_SRV_INNODB_MONITOR:
+   return("LATCH_ID_SRV_INNODB_MONITOR");
+   case	LATCH_ID_SRV_MISC_TMPFILE:
+   return("LATCH_ID_SRV_MISC_TMPFILE");
+   case	LATCH_ID_SRV_MONITOR_FILE:
+   return("LATCH_ID_SRV_MONITOR_FILE");
+   case	LATCH_ID_SYNC_THREAD:
+   return("LATCH_ID_SYNC_THREAD");
+   case	LATCH_ID_BUF_DBLWR:
+   return("LATCH_ID_BUF_DBLWR");
+   case	LATCH_ID_TRX_UNDO:
+   return("LATCH_ID_TRX_UNDO");
+   case	LATCH_ID_TRX_POOL:
+   return("LATCH_ID_TRX_POOL");
+   case	LATCH_ID_TRX_POOL_MANAGER:
+   return("LATCH_ID_TRX_POOL_MANAGER");
+   case	LATCH_ID_TRX:
+   return("LATCH_ID_TRX");
+   case	LATCH_ID_LOCK_SYS:
+   return("LATCH_ID_LOCK_SYS");
+   case	LATCH_ID_LOCK_SYS_WAIT:
+   return("LATCH_ID_LOCK_SYS_WAIT");
+   case	LATCH_ID_TRX_SYS:
+   return("LATCH_ID_TRX_SYS");
+   case	LATCH_ID_SRV_SYS:
+   return("LATCH_ID_SRV_SYS");
+   case	LATCH_ID_SRV_SYS_TASKS:
+   return("LATCH_ID_SRV_SYS_TASKS");
+   case	LATCH_ID_PAGE_ZIP_STAT_PER_INDEX:
+   return("LATCH_ID_PAGE_ZIP_STAT_PER_INDEX");
+   case	LATCH_ID_EVENT_MANAGER:
+   return("LATCH_ID_EVENT_MANAGER");
+   case	LATCH_ID_EVENT_MUTEX:
+   return("LATCH_ID_EVENT_MUTEX");
+   case	LATCH_ID_SYNC_ARRAY_MUTEX:
+   return("LATCH_ID_SYNC_ARRAY_MUTEX");
+   case	LATCH_ID_ZIP_PAD_MUTEX:
+   return("LATCH_ID_ZIP_PAD_MUTEX");
+   case	LATCH_ID_OS_AIO_READ_MUTEX:
+   return("LATCH_ID_OS_AIO_READ_MUTEX");
+   case	LATCH_ID_OS_AIO_WRITE_MUTEX:
+   return("LATCH_ID_OS_AIO_WRITE_MUTEX");
+   case	LATCH_ID_OS_AIO_LOG_MUTEX:
+   return("LATCH_ID_OS_AIO_LOG_MUTEX");
+   case	LATCH_ID_OS_AIO_IBUF_MUTEX:
+   return("LATCH_ID_OS_AIO_IBUF_MUTEX");
+   case	LATCH_ID_OS_AIO_SYNC_MUTEX:
+   return("LATCH_ID_OS_AIO_SYNC_MUTEX");
+   case	LATCH_ID_ROW_DROP_LIST:
+   return("LATCH_ID_ROW_DROP_LIST");
+   case	LATCH_ID_INDEX_ONLINE_LOG:
+   return("LATCH_ID_INDEX_ONLINE_LOG");
+   case	LATCH_ID_WORK_QUEUE:
+   return("LATCH_ID_WORK_QUEUE");
+   case	LATCH_ID_BTR_SEARCH:
+   return("LATCH_ID_BTR_SEARCH");
+   case	LATCH_ID_BUF_BLOCK_LOCK:
+   return("LATCH_ID_BUF_BLOCK_LOCK");
+   case	LATCH_ID_BUF_BLOCK_DEBUG:
+   return("LATCH_ID_BUF_BLOCK_DEBUG");
+   case	LATCH_ID_DICT_OPERATION:
+   return("LATCH_ID_DICT_OPERATION");
+   case	LATCH_ID_CHECKPOINT:
+   return("LATCH_ID_CHECKPOINT");
+   case	LATCH_ID_FIL_SPACE:
+   return("LATCH_ID_FIL_SPACE");
+   case	LATCH_ID_FTS_CACHE:
+   return("LATCH_ID_FTS_CACHE");
+   case	LATCH_ID_FTS_CACHE_INIT:
+   return("LATCH_ID_FTS_CACHE_INIT");
+   case	LATCH_ID_TRX_I_S_CACHE:
+   return("LATCH_ID_TRX_I_S_CACHE");
+   case	LATCH_ID_TRX_PURGE:
+   return("LATCH_ID_TRX_PURGE");
+   case	LATCH_ID_IBUF_INDEX_TREE:
+   return("LATCH_ID_IBUF_INDEX_TREE");
+   case	LATCH_ID_INDEX_TREE:
+   return("LATCH_ID_INDEX_TREE");
+   case	LATCH_ID_DICT_TABLE_STATS:
+   return("LATCH_ID_DICT_TABLE_STATS");
+   case	LATCH_ID_HASH_TABLE_RW_LOCK:
+   return("LATCH_ID_HASH_TABLE_RW_LOCK");
+   case	LATCH_ID_BUF_CHUNK_MAP_LATCH:
+   return("LATCH_ID_BUF_CHUNK_MAP_LATCH");
+   case	LATCH_ID_SYNC_DEBUG_MUTEX:
+   return("LATCH_ID_SYNC_DEBUG_MUTEX");
+   case	LATCH_ID_SCRUB_STAT_MUTEX:
+   return("LATCH_ID_SCRUB_STAT_MUTEX");
+   case	LATCH_ID_MASTER_KEY_ID_MUTEX:
+   return("LATCH_ID_MASTER_KEY_ID_MUTEX");
+   case	LATCH_ID_FIL_CRYPT_MUTEX:
+   return("LATCH_ID_FIL_CRYPT_MUTEX");
+   case	LATCH_ID_FIL_CRYPT_STAT_MUTEX:
+   return("LATCH_ID_FIL_CRYPT_STAT_MUTEX");
+   case	LATCH_ID_FIL_CRYPT_DATA_MUTEX:
+   return("LATCH_ID_FIL_CRYPT_DATA_MUTEX");
+   case	LATCH_ID_FIL_CRYPT_THREADS_MUTEX:
+   return("LATCH_ID_FIL_CRYPT_THREADS_MUTEX");
+   case	LATCH_ID_FIL_CRYPT_START_ROTATE_MUTEX:
+   return("LATCH_ID_FIL_CRYPT_START_ROTATE_MUTEX");
+   case	LATCH_ID_TEST_MUTEX:
+   return("LATCH_ID_TEST_MUTEX");
+ }
+ ut_ad(0);
+ return("UNKNOWN");
+}
+
+void srv_mutex_destroy_stat_print()
+{
+	for (uint32_t i = 0 ; i < LATCH_ID_MAX; ++i) {
+		ib::info() << "Mutex name: " <<  mutex_name(i) << " destroy count: " << mutex_destroy_stat[i];
 	}
 }

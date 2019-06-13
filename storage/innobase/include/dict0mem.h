@@ -1805,6 +1805,7 @@ dict_table_autoinc_destroy(
 {
 	if (table->autoinc_mutex_created == os_once::DONE
 	    && table->autoinc_mutex != NULL) {
+		//ib::info() << "Freeing autoinc mutex of table: " << table->name.m_name;
 		mutex_free(table->autoinc_mutex);
 		UT_DELETE(table->autoinc_mutex);
 	}
