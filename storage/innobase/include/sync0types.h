@@ -27,6 +27,7 @@ Created 9/5/1995 Heikki Tuuri
 #define sync0types_h
 
 #include <vector>
+#include <set>
 #include <iostream>
 
 #include "ut0new.h"
@@ -645,10 +646,10 @@ public:
 
 		if (m_counters.empty()) {
 			count = UT_NEW_NOKEY(Count());
-			m_counters.push_back(count);
+			m_counters.insert(count);
 		} else {
 			ut_a(m_counters.size() == 1);
-			count = m_counters[0];
+			count = *(m_counters.begin());
 		}
 
 		m_mutex.exit();
@@ -670,7 +671,7 @@ public:
 	{
 		m_mutex.enter();
 
-		m_counters.push_back(count);
+		m_counters.insert(count);
 
 		m_mutex.exit();
 	}
@@ -748,7 +749,7 @@ private:
 
 private:
 	typedef OSMutex Mutex;
-	typedef std::vector<Count*> Counters;
+	typedef std::set<Count*> Counters;
 
 	/** Mutex protecting m_counters */
 	Mutex			m_mutex;

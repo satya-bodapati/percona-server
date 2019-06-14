@@ -316,6 +316,7 @@ void LatchCounter::single_deregister(latch_id_t m_id, Count* count)
 {
 	m_mutex.enter();
 
+#if 0
 	if (srv_shutdown_state >= SRV_SHUTDOWN_CLEANUP) {
 		ib::info() << "Skipping degister for this mutex: " << mutex_name(m_id);
 		m_counters.clear();
@@ -328,6 +329,9 @@ void LatchCounter::single_deregister(latch_id_t m_id, Count* count)
 			m_counters.begin(),
 			m_counters.end(), count),
 		m_counters.end());
+#endif
+
+	m_counters.erase(count);
 
 	m_mutex.exit();
 }
