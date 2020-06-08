@@ -2047,6 +2047,14 @@ void os_free_block(file::Block *block) noexcept;
 /** Submit buffered AIO requests on the given segment to the kernel. */
 void os_aio_dispatch_read_array_submit();
 
+/** Encrypt a page content when write it to disk.
+@param[in]	type		IO flags
+@param[out]	buf		buffer to read or write
+@param[in,out]	n		number of bytes to read/write, starting from
+                                offset
+@return pointer to the encrypted page */
+file::Block *os_file_encrypt_page(const IORequest &type, void *&buf, ulint *n);
+
 #include "os0file.ic"
 #endif /* UNIV_NONINL */
 
