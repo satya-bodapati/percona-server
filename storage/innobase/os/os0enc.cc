@@ -1854,7 +1854,7 @@ void Encryption::set_encryption_rotation(
 ulint Encryption::get_master_key_id() { return s_master_key_id; }
 
 bool Encryption::dblwr_encrypt_page(fil_space_t *space, page_t *in_page,
-                                    file::Block *&enc_block,
+                                    file::Block_ptr &enc_block,
                                     ulint &enc_block_len) {
   if (!FSP_FLAGS_GET_ENCRYPTION(space->flags)) {
     return (false);
@@ -1874,24 +1874,23 @@ bool Encryption::dblwr_encrypt_page(fil_space_t *space, page_t *in_page,
   to a new memory block which is encrypted and
   the bytes will have value of length of encrypted data */
   void *in_page_before = in_page;
-  file::Block *block = os_file_encrypt_page(write_request, in_page_before, &bytes);
+  file::Block_ptr block{os_file_encrypt_page(write_request, in_page_before, &bytes)};
 
-  ut_ad(block != nullptr);
+  ut_ad(block.get() != nullptr);
 
   if (in_page_before == in_page) {
-    os_free_block(block);
     return (false);
   }
 
   ut_ad(bytes == page_size.physical());
-  enc_block = block;
+  enc_block = std::move(block);
   enc_block_len = bytes;
   return (true);
 }
 
-dberr_t Encryption::dblwr_decrypt_page(fil_space_t *space, page_t *page) {
+bool Encryption::dblwr_decrypt_page(fil_space_t *space, page_t *page) {
   if (!FSP_FLAGS_GET_ENCRYPTION(space->flags)) {
-    return (DB_SUCCESS);
+    return (true);
   }
 
   IORequest decrypt_request;
@@ -1910,11 +1909,11 @@ dberr_t Encryption::dblwr_decrypt_page(fil_space_t *space, page_t *page) {
                                    NULL, page_size.physical());
 
   ut_ad(err == DB_SUCCESS);
-  return (err);
+  return (err == DB_SUCCESS);
 }
 
 bool os_dblwr_encrypt_page(space_id_t space_id, page_t *in_page,
-                           file::Block *&enc_block, ulint &enc_block_len) {
+                           file::Block_ptr &enc_block, ulint &enc_block_len) {
   fil_space_t *space = fil_space_acquire_silent(space_id);
 
   if (space == nullptr) {

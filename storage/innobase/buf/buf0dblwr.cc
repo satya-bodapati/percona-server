@@ -360,7 +360,7 @@ class Double_write {
     void *frame{};
     uint32_t len{};
 
-    file::Block *enc_block = nullptr;
+    file::Block_ptr enc_block;
     prepare(bpage, &frame, &len, enc_block);
 
     ut_a(len <= univ_page_size.physical());
@@ -382,10 +382,6 @@ class Double_write {
     }
 
     m_buf_pages.push_back(bpage);
-
-    if (enc_block != nullptr) {
-      os_free_block(enc_block);
-    }
 
     mutex_exit(&m_mutex);
   }
@@ -541,7 +537,7 @@ class Double_write {
   then encrypted block is returned and the ptr is set to the encrypted
   frame and len to encrypted length */
   static void prepare(const buf_page_t *bpage, void **ptr, uint32_t *len,
-                      file::Block*& enc_block)
+                      file::Block_ptr &enc_block)
       noexcept;
 
   /** Free the data structures. */
@@ -791,7 +787,7 @@ Double_write::~Double_write() noexcept {
 }
 
 void Double_write::prepare(const buf_page_t *bpage, void **ptr, uint32_t *len,
-                           file::Block*& enc_block) noexcept {
+                           file::Block_ptr &enc_block) noexcept {
   auto block = reinterpret_cast<const buf_block_t *>(bpage);
   auto state = buf_block_get_state(block);
 
@@ -831,7 +827,7 @@ void Double_write::prepare(const buf_page_t *bpage, void **ptr, uint32_t *len,
     bool success = os_dblwr_encrypt_page(block->page.id.space(), in_page,
                                          enc_block, enc_block_len);
     if (success) {
-      *ptr = ut_align(enc_block->m_ptr, os_io_ptr_align);
+      *ptr = ut_align(enc_block.get()->m_ptr, os_io_ptr_align);
       *len = enc_block_len;
     }
   }
@@ -842,16 +838,12 @@ void Double_write::single_write(Segment *segment,
   uint32_t len{};
   void *frame{};
 
-  file::Block *enc_block = nullptr;
+  file::Block_ptr enc_block;
   prepare(bpage, &frame, &len, enc_block);
 
   ut_ad(len <= univ_page_size.physical());
 
   segment->write(frame, len);
-
-  if (enc_block != nullptr) {
-    os_free_block(enc_block);
-  }
 }
 
 void Batch_segment::write(const Buffer &buffer) noexcept {
@@ -1945,9 +1937,9 @@ static bool dblwr_recover_page(page_no_t dblwr_page_no, fil_space_t *space,
                                    << ". Trying to recover it from the"
                                    << " doublewrite file.";
 
-    err = Encryption::dblwr_decrypt_page(space, page);
+    bool success = Encryption::dblwr_decrypt_page(space, page);
 
-    if (err != DB_SUCCESS || dblwr_page.is_corrupted()) {
+    if (!success || dblwr_page.is_corrupted()) {
       ib::error(ER_IB_MSG_DBLWR_1304);
 
       buf_page_print(buffer.begin(), page_size, BUF_PAGE_PRINT_NO_CRASH);

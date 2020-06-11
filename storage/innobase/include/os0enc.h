@@ -41,6 +41,8 @@ class IORequest;
 struct fil_space_t;
 namespace file {
 struct Block;
+struct Block_deleter;
+using Block_ptr = std::unique_ptr<Block, Block_deleter>;
 }
 
 /** Disk sector size of aligning write buffer for DIRECT_IO */
@@ -549,7 +551,8 @@ class Encryption {
   @param[out]	enc_block_len	encrypted block len
   @return true if encrypted, else false */
   static bool dblwr_encrypt_page(fil_space_t *space, page_t *in_page,
-                                 file::Block *&enc_block, ulint &enc_block_len);
+                                 file::Block_ptr &enc_block,
+                                 ulint &enc_block_len);
 
   /** Decrypt a page from doublewrite buffer. Tablespace object
   (fil_space_t) must have encryption key, iv set properly.
@@ -557,8 +560,8 @@ class Encryption {
   @param[in]		space	tablespace obejct
   @param[in,out]	page	in: encrypted page
                                 out: decrypted page
-  @return DB_SUCCESS on success, others on failure */
-  static dberr_t dblwr_decrypt_page(fil_space_t *space, page_t *in_page);
+  @return true on success, false on failure */
+  static bool dblwr_decrypt_page(fil_space_t *space, page_t *in_page);
 
  private:
   /** Encrypt type */
@@ -616,5 +619,5 @@ encrypted using its tablespace key.
 @param[out]	enc_block_len	encrypted block len
 @return true if encrypted, else false */
 bool os_dblwr_encrypt_page(space_id_t space_id, page_t *in_page,
-                           file::Block *&enc_block, ulint &enc_block_len);
+                           file::Block_ptr &enc_block, ulint &enc_block_len);
 #endif /* os0enc_h */

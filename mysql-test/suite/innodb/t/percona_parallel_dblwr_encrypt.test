@@ -1,11 +1,8 @@
 # Test Parallel double write buffer encryption
 --source include/have_debug.inc
+--source include/have_innodb_16k.inc
 
 --let $MYSQLD_DATADIR=`SELECT @@datadir`
---let $PAGE_SIZE=`SELECT @@innodb_page_size`
-if ($PAGE_SIZE != 16384) {
-  --skip Test needs 16K page size
-}
 
 CREATE TABLE t1(a TEXT) ENCRYPTION='Y';
 CREATE TABLE t2(a TEXT) ENCRYPTION='Y';
