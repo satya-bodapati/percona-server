@@ -79,7 +79,10 @@ ulong batch_size{};
 
 ulong n_pages{64};
 
-bool enabled{true};
+ulong enabled{ON};
+
+/** @return true for dbwlr modes ON & REDUCED, else false */
+bool is_enabled() {return (enabled == ON || enabled == REDUCED); }
 
 /** Legacy dblwr buffer first segment page number. */
 static page_no_t LEGACY_PAGE1;
@@ -1563,7 +1566,7 @@ dberr_t dblwr::write(buf_flush_t flush_type, buf_page_t *bpage,
   }
 
   if (srv_read_only_mode || fsp_is_system_temporary(space_id) ||
-      !dblwr::enabled || Double_write::s_instances == nullptr ||
+      !dblwr::is_enabled() || Double_write::s_instances == nullptr ||
       mtr_t::s_logging.dblwr_disabled()) {
     /* Skip the double-write buffer since it is not needed.
     Temporary tablespaces are never recovered, therefore we don't care
@@ -2011,7 +2014,7 @@ void recv::Pages::recover(fil_space_t *space) noexcept {
   given the control flow, we read the pages in anyway but don't recover
   from the pages we read in. */
 
-  if (!dblwr::enabled || recv_sys->is_cloned_db) {
+  if (!dblwr::is_enabled() || recv_sys->is_cloned_db) {
     return;
   }
 
@@ -2050,7 +2053,7 @@ void recv::Pages::recover(fil_space_t *space) noexcept {
 }
 
 const byte *recv::Pages::find(const page_id_t &page_id) const noexcept {
-  if (!dblwr::enabled) {
+  if (!dblwr::is_enabled()) {
     return nullptr;
   }
   using Matches = std::vector<const byte *, ut_allocator<const byte *>>;
@@ -2088,7 +2091,7 @@ const byte *recv::Pages::find(const page_id_t &page_id) const noexcept {
 
 void recv::Pages::add(page_no_t page_no, const byte *page,
                       uint32_t n_bytes) noexcept {
-  if (!dblwr::enabled) {
+  if (!dblwr::is_enabled()) {
     return;
   }
   /* Make a copy of the page contents. */
@@ -2101,7 +2104,7 @@ void recv::Pages::check_missing_tablespaces() const noexcept {
   /* For cloned database double write pages should be ignored. However,
   given the control flow, we read the pages in anyway but don't recover
   from the pages we read in. */
-  if (!dblwr::enabled) {
+  if (!dblwr::is_enabled()) {
     return;
   }
 
@@ -2142,7 +2145,7 @@ void recv::Pages::check_missing_tablespaces() const noexcept {
 dberr_t dblwr::recv::load(recv::Pages *pages) noexcept {
 #ifndef UNIV_HOTBACKUP
   /* For cloned database double write pages should be ignored. */
-  if (!dblwr::enabled) {
+  if (!dblwr::is_enabled()) {
     return DB_SUCCESS;
   }
 

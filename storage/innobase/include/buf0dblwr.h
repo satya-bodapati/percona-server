@@ -217,8 +217,12 @@ namespace dblwr {
 /** Number of pages per doublewrite thread/segment */
 extern ulong n_pages;
 
-/** true if enabled. */
-extern bool enabled;
+enum mode_t { OFF, ON, REDUCED };
+
+/** 1 if enabled. */
+extern ulong enabled;
+
+bool is_enabled();
 
 /** Number of files to use for the double write buffer. It must be <= than
 the number of buffer pool instances. */

@@ -862,11 +862,11 @@ dberr_t SysTablespace::open_or_create(bool is_temp, bool create_new_db,
     the tablespace should be on the same medium. */
 
     if (fil_fusionio_enable_atomic_write(it->m_handle)) {
-      if (dblwr::enabled) {
+      if (dblwr::is_enabled()) {
         ib::info(ER_IB_MSG_456) << "FusionIO atomic IO enabled,"
                                    " disabling the double write buffer";
 
-        dblwr::enabled = false;
+        dblwr::enabled = dblwr::OFF;
       }
 
       it->m_atomic_write = true;

@@ -11,7 +11,7 @@ SELECT COUNT(@@GLOBAL.innodb_doublewrite);
 
 
 --disable_warnings
-SELECT IF(@@GLOBAL.innodb_doublewrite, "ON", "OFF") = VARIABLE_VALUE
+SELECT @@GLOBAL.innodb_doublewrite = VARIABLE_VALUE
 FROM performance_schema.global_variables
 WHERE VARIABLE_NAME='innodb_doublewrite';
 --enable_warnings
@@ -45,3 +45,91 @@ SELECT COUNT(@@SESSION.innodb_doublewrite);
 SELECT COUNT(@@GLOBAL.innodb_doublewrite);
 --echo 1 Expected
 
+--echo "##############################################"
+--let $restart_parameters = "restart: --innodb-doublewrite=ON"
+--source include/restart_mysqld.inc
+SELECT @@global.innodb_doublewrite;
+
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=0;
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=1;
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=2;
+
+--echo "##############################################"
+--let $restart_parameters = "restart: --innodb-doublewrite=off"
+--source include/restart_mysqld.inc
+SELECT @@global.innodb_doublewrite;
+
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=0;
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=1;
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=2;
+
+
+--echo "##############################################"
+--let $restart_parameters = "restart: --innodb-doublewrite=reduced"
+--source include/restart_mysqld.inc
+SELECT @@global.innodb_doublewrite;
+
+
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=off;
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=on;
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=detect;
+
+--echo "##############################################"
+--let $restart_parameters = "restart: --innodb-doublewrite"
+--source include/restart_mysqld.inc
+SELECT @@global.innodb_doublewrite;
+
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=0;
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=1;
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=2;
+
+--echo "##############################################"
+--let $restart_parameters = "restart: --innodb-doublewrite=0"
+--source include/restart_mysqld.inc
+SELECT @@global.innodb_doublewrite;
+
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=0;
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=1;
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=2;
+
+--echo "##############################################"
+--let $restart_parameters = "restart: --innodb-doublewrite=1"
+--source include/restart_mysqld.inc
+SELECT @@global.innodb_doublewrite;
+
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=0;
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=1;
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=2;
+
+--echo "##############################################"
+--let $restart_parameters = "restart: --innodb-doublewrite=2"
+--source include/restart_mysqld.inc
+SELECT @@global.innodb_doublewrite;
+
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=0;
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=1;
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET @@GLOBAL.innodb_doublewrite=2;
+
+--let $restart_parameters =
+--source include/restart_mysqld.inc

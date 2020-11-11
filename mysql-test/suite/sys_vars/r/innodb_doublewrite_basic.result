@@ -10,10 +10,10 @@ SELECT COUNT(@@GLOBAL.innodb_doublewrite);
 COUNT(@@GLOBAL.innodb_doublewrite)
 1
 1 Expected
-SELECT IF(@@GLOBAL.innodb_doublewrite, "ON", "OFF") = VARIABLE_VALUE
+SELECT @@GLOBAL.innodb_doublewrite = VARIABLE_VALUE
 FROM performance_schema.global_variables
 WHERE VARIABLE_NAME='innodb_doublewrite';
-IF(@@GLOBAL.innodb_doublewrite, "ON", "OFF") = VARIABLE_VALUE
+@@GLOBAL.innodb_doublewrite = VARIABLE_VALUE
 1
 1 Expected
 SELECT COUNT(@@GLOBAL.innodb_doublewrite);
@@ -44,3 +44,81 @@ SELECT COUNT(@@GLOBAL.innodb_doublewrite);
 COUNT(@@GLOBAL.innodb_doublewrite)
 1
 1 Expected
+"##############################################"
+# restart: --innodb-doublewrite=ON
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
+SET @@GLOBAL.innodb_doublewrite=0;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+SET @@GLOBAL.innodb_doublewrite=1;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+SET @@GLOBAL.innodb_doublewrite=2;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+"##############################################"
+# restart: --innodb-doublewrite=off
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+OFF
+SET @@GLOBAL.innodb_doublewrite=0;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+SET @@GLOBAL.innodb_doublewrite=1;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+SET @@GLOBAL.innodb_doublewrite=2;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+"##############################################"
+# restart: --innodb-doublewrite=reduced
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+REDUCED
+SET @@GLOBAL.innodb_doublewrite=off;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+SET @@GLOBAL.innodb_doublewrite=on;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+SET @@GLOBAL.innodb_doublewrite=detect;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+"##############################################"
+# restart: --innodb-doublewrite
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
+SET @@GLOBAL.innodb_doublewrite=0;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+SET @@GLOBAL.innodb_doublewrite=1;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+SET @@GLOBAL.innodb_doublewrite=2;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+"##############################################"
+# restart: --innodb-doublewrite=0
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+OFF
+SET @@GLOBAL.innodb_doublewrite=0;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+SET @@GLOBAL.innodb_doublewrite=1;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+SET @@GLOBAL.innodb_doublewrite=2;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+"##############################################"
+# restart: --innodb-doublewrite=1
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
+SET @@GLOBAL.innodb_doublewrite=0;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+SET @@GLOBAL.innodb_doublewrite=1;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+SET @@GLOBAL.innodb_doublewrite=2;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+"##############################################"
+# restart: --innodb-doublewrite=2
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+REDUCED
+SET @@GLOBAL.innodb_doublewrite=0;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+SET @@GLOBAL.innodb_doublewrite=1;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+SET @@GLOBAL.innodb_doublewrite=2;
+ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+# restart

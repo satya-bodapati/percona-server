@@ -462,6 +462,15 @@ static TYPELIB innodb_default_row_format_typelib = {
     "innodb_default_row_format_typelib", innodb_default_row_format_names,
     nullptr};
 
+/** Possible values for system variable "innodb_doublewrite". */
+static const char *innodb_doublewrite_names[] = {"OFF", "ON", "REDUCED", NullS};
+
+/** Used to define an enumerate type of the system variable
+innodb_default_row_format. */
+static TYPELIB innodb_doublewrite_typelib = {
+    array_elements(innodb_doublewrite_names) - 1, "innodb_doublewrite_typelib",
+    innodb_doublewrite_names, nullptr};
+
 #else  /* !UNIV_HOTBACKUP */
 
 /** Returns the name of the checksum algorithm corresponding to the
@@ -5142,7 +5151,7 @@ static int innodb_init_params() {
 
     /* There is no write except to intrinsic table and so turn-off
     doublewrite mechanism completely. */
-    dblwr::enabled = false;
+    dblwr::enabled = dblwr::OFF;
   }
 
 #ifdef LINUX_NATIVE_AIO
@@ -13423,7 +13432,7 @@ static bool innobase_ddse_dict_init(
   DBUG_ASSERT(tables && tables->is_empty());
   DBUG_ASSERT(tablespaces && tablespaces->is_empty());
 
-  if (dblwr::enabled) {
+  if (dblwr::is_enabled()) {
     if (innobase_doublewrite_dir != nullptr && *innobase_doublewrite_dir != 0) {
       dblwr::dir.assign(innobase_doublewrite_dir);
       switch (dblwr::dir.front()) {
@@ -23365,11 +23374,11 @@ static MYSQL_SYSVAR_BOOL(
     nullptr, nullptr, TRUE);
 
 // clang-format off
-static MYSQL_SYSVAR_BOOL(
-    doublewrite, dblwr::enabled, PLUGIN_VAR_NOCMDARG | PLUGIN_VAR_READONLY,
+static MYSQL_SYSVAR_ENUM(
+    doublewrite, dblwr::enabled, PLUGIN_VAR_READONLY|PLUGIN_VAR_OPCMDARG,
     "Enable InnoDB doublewrite buffer (enabled by default)."
     " Disable with --skip-innodb-doublewrite.",
-    nullptr, nullptr, TRUE);
+    nullptr, nullptr, dblwr::ON, &innodb_doublewrite_typelib);
 
 static MYSQL_SYSVAR_STR(
     doublewrite_dir, innobase_doublewrite_dir, PLUGIN_VAR_READONLY,

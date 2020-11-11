@@ -6021,7 +6021,7 @@ dberr_t fil_ibd_open(bool validate, fil_type_t purpose, space_id_t space_id,
 
 #if !defined(NO_FALLOCATE) && defined(UNIV_LINUX)
   const bool atomic_write =
-      !dblwr::enabled && fil_fusionio_enable_atomic_write(df.handle());
+      !dblwr::is_enabled() && fil_fusionio_enable_atomic_write(df.handle());
 #else
   const bool atomic_write = false;
 #endif /* !NO_FALLOCATE && UNIV_LINUX */

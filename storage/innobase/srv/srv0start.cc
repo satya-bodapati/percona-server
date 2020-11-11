@@ -991,7 +991,7 @@ dberr_t srv_undo_tablespace_open(undo::Tablespace &undo_space) {
 
   /* Check if this file supports atomic write. */
 #if !defined(NO_FALLOCATE) && defined(UNIV_LINUX)
-  if (!dblwr::enabled) {
+  if (!dblwr::is_enabled()) {
     atomic_write = fil_fusionio_enable_atomic_write(fh);
   } else {
     atomic_write = false;
@@ -2667,7 +2667,8 @@ dberr_t srv_start(bool create_new_db) {
 
 files_checked:
 
-  if (dblwr::enabled && ((err = dblwr::open(create_new_db)) != DB_SUCCESS)) {
+  if (dblwr::is_enabled() &&
+      ((err = dblwr::open(create_new_db)) != DB_SUCCESS)) {
     return (srv_init_abort(err));
   }
 
