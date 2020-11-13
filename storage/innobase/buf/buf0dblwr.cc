@@ -645,8 +645,21 @@ class Segment {
   @param[in] n_pages            Number of pages in the segment. */
   Segment(dblwr::File &file, page_no_t start, uint32_t n_pages)
       : m_file(file),
-        m_start(start * univ_page_size.physical()),
-        m_end(m_start + (n_pages * univ_page_size.physical())) {}
+        m_phy_size(univ_page_size.physical()),
+        m_start(start * m_phy_size),
+        m_end(m_start + (n_pages * m_phy_size)) {}
+
+  /** Constructor.
+  @param[in] file               File that owns the segment.
+  @param[in] phy_size		Size of an entry in segment
+  @param[in] start              Offset (page number) of segment in the file.
+  @param[in] n_pages            Number of pages in the segment. */
+  Segment(dblwr::File &file, uint32_t phy_size, page_no_t start,
+          uint32_t n_pages)
+      : m_file(file),
+        m_phy_size(phy_size),
+        m_start(start * m_phy_size),
+        m_end(m_start + (n_pages * m_phy_size)) {}
 
   /** Destructor. */
   virtual ~Segment() {}
@@ -670,6 +683,9 @@ class Segment {
 
   /** File that owns the segment. */
   dblwr::File &m_file;
+
+  /** Physical page size of each entry/Segment */
+  uint32_t m_phy_size{};
 
   /** Physical offset in the file for the segment. */
   os_offset_t m_start{};
