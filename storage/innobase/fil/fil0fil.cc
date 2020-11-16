@@ -288,7 +288,8 @@ Fil_path MySQL_undo_path;
 bool MySQL_undo_path_is_unique;
 
 /** Common InnoDB file extentions */
-const char *dot_ext[] = {"", ".ibd", ".cfg", ".cfp", ".ibt", ".ibu", ".dblwr"};
+const char *dot_ext[] = {"",     ".ibd",   ".cfg",    ".cfp",   ".ibt",
+                         ".ibu", ".dblwr", ".bdblwr", ".sdblwr"};
 
 /** The number of fsyncs done to the log */
 ulint fil_n_log_flushes = 0;

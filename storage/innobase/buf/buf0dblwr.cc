@@ -31,12 +31,12 @@ Atomic writes handling. */
 
 #include "buf0buf.h"
 #include "buf0checksum.h"
+#include "os0enc.h"
 #include "os0thread-create.h"
 #include "page0zip.h"
 #include "srv0srv.h"
 #include "srv0start.h"
 #include "ut0mpmcbq.h"
-#include "os0enc.h"
 
 #include <iomanip>
 #include <iostream>
@@ -82,7 +82,7 @@ ulong n_pages{64};
 ulong enabled{ON};
 
 /** @return true for dbwlr modes ON & REDUCED, else false */
-bool is_enabled() {return (enabled == ON || enabled == REDUCED); }
+bool is_enabled() { return (enabled == ON || enabled == REDUCED); }
 
 /** Legacy dblwr buffer first segment page number. */
 static page_no_t LEGACY_PAGE1;
@@ -494,10 +494,12 @@ class Double_write {
       MY_ATTRIBUTE((warn_unused_result));
 
   /** Write zeros to the file if it is "empty"
-  @param[in]	file		          File instance.
+  @param[in]	file		  File instance.
   @param[in]	n_pages           Size in physical pages.
+  @param[in]	phy_size	  Physical page size in DBLWR file
   @return DB_SUCCESS or error code */
-  static dberr_t init_file(dblwr::File &file, uint32_t n_pages) noexcept
+  static dberr_t init_file(dblwr::File &file, uint32_t n_pages,
+      uint32_t phy_size=univ_page_size.physical()) noexcept
       MY_ATTRIBUTE((warn_unused_result));
 
   /** Reset the size in bytes to the configured size.
@@ -626,6 +628,8 @@ class Double_write {
   /** Files to use for atomic writes. */
   static std::vector<dblwr::File> s_files;
 
+  static std::vector<dblwr::File> s_r_files;
+
   /** The global instances */
   static Instances *s_instances;
 
@@ -714,6 +718,18 @@ class Batch_segment : public Segment {
     reset();
   }
 
+  /** Constructor.
+  @param[in] id                 Segment ID.
+  @param[in] file               File that owns the segment.
+  @param[in] phy_size		physical size of each segment entry
+  @param[in] start              Offset (page number) of segment in the file.
+  @param[in] n_pages            Number of pages in the segment. */
+  Batch_segment(uint16_t id, dblwr::File &file, uint32_t phy_size,
+                page_no_t start, uint32_t n_pages)
+      : Segment(file, phy_size, start, n_pages), m_id(id) {
+    reset();
+  }
+
   /** Destructor. */
   virtual ~Batch_segment() noexcept {
     ut_a(m_written.load(std::memory_order_relaxed) == 0);
@@ -783,6 +799,7 @@ class Batch_segment : public Segment {
 
 uint32_t Double_write::s_n_instances{};
 std::vector<dblwr::File> Double_write::s_files;
+std::vector<dblwr::File> Double_write::s_r_files;
 Double_write::Segments *Double_write::s_single_segments{};
 Double_write::Batch_segments *Double_write::s_LRU_batch_segments{};
 Double_write::Batch_segments *Double_write::s_flush_list_batch_segments{};
@@ -917,7 +934,14 @@ void Double_write::shutdown() noexcept {
     }
   }
 
+  for (auto &file : s_r_files) {
+    if (file.m_pfs.m_file != OS_FILE_CLOSED) {
+      os_file_close(file.m_pfs);
+    }
+  }
+
   s_files.clear();
+  s_r_files.clear();
 
   if (s_LRU_batch_segments != nullptr) {
     Batch_segment *s{};
@@ -1176,16 +1200,16 @@ void Double_write::reset_file(dblwr::File &file, bool truncate) noexcept {
   }
 }
 
-dberr_t Double_write::init_file(dblwr::File &file, uint32_t n_pages) noexcept {
+dberr_t Double_write::init_file(dblwr::File &file, uint32_t n_pages,
+                                uint32_t phy_size) noexcept {
   auto pfs_file = file.m_pfs;
   auto size = os_file_get_size(pfs_file);
 
   ut_ad(dblwr::File::s_n_pages > 0);
 
   if (size == 0) {
-    auto err = os_file_write_zeros(
-        pfs_file, file.m_name.c_str(), univ_page_size.physical(), 0,
-        n_pages * univ_page_size.physical(), srv_read_only_mode);
+    auto err = os_file_write_zeros(pfs_file, file.m_name.c_str(), phy_size, 0,
+                                   n_pages * phy_size, srv_read_only_mode);
 
     if (err != DB_SUCCESS) {
       return err;
@@ -1681,9 +1705,11 @@ void dblwr::recv::recover(recv::Pages *pages, fil_space_t *space) noexcept {
 @param[in] id                   Instance ID.
 @param[out] file                File handle.
 @param[in] file_type            The file type.
+@param[in] file_extension 	.dblwr/.bdblwr/.sdblwr
 @return DB_SUCCESS if all went well. */
 static dberr_t dblwr_file_open(const std::string &dir_name, int id,
-                               dblwr::File &file, ulint file_type) noexcept {
+                               dblwr::File &file, ulint file_type,
+                               ib_file_suffix extension = DWR) noexcept {
   bool dir_exists;
   bool file_exists;
   os_file_type_t type;
@@ -1720,7 +1746,7 @@ static dberr_t dblwr_file_open(const std::string &dir_name, int id,
 
   file.m_name += std::to_string(srv_page_size) + "_" + std::to_string(id);
 
-  file.m_name += dot_ext[DWR];
+  file.m_name += dot_ext[extension];
 
   uint32_t mode;
   if (dir_exists) {
@@ -1762,6 +1788,68 @@ static dberr_t dblwr_file_open(const std::string &dir_name, int id,
   }
 
   return DB_SUCCESS;
+}
+
+dberr_t dblwr::reduced_open(bool create_new_db) noexcept {
+  ut_a(Double_write::s_r_files.empty());
+
+  // one for batch segments, one for single page segments
+  Double_write::s_r_files.resize(2);
+
+  dberr_t err{DB_SUCCESS};
+
+  /* Create the batch file */
+  const auto first = &Double_write::s_r_files[0];
+  for (auto &file : Double_write::s_r_files) {
+    auto id = &file - first;
+
+    uint32_t pages_per_file{0};
+    ib_file_suffix extension{};
+
+    switch (id) {
+      case 0:
+        pages_per_file = dblwr::n_pages * Double_write::s_n_instances;
+        extension = BWR;
+        break;
+      case 1:
+        // Since total size disk required is 20 * 512 = 10240. We will create
+        // two 8K blocks
+        pages_per_file = 2;
+        extension = SWR;
+        break;
+      default:
+        // Currently Only two files allowed
+        ut_ad(0);
+    }
+
+    err = dblwr_file_open(dblwr::dir, &file - first, file, OS_DBLWR_FILE,
+                          extension);
+
+    if (err != DB_SUCCESS) {
+      return (err);
+    }
+
+    const uint32_t phy_size = 8192;
+
+    err = Double_write::init_file(file, pages_per_file, phy_size);
+
+    if (err != DB_SUCCESS) {
+      return (err);
+    }
+
+    auto file_size = os_file_get_size(file.m_pfs);
+
+    if (file_size == 0 || (file_size % phy_size)) {
+      ib::warn(ER_IB_MSG_DBLWR_1322, file.m_name.c_str(), (ulint)file_size,
+               (ulint)phy_size);
+    }
+
+    /* Truncate the size after recovery: false. */
+    // TODO: we need this because the dblwr file size can change based on
+    // batch_size, n_pages, instances etc
+    // Double_write::reset_file(file, false);
+  }
+  return (DB_SUCCESS);
 }
 
 dberr_t dblwr::open(bool create_new_db) noexcept {
@@ -1854,6 +1942,10 @@ dberr_t dblwr::open(bool create_new_db) noexcept {
     err = Double_write::create_v2();
   } else {
     Double_write::shutdown();
+  }
+
+  if (err == DB_SUCCESS) {
+    err = dblwr::reduced_open(create_new_db);
   }
 
   return err;

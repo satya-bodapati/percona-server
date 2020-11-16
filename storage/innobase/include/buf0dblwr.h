@@ -165,6 +165,12 @@ extern page_id_t Force_crash;
 @return DB_SUCCESS or error code */
 dberr_t open(bool create_new_db) noexcept MY_ATTRIBUTE((warn_unused_result));
 
+/** Startup the background thread(s) and create the instance.
+@param[in]  create_new_db Create new database.
+@return DB_SUCCESS or error code */
+dberr_t reduced_open(bool create_new_db) noexcept
+    MY_ATTRIBUTE((warn_unused_result));
+
 /** Shutdown the background thread and destroy the instance */
 void close() noexcept;
 
