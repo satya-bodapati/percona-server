@@ -646,6 +646,8 @@ class Double_write {
   /** For indexing batch segments by ID. */
   static std::vector<Batch_segment *> s_segments;
 
+  static void free_segments(Batch_segments*& segments) noexcept;
+
  public:
   /** Files to use for atomic writes. */
   static std::vector<dblwr::File> s_files;
@@ -1050,6 +1052,17 @@ dberr_t Double_write::create_reduced_v2() noexcept {
   return err;
 }
 
+void Double_write::free_segments(Batch_segments *&segments) noexcept {
+  if (segments != nullptr) {
+    Batch_segment *s{};
+    while (segments->dequeue(s)) {
+      UT_DELETE(s);
+    }
+    UT_DELETE(segments);
+    segments = nullptr;
+  }
+}
+
 void Double_write::shutdown() noexcept {
   if (s_instances == nullptr) {
     return;
@@ -1058,6 +1071,11 @@ void Double_write::shutdown() noexcept {
   for (auto dblwr : *s_instances) {
     UT_DELETE(dblwr);
   }
+
+  for (auto dblwr : *s_r_instances) {
+    UT_DELETE(dblwr);
+  }
+
 
   for (auto &file : s_files) {
     if (file.m_pfs.m_file != OS_FILE_CLOSED) {
@@ -1074,23 +1092,10 @@ void Double_write::shutdown() noexcept {
   s_files.clear();
   s_r_files.clear();
 
-  if (s_LRU_batch_segments != nullptr) {
-    Batch_segment *s{};
-    while (s_LRU_batch_segments->dequeue(s)) {
-      UT_DELETE(s);
-    }
-    UT_DELETE(s_LRU_batch_segments);
-    s_LRU_batch_segments = nullptr;
-  }
-
-  if (s_flush_list_batch_segments != nullptr) {
-    Batch_segment *s{};
-    while (s_flush_list_batch_segments->dequeue(s)) {
-      UT_DELETE(s);
-    }
-    UT_DELETE(s_flush_list_batch_segments);
-    s_flush_list_batch_segments = nullptr;
-  }
+  free_segments(s_LRU_batch_segments);
+  free_segments(s_flush_list_batch_segments);
+  free_segments(s_r_LRU_batch_segments);
+  free_segments(s_r_flush_list_batch_segments);
 
   if (s_single_segments != nullptr) {
     Segment *s{};
@@ -1102,7 +1107,9 @@ void Double_write::shutdown() noexcept {
   }
 
   UT_DELETE(s_instances);
+  UT_DELETE(s_r_instances);
   s_instances = nullptr;
+  s_r_instances = nullptr;
 }
 
 void Double_write::check_page_lsn(const page_t *page) noexcept {
