@@ -230,6 +230,8 @@ extern ulong enabled;
 
 bool is_enabled();
 
+bool is_reduced();
+
 /** Number of files to use for the double write buffer. It must be <= than
 the number of buffer pool instances. */
 extern ulong n_files;

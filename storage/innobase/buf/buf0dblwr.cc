@@ -84,6 +84,8 @@ ulong enabled{ON};
 /** @return true for dbwlr modes ON & REDUCED, else false */
 bool is_enabled() { return (enabled == ON || enabled == REDUCED); }
 
+bool is_reduced() { return (enabled == REDUCED); }
+
 /** Legacy dblwr buffer first segment page number. */
 static page_no_t LEGACY_PAGE1;
 
@@ -257,7 +259,7 @@ class Double_write {
   Double_write(uint16_t id, uint32_t n_pages) noexcept;
 
   /** Destructor */
-  ~Double_write() noexcept;
+  virtual ~Double_write() noexcept;
 
   /** @return instance ID */
   uint16_t id() const noexcept MY_ATTRIBUTE((warn_unused_result)) {
@@ -285,7 +287,7 @@ class Double_write {
       i += midpoint;
     }
 
-    return s_instances->at(i);
+    return (is_reduced() ? s_r_instances->at(i) : s_instances->at(i));
   }
 
   /** Wait for any pending batch to complete.
@@ -336,7 +338,7 @@ class Double_write {
   double write file, sync the file if required and then write to the
   data files.
   @param[in] flush_type         LRU or FLUSH request. */
-  void write_pages(buf_flush_t flush_type) noexcept;
+  virtual void write_pages(buf_flush_t flush_type) noexcept;
 
   /** Force a flush of the page queue.
   @param[in] flush_type           FLUSH LIST or LRU LIST flush. */
@@ -404,6 +406,12 @@ class Double_write {
   @param[in] segments_per_file  Number of configured segments per file.
   @return DB_SUCCESS or error code. */
   static dberr_t create_batch_segments(uint32_t segments_per_file) noexcept
+      MY_ATTRIBUTE((warn_unused_result));
+
+  /** Create the batch write segments.
+  @param[in] segments_per_file  Number of configured segments per file.
+  @return DB_SUCCESS or error code. */
+  static dberr_t create_reduced_batch_segments() noexcept
       MY_ATTRIBUTE((warn_unused_result));
 
   /** Create the single page flush segments.
@@ -519,6 +527,10 @@ class Double_write {
   @return DB_SUCCESS or error code */
   static dberr_t create_v2() noexcept MY_ATTRIBUTE((warn_unused_result));
 
+  /** Create the v2 data structures
+  @return DB_SUCCESS or error code */
+  static dberr_t create_reduced_v2() noexcept MY_ATTRIBUTE((warn_unused_result));
+
 #ifndef _WIN32
   /** @return true if we need to fsync to disk */
   static bool is_fsync_required() noexcept MY_ATTRIBUTE((warn_unused_result)) {
@@ -589,7 +601,7 @@ class Double_write {
           header page. */
   static byte *get(mtr_t *mtr) noexcept MY_ATTRIBUTE((warn_unused_result));
 
- private:
+ protected:
   using Segments = mpmc_bq<Segment *>;
   using Instances = std::vector<Double_write *>;
   using Batch_segments = mpmc_bq<Batch_segment *>;
@@ -621,6 +633,16 @@ class Double_write {
   /** File segments to use for single page writes. */
   static Segments *s_single_segments;
 
+  /** File segments to use for LRU batched writes. */
+  static Batch_segments *s_r_LRU_batch_segments;
+
+  /** File segments to use for flush list batched writes. */
+  static Batch_segments *s_r_flush_list_batch_segments;
+
+  /** File segments to use for single page writes. */
+  static Segments *s_r_single_segments;
+
+
   /** For indexing batch segments by ID. */
   static std::vector<Batch_segment *> s_segments;
 
@@ -633,12 +655,17 @@ class Double_write {
   /** The global instances */
   static Instances *s_instances;
 
+  /** The global Reduced instances */
+  static Instances *s_r_instances;
+
   // Disable copying
   Double_write(const Double_write &) = delete;
   Double_write(const Double_write &&) = delete;
   Double_write &operator=(Double_write &&) = delete;
   Double_write &operator=(const Double_write &) = delete;
 };
+
+
 
 /** File segment of a double write file. */
 class Segment {
@@ -797,6 +824,72 @@ class Batch_segment : public Segment {
   std::atomic_int m_written{};
 };
 
+class Reduced_double_write : public Double_write {
+
+public:
+  /** Constructor
+  @param[in] id                 Instance ID
+  @param[in] n_pages            Number of pages handled by this instance. */
+  Reduced_double_write(uint16_t id, uint32_t n_pages) : Double_write(id, n_pages) {}
+
+
+  /** Process the requests in the flush queue, write the blocks to the
+  double write file, sync the file if required and then write to the
+  data files.
+  @param[in] flush_type         LRU or FLUSH request. */
+  void write_pages(buf_flush_t flush_type) noexcept {
+    ut_ad(mutex_own(&m_mutex));
+    ut_a(!m_buffer.empty());
+
+    Batch_segment *batch_segment{};
+
+    auto segments = flush_type == BUF_FLUSH_LRU ? s_r_LRU_batch_segments
+                                                : s_r_flush_list_batch_segments;
+
+    while (!segments->dequeue(batch_segment)) {
+      os_thread_yield();
+    }
+
+    batch_segment->start(this);
+
+    batch_segment->write(m_buffer);
+
+    m_buffer.clear();
+
+#ifndef _WIN32
+    if (is_fsync_required()) {
+      batch_segment->flush();
+    }
+#endif /* !_WIN32 */
+
+    batch_segment->set_batch_size(m_buf_pages.size());
+
+    for (uint32_t i = 0; i < m_buf_pages.size(); ++i) {
+      const auto bpage = m_buf_pages.m_pages[i];
+
+      ut_d(auto page_id = bpage->id);
+
+      bpage->set_dblwr_batch_id(batch_segment->id());
+
+      auto err = write_to_datafile(bpage, false);
+      ut_a(err == DB_SUCCESS || err == DB_TABLESPACE_DELETED);
+
+#ifdef UNIV_DEBUG
+      if (dblwr::Force_crash == page_id) {
+        DBUG_SUICIDE();
+      }
+#endif /* UNIV_DEBUG */
+    }
+
+    srv_stats.dblwr_writes.inc();
+
+    m_buf_pages.clear();
+
+    os_aio_simulated_wake_handler_threads();
+  }
+
+};
+
 uint32_t Double_write::s_n_instances{};
 std::vector<dblwr::File> Double_write::s_files;
 std::vector<dblwr::File> Double_write::s_r_files;
@@ -804,8 +897,12 @@ Double_write::Segments *Double_write::s_single_segments{};
 Double_write::Batch_segments *Double_write::s_LRU_batch_segments{};
 Double_write::Batch_segments *Double_write::s_flush_list_batch_segments{};
 std::vector<Batch_segment *> Double_write::s_segments{};
-
 Double_write::Instances *Double_write::s_instances{};
+
+Double_write::Batch_segments *Double_write::s_r_LRU_batch_segments{};
+Double_write::Batch_segments *Double_write::s_r_flush_list_batch_segments{};
+Double_write::Segments *Double_write::s_r_single_segments{};
+Double_write::Instances *Double_write::s_r_instances{};
 
 Double_write::Double_write(uint16_t id, uint32_t n_pages) noexcept
     : m_id(id), m_buffer(n_pages), m_buf_pages(n_pages) {
@@ -914,6 +1011,40 @@ dberr_t Double_write::create_v2() noexcept {
     }
     UT_DELETE(s_instances);
     s_instances = nullptr;
+  }
+
+  return err;
+}
+
+dberr_t Double_write::create_reduced_v2() noexcept {
+  ut_a(!s_files.empty());
+  ut_a(s_r_instances == nullptr);
+
+  s_r_instances = UT_NEW_NOKEY(Instances{});
+
+  if (s_r_instances == nullptr) {
+    return DB_OUT_OF_MEMORY;
+  }
+
+  dberr_t err{DB_SUCCESS};
+
+  for (uint32_t i = 0; i < s_n_instances; ++i) {
+    auto ptr = UT_NEW_NOKEY(Reduced_double_write(i, dblwr::n_pages));
+
+    if (ptr == nullptr) {
+      err = DB_OUT_OF_MEMORY;
+      break;
+    }
+
+    s_r_instances->push_back(ptr);
+  }
+
+  if (err != DB_SUCCESS) {
+    for (auto &dblwr : *s_r_instances) {
+      UT_DELETE(dblwr);
+    }
+    UT_DELETE(s_r_instances);
+    s_r_instances = nullptr;
   }
 
   return err;
@@ -1549,6 +1680,56 @@ dberr_t Double_write::create_batch_segments(
   return DB_SUCCESS;
 }
 
+dberr_t Double_write::create_reduced_batch_segments() noexcept {
+  const auto n =
+      std::max(ulint{2}, ut_2_power_up(Double_write::s_n_instances / 2));
+
+  ut_a(s_r_LRU_batch_segments == nullptr);
+
+  s_r_LRU_batch_segments = UT_NEW_NOKEY(Batch_segments(n));
+
+  if (s_r_LRU_batch_segments == nullptr) {
+    return DB_OUT_OF_MEMORY;
+  }
+
+  ut_a(s_r_flush_list_batch_segments == nullptr);
+
+  s_r_flush_list_batch_segments = UT_NEW_NOKEY(Batch_segments(n));
+
+  if (s_r_flush_list_batch_segments == nullptr) {
+    return DB_OUT_OF_MEMORY;
+  }
+
+  const uint32_t total_pages = Double_write::s_n_instances;
+
+  // Batch_ids for new segments should start after old batch ids
+  uint16_t id = Double_write::s_segments.size();
+
+  // Reduced Batch file
+  auto &file = Double_write::s_r_files[0];
+  for (uint32_t i = 0; i < total_pages; ++i, ++id) {
+    auto s = UT_NEW_NOKEY(Batch_segment(id, file, 8192, i, 1));
+
+    if (s == nullptr) {
+      return DB_OUT_OF_MEMORY;
+    }
+
+    Batch_segments *segments{};
+
+    if (i < total_pages / 2) {
+      segments = s_r_LRU_batch_segments;
+    } else {
+      segments = s_r_flush_list_batch_segments;
+    }
+
+    auto success = segments->enqueue(s);
+    ut_a(success);
+    s_segments.push_back(s);
+  }
+
+  return DB_SUCCESS;
+}
+
 dberr_t Double_write::create_single_segments(
     uint32_t segments_per_file) noexcept {
   ut_a(s_single_segments == nullptr);
@@ -1808,7 +1989,7 @@ dberr_t dblwr::reduced_open(bool create_new_db) noexcept {
 
     switch (id) {
       case 0:
-        pages_per_file = dblwr::n_pages * Double_write::s_n_instances;
+        pages_per_file = Double_write::s_n_instances;
         extension = BWR;
         break;
       case 1:
@@ -1946,6 +2127,15 @@ dberr_t dblwr::open(bool create_new_db) noexcept {
 
   if (err == DB_SUCCESS) {
     err = dblwr::reduced_open(create_new_db);
+  }
+
+  /* Create the segments that for LRU and FLUSH list batches writes */
+  if (err == DB_SUCCESS) {
+    err = Double_write::create_reduced_batch_segments();
+  }
+
+  if (err == DB_SUCCESS) {
+    err = Double_write::create_reduced_v2();
   }
 
   return err;
