@@ -223,6 +223,38 @@ namespace dblwr {
 /** Number of pages per doublewrite thread/segment */
 extern ulong n_pages;
 
+const uint32_t REDUCED_BATCH_PAGE_SIZE = 8192;
+const uint32_t REDUCED_SINGLE_PAGE_SIZE = 20;
+
+// 20-BYTE HEADER
+const uint32_t RB_BATCH_ID_SIZE = 4;
+const uint32_t RB_CHECKSUM_SIZE = 4;
+const uint32_t RB_DATA_LEN_SIZE = 2;
+const uint32_t RB_BATCH_TYPE_SIZE = 1;
+const uint32_t RB_UNUSED_BYTES_SIZE = 9;
+
+// Header Offsets
+constexpr const uint32_t RB_OFF_BATCH_ID = 0;
+constexpr const uint32_t RB_OFF_CHECKSUM = RB_OFF_BATCH_ID + RB_BATCH_ID_SIZE;
+constexpr const uint32_t RB_OFF_DATA_LEN = RB_OFF_CHECKSUM + RB_CHECKSUM_SIZE;
+constexpr const uint32_t RB_OFF_BATCH_TYPE = RB_OFF_DATA_LEN + RB_DATA_LEN_SIZE;
+
+constexpr const uint32_t REDUCED_HEADER_SIZE =
+    RB_BATCH_ID_SIZE     /* BATCH_ID */
+    + RB_CHECKSUM_SIZE   /* CHECKSUM */
+    + RB_DATA_LEN_SIZE   /* DATA_LEN */
+    + RB_BATCH_TYPE_SIZE /* BATCH_TYPE */
+    + 9 /* UNUSED BYTES */;
+
+constexpr const uint32_t REDUCED_ENTRY_SIZE =
+    sizeof(space_id_t) + sizeof(page_no_t) + sizeof(lsn_t);
+
+constexpr const uint32_t REDUCED_DATA_SIZE =
+    REDUCED_BATCH_PAGE_SIZE - REDUCED_HEADER_SIZE;
+
+constexpr const uint32_t REDUCED_MAX_ENTRIES =
+    REDUCED_DATA_SIZE / REDUCED_ENTRY_SIZE;
+
 enum mode_t { OFF, ON, REDUCED };
 
 /** 1 if enabled. */

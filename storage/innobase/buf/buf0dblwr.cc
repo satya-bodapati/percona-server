@@ -642,11 +642,22 @@ class Double_write {
   /** File segments to use for single page writes. */
   static Segments *s_r_single_segments;
 
-
   /** For indexing batch segments by ID. */
   static std::vector<Batch_segment *> s_segments;
 
-  static void free_segments(Batch_segments*& segments) noexcept;
+  /** Utility function to free batch segments
+  @param[in]  segments  batch segment to free */
+  static void free_segments(Batch_segments *&segments) noexcept;
+
+  /* Last used batch_id for regular batch segments. Any id greater
+  than this belongs to reduced double write */
+  static uint32_t s_regular_last_batch_id;
+
+  /* @return true if batch belonged to reduced dblwr. When returning
+  a batch segment to lock-free queue, we should know which lock-free
+  queue(Batch_segments) to return to
+  @param[in]  batch_id Batch segment id */
+  static bool is_reduced_batch_id(uint32_t batch_id);
 
  public:
   /** Files to use for atomic writes. */
@@ -666,8 +677,6 @@ class Double_write {
   Double_write &operator=(Double_write &&) = delete;
   Double_write &operator=(const Double_write &) = delete;
 };
-
-
 
 /** File segment of a double write file. */
 class Segment {
@@ -772,6 +781,8 @@ class Batch_segment : public Segment {
   @param[in] buffer             Buffer to write. */
   void write(const Buffer &buffer) noexcept;
 
+  void write(const byte *buf, uint32_t len) noexcept;
+
   /** Called on page write completion.
   @return if batch ended. */
   bool write_complete() noexcept MY_ATTRIBUTE((warn_unused_result)) {
@@ -827,13 +838,18 @@ class Batch_segment : public Segment {
 };
 
 class Reduced_double_write : public Double_write {
-
-public:
+ public:
   /** Constructor
   @param[in] id                 Instance ID
   @param[in] n_pages            Number of pages handled by this instance. */
-  Reduced_double_write(uint16_t id, uint32_t n_pages) : Double_write(id, n_pages) {}
+  Reduced_double_write(uint16_t id, uint32_t n_pages)
+      : Double_write(id, n_pages), m_buf(nullptr), m_page(nullptr) {}
 
+  ~Reduced_double_write() {
+    if (m_buf != nullptr) {
+      ut_free(m_buf);
+    }
+  }
 
   /** Process the requests in the flush queue, write the blocks to the
   double write file, sync the file if required and then write to the
@@ -842,6 +858,41 @@ public:
   void write_pages(buf_flush_t flush_type) noexcept {
     ut_ad(mutex_own(&m_mutex));
     ut_a(!m_buffer.empty());
+
+    allocate();
+
+    uint16_t data_len{};
+    byte *ptr = m_page + REDUCED_HEADER_SIZE;
+    byte *ptr_orig = ptr;
+
+    for (uint32_t i = 0; i < m_buf_pages.size(); ++i) {
+      const auto bpage = m_buf_pages.m_pages[i];
+
+      mach_write_to_4(ptr, bpage->id.space());
+      ptr += 4;
+
+      mach_write_to_4(ptr, bpage->id.page_no());
+      ptr += 4;
+
+      page_t *frame = bpage->zip.data;
+
+      if (!frame) {
+        frame = ((buf_block_t *)bpage)->frame;
+      }
+
+      lsn_t frame_lsn = mach_read_from_8(frame + FIL_PAGE_LSN);
+
+      mach_write_to_8(ptr, frame_lsn);
+      ptr += 8;
+
+      data_len += REDUCED_ENTRY_SIZE;
+    }
+
+    ut_ad(ptr - ptr_orig == data_len);
+    ut_ad(data_len < REDUCED_DATA_SIZE);
+
+    // Calculate checksum for the data written
+    uint32_t checksum = calcuate_checksum(data_len);
 
     Batch_segment *batch_segment{};
 
@@ -852,11 +903,15 @@ public:
       os_thread_yield();
     }
 
+    // Create Page header
+    create_header(batch_segment->id(), checksum, data_len, flush_type);
+
     batch_segment->start(this);
 
-    batch_segment->write(m_buffer);
+    batch_segment->write(m_page, REDUCED_BATCH_PAGE_SIZE);
 
     m_buffer.clear();
+    clear();
 
 #ifndef _WIN32
     if (is_fsync_required()) {
@@ -890,6 +945,37 @@ public:
     os_aio_simulated_wake_handler_threads();
   }
 
+ private:
+  void allocate() {
+    ut_ad(mutex_own(&m_mutex));
+
+    if (m_buf != nullptr) {
+      return;
+    }
+
+    m_buf = static_cast<byte *>(ut_zalloc_nokey(2 * REDUCED_BATCH_PAGE_SIZE));
+
+    /* Align the memory for file i/o if we might have O_DIRECT set */
+    m_page = static_cast<byte *>(ut_align(m_buf, REDUCED_BATCH_PAGE_SIZE));
+  }
+
+  void clear() { memset(m_page, 0, REDUCED_BATCH_PAGE_SIZE); }
+
+  void create_header(uint32_t batch_id, uint32_t checksum, uint16_t data_len,
+                     buf_flush_t flush_type) {
+    mach_write_to_4(m_page + RB_OFF_BATCH_ID, batch_id);
+    mach_write_to_4(m_page + RB_OFF_CHECKSUM, checksum);
+    mach_write_to_2(m_page + RB_OFF_DATA_LEN, data_len);
+    m_page[RB_OFF_BATCH_TYPE] = flush_type;
+  }
+
+  uint32_t calcuate_checksum(uint16_t data_len) {
+    return (ut_crc32(m_page + REDUCED_HEADER_SIZE, data_len));
+  }
+
+ private:
+  byte *m_buf;
+  byte *m_page;
 };
 
 uint32_t Double_write::s_n_instances{};
@@ -900,6 +986,7 @@ Double_write::Batch_segments *Double_write::s_LRU_batch_segments{};
 Double_write::Batch_segments *Double_write::s_flush_list_batch_segments{};
 std::vector<Batch_segment *> Double_write::s_segments{};
 Double_write::Instances *Double_write::s_instances{};
+uint32_t Double_write::s_regular_last_batch_id{};
 
 Double_write::Batch_segments *Double_write::s_r_LRU_batch_segments{};
 Double_write::Batch_segments *Double_write::s_r_flush_list_batch_segments{};
@@ -982,6 +1069,10 @@ void Double_write::single_write(Segment *segment,
 
 void Batch_segment::write(const Buffer &buffer) noexcept {
   Segment::write(buffer.begin(), buffer.size());
+}
+
+void Batch_segment::write(const byte *buf, uint32_t len) noexcept {
+  Segment::write(buf, len);
 }
 
 dberr_t Double_write::create_v2() noexcept {
@@ -1075,7 +1166,6 @@ void Double_write::shutdown() noexcept {
   for (auto dblwr : *s_r_instances) {
     UT_DELETE(dblwr);
   }
-
 
   for (auto &file : s_files) {
     if (file.m_pfs.m_file != OS_FILE_CLOSED) {
@@ -1684,6 +1774,8 @@ dberr_t Double_write::create_batch_segments(
     }
   }
 
+  s_regular_last_batch_id = id;
+
   return DB_SUCCESS;
 }
 
@@ -1835,6 +1927,12 @@ dberr_t dblwr::write(buf_flush_t flush_type, buf_page_t *bpage,
   return err;
 }
 
+bool Double_write::is_reduced_batch_id(uint32_t batch_id) {
+  // TODO: change to debug assert
+  ut_a(s_regular_last_batch_id != 0);
+  return (batch_id > s_regular_last_batch_id);
+}
+
 void Double_write::write_complete(buf_page_t *bpage,
                                   buf_flush_t flush_type) noexcept {
   if (s_instances == nullptr) {
@@ -1859,9 +1957,17 @@ void Double_write::write_complete(buf_page_t *bpage,
 
           batch_segment->reset();
 
-          auto segments = (flush_type == BUF_FLUSH_LRU)
-                              ? Double_write::s_LRU_batch_segments
-                              : Double_write::s_flush_list_batch_segments;
+          Batch_segments *segments{nullptr};
+
+          if (is_reduced_batch_id(batch_id)) {
+            segments = (flush_type == BUF_FLUSH_LRU)
+                           ? Double_write::s_r_LRU_batch_segments
+                           : Double_write::s_r_flush_list_batch_segments;
+          } else {
+            segments = (flush_type == BUF_FLUSH_LRU)
+                           ? Double_write::s_LRU_batch_segments
+                           : Double_write::s_flush_list_batch_segments;
+          }
 
           fil_flush_file_spaces(FIL_TYPE_TABLESPACE);
 
