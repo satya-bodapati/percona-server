@@ -1786,6 +1786,7 @@ class Reduced_batch_deserializer {
   template <typename F>
   void parse_page_data(const byte *page, uint16_t data_len, F &f) noexcept {
     const byte *page_data = page + REDUCED_HEADER_SIZE;
+    const byte *page_start = page + REDUCED_HEADER_SIZE;
     const uint32_t expected_entries = data_len / REDUCED_ENTRY_SIZE;
 
     for (uint32_t entry = 1; entry <= expected_entries; ++entry) {
@@ -1801,6 +1802,8 @@ class Reduced_batch_deserializer {
       Page_entry pe(space_id, page_num, lsn);
       f(pe);
     }
+
+    ut_ad(page_data - page_start == (expected_entries * REDUCED_ENTRY_SIZE));
   }
 
   bool is_zeroes(const byte *page) {
@@ -1839,9 +1842,8 @@ dberr_t Double_write::load_reduced_batch(dblwr::File &file,
              (ulint)REDUCED_BATCH_PAGE_SIZE);
   }
 
-  Buffer buffer(n_pages);
   const uint32_t n_pages = size / REDUCED_BATCH_PAGE_SIZE;
-
+  Buffer buffer(n_pages, REDUCED_BATCH_PAGE_SIZE);
   IORequest read_request(IORequest::READ);
 
   read_request.disable_compression();
@@ -2914,7 +2916,7 @@ dberr_t dblwr::recv::reduced_load(recv::Pages *pages) noexcept {
 
   std::string rexp{"#ib_([0-9]+)_([0-9]+)\\"};
 
-  rexp.append(dot_ext[DWR]);
+  rexp.append(dot_ext[BWR]);
 
   const std::regex regex{rexp};
 
@@ -2940,7 +2942,12 @@ dberr_t dblwr::recv::reduced_load(recv::Pages *pages) noexcept {
     }
   }
 
-  // There should be always only one file
+  if (ids.size() == 0) {
+    // We are starting on older version that doesn't have reduced dblwr file
+    return (DB_SUCCESS);
+  }
+
+  // There should be always only one Batch DBLWR file
   ut_ad(ids.size() == 1);
 
   dblwr::File file;
