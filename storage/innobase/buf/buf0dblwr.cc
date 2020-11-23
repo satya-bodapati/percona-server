@@ -145,13 +145,23 @@ struct Page {
   Page &operator=(const Page &) = delete;
 };
 
+struct Page_entry {
+  Page_entry(space_id_t space_id, page_no_t page_num, lsn_t lsn)
+      : m_space_id(space_id), m_page_num(page_num), m_lsn(lsn) {}
+
+  space_id_t m_space_id;
+  page_no_t m_page_num;
+  lsn_t m_lsn;
+};
+
 /** Pages recovered from the doublewrite buffer */
 class Pages {
  public:
   using Buffers = std::vector<Page *, ut_allocator<Page *>>;
+  using Page_entries=std::vector<Page_entry>;
 
   /** Default constructor */
-  Pages() : m_pages() {}
+  Pages() : m_pages(), m_page_entries() {}
 
   /** Destructor */
   ~Pages() noexcept {
@@ -160,6 +170,7 @@ class Pages {
     }
 
     m_pages.clear();
+    m_page_entries.clear();
   }
 
   /** Add a page frame to the doublewrite recovery buffer.
@@ -168,11 +179,35 @@ class Pages {
   @param[in]	n_bytes		        Size in bytes */
   void add(page_no_t page_no, const byte *page, uint32_t n_bytes) noexcept;
 
+  void add_entry(Page_entry &pg_entry) { m_page_entries.push_back(pg_entry); }
+
   /** Find a doublewrite copy of a page.
   @param[in]	page_id		        Page number to lookup
   @return	page frame
   @retval nullptr if no page was found */
   const byte *find(const page_id_t &page_id) const noexcept;
+
+  bool dblwr_recover_page(page_no_t dblwr_page_no, fil_space_t *space,
+                          page_no_t page_no, byte *page) noexcept;
+
+  /** Find a doublewrite copy of a page.
+  @param[in]	page_id		        Page number to lookup
+  @return	page frame
+  @retval nullptr if no page was found */
+  lsn_t find_entry(const page_id_t &page_id) const noexcept {
+    lsn_t max_lsn = 0;
+    // There can be multiple entries with different LSNs, we are interted in the
+    // entry with max_lsn
+    for (auto &pe : m_page_entries) {
+      if (page_id.space() == pe.m_lsn && page_id.page_no() == pe.m_page_num) {
+        if (pe.m_lsn > max_lsn) {
+          max_lsn = pe.m_lsn;
+        }
+      }
+    }
+
+    return (max_lsn != 0 ? max_lsn : LSN_MAX);
+  }
 
   /** Recover double write buffer pages
   @param[in]	space		          Tablespace pages to recover, if set
@@ -186,6 +221,7 @@ class Pages {
  private:
   /** Recovered doublewrite buffer page frames */
   Buffers m_pages;
+  Page_entries m_page_entries;
 
   // Disable copying
   Pages(const Pages &) = delete;
@@ -499,6 +535,14 @@ class Double_write {
                                 read from the file
   @return DB_SUCCESS or error code */
   static dberr_t load(dblwr::File &file, recv::Pages *pages) noexcept
+      MY_ATTRIBUTE((warn_unused_result));
+
+   /** Load the doublewrite buffer pages from an external file.
+  @param[in,out]	file		      File handle
+  @param[in,out]	pages		      For storing the doublewrite pages
+                                read from the file
+  @return DB_SUCCESS or error code */
+  static dberr_t load_reduced_batch(dblwr::File &file, recv::Pages *pages) noexcept
       MY_ATTRIBUTE((warn_unused_result));
 
   /** Write zeros to the file if it is "empty"
@@ -892,7 +936,7 @@ class Reduced_double_write : public Double_write {
     ut_ad(data_len < REDUCED_DATA_SIZE);
 
     // Calculate checksum for the data written
-    uint32_t checksum = calcuate_checksum(data_len);
+    uint32_t checksum = calculate_checksum(data_len);
 
     Batch_segment *batch_segment{};
 
@@ -969,7 +1013,7 @@ class Reduced_double_write : public Double_write {
     m_page[RB_OFF_BATCH_TYPE] = flush_type;
   }
 
-  uint32_t calcuate_checksum(uint16_t data_len) {
+  uint32_t calculate_checksum(uint16_t data_len) {
     return (ut_crc32(m_page + REDUCED_HEADER_SIZE, data_len));
   }
 
@@ -1674,6 +1718,151 @@ dberr_t Double_write::load(dblwr::File &file, recv::Pages *pages) noexcept {
   return DB_SUCCESS;
 }
 
+class Reduced_batch_deserializer {
+ public:
+  explicit Reduced_batch_deserializer(Buffer *buf, uint32_t n_pages)
+      : m_buf(buf), m_n_pages(n_pages) {}
+
+  template <typename F>
+  dberr_t deserialize(F &f) {
+    auto page = m_buf->begin();
+    for (uint32_t i = 0; i < m_n_pages; ++i) {
+      if (is_zeroes(page)) {
+        page += REDUCED_BATCH_PAGE_SIZE;
+        continue;
+      }
+
+      dberr_t err = parse_page(page, f);
+      if (err != DB_SUCCESS) {
+        return (err);
+      }
+
+      page += REDUCED_BATCH_PAGE_SIZE;
+    }
+
+    return (DB_SUCCESS);
+  }
+
+ private:
+  dberr_t parse_header(const byte *page, uint16_t *data_len) noexcept {
+    //    uint32_t batch_id = mach_read_from_4(page + RB_OFF_BATCH_ID);
+    uint32_t checksum = mach_read_from_4(page + RB_OFF_CHECKSUM);
+    *data_len = mach_read_from_2(page + RB_OFF_DATA_LEN);
+    //   buf_flush_t flush_type =
+    //   static_cast<buf_flush_t>(page[RB_OFF_BATCH_TYPE]);
+
+    if (*data_len == 0) {
+      return (DB_CORRUPTION);
+    }
+
+    if (*data_len % REDUCED_ENTRY_SIZE != 0) {
+      return (DB_CORRUPTION);
+    }
+
+    uint32_t calc_checksum = ut_crc32(page + REDUCED_HEADER_SIZE, *data_len);
+
+    if (checksum != calc_checksum) {
+      // TODO: Add better message here
+      return (DB_CORRUPTION);
+    }
+    return (DB_SUCCESS);
+  }
+
+  template <typename F>
+  dberr_t parse_page(const byte *page, F &f) noexcept {
+    uint16_t data_len{};
+
+    dberr_t err = parse_header(page, &data_len);
+
+    if (err != DB_SUCCESS) {
+      return (err);
+    }
+
+    parse_page_data(page, data_len, f);
+
+    return (DB_SUCCESS);
+  }
+
+  template <typename F>
+  void parse_page_data(const byte *page, uint16_t data_len, F &f) noexcept {
+    const byte *page_data = page + REDUCED_HEADER_SIZE;
+    const uint32_t expected_entries = data_len / REDUCED_ENTRY_SIZE;
+
+    for (uint32_t entry = 1; entry <= expected_entries; ++entry) {
+      space_id_t space_id = mach_read_from_4(page_data);
+      page_data += 4;
+
+      page_no_t page_num = mach_read_from_4(page_data);
+      page_data += 4;
+
+      lsn_t lsn = mach_read_from_8(page_data);
+      page_data += 8;
+
+      Page_entry pe(space_id, page_num, lsn);
+      f(pe);
+    }
+  }
+
+  bool is_zeroes(const byte *page) {
+    for (ulint i = 0; i < REDUCED_BATCH_PAGE_SIZE; i++) {
+      if (page[i] != 0) {
+        return (false);
+      }
+    }
+    return (true);
+  }
+
+ private:
+  Buffer *m_buf;
+  uint32_t m_n_pages;
+};
+
+dberr_t Double_write::load_reduced_batch(dblwr::File &file,
+                                         recv::Pages *pages) noexcept {
+  os_offset_t size = os_file_get_size(file.m_pfs);
+
+  if (srv_read_only_mode) {
+    ib::info() << "Skipping doublewrite buffer processing due to "
+                  "InnoDB running in read only mode";
+    return (DB_SUCCESS);
+  }
+
+  if (size == 0) {
+    /* Double write buffer is empty. */
+    ib::info(ER_IB_MSG_DBLWR_1285, file.m_name.c_str());
+
+    return DB_SUCCESS;
+  }
+
+  if ((size % REDUCED_BATCH_PAGE_SIZE) != 0) {
+    ib::warn(ER_IB_MSG_DBLWR_1319, file.m_name.c_str(), (ulint)size,
+             (ulint)REDUCED_BATCH_PAGE_SIZE);
+  }
+
+  Buffer buffer(n_pages);
+  const uint32_t n_pages = size / REDUCED_BATCH_PAGE_SIZE;
+
+  IORequest read_request(IORequest::READ);
+
+  read_request.disable_compression();
+
+  auto err = os_file_read(read_request, file.m_name.c_str(), file.m_pfs,
+                          buffer.begin(), 0, buffer.capacity());
+
+  if (err != DB_SUCCESS) {
+    ib::error(ER_IB_MSG_DBLWR_1301, ut_strerr(err));
+
+    return err;
+  }
+
+  auto page_entry_processor = [&](Page_entry &pe) { pages->add_entry(pe); };
+
+  Reduced_batch_deserializer rbd(&buffer, n_pages);
+  err = rbd.deserialize(page_entry_processor);
+
+  return DB_SUCCESS;
+}
+
 void Double_write::write_pages(buf_flush_t flush_type) noexcept {
   ut_ad(mutex_own(&m_mutex));
   ut_a(!m_buffer.empty());
@@ -2305,7 +2494,7 @@ bool dblwr::v1::is_inside(page_no_t page_no) noexcept {
 @param[in]	page_no		          Page number in the tablespace
 @param[in]	page		            Data to write to <space, page_no>
 @return true if page was restored to the tablespace */
-static bool dblwr_recover_page(page_no_t dblwr_page_no, fil_space_t *space,
+bool recv::Pages::dblwr_recover_page(page_no_t dblwr_page_no, fil_space_t *space,
                                page_no_t page_no, byte *page) noexcept {
   /* For cloned database double write pages should be ignored. However,
   given the control flow, we read the pages in anyway but don't recover
@@ -2391,6 +2580,21 @@ static bool dblwr_recover_page(page_no_t dblwr_page_no, fil_space_t *space,
     } else {
       return false;
     }
+  }
+
+  lsn_t reduced_lsn = find_entry(page_id);
+  lsn_t dblwr_lsn = mach_read_from_8(page + FIL_PAGE_LSN);
+
+  /* If we find a newer version of page that is in reduced dblwr, we
+  shouldn't restore the old/stale page from regular dblwr. We should
+  abort */
+  if (reduced_lsn != LSN_MAX && reduced_lsn > dblwr_lsn) {
+    ib::error(ER_IB_MSG_DBLWR_1304);
+
+    //TODO: is this correct page_no? and how to report proper space_id and page_no
+    ib::error(ER_IB_MSG_DBLWR_1295, dblwr_page_no);
+
+    ib::fatal(ER_IB_MSG_DBLWR_1306);
   }
 
   /* Recovered data file pages are written out as uncompressed. */
@@ -2665,9 +2869,111 @@ dberr_t dblwr::recv::load(recv::Pages *pages) noexcept {
   return DB_SUCCESS;
 }
 
+dberr_t dblwr::recv::reduced_load(recv::Pages *pages) noexcept {
+#ifndef UNIV_HOTBACKUP
+  /* For cloned database double write pages should be ignored. */
+  if (!dblwr::is_enabled()) {
+    return DB_SUCCESS;
+  }
+
+  ut_ad(!dblwr::dir.empty());
+
+  /* The number of buffer pool instances can change. Therefore we must:
+    1. Scan the doublewrite directory for all *.dblwr files and load
+       their contents.
+    2. Reset the file sizes after recovery is complete. */
+
+  auto real_path_dir = Fil_path::get_real_path(dblwr::dir);
+
+  /* Walk the sub-tree of dblwr::dir. */
+
+  std::vector<std::string> dblwr_files;
+
+  Dir_Walker::walk(real_path_dir, false, [&](const std::string &path) {
+    ut_a(path.length() > real_path_dir.length());
+
+    if (Fil_path::get_file_type(path) != OS_FILE_TYPE_FILE) {
+      return;
+    }
+
+    /* Make the filename relative to the directory that was scanned. */
+
+    auto file = path.substr(real_path_dir.length(), path.length());
+
+    /** 7 == strlen(".bdblwr"). */
+    if (file.size() <= 7) {
+      return;
+    }
+
+    if (Fil_path::has_suffix(BWR, file.c_str())) {
+      dblwr_files.push_back(file);
+    }
+  });
+
+  /* We have to use all the dblwr files for recovery. */
+
+  std::string rexp{"#ib_([0-9]+)_([0-9]+)\\"};
+
+  rexp.append(dot_ext[DWR]);
+
+  const std::regex regex{rexp};
+
+  std::vector<int> ids;
+
+  for (auto &file : dblwr_files) {
+    std::smatch match;
+
+    if (std::regex_match(file, match, regex) && match.size() == 3) {
+      /* Check if the page size matches. */
+      int page_size = std::stoi(match[1].str());
+
+      if (page_size == (int)srv_page_size) {
+        int id = std::stoi(match[2].str());
+        ids.push_back(id);
+      } else {
+        ib::info(ER_IB_MSG_DBLWR_1310)
+            << "Ignoring " << file << " - page size doesn't match";
+      }
+    } else {
+      ib::warn(ER_IB_MSG_DBLWR_1311)
+          << file << " not in double write buffer file name format!";
+    }
+  }
+
+  // There should be always only one file
+  ut_ad(ids.size() == 1);
+
+  dblwr::File file;
+
+  /* Open the file for reading. */
+  auto err = dblwr_file_open(dblwr::dir, 0, file, OS_DATA_FILE, BWR);
+
+  if (err == DB_NOT_FOUND) {
+    return (DB_SUCCESS);
+  } else if (err != DB_SUCCESS) {
+    return err;
+  }
+
+  err = Double_write::load_reduced_batch(file, pages);
+
+  os_file_close(file.m_pfs);
+
+  if (err != DB_SUCCESS) {
+    return err;
+  }
+
+#endif /* UNIV_HOTBACKUP */
+  return DB_SUCCESS;
+}
+
 const byte *dblwr::recv::find(const recv::Pages *pages,
                               const page_id_t &page_id) noexcept {
   return pages->find(page_id);
+}
+
+lsn_t dblwr::recv::find_entry(const recv::Pages *pages,
+                              const page_id_t &page_id) noexcept {
+  return pages->find_entry(page_id);
 }
 
 void dblwr::recv::create(recv::Pages *&pages) noexcept {

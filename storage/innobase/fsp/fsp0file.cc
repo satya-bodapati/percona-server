@@ -992,6 +992,18 @@ dberr_t Datafile::restore_from_doublewrite(page_no_t restore_page_no) {
     return (DB_CORRUPTION);
   }
 
+  const lsn_t dblwr_lsn = mach_read_from_8(page + FIL_PAGE_LSN);
+  const lsn_t reduced_lsn = recv_sys->dblwr->find_entry(page_id);
+
+  if (reduced_lsn != LSN_MAX && reduced_lsn > dblwr_lsn) {
+    ib::error(ER_IB_MSG_412)
+        << "Corrupted page " << page_id_t(m_space_id, restore_page_no)
+        << " of datafile '" << m_filepath
+        << "' could not be found in the doublewrite buffer.";
+
+    return (DB_CORRUPTION);
+  }
+
   const uint32_t flags =
       mach_read_from_4(FSP_HEADER_OFFSET + FSP_SPACE_FLAGS + page);
 

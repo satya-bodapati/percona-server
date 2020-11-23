@@ -62,17 +62,33 @@ struct Buffer {
   /** Constructor
   @param[in]	n_pages		        Number of pages to create */
   explicit Buffer(size_t n_pages) noexcept
-      : m_n_bytes(n_pages * univ_page_size.physical()) {
+      : m_phy_size(univ_page_size.physical()), m_n_bytes(n_pages * m_phy_size) {
     ut_a(n_pages > 0);
 
-    auto n_bytes = m_n_bytes + univ_page_size.physical();
+    auto n_bytes = m_n_bytes + m_phy_size;
 
     m_ptr_unaligned = static_cast<byte *>(ut_zalloc_nokey(n_bytes));
 
-    m_ptr = static_cast<byte *>(ut_align(m_ptr_unaligned, UNIV_PAGE_SIZE));
+    m_ptr = static_cast<byte *>(ut_align(m_ptr_unaligned, m_phy_size));
 
-    ut_a(ptrdiff_t(m_ptr - m_ptr_unaligned) <=
-         (ssize_t)univ_page_size.physical());
+    ut_a(ptrdiff_t(m_ptr - m_ptr_unaligned) <= (ssize_t)m_phy_size);
+
+    m_next = m_ptr;
+  }
+
+  /** Constructor
+  @param[in]	n_pages		        Number of pages to create */
+  explicit Buffer(size_t n_pages, uint32_t phy_size) noexcept
+      : m_phy_size(phy_size), m_n_bytes(n_pages * m_phy_size) {
+    ut_a(n_pages > 0);
+
+    auto n_bytes = m_n_bytes + m_phy_size;
+
+    m_ptr_unaligned = static_cast<byte *>(ut_zalloc_nokey(n_bytes));
+
+    m_ptr = static_cast<byte *>(ut_align(m_ptr_unaligned, m_phy_size));
+
+    ut_a(ptrdiff_t(m_ptr - m_ptr_unaligned) <= (ssize_t)m_phy_size);
 
     m_next = m_ptr;
   }
@@ -90,12 +106,12 @@ struct Buffer {
   bool append(const void *ptr, size_t n_bytes) noexcept {
     ut_a(m_next >= m_ptr && m_next <= m_ptr + m_n_bytes);
 
-    if (m_next + univ_page_size.physical() > m_ptr + m_n_bytes) {
+    if (m_next + m_phy_size > m_ptr + m_n_bytes) {
       return false;
     }
 
     memcpy(m_next, ptr, n_bytes);
-    m_next += univ_page_size.physical();
+    m_next += m_phy_size;
 
     return true;
   }
@@ -120,6 +136,8 @@ struct Buffer {
 
   /** Empty the buffer. */
   void clear() noexcept { m_next = m_ptr; }
+
+  uint32_t m_phy_size;
 
   /** Write buffer used in writing to the doublewrite buffer,
   aligned to an address divisible by UNIV_PAGE_SIZE (which is
@@ -288,6 +306,12 @@ void create(Pages *&pages) noexcept;
 @return DB_SUCCESS or error code */
 dberr_t load(Pages *pages) noexcept MY_ATTRIBUTE((warn_unused_result));
 
+/** Load the doublewrite buffer pages.
+@param[in,out] pages           For storing the doublewrite pages read
+                               from the double write buffer
+@return DB_SUCCESS or error code */
+dberr_t reduced_load(Pages *pages) noexcept MY_ATTRIBUTE((warn_unused_result));
+
 /** Restore pages from the double write buffer to the tablespace.
 @param[in,out]	pages		Pages from the doublewrite buffer
 @param[in]	space		Tablespace pages to restore, if set
@@ -300,6 +324,14 @@ void recover(Pages *pages, fil_space_t *space) noexcept;
 @return	page frame
 @retval NULL if no page was found */
 const byte *find(const Pages *pages, const page_id_t &page_id) noexcept
+    MY_ATTRIBUTE((warn_unused_result));
+
+/** Find a doublewrite copy of a page.
+@param[in]	pages		Pages read from the doublewrite buffer
+@param[in]	page_id		Page number to lookup
+@return	page frame
+@retval NULL if no page was found */
+lsn_t find_entry(const Pages *pages, const page_id_t &page_id) noexcept
     MY_ATTRIBUTE((warn_unused_result));
 
 /** Check if some pages from the double write buffer could not be
@@ -329,6 +361,12 @@ class DBLWR {
     return (dblwr::recv::load(m_pages));
   }
 
+  /** Load the doublewrite buffer pages. Doesn't create the doublewrite
+  @return DB_SUCCESS or error code */
+  dberr_t reduced_load() noexcept MY_ATTRIBUTE((warn_unused_result)) {
+    return (dblwr::recv::reduced_load(m_pages));
+  }
+
   /** Restore pages from the double write buffer to the tablespace.
   @param[in]	space		Tablespace pages to restore,
                                   if set to nullptr then try
@@ -346,6 +384,12 @@ class DBLWR {
       MY_ATTRIBUTE((warn_unused_result)) {
     return (dblwr::recv::find(m_pages, page_id));
   }
+
+  lsn_t find_entry(const page_id_t &page_id) noexcept
+      MY_ATTRIBUTE((warn_unused_result)) {
+    return (dblwr::recv::find_entry(m_pages, page_id));
+  }
+
   // clang-format on
 
   /** Check if some pages from the double write buffer
