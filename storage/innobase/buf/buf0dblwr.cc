@@ -187,8 +187,16 @@ class Pages {
   @retval nullptr if no page was found */
   const byte *find(const page_id_t &page_id) const noexcept;
 
+  /** Find a doublewrite copy of a page.
+  @param[in]	page_id		        Page number to lookup
+  @return	page frame
+  @retval nullptr if no page was found */
+  bool is_recovered(const page_id_t &page_id) const noexcept;
+
   bool dblwr_recover_page(page_no_t dblwr_page_no, fil_space_t *space,
                           page_no_t page_no, byte *page) noexcept;
+
+  bool is_actual_page_corrupted(fil_space_t *space, page_id_t &page_id);
 
   /** Find a doublewrite copy of a page.
   @param[in]	page_id		        Page number to lookup
@@ -217,6 +225,12 @@ class Pages {
   /** Check if some pages could be restored because of missing
   tablespace IDs */
   void check_missing_tablespaces() const noexcept;
+
+ private:
+  /** Recover double write buffer pages
+   @param[in]	space		          Tablespace pages to recover, if set
+                                 to nullptr then try and recovery all. */
+  void reduced_recover(fil_space_t *space) noexcept;
 
  private:
   /** Recovered doublewrite buffer page frames */
@@ -949,6 +963,8 @@ class Reduced_double_write : public Double_write {
 
     // Create Page header
     create_header(batch_segment->id(), checksum, data_len, flush_type);
+
+    ut_ad(data_len/REDUCED_ENTRY_SIZE == m_buf_pages.size());
 
     batch_segment->start(this);
 
@@ -1862,7 +1878,7 @@ dberr_t Double_write::load_reduced_batch(dblwr::File &file,
   Reduced_batch_deserializer rbd(&buffer, n_pages);
   err = rbd.deserialize(page_entry_processor);
 
-  return DB_SUCCESS;
+  return (err);
 }
 
 void Double_write::write_pages(buf_flush_t flush_type) noexcept {
@@ -2490,6 +2506,48 @@ bool dblwr::v1::is_inside(page_no_t page_no) noexcept {
   return false;
 }
 
+bool recv::Pages::is_actual_page_corrupted(fil_space_t *space,
+                                           page_id_t &page_id) {
+  if (page_id.page_no() >= space->size) {
+    /* Do not report the warning if the tablespace is going to be truncated. */
+    if (!undo::is_active(space->id)) {
+      ib::warn(ER_IB_MSG_DBLWR_1313)
+          << "Page# " << page_id.page_no()
+          << " stored in the doublewrite file is"
+             " not within data file space bounds "
+          << space->size << " bytes:  page : " << page_id;
+    }
+    return (false);
+  }
+
+  Buffer buffer{1};
+  const page_size_t page_size(space->flags);
+
+  /* We want to ensure that for partial reads the
+  unread portion of the page is NUL. */
+  memset(buffer.begin(), 0x0, page_size.physical());
+
+  IORequest request;
+
+  request.dblwr();
+
+  /* Read in the page from the data file to compare. */
+  auto err = fil_io(request, true, page_id, page_size, 0, page_size.physical(),
+                    buffer.begin(), nullptr);
+
+  if (err != DB_SUCCESS) {
+    ib::warn(ER_IB_MSG_DBLWR_1314)
+        << "Double write fle recovery: " << page_id << " read failed with "
+        << "error: " << ut_strerr(err);
+  }
+
+  /* Is the page read from the data file corrupt? */
+  BlockReporter data_file_page(true, buffer.begin(), page_size,
+                               fsp_is_checksum_disabled(space->id));
+
+  return (data_file_page.is_corrupted());
+}
+
 /** Recover a page from the doublewrite buffer.
 @param[in]	dblwr_page_no	      Page number if the doublewrite buffer
 @param[in]	space		            Tablespace the page belongs to
@@ -2665,8 +2723,57 @@ void recv::Pages::recover(fil_space_t *space) noexcept {
         dblwr_recover_page(page->m_no, space, page_no, page->m_buffer.begin());
   }
 
+  reduced_recover(space);
+
   fil_flush_file_spaces(FIL_TYPE_TABLESPACE);
 #endif /* !UNIV_HOTBACKUP */
+}
+
+void recv::Pages::reduced_recover(fil_space_t *space) noexcept {
+
+  auto recover_all = (space == nullptr);
+
+  for (const auto &entry : m_page_entries) {
+    auto space_id = entry.m_space_id;
+    // auto lsn = entry.m_lsn;
+    page_id_t page_id(entry.m_space_id, entry.m_page_num);
+
+    if (recover_all) {
+      space = fil_space_get(space_id);
+
+      if (space == nullptr) {
+        /* Maybe we have dropped the tablespace
+        and this page once belonged to it: do nothing. */
+        continue;
+      }
+
+    } else if (space->id != space_id) {
+      continue;
+    }
+
+    fil_space_open_if_needed(space);
+
+    bool is_corrupted = is_actual_page_corrupted(space, page_id);
+
+    if (is_corrupted) {
+      const byte *page = find(page_id);
+      if (page != nullptr) {
+        if (!is_recovered(page_id)) {
+          // crash here
+          // TODO: add better error message here to indicate page number
+          // May be add new error code
+          ib::error(ER_IB_MSG_DBLWR_1304);
+          ib::fatal(ER_IB_MSG_DBLWR_1306);
+        }
+      } else {
+        // TODO: add better error message here to indicate page number
+        // May be add new error code
+        ib::error(ER_IB_MSG_DBLWR_1304);
+        ib::fatal(ER_IB_MSG_DBLWR_1306);
+        // crash here
+      }
+    }
+  }
 }
 
 const byte *recv::Pages::find(const page_id_t &page_id) const noexcept {
@@ -2704,6 +2811,19 @@ const byte *recv::Pages::find(const page_id_t &page_id) const noexcept {
   }
 
   return page;
+}
+
+bool recv::Pages::is_recovered(const page_id_t &page_id) const noexcept {
+  for (const auto &page : m_pages) {
+    auto &buffer = page->m_buffer;
+
+    if (page_get_space_id(buffer.begin()) == page_id.space() &&
+        page_get_page_no(buffer.begin()) == page_id.page_no() &&
+        page->m_recovered) {
+      return (true);
+    }
+  }
+  return (false);
 }
 
 void recv::Pages::add(page_no_t page_no, const byte *page,
