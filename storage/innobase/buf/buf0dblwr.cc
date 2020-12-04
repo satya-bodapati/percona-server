@@ -207,7 +207,7 @@ class Pages {
     // There can be multiple entries with different LSNs, we are interted in the
     // entry with max_lsn
     for (auto &pe : m_page_entries) {
-      if (page_id.space() == pe.m_lsn && page_id.page_no() == pe.m_page_num) {
+      if (page_id.space() == pe.m_space_id && page_id.page_no() == pe.m_page_num) {
         if (pe.m_lsn > max_lsn) {
           max_lsn = pe.m_lsn;
         }
@@ -2652,7 +2652,7 @@ bool recv::Pages::dblwr_recover_page(page_no_t dblwr_page_no, fil_space_t *space
     ib::error(ER_IB_MSG_DBLWR_1304);
 
     //TODO: is this correct page_no? and how to report proper space_id and page_no
-    ib::error(ER_IB_MSG_DBLWR_1295, dblwr_page_no);
+    ib::error(ER_IB_MSG_DBLWR_1295, std::to_string(dblwr_page_no).c_str());
 
     ib::fatal(ER_IB_MSG_DBLWR_1306);
   }
