@@ -983,12 +983,17 @@ dberr_t Datafile::restore_from_doublewrite(page_no_t restore_page_no) {
     /* If the first page of the given user tablespace is not there
     in the doublewrite buffer, then the recovery is going to fail
     now. Hence this is treated as an error. */
+    const lsn_t reduced_lsn = recv_sys->dblwr->find_entry(page_id);
 
-    ib::error(ER_IB_MSG_412)
-        << "Corrupted page " << page_id_t(m_space_id, restore_page_no)
-        << " of datafile '" << m_filepath
-        << "' could not be found in the doublewrite buffer.";
-
+    if (reduced_lsn != LSN_MAX) {
+      ib::error(ER_REDUCED_DBLWR_PAGE_FOUND, m_filepath, page_id.space(),
+                page_id.page_no());
+    } else {
+      ib::error(ER_IB_MSG_412)
+          << "Corrupted page " << page_id_t(m_space_id, restore_page_no)
+          << " of datafile '" << m_filepath
+          << "' could not be found in the doublewrite buffer.";
+    }
     return (DB_CORRUPTION);
   }
 
@@ -996,11 +1001,8 @@ dberr_t Datafile::restore_from_doublewrite(page_no_t restore_page_no) {
   const lsn_t reduced_lsn = recv_sys->dblwr->find_entry(page_id);
 
   if (reduced_lsn != LSN_MAX && reduced_lsn > dblwr_lsn) {
-    ib::error(ER_IB_MSG_412)
-        << "Corrupted page " << page_id_t(m_space_id, restore_page_no)
-        << " of datafile '" << m_filepath
-        << "' could not be found in the doublewrite buffer.";
-
+    ib::error(ER_REDUCED_DBLWR_PAGE_FOUND, m_filepath, page_id.space(),
+              page_id.page_no());
     return (DB_CORRUPTION);
   }
 

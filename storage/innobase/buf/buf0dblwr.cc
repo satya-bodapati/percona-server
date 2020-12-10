@@ -196,7 +196,9 @@ class Pages {
   bool dblwr_recover_page(page_no_t dblwr_page_no, fil_space_t *space,
                           page_no_t page_no, byte *page) noexcept;
 
-  bool is_actual_page_corrupted(fil_space_t *space, page_id_t &page_id);
+  // 0 - is_corrupted, 1 - is_all_zero
+  std::tuple<bool, bool> is_actual_page_corrupted(fil_space_t *space,
+                                                  page_id_t &page_id);
 
   /** Find a doublewrite copy of a page.
   @param[in]	page_id		        Page number to lookup
@@ -204,7 +206,7 @@ class Pages {
   @retval nullptr if no page was found */
   lsn_t find_entry(const page_id_t &page_id) const noexcept {
     lsn_t max_lsn = 0;
-    // There can be multiple entries with different LSNs, we are interted in the
+    // There can be multiple entries with different LSNs, we are interested in the
     // entry with max_lsn
     for (auto &pe : m_page_entries) {
       if (page_id.space() == pe.m_space_id && page_id.page_no() == pe.m_page_num) {
@@ -1750,6 +1752,7 @@ class Reduced_batch_deserializer {
 
       dberr_t err = parse_page(page, f);
       if (err != DB_SUCCESS) {
+	ib::error(ER_REDUCED_DBLWR_FILE_CORRUPTED, i);
         return (err);
       }
 
@@ -2506,8 +2509,10 @@ bool dblwr::v1::is_inside(page_no_t page_no) noexcept {
   return false;
 }
 
-bool recv::Pages::is_actual_page_corrupted(fil_space_t *space,
-                                           page_id_t &page_id) {
+std::tuple<bool, bool> recv::Pages::is_actual_page_corrupted(
+    fil_space_t *space, page_id_t &page_id) {
+  auto result = std::make_tuple(false, false);
+
   if (page_id.page_no() >= space->size) {
     /* Do not report the warning if the tablespace is going to be truncated. */
     if (!undo::is_active(space->id)) {
@@ -2517,7 +2522,7 @@ bool recv::Pages::is_actual_page_corrupted(fil_space_t *space,
              " not within data file space bounds "
           << space->size << " bytes:  page : " << page_id;
     }
-    return (false);
+    return (result);
   }
 
   Buffer buffer{1};
@@ -2545,7 +2550,12 @@ bool recv::Pages::is_actual_page_corrupted(fil_space_t *space,
   BlockReporter data_file_page(true, buffer.begin(), page_size,
                                fsp_is_checksum_disabled(space->id));
 
-  return (data_file_page.is_corrupted());
+  // TODO: is this the right place?
+  bool is_all_zero = buf_page_is_zeroes(buffer.begin(), page_size);
+
+  std::get<0>(result) = data_file_page.is_corrupted();
+  std::get<1>(result) = is_all_zero;
+  return (result);
 }
 
 /** Recover a page from the doublewrite buffer.
@@ -2649,12 +2659,8 @@ bool recv::Pages::dblwr_recover_page(page_no_t dblwr_page_no, fil_space_t *space
   shouldn't restore the old/stale page from regular dblwr. We should
   abort */
   if (reduced_lsn != LSN_MAX && reduced_lsn > dblwr_lsn) {
-    ib::error(ER_IB_MSG_DBLWR_1304);
-
-    //TODO: is this correct page_no? and how to report proper space_id and page_no
-    ib::error(ER_IB_MSG_DBLWR_1295, std::to_string(dblwr_page_no).c_str());
-
-    ib::fatal(ER_IB_MSG_DBLWR_1306);
+    ib::fatal(ER_REDUCED_DBLWR_PAGE_FOUND, space->name, page_id.space(),
+              page_id.page_no());
   }
 
   /* Recovered data file pages are written out as uncompressed. */
@@ -2753,24 +2759,23 @@ void recv::Pages::reduced_recover(fil_space_t *space) noexcept {
 
     fil_space_open_if_needed(space);
 
-    bool is_corrupted = is_actual_page_corrupted(space, page_id);
+    bool is_corrupted = false;
+    bool is_all_zero = false;
+    std::tie(is_corrupted, is_all_zero) =
+        is_actual_page_corrupted(space, page_id);
 
-    if (is_corrupted) {
+    if (is_corrupted || is_all_zero) {
       const byte *page = find(page_id);
       if (page != nullptr) {
         if (!is_recovered(page_id)) {
           // crash here
-          // TODO: add better error message here to indicate page number
-          // May be add new error code
-          ib::error(ER_IB_MSG_DBLWR_1304);
-          ib::fatal(ER_IB_MSG_DBLWR_1306);
+          ib::fatal(ER_REDUCED_DBLWR_PAGE_FOUND, space->name, page_id.space(),
+                    page_id.page_no());
         }
       } else {
-        // TODO: add better error message here to indicate page number
-        // May be add new error code
-        ib::error(ER_IB_MSG_DBLWR_1304);
-        ib::fatal(ER_IB_MSG_DBLWR_1306);
         // crash here
+        ib::fatal(ER_REDUCED_DBLWR_PAGE_FOUND, space->name, page_id.space(),
+                  page_id.page_no());
       }
     }
   }
