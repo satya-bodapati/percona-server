@@ -1,0 +1,5 @@
+--source include/not_valgrind.inc
+--source include/have_debug.inc
+
+--source ../include/doublewrite_reduced.inc
+#--source ../include/doublewrite_reduced_mod.inc

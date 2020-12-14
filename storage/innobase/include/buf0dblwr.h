@@ -331,7 +331,7 @@ const byte *find(const Pages *pages, const page_id_t &page_id) noexcept
 @param[in]	page_id		Page number to lookup
 @return	page frame
 @retval NULL if no page was found */
-lsn_t find_entry(const Pages *pages, const page_id_t &page_id) noexcept
+std::tuple<bool,lsn_t> find_entry(const Pages *pages, const page_id_t &page_id) noexcept
     MY_ATTRIBUTE((warn_unused_result));
 
 /** Check if some pages from the double write buffer could not be
@@ -385,7 +385,7 @@ class DBLWR {
     return (dblwr::recv::find(m_pages, page_id));
   }
 
-  lsn_t find_entry(const page_id_t &page_id) noexcept
+  std::tuple<bool, lsn_t>find_entry(const page_id_t &page_id) noexcept
       MY_ATTRIBUTE((warn_unused_result)) {
     return (dblwr::recv::find_entry(m_pages, page_id));
   }

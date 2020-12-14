@@ -979,13 +979,16 @@ dberr_t Datafile::restore_from_doublewrite(page_no_t restore_page_no) {
   /* Find if double write buffer contains page_no of given space id. */
   const byte *page = recv_sys->dblwr->find(page_id);
 
+  bool found = false;
+  lsn_t reduced_lsn = LSN_MAX;
+  std::tie(found, reduced_lsn) = recv_sys->dblwr->find_entry(page_id);
+
   if (page == nullptr) {
     /* If the first page of the given user tablespace is not there
     in the doublewrite buffer, then the recovery is going to fail
     now. Hence this is treated as an error. */
-    const lsn_t reduced_lsn = recv_sys->dblwr->find_entry(page_id);
 
-    if (reduced_lsn != LSN_MAX) {
+    if (found && reduced_lsn != LSN_MAX && reduced_lsn != 0) {
       ib::error(ER_REDUCED_DBLWR_PAGE_FOUND, m_filepath, page_id.space(),
                 page_id.page_no());
     } else {
@@ -998,9 +1001,8 @@ dberr_t Datafile::restore_from_doublewrite(page_no_t restore_page_no) {
   }
 
   const lsn_t dblwr_lsn = mach_read_from_8(page + FIL_PAGE_LSN);
-  const lsn_t reduced_lsn = recv_sys->dblwr->find_entry(page_id);
 
-  if (reduced_lsn != LSN_MAX && reduced_lsn > dblwr_lsn) {
+  if (found && reduced_lsn != LSN_MAX && reduced_lsn > dblwr_lsn) {
     ib::error(ER_REDUCED_DBLWR_PAGE_FOUND, m_filepath, page_id.space(),
               page_id.page_no());
     return (DB_CORRUPTION);

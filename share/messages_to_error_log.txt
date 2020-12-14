@@ -11162,7 +11162,7 @@ ER_REDUCED_DBLWR_FILE_CORRUPTED
   eng "Cannot recover from reduced doublewrite buffer as page %u from batch doublewrite file is corrupted."
 
 ER_REDUCED_DBLWR_PAGE_FOUND
-  eng "Database page corruption of tablespace %s space_id: %u page %u. Cannot recover it from the doublewrite buffer because it was written in reduced-doublewrite mode."
+  eng "Database page corruption of tablespace %s space_id: %u page_num: %u. Cannot recover it from the doublewrite buffer because it was written in reduced-doublewrite mode."
 
 #
 # End of Percona Server 8.0 server error log messages

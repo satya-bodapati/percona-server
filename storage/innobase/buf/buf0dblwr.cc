@@ -203,20 +203,24 @@ class Pages {
   /** Find a doublewrite copy of a page.
   @param[in]	page_id		        Page number to lookup
   @return	page frame
-  @retval nullptr if no page was found */
-  lsn_t find_entry(const page_id_t &page_id) const noexcept {
+  @retval nullptr if no page was found
+  // 0 - found or not, 1 - if found the max LSN */
+  std::tuple<bool, lsn_t> find_entry(const page_id_t &page_id) const noexcept {
+    bool found = false;
     lsn_t max_lsn = 0;
-    // There can be multiple entries with different LSNs, we are interested in the
-    // entry with max_lsn
+    // There can be multiple entries with different LSNs, we are interested in
+    // the entry with max_lsn
     for (auto &pe : m_page_entries) {
-      if (page_id.space() == pe.m_space_id && page_id.page_no() == pe.m_page_num) {
+      if (page_id.space() == pe.m_space_id &&
+          page_id.page_no() == pe.m_page_num) {
         if (pe.m_lsn > max_lsn) {
+          found = true;
           max_lsn = pe.m_lsn;
         }
       }
     }
 
-    return (max_lsn != 0 ? max_lsn : LSN_MAX);
+    return (std::tuple<bool, lsn_t>(found, max_lsn));
   }
 
   /** Recover double write buffer pages
@@ -2652,13 +2656,15 @@ bool recv::Pages::dblwr_recover_page(page_no_t dblwr_page_no, fil_space_t *space
     }
   }
 
-  lsn_t reduced_lsn = find_entry(page_id);
+  bool found = false;
+  lsn_t reduced_lsn = LSN_MAX;
+  std::tie(found, reduced_lsn) = find_entry(page_id);
   lsn_t dblwr_lsn = mach_read_from_8(page + FIL_PAGE_LSN);
 
   /* If we find a newer version of page that is in reduced dblwr, we
   shouldn't restore the old/stale page from regular dblwr. We should
   abort */
-  if (reduced_lsn != LSN_MAX && reduced_lsn > dblwr_lsn) {
+  if (found && reduced_lsn != LSN_MAX && reduced_lsn > dblwr_lsn) {
     ib::fatal(ER_REDUCED_DBLWR_PAGE_FOUND, space->name, page_id.space(),
               page_id.page_no());
   }
@@ -2741,7 +2747,6 @@ void recv::Pages::reduced_recover(fil_space_t *space) noexcept {
 
   for (const auto &entry : m_page_entries) {
     auto space_id = entry.m_space_id;
-    // auto lsn = entry.m_lsn;
     page_id_t page_id(entry.m_space_id, entry.m_page_num);
 
     if (recover_all) {
@@ -2764,17 +2769,30 @@ void recv::Pages::reduced_recover(fil_space_t *space) noexcept {
     std::tie(is_corrupted, is_all_zero) =
         is_actual_page_corrupted(space, page_id);
 
-    if (is_corrupted || is_all_zero) {
+    if (is_corrupted) {
       const byte *page = find(page_id);
       if (page != nullptr) {
         if (!is_recovered(page_id)) {
           // crash here
-          ib::fatal(ER_REDUCED_DBLWR_PAGE_FOUND, space->name, page_id.space(),
+          ib::fatal(ER_REDUCED_DBLWR_PAGE_FOUND, space->files.front().name, page_id.space(),
                     page_id.page_no());
         }
       } else {
         // crash here
-        ib::fatal(ER_REDUCED_DBLWR_PAGE_FOUND, space->name, page_id.space(),
+        ib::fatal(ER_REDUCED_DBLWR_PAGE_FOUND, space->files.front().name, page_id.space(),
+                  page_id.page_no());
+      }
+    }
+
+    if (is_all_zero) {
+      // is there a dblwr reduced entry with non-zero LSN?
+      bool found = false;
+      lsn_t reduced_lsn = LSN_MAX;
+      std::tie(found, reduced_lsn) = find_entry(page_id);
+
+      if (!is_recovered(page_id) && found && reduced_lsn != LSN_MAX &&
+          reduced_lsn != 0) {
+        ib::fatal(ER_REDUCED_DBLWR_PAGE_FOUND, space->files.front().name, page_id.space(),
                   page_id.page_no());
       }
     }
@@ -3103,8 +3121,8 @@ const byte *dblwr::recv::find(const recv::Pages *pages,
   return pages->find(page_id);
 }
 
-lsn_t dblwr::recv::find_entry(const recv::Pages *pages,
-                              const page_id_t &page_id) noexcept {
+std::tuple<bool, lsn_t> dblwr::recv::find_entry(
+    const recv::Pages *pages, const page_id_t &page_id) noexcept {
   return pages->find_entry(page_id);
 }
 
