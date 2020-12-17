@@ -1,12 +1,13 @@
---echo #
---echo # Bug #17335427 INNODB CAN NOT USE THE DOUBLEWRITE BUFFER PROPERLY
---echo # Bug #18144349 INNODB CANNOT USE THE DOUBLEWRITE BUFFER FOR THE FIRST
---echo # PAGE OF SYSTEM TABLESPACE
---echo #
-
 --let BACKUP=$MYSQL_TMP_DIR/datadir_backup
 --let ORIG=$MYSQL_TMP_DIR/datadir_orig
+if ($O_DIRECT) {
+--let $restart_parameters = "restart: --innodb_doublewrite=reduced --datadir=$BACKUP/data --innodb-flush-method=O_DIRECT"
+}
+
+if (!$O_DIRECT) {
 --let $restart_parameters = "restart: --innodb_doublewrite=reduced --datadir=$BACKUP/data"
+}
+
 --let $ERROR_LOG=$MYSQL_TMP_DIR/error.log
 
 --disable_query_log
@@ -50,14 +51,14 @@ SET GLOBAL innodb_fast_shutdown = 0;
 --force-cpdir $MYSQLD_DATADIR $BACKUP
 --force-cpdir $MYSQLD_DATADIR $ORIG
 
---replace_result $BACKUP BACKUP
+--replace_result $BACKUP BACKUP " --innodb-flush-method=O_DIRECT" ""
 --source include/start_mysqld.inc
-
-SELECT @@datadir;
 
 --echo # ---------------------------------------------------------------
 --echo # Test Begin: Test if recovery works if first page of user
 --echo # tablespace is full of zeroes.
+
+SHOW VARIABLES LIKE 'innodb_doublewrite';
 
 --echo # Ensure that dirty pages of table t1 is flushed.
 FLUSH TABLES t1 FOR EXPORT;
@@ -102,13 +103,15 @@ SET GLOBAL innodb_fil_make_page_dirty_debug = @space_id;
 --echo # restoring original datadir
 --force-rmdir $BACKUP/data
 --force-cpdir $ORIG/data $BACKUP/data
---replace_result $BACKUP BACKUP
+--replace_result $BACKUP BACKUP " --innodb-flush-method=O_DIRECT" ""
 --source include/start_mysqld.inc
 
 --echo # Test End - 1
 --echo # ---------------------------------------------------------------
 --echo # Test Begin: Test if recovery works if first page of user
 --echo # tablespace is corrupted.
+
+SHOW VARIABLES LIKE 'innodb_doublewrite';
 
 SELECT space from INFORMATION_SCHEMA.INNODB_TABLESPACES
 WHERE name = 'test/t1' INTO @space_id;
@@ -150,13 +153,15 @@ SET GLOBAL innodb_fil_make_page_dirty_debug = @space_id;
 --echo # restoring original datadir
 --force-rmdir $BACKUP/data
 --force-cpdir $ORIG/data $BACKUP/data
---replace_result $BACKUP BACKUP
+--replace_result $BACKUP BACKUP " --innodb-flush-method=O_DIRECT" ""
 --source include/start_mysqld.inc
 
 --echo # Test End - 2
 --echo # ---------------------------------------------------------------
 --echo # Test Begin: Test if recovery works if 2nd page of user
 --echo # tablespace is full of zeroes.
+
+SHOW VARIABLES LIKE 'innodb_doublewrite';
 
 SELECT space FROM INFORMATION_SCHEMA.INNODB_TABLESPACES
 WHERE name = 'test/t1' INTO @space_id;
@@ -198,13 +203,15 @@ SET GLOBAL innodb_fil_make_page_dirty_debug = @space_id;
 --echo # restoring original datadir
 --force-rmdir $BACKUP/data
 --force-cpdir $ORIG/data $BACKUP/data
---replace_result $BACKUP BACKUP
+--replace_result $BACKUP BACKUP " --innodb-flush-method=O_DIRECT" ""
 --source include/start_mysqld.inc
 
 --echo # Test End - 3
 --echo # ---------------------------------------------------------------
 --echo # Test Begin: Test if recovery works if 2nd page of user
 --echo # tablespace is corrupted.
+
+SHOW VARIABLES LIKE 'innodb_doublewrite';
 
 SELECT space FROM INFORMATION_SCHEMA.INNODB_TABLESPACES
 WHERE name = 'test/t1' into @space_id;
@@ -246,13 +253,15 @@ SET GLOBAL innodb_fil_make_page_dirty_debug = @space_id;
 --echo # restoring original datadir
 --force-rmdir $BACKUP/data
 --force-cpdir $ORIG/data $BACKUP/data
---replace_result $BACKUP BACKUP
+--replace_result $BACKUP BACKUP " --innodb-flush-method=O_DIRECT" ""
 --source include/start_mysqld.inc
 
 --echo # Test End - 4
 --echo # ---------------------------------------------------------------
 --echo # Test Begin: Test if recovery works if first page of
 --echo # system tablespace is full of zeroes.
+
+SHOW VARIABLES LIKE 'innodb_doublewrite';
 
 SET GLOBAL innodb_master_thread_disabled_debug=1;
 
@@ -288,13 +297,15 @@ SET GLOBAL innodb_fil_make_page_dirty_debug = 0;
 --echo # restoring original datadir
 --force-rmdir $BACKUP/data
 --force-cpdir $ORIG/data $BACKUP/data
---replace_result $BACKUP BACKUP
+--replace_result $BACKUP BACKUP " --innodb-flush-method=O_DIRECT" ""
 --source include/start_mysqld.inc
 
 --echo # Test End - 5
 --echo # ---------------------------------------------------------------
 --echo # Test Begin: Test if recovery works if first page of
 --echo # system tablespace is corrupted.
+
+SHOW VARIABLES LIKE 'innodb_doublewrite';
 
 SET GLOBAL innodb_master_thread_disabled_debug=1;
 
@@ -329,13 +340,15 @@ SET GLOBAL innodb_fil_make_page_dirty_debug = 0;
 --echo # restoring original datadir
 --force-rmdir $BACKUP/data
 --force-cpdir $ORIG/data $BACKUP/data
---replace_result $BACKUP BACKUP
+--replace_result $BACKUP BACKUP " --innodb-flush-method=O_DIRECT" ""
 --source include/start_mysqld.inc
 
 --echo # Test End - 6
 --echo # ---------------------------------------------------------------
 --echo # Test Begin: Test if recovery works if 2nd page of
 --echo # system tablespace is full of zeroes.
+
+SHOW VARIABLES LIKE 'innodb_doublewrite';
 
 SET GLOBAL innodb_master_thread_disabled_debug=1;
 
@@ -371,13 +384,15 @@ SET GLOBAL innodb_fil_make_page_dirty_debug = 0;
 --echo # restoring original datadir
 --force-rmdir $BACKUP/data
 --force-cpdir $ORIG/data $BACKUP/data
---replace_result $BACKUP BACKUP
+--replace_result $BACKUP BACKUP " --innodb-flush-method=O_DIRECT" ""
 --source include/start_mysqld.inc
 
 --echo # Test End - 7
 --echo # ---------------------------------------------------------------
 --echo # Test Begin: Test if recovery works if 2nd page of
 --echo # system tablespace is corrupted.
+
+SHOW VARIABLES LIKE 'innodb_doublewrite';
 
 SET GLOBAL innodb_master_thread_disabled_debug=1;
 
