@@ -1229,8 +1229,10 @@ void Double_write::shutdown() noexcept {
     UT_DELETE(dblwr);
   }
 
-  for (auto dblwr : *s_r_instances) {
-    UT_DELETE(dblwr);
+  if (s_r_instances != nullptr) {
+    for (auto dblwr : *s_r_instances) {
+      UT_DELETE(dblwr);
+    }
   }
 
   for (auto &file : s_files) {
@@ -2450,6 +2452,12 @@ dberr_t dblwr::open(bool create_new_db) noexcept {
     err = Double_write::create_v2();
   } else {
     Double_write::shutdown();
+  }
+
+  // TODO: we should always try to open and use those files if they exist
+  // even if the reduced_mode is OFF
+  if (!dblwr::is_reduced()) {
+    return (DB_SUCCESS);
   }
 
   if (err == DB_SUCCESS) {
