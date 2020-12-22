@@ -3,10 +3,3 @@
 
 --let $O_DIRECT=0
 --source ../include/doublewrite_reduced.inc
-
---echo ###########################################
---echo # Test with O_DIRECT enabled
---echo ###########################################
-
---let $O_DIRECT=1
---source ../include/doublewrite_reduced.inc

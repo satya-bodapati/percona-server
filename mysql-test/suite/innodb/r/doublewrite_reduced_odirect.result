@@ -1,3 +1,6 @@
+###########################################
+# Test with O_DIRECT enabled
+###########################################
 SHOW VARIABLES LIKE 'innodb_doublewrite';
 Variable_name	Value
 innodb_doublewrite	ON

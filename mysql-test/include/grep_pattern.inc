@@ -12,7 +12,7 @@
 #
 # --let $grep_pattern= PERL_REGEX
 # --let $grep_file= FILENAME
-# [--let $grep_output= print_each | print_count | boolean]
+# [--let $grep_output= print_each | print_count | boolean | none]
 #
 # Parameters:
 #
@@ -44,17 +44,25 @@ if (!$grep_output)
 --let _GP_GREP_PATTERN= $grep_pattern
 --let _GP_GREP_FILE= $grep_file
 
+--let _GREP_RESULT_FILE=$MYSQL_TMP_DIR/grep_result
+
 --perl
   use strict;
   my $file= $ENV{'_GP_GREP_FILE'} or die "grep_file is not set";
   my $pattern= $ENV{'_GP_GREP_PATTERN'} or die "grep_pattern is not set";
   open(FILE, "$file") or die("Unable to open $file: $!\n");
+  my $out_file = $ENV{'_GREP_RESULT_FILE'} or die "_GREP_RESULT_FILE is not set";
   my $count = 0;
   my $result = "";
   my $output = $ENV{'_GP_GREP_OUTPUT'};
   if ($output eq 'print_each') {
     print "Matching lines are:\n";
   }
+
+  if ($output eq 'none') {
+    open(OUT_FILE, '>', $out_file) or die("Unable to open out file for writing: $!\n");
+  }
+
   my $finished = 0;
 
   while (<FILE>) {
@@ -78,14 +86,22 @@ if (!$grep_output)
   if ($count == 0 && $output eq 'print_each') {
     print "None\n";
   }
+
   if ($output eq 'boolean') {
     print $count ? "Pattern found.\n" : "Pattern not found.\n";
-  }
-  else {
+  } elsif ($output eq 'none') {
+    print OUT_FILE "--let \$GREP_RESULT=$count\n";
+    close(OUT_FILE);
+  } else {
     print "Occurrences of '$pattern' in the input file: $count\n";
   }
   close(FILE) or die "Error closing $file: $!";
 EOF
 
+if ($_GP_GREP_OUTPUT == "none") {
+  --source $_GREP_RESULT_FILE
+  #--echo "GREP_RESULT is $GREP_RESULT"
+  --remove_file $_GREP_RESULT_FILE
+}
 
 #--source include/end_include_file.inc
