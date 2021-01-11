@@ -282,6 +282,10 @@ bool is_enabled();
 
 bool is_reduced();
 
+bool is_disabled();
+
+const char *to_string(mode_t dblwr_mode);
+
 /** Number of files to use for the double write buffer. It must be <= than
 the number of buffer pool instances. */
 extern ulong n_files;

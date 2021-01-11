@@ -83,6 +83,20 @@ ulong enabled{ON};
 
 /** @return true for dbwlr modes ON & REDUCED, else false */
 bool is_enabled() { return (enabled == ON || enabled == REDUCED); }
+bool is_disabled() { return (enabled == OFF); }
+
+const char *to_string(mode_t dblwr_mode) {
+  switch (dblwr_mode) {
+    case OFF:
+      return ("OFF");
+    case ON:
+      return ("ON");
+    case REDUCED:
+      return ("REDUCED");
+  }
+  ut_ad(0);
+  return("");
+}
 
 bool is_reduced() { return (enabled == REDUCED); }
 
