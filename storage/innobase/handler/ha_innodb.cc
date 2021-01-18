@@ -905,6 +905,33 @@ static void doublewrite_update(THD *thd,            // in: thread handle <]
     return;
   }
 
+  if (new_value == dblwr::enabled) {
+    // Old value and new value same. Do nothing.
+    return;
+  }
+
+  // Handle ON to REDUCED
+  // 1. Check if REDUCED setup is already initalized. If not intialized REDUCED
+  //    files and structures
+  // 2. Flush the partially filled dblwr buffers
+  //
+  if (new_value == dblwr::REDUCED) {
+    dberr_t err = dblwr::enable_reduced(false);
+    if (err != DB_SUCCESS) {
+      push_warning_printf(thd, Sql_condition::SL_WARNING, HA_ERR_UNSUPPORTED,
+                          "InnoDB: cannot change doublewrite mode to %s."
+                          " Please check if doublewrite directory is writable"
+                          " Error code: %d",
+                          to_string(new_value), err);
+      return;
+    }
+  }
+
+  // Handle REDUCED to ON
+  // 1. Flush partially filled reduced dblwr buffers
+
+  dblwr::force_flush_all();
+
   *static_cast<dblwr::mode_t *>(var_ptr) =
       *static_cast<const dblwr::mode_t *>(save);
 }

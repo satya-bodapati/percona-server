@@ -81,6 +81,8 @@ ulong n_pages{64};
 
 ulong enabled{ON};
 
+bool is_reduced_inited = false;
+
 /** @return true for dbwlr modes ON & REDUCED, else false */
 bool is_enabled() { return (enabled == ON || enabled == REDUCED); }
 bool is_disabled() { return (enabled == OFF); }
@@ -415,6 +417,7 @@ class Double_write {
   void force_flush(buf_flush_t flush_type) noexcept {
     for (;;) {
       mutex_enter(&m_mutex);
+
       if (!m_buf_pages.empty() && !flush_to_disk(flush_type)) {
         ut_ad(!mutex_own(&m_mutex));
         continue;
@@ -1983,6 +1986,11 @@ dberr_t Double_write::create_batch_segments(
 
   for (auto &file : s_files) {
     for (uint32_t i = 0; i < total_pages; i += dblwr::n_pages, ++id) {
+
+      ib::info() << "Creating Batch segment: " << id
+                 << " file name: " << file.m_name << " i: " << i
+                 << " n_pages: " << dblwr::n_pages;
+
       auto s = UT_NEW_NOKEY(Batch_segment(id, file, i, dblwr::n_pages));
 
       if (s == nullptr) {
@@ -2001,10 +2009,11 @@ dberr_t Double_write::create_batch_segments(
       auto success = segments->enqueue(s);
       ut_a(success);
       s_segments.push_back(s);
+      s_regular_last_batch_id = id;
     }
   }
 
-  s_regular_last_batch_id = id;
+  ib::info() << "The last regular batch_id is " << s_regular_last_batch_id;
 
   return DB_SUCCESS;
 }
@@ -2037,6 +2046,11 @@ dberr_t Double_write::create_reduced_batch_segments() noexcept {
   // Reduced Batch file
   auto &file = Double_write::s_r_files[0];
   for (uint32_t i = 0; i < total_pages; ++i, ++id) {
+
+      ib::info() << "Creating Reduced_Batch segment: " << id
+                 << " file name: " << file.m_name << " i: " << i
+                 << " n_pages: " << dblwr::n_pages;
+
     auto s = UT_NEW_NOKEY(Batch_segment(id, file, 8192, i, 1));
 
     if (s == nullptr) {
@@ -2468,6 +2482,10 @@ dberr_t dblwr::open(bool create_new_db) noexcept {
     Double_write::shutdown();
   }
 
+  if (err != DB_SUCCESS) {
+    return (err);
+  }
+
   // TODO: we should always try to open and use those files if they exist
   // even if the reduced_mode is OFF
   if (!dblwr::is_reduced()) {
@@ -2475,8 +2493,18 @@ dberr_t dblwr::open(bool create_new_db) noexcept {
   }
 
   if (err == DB_SUCCESS) {
-    err = dblwr::reduced_open(create_new_db);
+    err = dblwr::enable_reduced(create_new_db);
   }
+
+  return err;
+}
+
+dberr_t dblwr::enable_reduced(bool create_new_db) noexcept {
+  if (is_reduced_inited) {
+    return (DB_SUCCESS);
+  }
+
+  dberr_t err = dblwr::reduced_open(create_new_db);
 
   /* Create the segments that for LRU and FLUSH list batches writes */
   if (err == DB_SUCCESS) {
@@ -2487,7 +2515,11 @@ dberr_t dblwr::open(bool create_new_db) noexcept {
     err = Double_write::create_reduced_v2();
   }
 
-  return err;
+  if (err == DB_SUCCESS) {
+    is_reduced_inited = true;
+  }
+
+  return (err);
 }
 
 void dblwr::close() noexcept { Double_write::shutdown(); }
@@ -2715,6 +2747,14 @@ void dblwr::force_flush(buf_flush_t flush_type,
                         uint32_t buf_pool_index) noexcept {
   Double_write::force_flush(flush_type, buf_pool_index);
 }
+
+void dblwr::force_flush_all() noexcept {
+  for (ulint i = 0; i < srv_buf_pool_instances; i++) {
+    force_flush(BUF_FLUSH_LRU, i);
+    force_flush(BUF_FLUSH_LIST, i);
+  }
+}
+
 #endif /* !UNIV_HOTBACKUP */
 
 void recv::Pages::recover(fil_space_t *space) noexcept {

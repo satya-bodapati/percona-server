@@ -2004,8 +2004,16 @@ static void buf_flush_end(buf_pool_t *buf_pool, buf_flush_t flush_type,
 
   if (!srv_read_only_mode) {
     if (dblwr::is_enabled()) {
-      if (flushed_page_count != 0)
+      if (flushed_page_count != 0) {
+        DBUG_EXECUTE_IF(
+            "skip_dblwr_force_flush",
+	     if (dblwr::is_reduced()) {
+              ib::info() << "SKipping reduced orce_flush..";
+              return;
+            }
+	 );
         dblwr::force_flush(flush_type, buf_pool_index(buf_pool));
+      }
     } else {
       buf_flush_sync_datafiles();
     }

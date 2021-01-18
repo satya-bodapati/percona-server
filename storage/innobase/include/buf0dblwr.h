@@ -183,6 +183,8 @@ extern page_id_t Force_crash;
 @return DB_SUCCESS or error code */
 dberr_t open(bool create_new_db) noexcept MY_ATTRIBUTE((warn_unused_result));
 
+dberr_t enable_reduced(bool create_new_db) noexcept MY_ATTRIBUTE((warn_unused_result));
+
 /** Startup the background thread(s) and create the instance.
 @param[in]  create_new_db Create new database.
 @return DB_SUCCESS or error code */
@@ -196,6 +198,8 @@ void close() noexcept;
 @param[in] flush_type           FLUSH LIST or LRU_LIST flush request.
 @param[in] buf_pool_index       Buffer pool instance for which called. */
 void force_flush(buf_flush_t flush_type, uint32_t buf_pool_index) noexcept;
+
+void force_flush_all() noexcept;
 
 /** Writes a page to the doublewrite buffer on disk, syncs it,
 then writes the page to the datafile.
@@ -277,6 +281,8 @@ enum mode_t { OFF, ON, REDUCED };
 
 /** 1 if enabled. */
 extern ulong enabled;
+
+extern bool is_reduced_inited;
 
 bool is_enabled();
 
