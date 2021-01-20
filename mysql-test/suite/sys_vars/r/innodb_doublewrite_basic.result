@@ -3,9 +3,8 @@ COUNT(@@GLOBAL.innodb_doublewrite)
 1
 1 Expected
 SET @@GLOBAL.innodb_doublewrite=off;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to OFF if doublewrite is enabled. Please shutdown and change value to OFF
 SET @@GLOBAL.innodb_doublewrite=on;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
 SELECT COUNT(@@GLOBAL.innodb_doublewrite);
 COUNT(@@GLOBAL.innodb_doublewrite)
 1
@@ -50,75 +49,63 @@ SELECT @@global.innodb_doublewrite;
 @@global.innodb_doublewrite
 ON
 SET @@GLOBAL.innodb_doublewrite=0;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to OFF if doublewrite is enabled. Please shutdown and change value to OFF
 SET @@GLOBAL.innodb_doublewrite=1;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
 SET @@GLOBAL.innodb_doublewrite=2;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
 "##############################################"
 # restart: --innodb-doublewrite=off
 SELECT @@global.innodb_doublewrite;
 @@global.innodb_doublewrite
 OFF
 SET @@GLOBAL.innodb_doublewrite=0;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
 SET @@GLOBAL.innodb_doublewrite=1;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to ON if doublewrite is disabled. Please shutdown and change value to ON
 SET @@GLOBAL.innodb_doublewrite=2;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to REDUCED if doublewrite is disabled. Please shutdown and change value to REDUCED
 "##############################################"
 # restart: --innodb-doublewrite=reduced
 SELECT @@global.innodb_doublewrite;
 @@global.innodb_doublewrite
 REDUCED
 SET @@GLOBAL.innodb_doublewrite=off;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to OFF if doublewrite is enabled. Please shutdown and change value to OFF
 SET @@GLOBAL.innodb_doublewrite=on;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
-SET @@GLOBAL.innodb_doublewrite=detect;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+SET @@GLOBAL.innodb_doublewrite=reduced;
 "##############################################"
 # restart: --innodb-doublewrite
 SELECT @@global.innodb_doublewrite;
 @@global.innodb_doublewrite
 ON
 SET @@GLOBAL.innodb_doublewrite=0;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to OFF if doublewrite is enabled. Please shutdown and change value to OFF
 SET @@GLOBAL.innodb_doublewrite=1;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
 SET @@GLOBAL.innodb_doublewrite=2;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
 "##############################################"
 # restart: --innodb-doublewrite=0
 SELECT @@global.innodb_doublewrite;
 @@global.innodb_doublewrite
 OFF
 SET @@GLOBAL.innodb_doublewrite=0;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
 SET @@GLOBAL.innodb_doublewrite=1;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to ON if doublewrite is disabled. Please shutdown and change value to ON
 SET @@GLOBAL.innodb_doublewrite=2;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to REDUCED if doublewrite is disabled. Please shutdown and change value to REDUCED
 "##############################################"
 # restart: --innodb-doublewrite=1
 SELECT @@global.innodb_doublewrite;
 @@global.innodb_doublewrite
 ON
 SET @@GLOBAL.innodb_doublewrite=0;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to OFF if doublewrite is enabled. Please shutdown and change value to OFF
 SET @@GLOBAL.innodb_doublewrite=1;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
 SET @@GLOBAL.innodb_doublewrite=2;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
 "##############################################"
 # restart: --innodb-doublewrite=2
 SELECT @@global.innodb_doublewrite;
 @@global.innodb_doublewrite
 REDUCED
 SET @@GLOBAL.innodb_doublewrite=0;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to OFF if doublewrite is enabled. Please shutdown and change value to OFF
 SET @@GLOBAL.innodb_doublewrite=1;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
 SET @@GLOBAL.innodb_doublewrite=2;
-ERROR HY000: Variable 'innodb_doublewrite' is a read only variable
 # restart

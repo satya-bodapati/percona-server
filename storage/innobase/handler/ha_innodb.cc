@@ -888,20 +888,30 @@ static void doublewrite_update(THD *thd,            // in: thread handle <]
   const auto new_value = *static_cast<const dblwr::mode_t *>(save);
 
   if (dblwr::is_enabled() && new_value == dblwr::OFF) {
+    my_error(ER_WRONG_ARGUMENTS, MYF(0),
+             "InnoDB: cannot change doublewrite mode to OFF if"
+             " doublewrite is enabled. Please shutdown and"
+             " change value to OFF");
+    /*
     push_warning_printf(thd, Sql_condition::SL_WARNING, HA_ERR_UNSUPPORTED,
                         "InnoDB: cannot change doublewrite mode to OFF if"
                         " doublewrite is enabled. Please shutdown and"
                         " change value to OFF");
+    */
     return;
   }
 
   if (dblwr::is_disabled() &&
       (new_value == dblwr::ON || new_value == dblwr::REDUCED)) {
-    push_warning_printf(thd, Sql_condition::SL_WARNING, HA_ERR_UNSUPPORTED,
-                        "InnoDB: cannot change doublewrite mode to %s if"
-                        " doublewrite is disabled. Please shutdown and"
-                        " change value to %s",
-                        to_string(new_value), to_string(new_value));
+    char msg[FN_REFLEN];
+    snprintf(msg, sizeof(msg),
+             "InnoDB: cannot change doublewrite mode to %s if"
+             " doublewrite is disabled. Please shutdown and"
+             " change value to %s",
+             to_string(new_value), to_string(new_value));
+
+    my_error(ER_WRONG_ARGUMENTS, MYF(0), msg);
+
     return;
   }
 
@@ -918,11 +928,13 @@ static void doublewrite_update(THD *thd,            // in: thread handle <]
   if (new_value == dblwr::REDUCED) {
     dberr_t err = dblwr::enable_reduced(false);
     if (err != DB_SUCCESS) {
-      push_warning_printf(thd, Sql_condition::SL_WARNING, HA_ERR_UNSUPPORTED,
-                          "InnoDB: cannot change doublewrite mode to %s."
-                          " Please check if doublewrite directory is writable"
-                          " Error code: %d",
-                          to_string(new_value), err);
+      char msg[FN_REFLEN];
+      snprintf(msg, sizeof(msg),
+               "InnoDB: cannot change doublewrite mode to %s."
+               " Please check if doublewrite directory is writable"
+               " Error code: %d",
+               to_string(new_value), err);
+      my_error(ER_WRONG_ARGUMENTS, MYF(0), msg);
       return;
     }
   }
