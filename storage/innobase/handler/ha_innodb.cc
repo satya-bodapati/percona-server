@@ -23445,7 +23445,7 @@ static MYSQL_SYSVAR_BOOL(
 
 // clang-format off
 static MYSQL_SYSVAR_ENUM(
-    doublewrite, dblwr::enabled, PLUGIN_VAR_OPCMDARG,
+    doublewrite, dblwr::enabled, PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_NOPERSIST,
     "Enable InnoDB doublewrite buffer (enabled by default)."
     " Disable with --skip-innodb-doublewrite.",
     nullptr, doublewrite_update, dblwr::ON, &innodb_doublewrite_typelib);

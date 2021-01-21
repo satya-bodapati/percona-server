@@ -119,3 +119,17 @@ SET @@GLOBAL.innodb_doublewrite=2;
 
 --let $restart_parameters =
 --source include/restart_mysqld.inc
+
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET PERSIST innodb_doublewrite=ON;
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET PERSIST innodb_doublewrite=OFF;
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET PERSIST innodb_doublewrite=REDUCED;
+
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET PERSIST_ONLY innodb_doublewrite=ON;
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET PERSIST_ONLY innodb_doublewrite=OFF;
+--Error ER_INCORRECT_GLOBAL_LOCAL_VAR
+SET PERSIST_ONLY innodb_doublewrite=REDUCED;

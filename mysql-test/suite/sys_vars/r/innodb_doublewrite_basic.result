@@ -109,3 +109,15 @@ ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to OF
 SET @@GLOBAL.innodb_doublewrite=1;
 SET @@GLOBAL.innodb_doublewrite=2;
 # restart
+SET PERSIST innodb_doublewrite=ON;
+ERROR HY000: Variable 'innodb_doublewrite' is a non persistent variable
+SET PERSIST innodb_doublewrite=OFF;
+ERROR HY000: Variable 'innodb_doublewrite' is a non persistent variable
+SET PERSIST innodb_doublewrite=REDUCED;
+ERROR HY000: Variable 'innodb_doublewrite' is a non persistent variable
+SET PERSIST_ONLY innodb_doublewrite=ON;
+ERROR HY000: Variable 'innodb_doublewrite' is a non persistent variable
+SET PERSIST_ONLY innodb_doublewrite=OFF;
+ERROR HY000: Variable 'innodb_doublewrite' is a non persistent variable
+SET PERSIST_ONLY innodb_doublewrite=REDUCED;
+ERROR HY000: Variable 'innodb_doublewrite' is a non persistent variable
