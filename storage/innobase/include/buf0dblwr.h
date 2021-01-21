@@ -183,10 +183,15 @@ extern page_id_t Force_crash;
 @return DB_SUCCESS or error code */
 dberr_t open(bool create_new_db) noexcept MY_ATTRIBUTE((warn_unused_result));
 
-dberr_t enable_reduced(bool create_new_db) noexcept MY_ATTRIBUTE((warn_unused_result));
+/** Enable the doublewrite reduced mode by creating the necessary dblwr files
+and in-memory structures
+@param[in]  create_new_db  true if db is bootstrapped
+@return DB_SUCCESS or error code */
+dberr_t enable_reduced(bool create_new_db) noexcept
+    MY_ATTRIBUTE((warn_unused_result));
 
-/** Startup the background thread(s) and create the instance.
-@param[in]  create_new_db Create new database.
+/** Check and open the reduced doublewrite files if necessary
+@param[in]  create_new_db  true if db is bootstrapped
 @return DB_SUCCESS or error code */
 dberr_t reduced_open(bool create_new_db) noexcept
     MY_ATTRIBUTE((warn_unused_result));
