@@ -199,6 +199,8 @@ void close() noexcept;
 @param[in] buf_pool_index       Buffer pool instance for which called. */
 void force_flush(buf_flush_t flush_type, uint32_t buf_pool_index) noexcept;
 
+/** Force a write of all pages in all dblwr segments (reduced or regular)
+This is used only when switching the doublewrite mode dynamically */
 void force_flush_all() noexcept;
 
 /** Writes a page to the doublewrite buffer on disk, syncs it,

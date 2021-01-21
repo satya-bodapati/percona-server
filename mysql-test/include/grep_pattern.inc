@@ -28,6 +28,8 @@
 #     - print_count: print just a count.
 #     - boolean: print only whether something was found or not.
 #     If this is not specified, print_each is used.
+#     - none: doesn't print anything but result is $GREP_RESULT
+#             0 - no match, and non-zero as number of matches
 
 #--let $include_filename= grep_pattern.inc
 #--source include/begin_include_file.inc
@@ -86,7 +88,6 @@ if (!$grep_output)
   if ($count == 0 && $output eq 'print_each') {
     print "None\n";
   }
-
   if ($output eq 'boolean') {
     print $count ? "Pattern found.\n" : "Pattern not found.\n";
   } elsif ($output eq 'none') {
@@ -100,7 +101,6 @@ EOF
 
 if ($_GP_GREP_OUTPUT == "none") {
   --source $_GREP_RESULT_FILE
-  #--echo "GREP_RESULT is $GREP_RESULT"
   --remove_file $_GREP_RESULT_FILE
 }
 

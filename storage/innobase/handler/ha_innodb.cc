@@ -878,13 +878,14 @@ static int default_encryption_key_id_validate(
   DBUG_RETURN(0);
 }
 
-static void doublewrite_update(THD *thd,            // in: thread handle <]
-                               SYS_VAR *var,        // in: pointer to
-                                                    // system variable */
-                               void *var_ptr,       // where the
-                                                    // formal string goes */
-                               const void *save) {  // in: immediate result
-                                                    // from check function
+/** Plugin update function to handle valdiation and then switch the
+innodb_doublewrite mode
+@param[in]	thd	thread handle
+@param[in]	var	pointer to system variable
+@param[in]	var_ptr	where the formal string goes
+@param[in]	save	immediate result from check function */
+static void doublewrite_update(THD *thd, SYS_VAR *var, void *var_ptr,
+                               const void *save) {
   const auto new_value = *static_cast<const dblwr::mode_t *>(save);
 
   if (dblwr::is_enabled() && new_value == dblwr::OFF) {

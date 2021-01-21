@@ -1,3 +1,7 @@
+# Tests if datadir can support innodb_flush_method as O_DIRECT
+# if datadir is on ramdisk, O_DIRECT is not supported. Such tests
+# should be run without --mem and mtr var dir should be on regular disk
+
 --source include/shutdown_mysqld.inc
 
 --let $ERROR_LOG=$MYSQL_TMP_DIR/o_direct.log
