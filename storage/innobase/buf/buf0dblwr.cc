@@ -626,6 +626,14 @@ class Double_write {
   @param[in] truncate           Truncate the file to configured size if true. */
   static void reset_file(dblwr::File &file, bool truncate) noexcept;
 
+  /** Reset the size in bytes to the configured size.
+  @param[in,out] file			File to reset
+  @param[in]	 pages_per_file		Number of pages to be created
+                                        in doublewrite file
+  @param[in]	 phy_size		physical page size */
+  static void reduced_reset_file(dblwr::File &file,
+      uint32_t pages_per_file, uint32_t phy_size) noexcept;
+
   /** Reset the size in bytes to the configured size of all files. */
   static void reset_files() noexcept {
     for (auto &file : Double_write::s_files) {
@@ -1565,6 +1573,28 @@ void Double_write::reset_file(dblwr::File &file, bool truncate) noexcept {
   }
 }
 
+void Double_write::reduced_reset_file(dblwr::File &file,
+                                      uint32_t pages_per_file,
+                                      uint32_t phy_size) noexcept {
+  auto cur_size = os_file_get_size(file.m_pfs);
+  auto new_size = pages_per_file * phy_size;
+  auto pfs_file = file.m_pfs;
+
+  if (new_size > cur_size) {
+    auto err = os_file_write_zeros(pfs_file, file.m_name.c_str(),
+                                   phy_size, cur_size,
+                                   new_size - cur_size, srv_read_only_mode);
+
+    if (err != DB_SUCCESS) {
+      ib::fatal(ER_IB_MSG_DBLWR_1321, file.m_name.c_str());
+    }
+
+    ib::info(ER_IB_MSG_DBLWR_1307)
+        << file.m_name << " size increased to " << new_size << " bytes "
+        << "from " << cur_size << " bytes";
+  }
+}
+
 dberr_t Double_write::init_file(dblwr::File &file, uint32_t n_pages,
                                 uint32_t phy_size) noexcept {
   auto pfs_file = file.m_pfs;
@@ -2430,7 +2460,7 @@ dberr_t dblwr::reduced_open(bool create_new_db) noexcept {
       return (err);
     }
 
-    const uint32_t phy_size = 8192;
+    const uint32_t phy_size = REDUCED_BATCH_PAGE_SIZE;
 
     err = Double_write::init_file(file, pages_per_file, phy_size);
 
@@ -2445,11 +2475,9 @@ dberr_t dblwr::reduced_open(bool create_new_db) noexcept {
                (ulint)phy_size);
     }
 
-    /* Truncate the size after recovery: false. */
-    // TODO: we need this because the dblwr file size can change based on
-    // batch_size, n_pages, instances etc
-    // Double_write::reset_file(file, false);
+    Double_write::reduced_reset_file(file, pages_per_file, phy_size);
   }
+
   return (DB_SUCCESS);
 }
 
