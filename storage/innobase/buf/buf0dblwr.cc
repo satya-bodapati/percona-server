@@ -759,9 +759,6 @@ class Double_write {
   */
   static Batch_segments *s_r_flush_list_batch_segments;
 
-  /** File segments to use for single page writes in reduced dblwr mode */
-  static Segments *s_r_single_segments;
-
   /** For indexing batch segments by ID. */
   static std::vector<Batch_segment *> s_segments;
 
@@ -1133,7 +1130,6 @@ uint32_t Double_write::s_regular_last_batch_id{};
 
 Double_write::Batch_segments *Double_write::s_r_LRU_batch_segments{};
 Double_write::Batch_segments *Double_write::s_r_flush_list_batch_segments{};
-Double_write::Segments *Double_write::s_r_single_segments{};
 Double_write::Instances *Double_write::s_r_instances{};
 
 Double_write::Double_write(uint16_t id, uint32_t n_pages) noexcept
@@ -2424,59 +2420,39 @@ static dberr_t dblwr_file_open(const std::string &dir_name, int id,
 dberr_t dblwr::reduced_open(bool create_new_db) noexcept {
   ut_a(Double_write::s_r_files.empty());
 
-  // one for batch segments, one for single page segments
-  Double_write::s_r_files.resize(2);
+  // one for batch segments
+  Double_write::s_r_files.resize(1);
 
   dberr_t err{DB_SUCCESS};
 
   /* Create the batch file */
-  const auto first = &Double_write::s_r_files[0];
-  for (auto &file : Double_write::s_r_files) {
-    auto id = &file - first;
+  auto& file = Double_write::s_r_files[0];
 
-    uint32_t pages_per_file{0};
-    ib_file_suffix extension{};
+  uint32_t pages_per_file = Double_write::s_n_instances;
+  ib_file_suffix extension{BWR};
 
-    switch (id) {
-      case 0:
-        pages_per_file = Double_write::s_n_instances;
-        extension = BWR;
-        break;
-      case 1:
-        // Since total size disk required is 20 * 512 = 10240. We will create
-        // two 8K blocks
-        pages_per_file = 2;
-        extension = SWR;
-        break;
-      default:
-        // Currently Only two files allowed
-        ut_ad(0);
-    }
+  err = dblwr_file_open(dblwr::dir, 0, file, OS_DBLWR_FILE, extension);
 
-    err = dblwr_file_open(dblwr::dir, &file - first, file, OS_DBLWR_FILE,
-                          extension);
-
-    if (err != DB_SUCCESS) {
-      return (err);
-    }
-
-    const uint32_t phy_size = REDUCED_BATCH_PAGE_SIZE;
-
-    err = Double_write::init_file(file, pages_per_file, phy_size);
-
-    if (err != DB_SUCCESS) {
-      return (err);
-    }
-
-    auto file_size = os_file_get_size(file.m_pfs);
-
-    if (file_size == 0 || (file_size % phy_size)) {
-      ib::warn(ER_IB_MSG_DBLWR_1322, file.m_name.c_str(), (ulint)file_size,
-               (ulint)phy_size);
-    }
-
-    Double_write::reduced_reset_file(file, pages_per_file, phy_size);
+  if (err != DB_SUCCESS) {
+    return (err);
   }
+
+  const uint32_t phy_size = REDUCED_BATCH_PAGE_SIZE;
+
+  err = Double_write::init_file(file, pages_per_file, phy_size);
+
+  if (err != DB_SUCCESS) {
+    return (err);
+  }
+
+  auto file_size = os_file_get_size(file.m_pfs);
+
+  if (file_size == 0 || (file_size % phy_size)) {
+    ib::warn(ER_IB_MSG_DBLWR_1322, file.m_name.c_str(), (ulint)file_size,
+             (ulint)phy_size);
+  }
+
+  Double_write::reduced_reset_file(file, pages_per_file, phy_size);
 
   return (DB_SUCCESS);
 }

@@ -253,7 +253,6 @@ namespace dblwr {
 extern ulong n_pages;
 
 const uint32_t REDUCED_BATCH_PAGE_SIZE = 8192;
-const uint32_t REDUCED_SINGLE_PAGE_SIZE = 20;
 
 // 20-BYTE HEADER
 const uint32_t RB_BATCH_ID_SIZE = 4;
