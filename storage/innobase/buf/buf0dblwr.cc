@@ -83,28 +83,39 @@ ulong enabled{ON};
 
 bool is_reduced_inited = false;
 
-/** @return true for dbwlr modes ON & REDUCED, else false */
-bool is_enabled() { return (enabled == ON || enabled == REDUCED); }
-/** @return true if dblwr is disabled */
-bool is_disabled() { return (enabled == OFF); }
+bool is_enabled() { return (is_enabled_low(enabled)); }
 
-/** @return the string version of dblwr ENUM variable
-@param[in]	dblwr_mode	dblwr ENUM */
-const char *to_string(mode_t dblwr_mode) {
-  switch (dblwr_mode) {
+bool is_enabled_low(ulong mode) {
+  return (mode == ON || mode == REDUCED || mode == TRUEE);
+}
+
+bool is_disabled() { return (is_disabled_low(enabled)); }
+
+bool is_disabled_low(ulong mode) { return (mode == OFF || mode == FALSEE); }
+
+const char *to_string(ulong mode) {
+  switch (mode) {
     case OFF:
       return ("OFF");
     case ON:
       return ("ON");
+    case TRUEE:
+      return ("TRUE");
+    case FALSEE:
+      return ("FALSE");
     case REDUCED:
       return ("REDUCED");
+    default:
+      ut_ad(0);
+      return ("");
   }
   ut_ad(0);
   return ("");
 }
 
-/** @return true if dblwr is in REDUCED mode */
-bool is_reduced() { return (enabled == REDUCED); }
+bool is_reduced() { return (is_reduced_low(enabled)); }
+
+bool is_reduced_low(ulong mode) { return (mode == REDUCED); }
 
 /** Legacy dblwr buffer first segment page number. */
 static page_no_t LEGACY_PAGE1;

@@ -463,7 +463,8 @@ static TYPELIB innodb_default_row_format_typelib = {
     nullptr};
 
 /** Possible values for system variable "innodb_doublewrite". */
-static const char *innodb_doublewrite_names[] = {"OFF", "ON", "REDUCED", NullS};
+static const char *innodb_doublewrite_names[] = {"OFF",  "ON",      "FALSE",
+                                                 "TRUE", "REDUCED", NullS};
 
 /** Used to define an enumerate type of the system variable
 innodb_default_row_format. */
@@ -886,30 +887,32 @@ innodb_doublewrite mode
 @param[in]	save	immediate result from check function */
 static void doublewrite_update(THD *thd, SYS_VAR *var, void *var_ptr,
                                const void *save) {
-  const auto new_value = *static_cast<const dblwr::mode_t *>(save);
+  ulong new_value = *static_cast<const dblwr::mode_t *>(save);
 
-  if (dblwr::is_enabled() && new_value == dblwr::OFF) {
-    my_error(ER_WRONG_ARGUMENTS, MYF(0),
-             "InnoDB: cannot change doublewrite mode to OFF if"
+  if (dblwr::is_enabled() && dblwr::is_disabled_low(new_value)) {
+    char msg[FN_REFLEN];
+    snprintf(msg, sizeof(msg),
+             "InnoDB: cannot change doublewrite mode to %s if"
              " doublewrite is enabled. Please shutdown and"
-             " change value to OFF");
+             " change value to %s",
+             dblwr::to_string(new_value), dblwr::to_string(new_value));
     /*
     push_warning_printf(thd, Sql_condition::SL_WARNING, HA_ERR_UNSUPPORTED,
                         "InnoDB: cannot change doublewrite mode to OFF if"
                         " doublewrite is enabled. Please shutdown and"
                         " change value to OFF");
     */
+    my_error(ER_WRONG_ARGUMENTS, MYF(0), msg);
     return;
   }
 
-  if (dblwr::is_disabled() &&
-      (new_value == dblwr::ON || new_value == dblwr::REDUCED)) {
+  if (dblwr::is_disabled() && dblwr::is_enabled_low(new_value)) {
     char msg[FN_REFLEN];
     snprintf(msg, sizeof(msg),
              "InnoDB: cannot change doublewrite mode to %s if"
              " doublewrite is disabled. Please shutdown and"
              " change value to %s",
-             to_string(new_value), to_string(new_value));
+             dblwr::to_string(new_value), dblwr::to_string(new_value));
 
     my_error(ER_WRONG_ARGUMENTS, MYF(0), msg);
 
@@ -926,7 +929,7 @@ static void doublewrite_update(THD *thd, SYS_VAR *var, void *var_ptr,
   //    files and structures
   // 2. Flush the partially filled dblwr buffers
   //
-  if (new_value == dblwr::REDUCED) {
+  if (dblwr::is_reduced_low(new_value)) {
     dberr_t err = dblwr::enable_reduced(false);
     if (err != DB_SUCCESS) {
       char msg[FN_REFLEN];
@@ -934,7 +937,7 @@ static void doublewrite_update(THD *thd, SYS_VAR *var, void *var_ptr,
                "InnoDB: cannot change doublewrite mode to %s."
                " Please check if doublewrite directory is writable"
                " Error code: %d",
-               to_string(new_value), err);
+               dblwr::to_string(new_value), err);
       my_error(ER_WRONG_ARGUMENTS, MYF(0), msg);
       return;
     }

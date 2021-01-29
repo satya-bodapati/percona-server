@@ -50,18 +50,109 @@ SELECT @@global.innodb_doublewrite;
 ON
 SET @@GLOBAL.innodb_doublewrite=0;
 ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to OFF if doublewrite is enabled. Please shutdown and change value to OFF
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
 SET @@GLOBAL.innodb_doublewrite=1;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
 SET @@GLOBAL.innodb_doublewrite=2;
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to FALSE if doublewrite is enabled. Please shutdown and change value to FALSE
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
+SET @@GLOBAL.innodb_doublewrite=3;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+TRUE
+SET @@GLOBAL.innodb_doublewrite=4;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+REDUCED
+"##############################################"
+# restart: --innodb-doublewrite=TRUE
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+TRUE
+SET @@GLOBAL.innodb_doublewrite=0;
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to OFF if doublewrite is enabled. Please shutdown and change value to OFF
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+TRUE
+SET @@GLOBAL.innodb_doublewrite=1;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
+SET @@GLOBAL.innodb_doublewrite=2;
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to FALSE if doublewrite is enabled. Please shutdown and change value to FALSE
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
+SET @@GLOBAL.innodb_doublewrite=3;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+TRUE
+SET @@GLOBAL.innodb_doublewrite=4;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+REDUCED
 "##############################################"
 # restart: --innodb-doublewrite=off
 SELECT @@global.innodb_doublewrite;
 @@global.innodb_doublewrite
 OFF
 SET @@GLOBAL.innodb_doublewrite=0;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+OFF
 SET @@GLOBAL.innodb_doublewrite=1;
 ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to ON if doublewrite is disabled. Please shutdown and change value to ON
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+OFF
 SET @@GLOBAL.innodb_doublewrite=2;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+FALSE
+SET @@GLOBAL.innodb_doublewrite=3;
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to TRUE if doublewrite is disabled. Please shutdown and change value to TRUE
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+FALSE
+SET @@GLOBAL.innodb_doublewrite=4;
 ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to REDUCED if doublewrite is disabled. Please shutdown and change value to REDUCED
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+FALSE
+"##############################################"
+# restart: --innodb-doublewrite=false
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+FALSE
+SET @@GLOBAL.innodb_doublewrite=0;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+OFF
+SET @@GLOBAL.innodb_doublewrite=1;
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to ON if doublewrite is disabled. Please shutdown and change value to ON
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+OFF
+SET @@GLOBAL.innodb_doublewrite=2;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+FALSE
+SET @@GLOBAL.innodb_doublewrite=3;
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to TRUE if doublewrite is disabled. Please shutdown and change value to TRUE
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+FALSE
+SET @@GLOBAL.innodb_doublewrite=4;
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to REDUCED if doublewrite is disabled. Please shutdown and change value to REDUCED
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+FALSE
 "##############################################"
 # restart: --innodb-doublewrite=reduced
 SELECT @@global.innodb_doublewrite;
@@ -69,27 +160,81 @@ SELECT @@global.innodb_doublewrite;
 REDUCED
 SET @@GLOBAL.innodb_doublewrite=off;
 ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to OFF if doublewrite is enabled. Please shutdown and change value to OFF
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+REDUCED
+SET @@GLOBAL.innodb_doublewrite=false;
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to OFF if doublewrite is enabled. Please shutdown and change value to OFF
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+REDUCED
 SET @@GLOBAL.innodb_doublewrite=on;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
+SET @@GLOBAL.innodb_doublewrite=true;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
 SET @@GLOBAL.innodb_doublewrite=reduced;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+REDUCED
 "##############################################"
 # restart: --innodb-doublewrite
 SELECT @@global.innodb_doublewrite;
 @@global.innodb_doublewrite
 ON
-SET @@GLOBAL.innodb_doublewrite=0;
+SET @@GLOBAL.innodb_doublewrite=off;
 ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to OFF if doublewrite is enabled. Please shutdown and change value to OFF
-SET @@GLOBAL.innodb_doublewrite=1;
-SET @@GLOBAL.innodb_doublewrite=2;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
+SET @@GLOBAL.innodb_doublewrite=false;
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to OFF if doublewrite is enabled. Please shutdown and change value to OFF
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
+SET @@GLOBAL.innodb_doublewrite=on;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
+SET @@GLOBAL.innodb_doublewrite=true;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
+SET @@GLOBAL.innodb_doublewrite=reduced;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+REDUCED
 "##############################################"
 # restart: --innodb-doublewrite=0
 SELECT @@global.innodb_doublewrite;
 @@global.innodb_doublewrite
 OFF
 SET @@GLOBAL.innodb_doublewrite=0;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+OFF
 SET @@GLOBAL.innodb_doublewrite=1;
 ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to ON if doublewrite is disabled. Please shutdown and change value to ON
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+OFF
 SET @@GLOBAL.innodb_doublewrite=2;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+FALSE
+SET @@GLOBAL.innodb_doublewrite=3;
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to TRUE if doublewrite is disabled. Please shutdown and change value to TRUE
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+FALSE
+SET @@GLOBAL.innodb_doublewrite=4;
 ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to REDUCED if doublewrite is disabled. Please shutdown and change value to REDUCED
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+FALSE
 "##############################################"
 # restart: --innodb-doublewrite=1
 SELECT @@global.innodb_doublewrite;
@@ -97,17 +242,108 @@ SELECT @@global.innodb_doublewrite;
 ON
 SET @@GLOBAL.innodb_doublewrite=0;
 ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to OFF if doublewrite is enabled. Please shutdown and change value to OFF
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
 SET @@GLOBAL.innodb_doublewrite=1;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
 SET @@GLOBAL.innodb_doublewrite=2;
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to FALSE if doublewrite is enabled. Please shutdown and change value to FALSE
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
+SET @@GLOBAL.innodb_doublewrite=3;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+TRUE
+SET @@GLOBAL.innodb_doublewrite=4;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+REDUCED
 "##############################################"
 # restart: --innodb-doublewrite=2
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+FALSE
+SET @@GLOBAL.innodb_doublewrite=0;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+OFF
+SET @@GLOBAL.innodb_doublewrite=1;
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to ON if doublewrite is disabled. Please shutdown and change value to ON
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+OFF
+SET @@GLOBAL.innodb_doublewrite=2;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+FALSE
+SET @@GLOBAL.innodb_doublewrite=3;
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to TRUE if doublewrite is disabled. Please shutdown and change value to TRUE
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+FALSE
+SET @@GLOBAL.innodb_doublewrite=4;
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to REDUCED if doublewrite is disabled. Please shutdown and change value to REDUCED
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+FALSE
+"##############################################"
+# restart: --innodb-doublewrite=3
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+TRUE
+SET @@GLOBAL.innodb_doublewrite=0;
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to OFF if doublewrite is enabled. Please shutdown and change value to OFF
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+TRUE
+SET @@GLOBAL.innodb_doublewrite=1;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
+SET @@GLOBAL.innodb_doublewrite=2;
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to FALSE if doublewrite is enabled. Please shutdown and change value to FALSE
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
+SET @@GLOBAL.innodb_doublewrite=3;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+TRUE
+SET @@GLOBAL.innodb_doublewrite=4;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+REDUCED
+"##############################################"
+# restart: --innodb-doublewrite=4
 SELECT @@global.innodb_doublewrite;
 @@global.innodb_doublewrite
 REDUCED
 SET @@GLOBAL.innodb_doublewrite=0;
 ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to OFF if doublewrite is enabled. Please shutdown and change value to OFF
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+REDUCED
 SET @@GLOBAL.innodb_doublewrite=1;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
 SET @@GLOBAL.innodb_doublewrite=2;
+ERROR HY000: Incorrect arguments to InnoDB: cannot change doublewrite mode to FALSE if doublewrite is enabled. Please shutdown and change value to FALSE
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+ON
+SET @@GLOBAL.innodb_doublewrite=3;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+TRUE
+SET @@GLOBAL.innodb_doublewrite=4;
+SELECT @@global.innodb_doublewrite;
+@@global.innodb_doublewrite
+REDUCED
 # restart
 SET PERSIST innodb_doublewrite=ON;
 ERROR HY000: Variable 'innodb_doublewrite' is a non persistent variable

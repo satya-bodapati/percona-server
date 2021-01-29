@@ -283,20 +283,37 @@ constexpr const uint32_t REDUCED_DATA_SIZE =
 constexpr const uint32_t REDUCED_MAX_ENTRIES =
     REDUCED_DATA_SIZE / REDUCED_ENTRY_SIZE;
 
-enum mode_t { OFF, ON, REDUCED };
+/* intentional difference in FALSE and TRUE spellings. InnoDB
+#defines them to 0 & 1. So we cannot use as is */
+enum mode_t { OFF, ON, FALSEE, TRUEE, REDUCED };
 
 /** 1 if enabled. */
 extern ulong enabled;
 
+/** true if reduced mode is inited */
 extern bool is_reduced_inited;
 
+/** @return true if dblwr mode is ON, TRUE or REDUCED */
 bool is_enabled();
+/** @return true if dblwr mode is ON, TRUE or REDUCED
+@param[in]	mode	dblwr ENUM */
+bool is_enabled_low(ulong mode);
 
+/** @return true if dblwr mode is REDUCED */
 bool is_reduced();
+/** @return true if dblwr mode is REDUCED
+@param[in]	mode	dblwr ENUM */
+bool is_reduced_low(ulong mode);
 
+/** @return true if dblwr mode is OFF, FALSE */
 bool is_disabled();
+/** @return true if dblwr mode is OFF, FALSE
+@param[in]	mode	dblwr ENUM */
+bool is_disabled_low(ulong mode);
 
-const char *to_string(mode_t dblwr_mode);
+/** @return string version of dblwr numeric values
+@param[in]	mode	dblwr ENUM */
+const char *to_string(ulong mode);
 
 /** Number of files to use for the double write buffer. It must be <= than
 the number of buffer pool instances. */
