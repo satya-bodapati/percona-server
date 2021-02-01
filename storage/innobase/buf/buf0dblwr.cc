@@ -2796,8 +2796,8 @@ bool recv::Pages::dblwr_recover_page(page_no_t dblwr_page_no, fil_space_t *space
   shouldn't restore the old/stale page from regular dblwr. We should
   abort */
   if (found && reduced_lsn != LSN_MAX && reduced_lsn > dblwr_lsn) {
-    ib::fatal(ER_REDUCED_DBLWR_PAGE_FOUND, space->name, page_id.space(),
-              page_id.page_no());
+    ib::fatal(ER_REDUCED_DBLWR_PAGE_FOUND, space->files.front().name,
+              page_id.space(), page_id.page_no());
   }
 
   /* Recovered data file pages are written out as uncompressed. */

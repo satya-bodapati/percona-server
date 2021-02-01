@@ -50,6 +50,8 @@ SET GLOBAL innodb_fast_shutdown = 0;
 --mkdir $ORIG
 --force-cpdir $MYSQLD_DATADIR $BACKUP
 --force-cpdir $MYSQLD_DATADIR $ORIG
+--remove_files_wildcard $ORIG/data/ *.bdblwr
+--remove_files_wildcard $ORIG/data/ *.dblwr
 
 --replace_result $BACKUP BACKUP " --innodb-flush-method=O_DIRECT" ""
 --source include/start_mysqld.inc
