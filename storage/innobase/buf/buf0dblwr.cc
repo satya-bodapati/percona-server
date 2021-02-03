@@ -2347,7 +2347,7 @@ void dblwr::recv::recover(recv::Pages *pages, fil_space_t *space) noexcept {
 @param[in] id                   Instance ID.
 @param[out] file                File handle.
 @param[in] file_type            The file type.
-@param[in] file_extension 	.dblwr/.bdblwr/.sdblwr
+@param[in] file_extension 	.dblwr/.bdblwr
 @return DB_SUCCESS if all went well. */
 static dberr_t dblwr_file_open(const std::string &dir_name, int id,
                                dblwr::File &file, ulint file_type,
@@ -2568,8 +2568,6 @@ dberr_t dblwr::open(bool create_new_db) noexcept {
     return (err);
   }
 
-  // TODO: we should always try to open and use those files if they exist
-  // even if the reduced_mode is OFF
   if (!dblwr::is_reduced()) {
     return (DB_SUCCESS);
   }
@@ -3166,9 +3164,9 @@ dberr_t dblwr::recv::reduced_load(recv::Pages *pages) noexcept {
   ut_ad(!dblwr::dir.empty());
 
   /* The number of buffer pool instances can change. Therefore we must:
-    1. Scan the doublewrite directory for all *.dblwr files and load
-       their contents.
-    2. Reset the file sizes after recovery is complete. */
+  1. Scan the doublewrite directory for all *.dblwr files and load
+     their contents.
+  2. Reset the file sizes after recovery is complete. */
 
   auto real_path_dir = Fil_path::get_real_path(dblwr::dir);
 
