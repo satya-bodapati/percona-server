@@ -22,7 +22,7 @@ call mtr.add_suppression("Wrong server version");
 --let INNODB_PAGE_SIZE=`select @@innodb_page_size`
 --let MYSQLD_DATADIR=`select @@datadir`
 
---let $ARGS=--innodb_doublewrite=reduced --log-error=$ERROR_LOG --datadir=$BACKUP/data --debug=d,ib_log
+--let $ARGS=--innodb_doublewrite=reduced --log-error=$ERROR_LOG --datadir=$BACKUP/data
 
 SHOW VARIABLES LIKE 'innodb_doublewrite';
 SHOW VARIABLES LIKE 'innodb_fil_make_page_dirty_debug';
