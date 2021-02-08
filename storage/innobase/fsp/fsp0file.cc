@@ -547,12 +547,12 @@ Datafile::ValidateOutput Datafile::validate_for_recovery(space_id_t space_id) {
       }
 
       output.error = restore_from_doublewrite(0);
+      /* Free the previously read first page and then re-validate. */
+      free_first_page();
       if (output.error != DB_SUCCESS) {
         return (output);
       }
 
-      /* Free the previously read first page and then re-validate. */
-      free_first_page();
       output = validate_first_page(space_id, nullptr, false);
   }
 

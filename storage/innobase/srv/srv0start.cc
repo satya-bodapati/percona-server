@@ -2826,14 +2826,15 @@ files_checked:
       /* Don't allow IBUF operations for cloned database
       recovery as it would add extra redo log and we may
       not have enough margin. */
+      dberr_t err;
       if (recv_sys->is_cloned_db) {
-        recv_apply_hashed_log_recs(*log_sys, false);
+        err = recv_apply_hashed_log_recs(*log_sys, false);
 
       } else {
-        recv_apply_hashed_log_recs(*log_sys, true);
+        err = recv_apply_hashed_log_recs(*log_sys, true);
       }
 
-      if (recv_sys->found_corrupt_log) {
+      if (recv_sys->found_corrupt_log || err != DB_SUCCESS) {
         err = DB_ERROR;
         return (srv_init_abort(err));
       }

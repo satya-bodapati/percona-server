@@ -93,7 +93,7 @@ SET GLOBAL innodb_fil_make_page_dirty_debug = @space_id;
 --let ALL_ZEROES=1
 --source corrupt_page.inc
 
---error 2
+--error 1
 --exec $MYSQLD_CMD $ARGS
 
 --let ABORT_ON=NOT_FOUND
@@ -143,7 +143,7 @@ SET GLOBAL innodb_fil_make_page_dirty_debug = @space_id;
 --let ALL_ZEROES=0
 --source corrupt_page.inc
 
---error 2
+--error 1
 --exec $MYSQLD_CMD $ARGS
 
 --let ABORT_ON=NOT_FOUND
@@ -193,7 +193,7 @@ SET GLOBAL innodb_fil_make_page_dirty_debug = @space_id;
 --let ALL_ZEROES=1
 --source corrupt_page.inc
 
---error 2
+--error 1
 --exec $MYSQLD_CMD $ARGS
 
 --let ABORT_ON=NOT_FOUND
@@ -243,7 +243,7 @@ SET GLOBAL innodb_fil_make_page_dirty_debug = @space_id;
 --let ALL_ZEROES=0
 --source corrupt_page.inc
 
---error 2
+--error 1
 --exec $MYSQLD_CMD $ARGS
 
 --let ABORT_ON=NOT_FOUND
@@ -374,7 +374,7 @@ SET GLOBAL innodb_fil_make_page_dirty_debug = 0;
 --let ALL_ZEROES=1
 --source corrupt_page.inc
 
---error 2
+--error 1
 --exec $MYSQLD_CMD $ARGS
 
 --let ABORT_ON=NOT_FOUND
@@ -417,7 +417,7 @@ SET GLOBAL innodb_fil_make_page_dirty_debug = 0;
 --let PAGE_NUM=1
 --source corrupt_page.inc
 
---error 2
+--error 1
 --exec $MYSQLD_CMD $ARGS
 
 --let ABORT_ON=NOT_FOUND

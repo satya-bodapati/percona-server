@@ -348,8 +348,9 @@ dberr_t reduced_load(Pages *pages) noexcept MY_ATTRIBUTE((warn_unused_result));
 /** Restore pages from the double write buffer to the tablespace.
 @param[in,out]	pages		Pages from the doublewrite buffer
 @param[in]	space		Tablespace pages to restore, if set
-                                to nullptr then try and restore all. */
-void recover(Pages *pages, fil_space_t *space) noexcept;
+                                to nullptr then try and restore all.
+@return DB_SUCCESS on success, others on failure */
+dberr_t recover(Pages *pages, fil_space_t *space) noexcept;
 
 /** Find a doublewrite copy of a page.
 @param[in]	pages		Pages read from the doublewrite buffer
@@ -404,8 +405,8 @@ class DBLWR {
   @param[in]	space		Tablespace pages to restore,
                                   if set to nullptr then try
                                   and restore all. */
-  void recover(fil_space_t *space = nullptr) noexcept {
-    dblwr::recv::recover(m_pages, space);
+  dberr_t recover(fil_space_t *space = nullptr) noexcept {
+    return(dblwr::recv::recover(m_pages, space));
   }
 
   // clang-format off

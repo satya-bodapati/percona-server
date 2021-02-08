@@ -274,8 +274,9 @@ class Pages {
 
   /** Recover double write buffer pages
   @param[in]	space		          Tablespace pages to recover, if set
-                                to nullptr then try and recovery all. */
-  void recover(fil_space_t *space) noexcept;
+                                to nullptr then try and recovery all.
+  @return DB_SUCCESS on success, false on failure */
+  dberr_t recover(fil_space_t *space) noexcept;
 
   /** Check if some pages could be restored because of missing
   tablespace IDs */
@@ -287,8 +288,9 @@ class Pages {
   space_id, page_id, LSN is logged. So we abort the server. It is expected that
   the user restores from backup
   @param[in]	space		Tablespace pages to check in reduced
-  dblwr, if set to nullptr then try and recovery all. */
-  void reduced_recover(fil_space_t *space) noexcept;
+  dblwr, if set to nullptr then try and recovery all.
+  @return DB_SUCCESS on success, others on failure */
+  dberr_t reduced_recover(fil_space_t *space) noexcept;
 
  private:
   /** Recovered doublewrite buffer page frames */
@@ -2336,9 +2338,9 @@ void dblwr::write_complete(buf_page_t *bpage, buf_flush_t flush_type) noexcept {
   Double_write::write_complete(bpage, flush_type);
 }
 
-void dblwr::recv::recover(recv::Pages *pages, fil_space_t *space) noexcept {
+dberr_t dblwr::recv::recover(recv::Pages *pages, fil_space_t *space) noexcept {
 #ifndef UNIV_HOTBACKUP
-  pages->recover(space);
+  return(pages->recover(space));
 #endif /* UNIV_HOTBACKUP */
 }
 
@@ -2798,8 +2800,9 @@ bool recv::Pages::dblwr_recover_page(page_no_t dblwr_page_no, fil_space_t *space
   shouldn't restore the old/stale page from regular dblwr. We should
   abort */
   if (found && reduced_lsn != LSN_MAX && reduced_lsn > dblwr_lsn) {
-    ib::fatal(ER_REDUCED_DBLWR_PAGE_FOUND, space->files.front().name,
+    ib::error(ER_REDUCED_DBLWR_PAGE_FOUND, space->files.front().name,
               page_id.space(), page_id.page_no());
+    return(false);
   }
 
   /* Recovered data file pages are written out as uncompressed. */
@@ -2836,14 +2839,14 @@ void dblwr::force_flush_all() noexcept {
 
 #endif /* !UNIV_HOTBACKUP */
 
-void recv::Pages::recover(fil_space_t *space) noexcept {
+dberr_t recv::Pages::recover(fil_space_t *space) noexcept {
 #ifndef UNIV_HOTBACKUP
   /* For cloned database double write pages should be ignored. However,
   given the control flow, we read the pages in anyway but don't recover
   from the pages we read in. */
 
   if (!dblwr::is_enabled() || recv_sys->is_cloned_db) {
-    return;
+    return(DB_SUCCESS);
   }
 
   auto recover_all = (space == nullptr);
@@ -2876,13 +2879,17 @@ void recv::Pages::recover(fil_space_t *space) noexcept {
         dblwr_recover_page(page->m_no, space, page_no, page->m_buffer.begin());
   }
 
-  reduced_recover(space);
+  dberr_t err = reduced_recover(space);
+  if (err != DB_SUCCESS) {
+    return(err);
+  }
 
   fil_flush_file_spaces(FIL_TYPE_TABLESPACE);
+  return(DB_SUCCESS);
 #endif /* !UNIV_HOTBACKUP */
 }
 
-void recv::Pages::reduced_recover(fil_space_t *space) noexcept {
+dberr_t recv::Pages::reduced_recover(fil_space_t *space) noexcept {
   auto recover_all = (space == nullptr);
 
   for (const auto &entry : m_page_entries) {
@@ -2913,14 +2920,14 @@ void recv::Pages::reduced_recover(fil_space_t *space) noexcept {
       const byte *page = find(page_id);
       if (page != nullptr) {
         if (!is_recovered(page_id)) {
-          // crash here
-          ib::fatal(ER_REDUCED_DBLWR_PAGE_FOUND, space->files.front().name,
+          ib::error(ER_REDUCED_DBLWR_PAGE_FOUND, space->files.front().name,
                     page_id.space(), page_id.page_no());
+	  return(DB_CORRUPTION);
         }
       } else {
-        // crash here
-        ib::fatal(ER_REDUCED_DBLWR_PAGE_FOUND, space->files.front().name,
+        ib::error(ER_REDUCED_DBLWR_PAGE_FOUND, space->files.front().name,
                   page_id.space(), page_id.page_no());
+        return (DB_CORRUPTION);
       }
     }
 
@@ -2932,11 +2939,13 @@ void recv::Pages::reduced_recover(fil_space_t *space) noexcept {
 
       if (!is_recovered(page_id) && found && reduced_lsn != LSN_MAX &&
           reduced_lsn != 0) {
-        ib::fatal(ER_REDUCED_DBLWR_PAGE_FOUND, space->files.front().name,
+        ib::error(ER_REDUCED_DBLWR_PAGE_FOUND, space->files.front().name,
                   page_id.space(), page_id.page_no());
+        return (DB_CORRUPTION);
       }
     }
   }
+  return(DB_SUCCESS);
 }
 
 const byte *recv::Pages::find(const page_id_t &page_id) const noexcept {
