@@ -284,8 +284,10 @@ constexpr const uint32_t REDUCED_MAX_ENTRIES =
     REDUCED_DATA_SIZE / REDUCED_ENTRY_SIZE;
 
 /* intentional difference in FALSE and TRUE spellings. InnoDB
-#defines them to 0 & 1. So we cannot use as is */
-enum mode_t { OFF, ON, FALSEE, TRUEE, REDUCED };
+#defines them to 0 & 1. So we cannot use as is.
+@note: If you change order or add new values, please update
+innodb_doublewrite_names enum in handler/ha_innodb.cc */
+enum mode_t { OFF, ON, REDUCED, FALSEE, TRUEE };
 
 /** 1 if enabled. */
 extern ulong enabled;

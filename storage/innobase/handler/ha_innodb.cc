@@ -462,9 +462,11 @@ static TYPELIB innodb_default_row_format_typelib = {
     "innodb_default_row_format_typelib", innodb_default_row_format_names,
     nullptr};
 
-/** Possible values for system variable "innodb_doublewrite". */
-static const char *innodb_doublewrite_names[] = {"OFF",  "ON",      "FALSE",
-                                                 "TRUE", "REDUCED", NullS};
+/** Possible values for system variable "innodb_doublewrite".
+@note: If you change order or add new values, please update dblwr::mode_t in
+include/buf0dblwr.h */
+static const char *innodb_doublewrite_names[] = {"OFF",   "ON",   "REDUCED",
+                                                 "FALSE", "TRUE", NullS};
 
 /** Used to define an enumerate type of the system variable
 innodb_default_row_format. */
@@ -919,13 +921,25 @@ static void doublewrite_update(THD *thd, SYS_VAR *var, void *var_ptr,
     return;
   }
 
+  // ON and TRUE are same
+  if ((dblwr::enabled == dblwr::TRUEE || dblwr::enabled == dblwr::ON) &&
+      (new_value == dblwr::TRUEE || new_value == dblwr::ON)) {
+    return;
+  }
+
+  // OFF and FALSE are same
+  if ((dblwr::enabled == dblwr::FALSEE || dblwr::enabled == dblwr::OFF) &&
+      (new_value == dblwr::FALSEE || new_value == dblwr::OFF)) {
+    return;
+  }
+
   if (new_value == dblwr::enabled) {
     // Old value and new value same. Do nothing.
     return;
   }
 
   // Handle ON to REDUCED
-  // 1. Check if REDUCED setup is already initalized. If not intialized REDUCED
+  // 1. Check if REDUCED setup is already initalized. If not intialize REDUCED
   //    files and structures
   // 2. Flush the partially filled dblwr buffers
   //

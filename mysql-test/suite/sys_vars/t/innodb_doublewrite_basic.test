@@ -55,10 +55,10 @@ SELECT @@global.innodb_doublewrite;
 SET @@GLOBAL.innodb_doublewrite=1;
 SELECT @@global.innodb_doublewrite;
 
---Error ER_WRONG_ARGUMENTS
 SET @@GLOBAL.innodb_doublewrite=2;
 SELECT @@global.innodb_doublewrite;
 
+--Error ER_WRONG_ARGUMENTS
 SET @@GLOBAL.innodb_doublewrite=3;
 SELECT @@global.innodb_doublewrite;
 
@@ -77,10 +77,10 @@ SELECT @@global.innodb_doublewrite;
 SET @@GLOBAL.innodb_doublewrite=1;
 SELECT @@global.innodb_doublewrite;
 
---Error ER_WRONG_ARGUMENTS
 SET @@GLOBAL.innodb_doublewrite=2;
 SELECT @@global.innodb_doublewrite;
 
+--Error ER_WRONG_ARGUMENTS
 SET @@GLOBAL.innodb_doublewrite=3;
 SELECT @@global.innodb_doublewrite;
 
@@ -99,10 +99,10 @@ SELECT @@global.innodb_doublewrite;
 SET @@GLOBAL.innodb_doublewrite=1;
 SELECT @@global.innodb_doublewrite;
 
+--Error ER_WRONG_ARGUMENTS
 SET @@GLOBAL.innodb_doublewrite=2;
 SELECT @@global.innodb_doublewrite;
 
---Error ER_WRONG_ARGUMENTS
 SET @@GLOBAL.innodb_doublewrite=3;
 SELECT @@global.innodb_doublewrite;
 
@@ -122,10 +122,10 @@ SELECT @@global.innodb_doublewrite;
 SET @@GLOBAL.innodb_doublewrite=1;
 SELECT @@global.innodb_doublewrite;
 
+--Error ER_WRONG_ARGUMENTS
 SET @@GLOBAL.innodb_doublewrite=2;
 SELECT @@global.innodb_doublewrite;
 
---Error ER_WRONG_ARGUMENTS
 SET @@GLOBAL.innodb_doublewrite=3;
 SELECT @@global.innodb_doublewrite;
 
@@ -191,10 +191,10 @@ SELECT @@global.innodb_doublewrite;
 SET @@GLOBAL.innodb_doublewrite=1;
 SELECT @@global.innodb_doublewrite;
 
+--Error ER_WRONG_ARGUMENTS
 SET @@GLOBAL.innodb_doublewrite=2;
 SELECT @@global.innodb_doublewrite;
 
---Error ER_WRONG_ARGUMENTS
 SET @@GLOBAL.innodb_doublewrite=3;
 SELECT @@global.innodb_doublewrite;
 
@@ -214,29 +214,6 @@ SELECT @@global.innodb_doublewrite;
 SET @@GLOBAL.innodb_doublewrite=1;
 SELECT @@global.innodb_doublewrite;
 
---Error ER_WRONG_ARGUMENTS
-SET @@GLOBAL.innodb_doublewrite=2;
-SELECT @@global.innodb_doublewrite;
-
-
-SET @@GLOBAL.innodb_doublewrite=3;
-SELECT @@global.innodb_doublewrite;
-
-SET @@GLOBAL.innodb_doublewrite=4;
-SELECT @@global.innodb_doublewrite;
-
---echo "##############################################"
---let $restart_parameters = "restart: --innodb-doublewrite=2"
---source include/restart_mysqld.inc
-SELECT @@global.innodb_doublewrite;
-
-SET @@GLOBAL.innodb_doublewrite=0;
-SELECT @@global.innodb_doublewrite;
-
---Error ER_WRONG_ARGUMENTS
-SET @@GLOBAL.innodb_doublewrite=1;
-SELECT @@global.innodb_doublewrite;
-
 SET @@GLOBAL.innodb_doublewrite=2;
 SELECT @@global.innodb_doublewrite;
 
@@ -244,7 +221,6 @@ SELECT @@global.innodb_doublewrite;
 SET @@GLOBAL.innodb_doublewrite=3;
 SELECT @@global.innodb_doublewrite;
 
---Error ER_WRONG_ARGUMENTS
 SET @@GLOBAL.innodb_doublewrite=4;
 SELECT @@global.innodb_doublewrite;
 
@@ -253,10 +229,10 @@ SELECT @@global.innodb_doublewrite;
 --source include/restart_mysqld.inc
 SELECT @@global.innodb_doublewrite;
 
---Error ER_WRONG_ARGUMENTS
 SET @@GLOBAL.innodb_doublewrite=0;
 SELECT @@global.innodb_doublewrite;
 
+--Error ER_WRONG_ARGUMENTS
 SET @@GLOBAL.innodb_doublewrite=1;
 SELECT @@global.innodb_doublewrite;
 
@@ -267,6 +243,7 @@ SELECT @@global.innodb_doublewrite;
 SET @@GLOBAL.innodb_doublewrite=3;
 SELECT @@global.innodb_doublewrite;
 
+--Error ER_WRONG_ARGUMENTS
 SET @@GLOBAL.innodb_doublewrite=4;
 SELECT @@global.innodb_doublewrite;
 
@@ -282,10 +259,32 @@ SELECT @@global.innodb_doublewrite;
 SET @@GLOBAL.innodb_doublewrite=1;
 SELECT @@global.innodb_doublewrite;
 
---Error ER_WRONG_ARGUMENTS
 SET @@GLOBAL.innodb_doublewrite=2;
 SELECT @@global.innodb_doublewrite;
 
+--Error ER_WRONG_ARGUMENTS
+SET @@GLOBAL.innodb_doublewrite=3;
+SELECT @@global.innodb_doublewrite;
+
+SET @@GLOBAL.innodb_doublewrite=4;
+SELECT @@global.innodb_doublewrite;
+
+--echo "##############################################"
+--let $restart_parameters = "restart: --innodb-doublewrite=2"
+--source include/restart_mysqld.inc
+SELECT @@global.innodb_doublewrite;
+
+--Error ER_WRONG_ARGUMENTS
+SET @@GLOBAL.innodb_doublewrite=0;
+SELECT @@global.innodb_doublewrite;
+
+SET @@GLOBAL.innodb_doublewrite=1;
+SELECT @@global.innodb_doublewrite;
+
+SET @@GLOBAL.innodb_doublewrite=2;
+SELECT @@global.innodb_doublewrite;
+
+--Error ER_WRONG_ARGUMENTS
 SET @@GLOBAL.innodb_doublewrite=3;
 SELECT @@global.innodb_doublewrite;
 
