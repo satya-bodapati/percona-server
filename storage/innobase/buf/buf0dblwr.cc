@@ -389,6 +389,18 @@ class Double_write {
   static Double_write *instance(buf_flush_t flush_type,
                                 uint32_t buf_pool_index) noexcept
       MY_ATTRIBUTE((warn_unused_result)) {
+    return (instance_low(flush_type, buf_pool_index, is_reduced()));
+  }
+
+  /** @return the double write instance to use for flushing.
+  @param[in] buf_pool_index     Buffer pool instance number.
+  @param[in] flush_type         LRU or Flush list write.
+  @param[in] is_reduced         true if REDUCED mode is on
+  @return instance that will handle the flush to disk. */
+  static Double_write *instance_low(buf_flush_t flush_type,
+                                    uint32_t buf_pool_index,
+                                    bool is_reduced) noexcept
+      MY_ATTRIBUTE((warn_unused_result)) {
     ut_a(buf_pool_index < srv_buf_pool_instances);
 
     auto midpoint = s_instances->size() / 2;
@@ -398,7 +410,7 @@ class Double_write {
       i += midpoint;
     }
 
-    return (is_reduced() ? s_r_instances->at(i) : s_instances->at(i));
+    return (is_reduced ? s_r_instances->at(i) : s_instances->at(i));
   }
 
   /** Wait for any pending batch to complete.
@@ -600,9 +612,14 @@ class Double_write {
     if (s_instances == nullptr) {
       return;
     }
-    auto dblwr = instance(flush_type, buf_pool_index);
+    auto dblwr = instance_low(flush_type, buf_pool_index, false);
 
     dblwr->force_flush(flush_type);
+
+    if (is_reduced_inited) {
+      auto dblwr = instance_low(flush_type, buf_pool_index, true);
+      dblwr->force_flush(flush_type);
+    }
   }
 
   /** Load the doublewrite buffer pages from an external file.
