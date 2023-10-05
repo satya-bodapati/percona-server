@@ -63,7 +63,6 @@ SET(INNOBASE_ZIP_DECOMPRESS_SOURCES
   os/os0thread.cc
   page/zipdecompress.cc
   rem/rec.cc
-  rem/rem0wrec.cc
   ut/crc32.cc
   ut/ut.cc
   ut/ut0new.cc)
@@ -202,7 +201,6 @@ SET(INNOBASE_SOURCES
   read/read0read.cc
   rem/rem0cmp.cc
   rem/rem0rec.cc
-  rem/rem0wrec.cc
   row/row0ext.cc
   row/row0import.cc
   row/row0ins.cc
