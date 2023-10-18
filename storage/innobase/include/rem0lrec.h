@@ -39,8 +39,78 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #ifndef rem0lrec_h
 #define rem0lrec_h
 
-#include "rem0rec.h"
+#include "rem0types.h"
+static inline ulint rec_get_nth_field_offs_low(const ulint *offsets, ulint n,
+                                               ulint *len);
 
+static inline ulint rec_get_nth_field_offs(const dict_index_t *index,
+                                           const ulint *offsets, ulint n,
+                                           ulint *len) {
+  if (index && index->has_row_versions()) {
+    n = index->get_field_off_pos(n);
+  }
+
+  return rec_get_nth_field_offs_low(offsets, n, len);
+}
+
+static inline byte *rec_get_nth_field(const dict_index_t *index,
+                                      const rec_t *rec, const ulint *offsets,
+                                      ulint n, ulint *len) {
+  byte *field =
+      const_cast<byte *>(rec) + rec_get_nth_field_offs(index, offsets, n, len);
+  return (field);
+}
+
+/** Determine if the offsets are for a record in the new
+ compact format.
+ @return nonzero if compact format */
+static inline bool rec_offs_comp(
+    const ulint *offsets) /*!< in: array returned by rec_get_offsets() */
+{
+  ut_ad(rec_offs_validate(nullptr, nullptr, offsets));
+  return (*rec_offs_base(offsets) & REC_OFFS_COMPACT) != 0;
+}
+
+/** Returns the offset of n - 1th field end if the record is stored in the
+ 1-byte offsets form. If the field is SQL null, the flag is ORed in the returned
+ value. This function and the 2-byte counterpart are defined here because the
+ C-compiler was not able to sum negative and positive constant offsets, and
+ warned of constant arithmetic overflow within the compiler.
+ @return offset of the start of the PREVIOUS field, SQL null flag ORed */
+static inline ulint rec_1_get_prev_field_end_info(
+    const rec_t *rec, /*!< in: record */
+    ulint n)          /*!< in: field index */
+{
+  ut_ad(rec_get_1byte_offs_flag(rec));
+  ut_ad(n <= rec_get_n_fields_old_raw(rec));
+
+  uint32_t version_length = 0;
+  if (rec_old_is_versioned(rec)) {
+    version_length = 1;
+  }
+
+  return (mach_read_from_1(rec - (REC_N_OLD_EXTRA_BYTES + version_length + n)));
+}
+
+/** Returns the offset of n - 1th field end if the record is stored in the
+ 2-byte offsets form. If the field is SQL null, the flag is ORed in the returned
+ value.
+ @return offset of the start of the PREVIOUS field, SQL null flag ORed */
+static inline ulint rec_2_get_prev_field_end_info(
+    const rec_t *rec, /*!< in: record */
+    ulint n)          /*!< in: field index */
+{
+  ut_ad(!rec_get_1byte_offs_flag(rec));
+  ut_ad(n <= rec_get_n_fields_old_raw(rec));
+
+  uint32_t version_length = 0;
+  if (rec_old_is_versioned(rec)) {
+    version_length = 1;
+  }
+
+  return (
+      mach_read_from_2(rec - (REC_N_OLD_EXTRA_BYTES + version_length + 2 * n)));
+}
 /** Set nth field value to SQL NULL.
 @param[in,out]  rec  record
 @param[in]      n    index of the field. */
@@ -273,11 +343,11 @@ static inline void rec_set_nth_field_low(rec_t *rec, const ulint *offsets,
   ut_ad(rec);
   ut_ad(rec_offs_validate(rec, nullptr, offsets));
 
-  auto fn = [&](const ulint *offsets, ulint n) {
+  auto fn = [&](const ulint *offsets1, ulint n1) {
     ulint n_drop = 0;
-    for (size_t i = 0; i < n; i++) {
-      ulint len = rec_offs_base(offsets)[1 + i];
-      if (len & REC_OFFS_DROP) {
+    for (size_t i = 0; i < n1; i++) {
+      ulint len1 = rec_offs_base(offsets1)[1 + i];
+      if (len1 & REC_OFFS_DROP) {
         n_drop++;
       }
     }
