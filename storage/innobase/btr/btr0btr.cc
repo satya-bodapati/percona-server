@@ -4242,7 +4242,12 @@ loop:
 
   } else if (!page_validate(page, index)) {
     btr_validate_report1(index, level, block);
-    ret = false;
+    // ret = false;
+    // lets abort quickly for now: TODO: decide if it is worth to fail fast
+
+    mtr_commit(&mtr);
+    mem_heap_free(heap);
+    return (false);
 
   } else if (level == 0 && !btr_index_page_validate(block, index)) {
     /* We are on level 0. Check that the records have the right

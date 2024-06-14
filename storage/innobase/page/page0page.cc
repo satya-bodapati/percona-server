@@ -45,6 +45,9 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "lock0lock.h"
 #include "srv0srv.h"
 #endif /* !UNIV_HOTBACKUP */
+#include "lob0lob.h"
+
+thread_local blob_ref_map *thread_local_blob_map = nullptr;
 
 /*                      THE INDEX PAGE
                         ==============
@@ -1720,6 +1723,109 @@ bool page_rec_validate(
   return true;
 }
 
+/* true if OK, false if there is problem */
+bool page_rec_blob_validate(
+    rec_t *rec, /*!< in: physical record */
+    dict_index_t *index,
+    const ulint *offsets) /*!< in: array returned by rec_get_offsets() */
+{
+  // this means reference check is not enabled. Enabled only via
+  // CHECK TABLE path
+  if (thread_local_blob_map == nullptr) {
+    return true;
+  }
+
+  // if index is not PRIMARY, return true
+  if (!index->is_clustered()) {
+    return true;
+  }
+
+  // if page-level is not zero, return true because blob exists only on leaf
+  // level
+  const page_t *page = page_align(rec);
+  if (!page_is_leaf(page)) {
+    return true;
+  }
+
+  // if rec is not user record, blob dont exist, return true
+  if (!page_rec_is_user_rec(rec)) {
+    return true;
+  }
+
+  // if rec doesnt have any externs, return true
+  if (!rec_offs_any_extern(offsets)) {
+    return true;
+  }
+
+  // if rec is deleted marked, return true, we cannot validate the blob. the
+  // blob pages in the deleted marked records could be freed
+  if (rec_get_deleted_flag(rec, rec_offs_comp(offsets))) {
+    return true;
+  }
+
+  // if rec is not the owner of the blob, we cannot validate if blob page state
+  // now validate that the blob first page is not marked as free from page
+  // bitmap
+
+  ulint n_fields = rec_offs_n_fields(offsets);
+
+  for (ulint i = 0; i < n_fields; i++) {
+    if (rec_offs_nth_extern(index, offsets, i)) {
+      byte *field_ref = lob::btr_rec_get_field_ref(index, rec, offsets, i);
+      lob::ref_t ref(field_ref);
+      if (!ref.is_owner() || ref.is_null() || ref.is_null_relaxed() ||
+          ref.is_being_modified()) {
+        continue;
+      }
+
+      if (ref.length() == 0) {
+        // LOB purged
+        continue;
+      }
+
+      space_id_t space_id = ref.space_id();
+      page_no_t page_no = ref.page_no();
+
+      page_id_t blob_page_id(space_id, page_no);
+      bool is_free = fseg_page_is_free(nullptr, space_id, page_no);
+      if (is_free) {
+        // This should not be possible. A record that owns the BLOB shouldn't
+        // have the first page marked as free in page bitmap
+        ut_ad(0);
+        ib::error() << "Invalid record! The record's blob reference is marked"
+                    << " as free although the record owns it "
+                    << " page_no: " << page_get_page_no(page)
+                    << " heap_no: " << page_rec_get_heap_no(rec);
+        ib::error() << "BLOB reference that is marked free " << blob_page_id;
+
+        return false;
+      }
+
+      page_id_t page_id(space_id, page_no);
+      auto it = thread_local_blob_map->find(page_id);
+      if (it == thread_local_blob_map->end()) {
+        (*thread_local_blob_map)[page_id] =
+            std::make_pair(page_get_page_no(page), page_rec_get_heap_no(rec));
+      } else {
+        auto val = it->second;
+        ib::error()
+            << "Invalid record! a blob external page cannot be shared between "
+               "two records";
+        ib::error() << "The blob ref page_id is " << blob_page_id;
+        ib::error()
+            << "The first occurence of the blob is in record : page_no: "
+            << val.first << " with heap_no: " << val.second;
+        ib::error()
+            << "The second occurence of the blob is in record: page_no: "
+            << page_get_page_no(page)
+            << " with heap no: " << page_rec_get_heap_no(rec);
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 #ifndef UNIV_HOTBACKUP
 #ifdef UNIV_DEBUG
 /** Checks that the first directory slot points to the infimum record and
@@ -2230,6 +2336,10 @@ bool page_validate(const page_t *page, dict_index_t *index) {
     }
 
     if (UNIV_UNLIKELY(!page_rec_validate(rec, offsets))) {
+      goto func_exit;
+    }
+
+    if (!page_rec_blob_validate(const_cast<byte *>(rec), index, offsets)) {
       goto func_exit;
     }
 

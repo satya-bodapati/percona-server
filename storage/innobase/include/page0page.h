@@ -741,6 +741,12 @@ void page_print(buf_block_t *block,  /*!< in: index page */
 bool page_rec_validate(
     const rec_t *rec,      /*!< in: physical record */
     const ulint *offsets); /*!< in: array returned by rec_get_offsets() */
+
+bool page_rec_blob_validate(
+    rec_t *rec, /*!< in: physical record */
+    dict_index_t *index,
+    const ulint *offsets); /*!< in: array returned by rec_get_offsets() */
+
 #ifdef UNIV_DEBUG
 /** Checks that the first directory slot points to the infimum record and
  the last to the supremum. This function is intended to track if the
@@ -800,6 +806,9 @@ param[in]       rec     Btree record
 param[in]       index   index
 @return true if ok */
 bool page_is_spatial_non_leaf(const rec_t *rec, dict_index_t *index);
+
+using blob_ref_map = std::unordered_map<page_id_t, std::pair<page_no_t, ulint>>;
+extern thread_local blob_ref_map *thread_local_blob_map;
 
 #include "page0page.ic"
 

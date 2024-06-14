@@ -9,6 +9,7 @@ insert into t1 values ("r3c1", "r3c2");
 insert into t1 values ("r4c1", "r4c2");
 insert into t1 values ("r5c1", "r5c2");
 insert into t1 values ("r6c1", "r6c2");
+CREATE TABLE t2 SELECT * FROM t1;
 SET SESSION debug="+d,check_table_set_wrong_min_bit";
 CHECK TABLE t1;
 Table	Op	Msg_type	Msg_text
@@ -19,6 +20,8 @@ Pattern "Setting wrong min bit to 2nd record" found
 # Expect found
 Pattern "Minimum record flag is wrongly set to rec on page '4' at level '3' for index 'GEN_CLUST_INDEX' of table 'test/t1'." found
 SET SESSION debug="-d,check_table_set_wrong_min_bit";
+DROP TABLE t1;
+CREATE TABLE t1 SELECT * FROM t2;
 SET SESSION debug="+d,check_table_reset_correct_min_bit";
 CHECK TABLE t1;
 Table	Op	Msg_type	Msg_text
@@ -33,3 +36,4 @@ SET SESSION debug="-d,check_table_reset_correct_min_bit";
 # CLEANUP #
 ###########
 drop table t1;
+DROP TABLE t2;

@@ -316,6 +316,15 @@ class page_id_t {
   friend std::ostream &operator<<(std::ostream &out, const page_id_t &page_id);
 };
 
+namespace std {
+template <>
+struct hash<page_id_t> {
+  std::size_t operator()(const page_id_t &page_id) const {
+    return page_id.hash();
+  }
+};
+}  // namespace std
+
 /** Print the given page_id_t object.
 @param[in,out]  out     the output stream
 @param[in]      page_id the page_id_t object to be printed

@@ -32,6 +32,7 @@ insert into t1 values ("r3c1", "r3c2");
 insert into t1 values ("r4c1", "r4c2");
 insert into t1 values ("r5c1", "r5c2");
 insert into t1 values ("r6c1", "r6c2");
+CREATE TABLE t2 SELECT * FROM t1;
 
 #-------------------------------------------------------------------------------
 # Scenario 1 : Min bit is set wrongly to a record which is not the first record
@@ -49,11 +50,13 @@ CHECK TABLE t1;
 --let SEARCH_PATTERN= Minimum record flag is wrongly set to rec on page '4' at level '3' for index 'GEN_CLUST_INDEX' of table 'test/t1'.
 --source include/search_pattern.inc
 SET SESSION debug="-d,check_table_set_wrong_min_bit";
+DROP TABLE t1;
 
 #-------------------------------------------------------------------------------
 # Scenario 2 : Min bit is not set to a record which is the first record on first
 #              page on level.
 #-------------------------------------------------------------------------------
+CREATE TABLE t1 SELECT * FROM t2;
 SET SESSION debug="+d,check_table_reset_correct_min_bit";
 CHECK TABLE t1;
 
@@ -75,3 +78,4 @@ SET GLOBAL innodb_limit_optimistic_insert_debug = @old_innodb_limit_optimistic_i
 --enable_query_log
 
 drop table t1;
+DROP TABLE t2;

@@ -202,6 +202,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "os0enc.h"
 #include "os0file.h"
 
+#include <include/scope_guard.h>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -18897,6 +18898,17 @@ int ha_innobase::check(THD *thd,                /*!< in: user thread handle */
       CHECK TABLE. */
       srv_fatal_semaphore_wait_extend.fetch_add(1);
 
+      // Setup the thread local map for clustered index only
+      if (index->is_clustered()) {
+        thread_local_blob_map = new blob_ref_map();
+      }
+
+      auto blob_ref_clear_guard = create_scope_guard([]() {
+        if (!thread_local_blob_map) return;
+        delete thread_local_blob_map;
+        thread_local_blob_map = nullptr;
+      });
+
       bool valid = btr_validate_index(index, m_prebuilt->trx, false);
 
       /* Restore the fatal lock wait timeout after
@@ -18910,7 +18922,12 @@ int ha_innobase::check(THD *thd,                /*!< in: user thread handle */
                             "InnoDB: The B-tree of"
                             " index %s is corrupted.",
                             index->name());
-        continue;
+        if (index->is_clustered()) {
+          dict_set_corrupted(index);
+          break;
+        } else {
+          continue;
+        }
       }
     }
 
