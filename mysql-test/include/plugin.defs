@@ -217,3 +217,4 @@ component_masking_functions         plugin_output_directory  no  MASKING_FUNCTIO
 component_percona_udf               plugin_output_directory  no  PERCONA_UDF_COMPONENT
 component_js_lang                   plugin_output_directory  no  JS_LANG_COMPONENT
 auth_openid_connect                 plugin_output_directory  no  AUTH_OIDC             auth_openid_connect
+component_bulk_load                 plugin_output_directory  no  BULK_LOAD_COMPONENT
