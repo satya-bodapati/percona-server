@@ -4256,6 +4256,20 @@ loop:
 #endif /* UNIV_ZIP_DEBUG */
 
   ut_a(block->page.id.space() == index->space);
+  page_zip_des_t *page_zip = buf_block_get_page_zip(block);
+  ulint zip_free_space = 0;
+  if (page_zip != nullptr) {
+    zip_free_space = page_zip_get_size(page_zip) -
+                     page_zip_get_trailer_len(page_zip, index->is_clustered()) -
+                     page_zip->m_end;
+  }
+
+  ib::info() << "CHECK_TABLE: TABLE_NAME: " << index->table->name
+             << " INDEX_NAME: " << index->name << " LEVEL: " << level
+             << " PAGE_NUM: " << block->page.id.page_no() << " FREE_SPACE: "
+             << (page_zip != nullptr
+                     ? zip_free_space
+                     : UNIV_PAGE_SIZE - page_get_data_size(page));
 
   if (fseg_page_is_free(seg, block->page.id.space(),
                         block->page.id.page_no())) {

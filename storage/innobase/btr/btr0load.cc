@@ -32,6 +32,9 @@ this program; if not, write to the Free Software Foundation, Inc.,
  *******************************************************/
 
 #include "btr0load.h"
+#include <algorithm>
+#include <cstddef>
+#include <unordered_map>
 #include "btr0btr.h"
 #include "btr0cur.h"
 #include "btr0pcur.h"
@@ -43,6 +46,79 @@ namespace ddl {
 /** Innodb B-tree index fill factor for bulk load. */
 long fill_factor;
 }  // namespace ddl
+
+// ---- InputEfficiencyTracker ----
+
+InputEfficiencyTracker::InputEfficiencyTracker(double alpha,
+                                               double initial_efficiency)
+    : smoothed_efficiency(initial_efficiency), alpha(alpha) {}
+
+void InputEfficiencyTracker::update(size_t m_data, size_t zip_in) {
+  if (m_data == 0) return;
+  double observed = static_cast<double>(zip_in) / m_data;
+  smoothed_efficiency = observed;
+}
+
+double InputEfficiencyTracker::predict_zip_in(size_t m_data) const {
+  return m_data * smoothed_efficiency;
+}
+
+double InputEfficiencyTracker::current() const { return smoothed_efficiency; }
+
+// ---- CompressionRatioTracker ----
+
+CompressionRatioTracker::CompressionRatioTracker(double initial, double alpha,
+                                                 double max_ratio)
+    : ratio(initial),
+      alpha(alpha),
+      max_ratio(max_ratio),
+      success_count(0),
+      success_threshold(5) {}
+
+void CompressionRatioTracker::update_on_success(size_t zip_in, size_t zip_out) {
+  if (zip_out == 0) return;
+  double observed = static_cast<double>(zip_in) / zip_out;
+  ratio = observed;
+
+#if 0
+    if (++success_count >= success_threshold && ratio < max_ratio) {
+        ratio *= 1.1;
+        success_count = 0;
+    }
+#endif
+}
+
+void CompressionRatioTracker::update_on_failure(size_t zip_in, size_t zip_out,
+                                                size_t compressed_limit) {
+  if (zip_out == 0) return;
+  double observed = static_cast<double>(zip_in) / zip_out;
+  ratio = observed * 0.95;
+
+  success_count = 0;
+}
+
+double CompressionRatioTracker::current() const { return ratio; }
+
+// ---- CompressionModel ----
+
+void CompressionModel::update_on_success(size_t m_data, size_t zip_in,
+                                         size_t zip_out) {
+  input_tracker.update(m_data, zip_in);
+  ratio_tracker.update_on_success(zip_in, zip_out);
+}
+
+void CompressionModel::update_on_failure(size_t m_data, size_t zip_in,
+                                         size_t zip_out,
+                                         size_t compressed_limit) {
+  input_tracker.update(m_data, zip_in);
+  ratio_tracker.update_on_failure(zip_in, zip_out, compressed_limit);
+}
+
+// ---- CompressionTrackerByLevel ----
+
+CompressionModel &CompressionTrackerByLevel::get(int level) {
+  return models[level];
+}
 
 /** The proper function call sequence of Page_load is as below:
 -- Page_load::init
@@ -96,6 +172,11 @@ class Page_load : private ut::Non_copyable {
       mem_heap_free(m_heap);
     }
   }
+  /** The index B-tree */
+  dict_index_t *m_index{};
+
+  /** Get page no */
+  [[nodiscard]] page_no_t get_page_no() const noexcept { return m_page_no; }
 
  private:
   /** Initialize members and allocate page if needed and start mtr.
@@ -165,10 +246,8 @@ class Page_load : private ut::Non_copyable {
   to be inserted.       We check fill factor & padding here.
   @param[in]    rec_size                Required space
   @return true  if space is available */
-  [[nodiscard]] inline bool is_space_available(size_t rec_size) const noexcept;
-
-  /** Get page no */
-  [[nodiscard]] page_no_t get_page_no() const noexcept { return m_page_no; }
+  [[nodiscard]] inline bool is_space_available(
+      size_t rec_size, CompressionTrackerByLevel &tracker) const noexcept;
 
   /** Get page level */
   [[nodiscard]] size_t get_level() const noexcept { return m_level; }
@@ -220,12 +299,9 @@ class Page_load : private ut::Non_copyable {
   [[nodiscard]] dberr_t store_ext(const big_rec_t *big_rec,
                                   Rec_offsets offsets) noexcept;
 
- private:
+ public:
   /** Memory heap for internal allocation */
   mem_heap_t *m_heap{};
-
-  /** The index B-tree */
-  dict_index_t *m_index{};
 
   /** The min-transaction */
   mtr_t *m_mtr{};
@@ -291,9 +367,63 @@ class Page_load : private ut::Non_copyable {
   /** Number of blocks which are buffer fixed but not pushed to mtr memo */
   int32_t m_n_blocks_buf_fixed{};
 
+  size_t m_n_blobs{};
+
   friend class Btree_load;
 };
 
+/** Determine if the length of the page trailer.
+ @return length of the page trailer, in bytes, not including the
+ terminating zero byte of the modification log */
+static inline ulint page_zip_get_trailer_len_estimate(
+    const Page_load *page_load,
+    const page_t *page, /*!< in: uncompressed page */
+    bool is_clust)      /*!< in: true if clustered index */
+{
+  ulint uncompressed_size;
+
+  if (!page_is_leaf(page)) {
+    uncompressed_size = PAGE_ZIP_DIR_SLOT_SIZE + REC_NODE_PTR_SIZE;
+  } else if (is_clust) {
+    uncompressed_size =
+        PAGE_ZIP_DIR_SLOT_SIZE + DATA_TRX_ID_LEN + DATA_ROLL_PTR_LEN;
+  } else {
+    uncompressed_size = PAGE_ZIP_DIR_SLOT_SIZE;
+  }
+
+  return (page_load->m_rec_no * uncompressed_size +
+          page_load->m_n_blobs * BTR_EXTERN_FIELD_REF_SIZE);
+}
+bool CompressionModel::is_space_available(const Page_load *page_load,
+                                          size_t m_data_so_far,
+                                          size_t next_rec_uncompressed,
+                                          size_t num_records_after,
+                                          size_t trailer_len, size_t header_len,
+                                          size_t page_size) const {
+  constexpr size_t kHeaderPadding =
+      128;  // To account for zlib + InnoDB trailer/metadata
+  constexpr double kSafetyFactor =
+      1.1;  // To give breathing room for fluctuation
+  double total_m_data = m_data_so_far + next_rec_uncompressed;
+  double estimated_zip_in = input_tracker.predict_zip_in(total_m_data);
+  double estimated_zip_out =
+      (estimated_zip_in / ratio_tracker.current()) * kSafetyFactor;
+  size_t reserved_space = page_size * (100 - ddl::fill_factor) / 100;
+  size_t total = static_cast<size_t>(estimated_zip_out) + trailer_len +
+                 header_len + kHeaderPadding + reserved_space;
+  ib::info() << "CompressionModel::is_space_available: "
+             << page_load->m_index->table->name
+             << " index: " << page_load->m_index->name
+             << " page_no: " << page_load->get_page_no()
+             << " total_uncompressed_data: " << total_m_data
+             << " estimated_zip_in: " << estimated_zip_in
+             << " estimation_zip_out: " << estimated_zip_out
+             << " total_including trailer_header: " << total
+             << " compressed page_size: " << page_size
+             << " is_space_available:  " << (total < page_size);
+
+  return total <= page_size;
+}
 dberr_t Page_load::init() noexcept {
   page_t *new_page;
   page_no_t new_page_no;
@@ -415,6 +545,8 @@ dberr_t Page_load::init() noexcept {
   m_slotted_rec_no = 0;
 
   m_modified = true;
+
+  m_n_blobs = 0;
 
   ut_d(m_total_data = 0);
 
@@ -598,7 +730,19 @@ bool Page_load::compress() noexcept {
   ut_ad(!m_modified);
   ut_ad(m_page_zip != nullptr);
 
-  return page_zip_compress(m_page_zip, m_page, m_index, page_zip_level, m_mtr);
+  bool ret =
+      page_zip_compress(m_page_zip, m_page, m_index, page_zip_level, m_mtr);
+  ib::info() << "Page_load_compress: " << m_index->name
+             << " page_no: " << page_get_page_no(m_page)
+             << " m_data:  " << UNIV_PAGE_SIZE - m_free_space
+             << " page_zip_in: " << m_page_zip->total_input_size
+             << " page_zip_out: " << m_page_zip->total_output_size
+             << " page_zip_m_end: " << m_page_zip->m_end
+             << " page_zip_success: " << ret << " page_zip_trailer_len: "
+             << (ret ? page_zip_get_trailer_len(m_page_zip,
+                                                m_index->is_clustered())
+                     : 0);
+  return ret;
 }
 
 dtuple_t *Page_load::get_node_ptr() noexcept {
@@ -746,7 +890,8 @@ void Page_load::set_prev(page_no_t prev_page_no) noexcept {
   btr_page_set_prev(m_page, nullptr, prev_page_no, m_mtr);
 }
 
-bool Page_load::is_space_available(size_t rec_size) const noexcept {
+bool Page_load::is_space_available(
+    size_t rec_size, CompressionTrackerByLevel &tracker) const noexcept {
   auto slot_size = page_dir_calc_reserved_space(m_rec_no + 1) -
                    page_dir_calc_reserved_space(m_rec_no);
 
@@ -760,11 +905,19 @@ bool Page_load::is_space_available(size_t rec_size) const noexcept {
   /* Fillfactor & Padding apply to both leaf and non-leaf pages.
   Note: we keep at least 2 records in a page to avoid B-tree level
   growing too high. */
-  if (m_rec_no >= 2 && ((m_page_zip == nullptr &&
-                         m_free_space - required_space < m_reserved_space) ||
-                        (m_page_zip != nullptr &&
-                         m_free_space - required_space < m_padding_space))) {
-    return false;
+  if (m_rec_no >= 2) {
+    if ((m_page_zip == nullptr &&
+         m_free_space - required_space < m_reserved_space)) {
+      return false;
+    }
+
+    if (m_page_zip != nullptr) {
+      size_t trailer_len = page_zip_get_trailer_len_estimate(
+          this, m_page, m_index->is_clustered());
+      return tracker.get(m_level).is_space_available(
+          this, UNIV_PAGE_SIZE - m_free_space, rec_size, m_rec_no + 1,
+          trailer_len);
+    }
   }
 
   return true;
@@ -966,8 +1119,22 @@ dberr_t Btree_load::page_commit(Page_load *page_loader,
              std::this_thread::sleep_for(std::chrono::seconds{1});)
 
   /* Compress page if it's a compressed table. */
-  if (page_loader->is_table_compressed() && !page_loader->compress()) {
-    return page_split(page_loader, next_page_loader);
+  if (page_loader->is_table_compressed()) {
+    if (!page_loader->compress()) {
+      // update failure compression satistics
+      tracker.get(page_loader->get_level())
+          .update_on_failure(UNIV_PAGE_SIZE - page_loader->m_free_space,
+                             page_loader->m_page_zip->total_input_size,
+                             page_loader->m_page_zip->total_output_size,
+                             page_zip_get_size(page_loader->m_page_zip) * 0.95);
+      return page_split(page_loader, next_page_loader);
+    } else {
+      // update successful compression  statistics
+      tracker.get(page_loader->get_level())
+          .update_on_success(UNIV_PAGE_SIZE - page_loader->m_free_space,
+                             page_loader->m_page_zip->total_input_size,
+                             page_loader->m_page_zip->total_output_size);
+    }
   }
 
   /* Insert node pointer to father page. */
@@ -1027,7 +1194,7 @@ void Btree_load::latch() noexcept {
 
 dberr_t Btree_load::prepare_space(Page_load *&page_loader, size_t level,
                                   size_t rec_size) noexcept {
-  if (page_loader->is_space_available(rec_size)) {
+  if (page_loader->is_space_available(rec_size, tracker)) {
     return DB_SUCCESS;
   }
 
@@ -1161,6 +1328,7 @@ dberr_t Btree_load::insert(dtuple_t *tuple, size_t level) noexcept {
       return DB_TOO_BIG_RECORD;
     }
 
+    page_loader->m_n_blobs++;
     rec_size = rec_get_converted_size(m_index, tuple);
   }
 

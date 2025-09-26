@@ -1652,6 +1652,21 @@ rec_t *page_cur_insert_rec_zip(
       page_has_garbage(page) && rec_size > page_get_max_insert_size(page, 1) &&
       rec_size <= page_get_max_insert_size_after_reorganize(page, 1);
 
+  ib::info() << "SATYA444:"
+             << " TABLE_NAME: " << index->table->name
+             << " INDEX_NAME: " << index->name << " rec_size:  " << rec_size
+             << " page_no: " << page_get_page_no(page)
+             << " page_has_garbage: " << page_has_garbage(page)
+             << " page_get_max_insert_size: "
+             << page_get_max_insert_size(page, 1)
+             << " page_get_max_insert_size_after_reorganize: "
+             << page_get_max_insert_size_after_reorganize(page, 1)
+             << " reorg_before_insert: " << reorg_before_insert
+             << " page_zip_available: "
+             << page_zip_available(page_zip, index->is_clustered(), rec_size, 1)
+             << " page_zip->m_nonempty: " << page_zip->m_nonempty
+             << " page_zip->m_end: " << page_zip->m_end;
+
   /* 2. Try to find suitable space from page memory management */
   if (!page_zip_available(page_zip, index->is_clustered(), rec_size, 1) ||
       reorg_before_insert) {
@@ -1687,6 +1702,7 @@ rec_t *page_cur_insert_rec_zip(
       /* The cursor should remain on the page infimum. */
       return (nullptr);
     } else if (!page_zip->m_nonempty && !page_has_garbage(page)) {
+      ib::info() << "SATYA555: page freshly compressed. Skipping reorganize:";
       /* The page has been freshly compressed, so
       reorganizing it will not help. */
     } else if (log_compressed && !reorg_before_insert) {
@@ -1699,6 +1715,8 @@ rec_t *page_cur_insert_rec_zip(
       if (page_zip_available(page_zip, index->is_clustered(), rec_size, 1)) {
         /* After reorganizing, there is space
         available. */
+        ib::info()
+            << "SATYA666: page reorganize attempted. Free space after that:";
         goto use_heap;
       }
     } else {

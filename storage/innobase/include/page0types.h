@@ -221,6 +221,10 @@ struct page_zip_des_t {
   /** 0 or compressed page shift size; the size in bytes is:
   (UNIV_ZIP_SIZE_MIN * >> 1) << ssize. */
   uint8_t ssize;
+
+  uint16_t total_input_size;
+
+  uint16_t total_output_size;
 };
 
 /** Compression statistics for a given page size */

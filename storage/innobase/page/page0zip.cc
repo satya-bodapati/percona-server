@@ -945,6 +945,7 @@ bool page_zip_compress(page_zip_des_t *page_zip, /*!< in: size; out: data,
   ulint n_blobs = 0;
   byte *storage; /* storage of uncompressed
                  columns */
+//  size_t total_intended_input = 0; /* Added: track total input size */
 #ifndef UNIV_HOTBACKUP
   const auto start_time = std::chrono::steady_clock::now();
 #endif /* !UNIV_HOTBACKUP */
@@ -958,6 +959,7 @@ bool page_zip_compress(page_zip_des_t *page_zip, /*!< in: size; out: data,
   bool cmp_per_index_enabled;
   cmp_per_index_enabled = srv_cmp_per_index_enabled;
 #endif /* !UNIV_HOTBACKUP */
+  size_t input_buffer_size = 0;
 
   if (!page) {
     return (false);
@@ -1098,6 +1100,14 @@ bool page_zip_compress(page_zip_des_t *page_zip, /*!< in: size; out: data,
     goto zlib_error;
   }
 
+#if 0
+  total_intended_input = page_header_get_field(page, PAGE_HEAP_TOP) -
+                         PAGE_ZIP_START  // Page data
+                         + page_zip_fields_encode(n_fields, index, trx_id_col,
+                                                  fields)
+			 - n_dense * slot_size;
+#endif
+
   c_stream.avail_out -= static_cast<uInt>(n_dense * slot_size);
   c_stream.avail_in = static_cast<uInt>(
       page_zip_fields_encode(n_fields, index, trx_id_col, fields));
@@ -1120,6 +1130,7 @@ bool page_zip_compress(page_zip_des_t *page_zip, /*!< in: size; out: data,
   c_stream.next_in = (byte *)page + PAGE_ZIP_START;
 
   storage = buf_end - n_dense * PAGE_ZIP_DIR_SLOT_SIZE;
+  input_buffer_size = storage - buf;
 
   /* Compress the records in heap_no order. */
   if (UNIV_UNLIKELY(!n_dense)) {
@@ -1163,6 +1174,24 @@ bool page_zip_compress(page_zip_des_t *page_zip, /*!< in: size; out: data,
   zlib_error:
     deflateEnd(&c_stream);
     mem_heap_free(heap);
+    /* NEW: Log compression failure details */
+    ib::info(ER_IB_MSG_915)
+        << "ZLIB_ERROR: page_zip_compress: failed to compress. "
+        << " space_id: " << index->space_id()
+        << " page_no: " << page_get_page_no(page)
+        << " index_name: " << index->name
+        << " page_level: " << btr_page_get_level(page)
+        << " intial input buffer size: " << input_buffer_size
+        << " c_stream.total_out: " << c_stream.total_out
+        << " c_stream.total_in: " << c_stream.total_in
+        << " c_stream.avail_in: " << c_stream.avail_in
+        << " c_stream.avail_out: " << c_stream.avail_out
+        << " used buffer: " << input_buffer_size - c_stream.avail_out
+        << " zlib_err=" << err;
+
+    page_zip->total_input_size = c_stream.total_in;
+    page_zip->total_output_size = c_stream.total_out;
+
   err_exit:
 #ifdef PAGE_ZIP_COMPRESS_DBG
     if (logfile) {
@@ -1254,6 +1283,9 @@ bool page_zip_compress(page_zip_des_t *page_zip, /*!< in: size; out: data,
     page_zip_stat_per_index[ind_id].compress_time += time_diff;
     mutex_exit(&page_zip_stat_per_index_mutex);
   }
+
+  page_zip->total_input_size = c_stream.total_in;
+  page_zip->total_output_size = c_stream.total_out;
 
   if (page_is_leaf(page)) {
     dict_index_zip_success(index);

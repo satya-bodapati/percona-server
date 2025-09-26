@@ -37,6 +37,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <stddef.h>
 #include <vector>
 
+#include <cstddef>
+#include <unordered_map>
 #include "dict0dict.h"
 #include "page0cur.h"
 #include "ut0class_life_cycle.h"
@@ -44,6 +46,74 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 // Forward declaration.
 class Page_load;
+
+/**
+ * Tracks how much of the uncompressed page (m_data)
+ * ends up actually passed to zlib (page_zip_in).
+ */
+class InputEfficiencyTracker {
+ public:
+  explicit InputEfficiencyTracker(double alpha = 0.9,
+                                  double initial_efficiency = 0.85);
+  void update(size_t m_data, size_t zip_in);
+  double predict_zip_in(size_t m_data) const;
+  double current() const;
+
+ private:
+  double smoothed_efficiency;
+  double alpha;
+};
+
+/**
+ * Tracks the compression ratio: zip_in / zip_out.
+ */
+class CompressionRatioTracker {
+ public:
+  CompressionRatioTracker(double initial = 2.0, double alpha = 0.9,
+                          double max_ratio = 1.95);
+  void update_on_success(size_t zip_in, size_t zip_out);
+  void update_on_failure(size_t zip_in, size_t zip_out,
+                         size_t compressed_limit);
+  double current() const;
+
+ private:
+  double ratio;
+  double alpha;
+  double max_ratio;
+  size_t success_count;
+  const size_t success_threshold;
+};
+
+/**
+ * Combines both trackers for a page level.
+ */
+class CompressionModel {
+ public:
+  bool is_space_available(const Page_load *page_load, size_t m_data_so_far,
+                          size_t next_rec_uncompressed,
+                          size_t num_records_after, size_t trailer_len,
+                          size_t header_len = 94,
+                          size_t page_size = 8000) const;
+
+  void update_on_success(size_t m_data, size_t zip_in, size_t zip_out);
+  void update_on_failure(size_t m_data, size_t zip_in, size_t zip_out,
+                         size_t compressed_limit);
+
+ private:
+  InputEfficiencyTracker input_tracker;
+  CompressionRatioTracker ratio_tracker;
+};
+
+/**
+ * Per-level compression model tracking.
+ */
+class CompressionTrackerByLevel {
+ public:
+  CompressionModel &get(int level);
+
+ private:
+  std::unordered_map<int, CompressionModel> models;
+};
 
 /** @note We should call commit(false) for a Page_load object, which is not in
 m_page_loaders after page_commit, and we will commit or abort Page_load
@@ -190,6 +260,8 @@ class Btree_load : private ut::Non_copyable {
   bulk load operation to ensure that the online status of the
   index does not change */
   IF_DEBUG(unsigned m_index_online{};)
+
+  CompressionTrackerByLevel tracker;
 };
 
 #endif /* btr0load_h */
