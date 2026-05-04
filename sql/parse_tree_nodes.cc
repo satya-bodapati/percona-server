@@ -1708,8 +1708,8 @@ bool PT_table_factor_function::do_contextualize(Parse_context *pc) {
 bool PT_table_sequence_function::do_contextualize(Parse_context *pc) {
   if (super::do_contextualize(pc) || m_expr->itemize(pc, &m_expr)) return true;
 
-  auto stf = new (pc->mem_root)
-      Table_function_sequence(m_table_alias.str, m_expr);
+  auto stf =
+      new (pc->mem_root) Table_function_sequence(m_table_alias.str, m_expr);
   if (stf == nullptr) return true;  // OOM
 
   LEX_CSTRING alias;
@@ -1721,7 +1721,7 @@ bool PT_table_sequence_function::do_contextualize(Parse_context *pc) {
   if (ti == nullptr) return true;
 
   m_table_ref = pc->select->add_table_to_list(pc->thd, ti, m_table_alias.str, 0,
-                                        TL_READ, MDL_SHARED_READ);
+                                              TL_READ, MDL_SHARED_READ);
   if (m_table_ref == nullptr) return true;
   if (pc->select->add_joined_table(m_table_ref)) return true;
 
@@ -2157,6 +2157,12 @@ bool PT_intersect::do_contextualize(Parse_context *pc [[maybe_unused]]) {
       m_is_distinct ? SC_INTERSECT_DISTINCT : SC_INTERSECT_ALL);
 }
 
+bool PT_vector_index_type::do_contextualize(Table_ddl_parse_context *pc) {
+  pc->key_create_info->vector_index_type = m_type_name;
+  pc->key_create_info->construction_params = &m_construction_params;
+  return false;
+}
+
 static bool setup_index(keytype key_type, const LEX_STRING name,
                         PT_base_index_option *type,
                         List<PT_key_part_specification> *columns,
@@ -2202,6 +2208,15 @@ static bool setup_index(keytype key_type, const LEX_STRING name,
       new (pc->mem_root) Key_spec(pc->mem_root, key_type, to_lex_cstring(name),
                                   pc->key_create_info, false, true, cols);
   if (key == nullptr || pc->alter_info->key_list.push_back(key)) return true;
+
+  if (pc->key_create_info->construction_params != nullptr) {
+    for (const auto *param : *pc->key_create_info->construction_params) {
+      if (param == nullptr) return true;
+      IndexConstructionParam p{to_lex_cstring(param->key()),
+                               to_lex_cstring(param->value())};
+      if (key->construction_params.push_back(p)) return true;
+    }
+  }
 
   return false;
 }
@@ -2777,8 +2792,7 @@ bool PT_column_def::do_contextualize(Table_ddl_parse_context *pc) {
       field_def->has_explicit_collation, field_def->uint_geom_type,
       &field_def->m_zip_dict, field_def->gcol_info, field_def->default_val_info,
       field_def->masking_policy, opt_place, field_def->m_srid,
-      field_def->check_const_spec_list,
-      field_hidden_type);
+      field_def->check_const_spec_list, field_hidden_type);
 }
 
 Sql_cmd *PT_create_table_stmt::make_cmd(THD *thd) {
@@ -3653,9 +3667,10 @@ bool PT_alter_table_change_column::do_contextualize(
       m_field_def->on_update_value, &m_field_def->comment, m_old_name.str,
       m_field_def->interval_list, m_field_def->charset,
       m_field_def->has_explicit_collation, m_field_def->uint_geom_type,
-      &m_field_def->m_zip_dict, m_field_def->gcol_info, m_field_def->default_val_info,
-      m_field_def->masking_policy, m_opt_place, m_field_def->m_srid,
-      m_field_def->check_const_spec_list, field_hidden_type);
+      &m_field_def->m_zip_dict, m_field_def->gcol_info,
+      m_field_def->default_val_info, m_field_def->masking_policy, m_opt_place,
+      m_field_def->m_srid, m_field_def->check_const_spec_list,
+      field_hidden_type);
 }
 
 bool PT_alter_table_rename::do_contextualize(Table_ddl_parse_context *pc) {

@@ -2161,6 +2161,10 @@ using fix_default_table_encryption_t = bool (*)(ulong value, bool is_starting);
 */
 typedef bool (*redo_log_set_state_t)(THD *thd, bool enable);
 
+struct HA_CREATE_INFO;
+using validate_engine_attributes_t = bool (*)(THD *thd, const char *db_name,
+                                              HA_CREATE_INFO *create_info,
+                                              const Alter_info *alter_info);
 /**
   @brief
   Retrieve ha_statistics from SE.
@@ -3034,6 +3038,7 @@ struct handlerton {
   fix_tablespaces_empty_uuid_t fix_tablespaces_empty_uuid;
   fix_default_table_encryption_t fix_default_table_encryption;
   redo_log_set_state_t redo_log_set_state;
+  validate_engine_attributes_t validate_engine_attributes{nullptr};
 
   get_table_statistics_t get_table_statistics;
   get_column_statistics_t get_column_statistics;

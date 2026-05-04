@@ -113,7 +113,7 @@ constexpr uint32_t DICT_SDI = 256;
 constexpr uint32_t DICT_MULTI_VALUE = 512;
 
 /** number of bits used for SYS_INDEXES.TYPE */
-constexpr uint32_t DICT_IT_BITS = 11;
+constexpr uint32_t DICT_IT_BITS = 10;
 /** @} */
 
 #if 0                         /* not implemented, retained for history */

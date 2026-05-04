@@ -11118,6 +11118,18 @@ ER_VECTOR_INDEX_NEEDS_PK
 ER_ONLY_SINGLE_VECTOR_INDEX_ALLOWED
   eng "A table can have at most one vector index."
 
+ER_INDEX_TYPE_NOT_SUPPORTED_FOR_VECTOR_INDEX
+  eng "The index type %.20s is not supported for vector indexes."
+
+ER_NO_INDEX_TYPE
+  eng "Type is required for vector indexes."
+
+ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER
+  eng "Illegal index construction parameter: %.20s."
+
+ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER_VALUE
+  eng "Illegal index construction parameter value: %.20s."
+
 start-error-number 7100
 
 #

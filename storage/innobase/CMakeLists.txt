@@ -160,7 +160,9 @@ SET(INNOBASE_SOURCES
   handler/ha0check.cc
   handler/i_s.cc
   handler/p_s.cc
+  handler/vec0vec.cc
   handler/xtradb_i_s.cc
+  vec/vec0index.cc
   ibuf/ibuf0ibuf.cc
   lob/lob0bulk.cc
   lob/lob0first.cc

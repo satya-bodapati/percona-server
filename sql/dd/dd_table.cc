@@ -1141,6 +1141,18 @@ static void fill_dd_indexes_from_keyinfo(
     if (key->parser_name.str)
       idx_options->set("parser_name", key->parser_name.str);
 
+    if (key->vector_index_type.length > 0) {
+      idx_options->set("vector_index_type",
+                       dd::String_type(key->vector_index_type.str,
+                                       key->vector_index_type.length));
+    }
+
+    if (key->vector_construction_params.length > 0) {
+      idx_options->set("vector_construction_params",
+                       dd::String_type(key->vector_construction_params.str,
+                                       key->vector_construction_params.length));
+    }
+
     /*
       If we have no primary key, then we pick the first candidate primary
       key and promote it. When we promote, the field's of key_part needs to
