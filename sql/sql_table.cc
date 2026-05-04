@@ -7680,6 +7680,13 @@ static bool prepare_key(
     return true;
   if (key_info->comment.length > 0) key_info->flags |= HA_USES_COMMENT;
 
+  if (key->type == KEYTYPE_VECTOR) {
+    key_info->vector_index_type.length =
+        key->key_create_info.vector_index_type.length;
+    key_info->vector_index_type.str =
+        key->key_create_info.vector_index_type.str;
+  }
+
   key_info->engine_attribute = key->key_create_info.m_engine_attribute;
   if (key_info->engine_attribute.length > 0)
     key_info->flags |= HA_INDEX_USES_ENGINE_ATTRIBUTE;
@@ -7738,6 +7745,21 @@ static bool prepare_key(
   // Verify that no bits set before switch have been cleared.
   assert((key_info->flags & flags_before_switch) == flags_before_switch);
   if (key->generated) key_info->flags |= HA_GENERATED_KEY;
+
+  // Serialize vector index construction params (WITH clause).
+  if (!key->construction_params.empty()) {
+    String buf;
+    for (size_t i = 0; i < key->construction_params.size(); i++) {
+      if (i > 0) buf.append(',');
+      const auto &p = key->construction_params[i];
+      buf.append(p.key.str, p.key.length);
+      buf.append('=');
+      buf.append(p.value.str, p.value.length);
+    }
+    key_info->vector_construction_params.str =
+        strmake_root(thd->mem_root, buf.ptr(), buf.length());
+    key_info->vector_construction_params.length = buf.length();
+  }
 
   key_info->algorithm = key->key_create_info.algorithm;
   key_info->user_defined_key_parts = key->columns.size();
@@ -16345,7 +16367,8 @@ bool prepare_fields_and_keys(THD *thd, const dd::Table *src_table, TABLE *table,
         key_create_info.parser_name = *plugin_name(key_info->parser);
       if (key_info->flags & HA_USES_COMMENT)
         key_create_info.comment = key_info->comment;
-
+      if (key_info->vector_index_type.str != nullptr)
+        key_create_info.vector_index_type = key_info->vector_index_type;
       if (key_info->engine_attribute.str != nullptr)
         key_create_info.m_engine_attribute = key_info->engine_attribute;
 
@@ -20653,6 +20676,11 @@ static bool check_engine(THD *thd, const char *db_name, const char *table_name,
       my_error(ER_CHECK_NOT_IMPLEMENTED, MYF(0), "ENCRYPTION");
       return true;
     }
+  }
+
+  if (auto vea = (*new_engine)->validate_engine_attributes;
+      vea != nullptr && vea(thd, db_name, create_info, alter_info)) {
+    return true;
   }
 
   return false;

@@ -2147,6 +2147,12 @@ CHARSET_INFO *warn_on_deprecated_user_defined_collation(
 
 %type <index_options> opt_index_options index_options  opt_fulltext_index_options
           fulltext_index_options opt_spatial_index_options spatial_index_options
+          opt_vector_index_options vector_index_options
+
+%type <index_construction_parameter> index_construction_parameter
+
+%type <index_construction_parameters> opt_index_construction_clause
+          index_construction_clause index_construction_parameter_list
 
 %type <opt_index_lock_and_algorithm> opt_index_lock_and_algorithm
 
@@ -2154,6 +2160,7 @@ CHARSET_INFO *warn_on_deprecated_user_defined_collation(
           spatial_index_option
           index_type_clause
           opt_index_type_clause
+          vector_index_option
 
 %type <alter_table_algorithm> alter_algorithm_option_value
         alter_algorithm_option
@@ -3615,7 +3622,54 @@ create_index_stmt:
                                              $11.algo.get_or_default(),
                                              $11.lock.get_or_default());
           }
+        | CREATE VECTOR_SYM INDEX_SYM ident ON_SYM table_ident
+          '(' key_list_with_expression ')' opt_index_lock_and_algorithm opt_vector_index_options
+          {
+            $$= NEW_PTN PT_create_index_stmt(@$, YYMEM_ROOT, KEYTYPE_VECTOR, $4,
+                                             nullptr, $6, $8, $11,
+                                             $10.algo.get_or_default(),
+                                             $10.lock.get_or_default());
+          }
         ;
+
+opt_index_construction_clause:
+          %empty { $$.init(YYMEM_ROOT); }
+        | index_construction_clause
+        ;
+
+index_construction_clause:
+          WITH '(' index_construction_parameter_list ')'
+          {
+            $$= $3;
+          }
+        ;
+
+index_construction_parameter_list:
+          index_construction_parameter
+          {
+            $$.init(YYMEM_ROOT);
+            if ($$.push_back($1))
+              MYSQL_YYABORT; // OOM
+          }
+        | index_construction_parameter_list ',' index_construction_parameter
+          {
+            $$= $1;
+            if ($$.push_back($3))
+              MYSQL_YYABORT; // OOM
+          }
+        ;
+
+index_construction_parameter:
+          IDENT_QUOTED EQ IDENT_QUOTED
+          {
+            $$= NEW_PTN PT_index_construction_parameter(@$, $1, $3);
+          }
+        | IDENT_QUOTED EQ NUM
+          {
+            $$= NEW_PTN PT_index_construction_parameter(@$, $1, $3);
+          }
+        ;
+
 /*
   Only a limited subset of <expr> are allowed in
   CREATE COMPRESSION_DICTIONARY.
@@ -7110,6 +7164,12 @@ table_constraint_def:
           {
             $$= NEW_PTN PT_inline_index_definition(@$, KEYTYPE_SPATIAL, $3, nullptr, $5, $7);
           }
+        | VECTOR_SYM opt_key_or_index opt_ident '(' key_list_with_expression ')'
+          opt_vector_index_options
+          {
+            $$= NEW_PTN PT_inline_index_definition(@$, KEYTYPE_VECTOR, $3,
+                                                   nullptr, $5, $7);
+          }
         | opt_constraint_name constraint_key_type opt_index_name_and_type
           '(' key_list_with_expression ')' opt_index_options
           {
@@ -8085,6 +8145,31 @@ spatial_index_option:
           common_index_option
         ;
 
+opt_vector_index_options:
+          %empty { $$.init(YYMEM_ROOT); }
+        | vector_index_options
+        ;
+
+vector_index_options:
+          vector_index_option
+          {
+            $$.init(YYMEM_ROOT);
+            if ($$.push_back($1))
+              MYSQL_YYABORT; // OOM
+          }
+        | vector_index_options vector_index_option
+          {
+            if ($1.push_back($2))
+              MYSQL_YYABORT; // OOM
+            $$= $1;
+          }
+        ;
+
+vector_index_option:
+          common_index_option
+        | index_type_clause { $$= $1; }
+        ;
+
 opt_index_options:
           %empty { $$.init(YYMEM_ROOT); }
         | index_options
@@ -8162,6 +8247,10 @@ opt_index_type_clause:
 index_type_clause:
           USING index_type    { $$= NEW_PTN PT_index_type(@$, $2); }
         | TYPE_SYM index_type { $$= NEW_PTN PT_index_type(@$, $2); }
+        | TYPE_SYM IDENT_sys opt_index_construction_clause
+          {
+             $$= NEW_PTN PT_vector_index_type(@$, to_lex_cstring($2), $3);
+          }
         ;
 
 visibility:
@@ -8173,7 +8262,7 @@ index_type:
           BTREE_SYM { $$= HA_KEY_ALG_BTREE; }
         | RTREE_SYM { $$= HA_KEY_ALG_RTREE; }
         | HASH_SYM  { $$= HA_KEY_ALG_HASH; }
-        ;
+       ;
 
 key_list:
           key_list ',' key_part
@@ -11038,11 +11127,11 @@ opt_jdv_table_tags:
 jdv_table_tag:
           INSERT_SYM           { $$ = jdv::DVT_INSERT; }
         | UPDATE_SYM           { $$ = jdv::DVT_UPDATE; }
-        | DELETE_SYM           { $$ = jdv::DVT_DELETE; }      
+        | DELETE_SYM           { $$ = jdv::DVT_DELETE; }
         | NO_SYM INSERT_SYM    { $$ = jdv::DVT_NOINSERT; }
         | NO_SYM UPDATE_SYM    { $$ = jdv::DVT_NOUPDATE; }
         | NO_SYM DELETE_SYM    { $$ = jdv::DVT_NODELETE; }
-        ;   
+        ;
 
 jdv_table_tags:
         jdv_table_tag { $$= $1; }
@@ -11057,7 +11146,7 @@ jdv_table_tags:
               ($3 == jdv::DVT_NOUPDATE && $$ & jdv::DVT_UPDATE) ||
               ($3 == jdv::DVT_DELETE && $$ & jdv::DVT_NODELETE) ||
               ($3 == jdv::DVT_NODELETE && $$ & jdv::DVT_DELETE)
-            )) 
+            ))
             {
                 my_error(ER_JDV_INVALID_DEFINITION_WRONG_ANNOTATIONS, MYF(0));
                 MYSQL_YYABORT;
@@ -16538,7 +16627,6 @@ ident_keywords_unambiguous:
         | XML_SYM
         | YEAR_SYM
         | ZONE_SYM
-        | VECTOR_SYM
         ;
 
 /*

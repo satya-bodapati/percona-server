@@ -3262,6 +3262,34 @@ static void store_key_options(THD *thd, String *packet, TABLE *table,
       end = longlong10_to_str(key_info->block_size, buff, 10);
       packet->append(buff, (uint)(end - buff));
     }
+
+    if (key_info->vector_index_type.length > 0) {
+      packet->append(STRING_WITH_LEN(" TYPE "));
+      append_identifier(thd, packet, key_info->vector_index_type.str,
+                        key_info->vector_index_type.length);
+    }
+
+    if (key_info->vector_construction_params.length > 0) {
+      packet->append(STRING_WITH_LEN(" WITH ("));
+      const char *p = key_info->vector_construction_params.str;
+      const char *end_p = p + key_info->vector_construction_params.length;
+      bool first = true;
+      while (p < end_p) {
+        if (!first) packet->append(STRING_WITH_LEN(", "));
+        first = false;
+        const auto *eq = static_cast<const char *>(memchr(p, '=', end_p - p));
+        if (eq == nullptr) break;
+        const auto *comma =
+            static_cast<const char *>(memchr(eq + 1, ',', end_p - eq - 1));
+        const char *val_end = (comma != nullptr) ? comma : end_p;
+        append_identifier(thd, packet, p, eq - p);
+        packet->append('=');
+        packet->append(eq + 1, val_end - eq - 1);
+        p = (val_end < end_p) ? val_end + 1 : end_p;
+      }
+      packet->append(')');
+    }
+
     assert(((key_info->flags & HA_USES_COMMENT) != 0) ==
            (key_info->comment.length > 0));
     if (key_info->flags & HA_USES_COMMENT) {
