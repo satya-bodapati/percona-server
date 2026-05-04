@@ -11118,6 +11118,18 @@ ER_INDEX_MUST_HAVE_COMPATIBLE_COLUMN
 ER_TABLE_CANT_HANDLE_INDEX
   eng "The used table type doesn't support %.20s indexes"
 
+ER_INDEX_TYPE_NOT_SUPPORTED
+  eng "The index type %.20s is not supported for %.20s indexes."
+
+ER_NO_INDEX_TYPE
+  eng "Type is required for vector indexes."
+
+ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER
+  eng "Illegal index construction parameter: %.20s."
+
+ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER_VALUE
+  eng "Illegal index construction parameter value: %.20s."
+
 start-error-number 7100
 
 #

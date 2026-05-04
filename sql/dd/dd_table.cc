@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <memory>  // unique_ptr
 #include <unordered_map>
+#include <utility>
 
 #include "lex_string.h"
 #include "m_string.h"
@@ -1142,6 +1143,12 @@ static void fill_dd_indexes_from_keyinfo(
 
     if (key->parser_name.str)
       idx_options->set("parser_name", key->parser_name.str);
+
+    if (key->vector_index_type.length > 0) {
+      idx_options->set("vector_index_type",
+                       dd::String_type(key->vector_index_type.str,
+                                       key->vector_index_type.length));
+    }
 
     if (key->vector_construction_params != nullptr &&
         !key->vector_construction_params->empty()) {

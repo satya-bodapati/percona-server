@@ -65,8 +65,10 @@ class Sdi_wcontext;
 class Table;
 
 static const std::set<String_type> default_valid_option_keys = {
-    "block_size", "flags", "parser_name",
-    "gipk" /* generated implicit primary key */};
+    "block_size",        "flags",
+    "parser_name",       "gipk", /* generated implicit primary key */
+    "vector_index_type", "vector_construction_params",
+};
 
 ///////////////////////////////////////////////////////////////////////////
 // Index_impl implementation.

@@ -1556,6 +1556,25 @@ static bool fill_index_from_dd(THD *thd, TABLE_SHARE *share,
       &share->mem_root, idx_obj->secondary_engine_attribute());
   if (keyinfo->secondary_engine_attribute.length > 0)
     keyinfo->flags |= HA_INDEX_USES_SECONDARY_ENGINE_ATTRIBUTE;
+
+  if (idx_options.exists("vector_index_type")) {
+    if (idx_options.get("vector_index_type", &keyinfo->vector_index_type,
+                        &share->mem_root))
+      assert(false);
+  }
+
+  if (idx_options.exists("vector_construction_params")) {
+    dd::String_type s;
+    if (idx_options.get("vector_construction_params", &s)) assert(false);
+    if (!s.empty()) {
+      auto *params = new (&share->mem_root) Construction_params;
+      params->init(&share->mem_root);
+      if (fill_vector_construction_params_from_dd(&share->mem_root, s, params))
+        return true;
+      keyinfo->vector_construction_params = params;
+    }
+  }
+
   return (false);
 }
 
