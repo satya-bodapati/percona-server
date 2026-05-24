@@ -759,6 +759,20 @@ extern unsigned long long srv_stats_persistent_sample_pages;
 extern bool srv_stats_auto_recalc;
 extern bool srv_stats_include_delete_marked;
 
+/** PS-11175 testing-only knob: when non-zero, a freshly-created page-archive
+group is started with its block-counter seeded to this value so a small
+workload can drive the writer past the 2-byte boundary at 65 535 and exercise
+the truncating mach_write_to_2 path in Arch_Block::add_reset. Default 0 means
+no seeding (production behaviour). Settable from MTR via the corresponding
+SYSVAR innodb_arch_page_initial_block_num. */
+extern unsigned long long srv_arch_page_initial_block_num;
+
+/** PS-11175 testing-only knob: value added to reset-point block_num before
+persisting it into reset metadata. Non-zero values can force natural 2-byte
+truncation during mach_write_to_2 in Arch_Block::add_reset without any direct
+on-disk file edits. Default 0 means no bias. */
+extern unsigned long long srv_arch_page_reset_block_num_bias;
+
 extern ulong srv_checksum_algorithm;
 
 extern double srv_max_buf_pool_modified_pct;

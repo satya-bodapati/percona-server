@@ -1901,7 +1901,17 @@ int Arch_Page_Sys::get_pages(MYSQL_THD thd, Page_Track_Callback cbk_func,
       ut_ad(bytes_left <= ARCH_PAGE_BLK_SIZE);
       ut_ad(block_stop_lsn != LSN_MAX);
 
+      const uint bytes_before_sub = bytes_left;
       bytes_left -= cur_pos.m_offset;
+
+      if (UNIV_UNLIKELY(bytes_before_sub < cur_pos.m_offset)) {
+        ib::error(ER_IB_MSG_26)
+            << "PS-11175 underflow candidate: block=" << cur_pos.m_block_num
+            << " data_len=" << data_len << " header_len="
+            << ARCH_PAGE_BLK_HEADER_LENGTH << " bytes_before="
+            << bytes_before_sub << " offset=" << cur_pos.m_offset
+            << " bytes_after=" << bytes_left;
+      }
 
       if (data_len == 0 || cur_pos.m_block_num == last_pos.m_block_num ||
           block_stop_lsn > stop_id) {
@@ -2451,6 +2461,24 @@ int Arch_Page_Sys::start(Arch_Group **group, lsn_t *start_lsn,
     m_request_blk_num_with_lsn = std::numeric_limits<uint64_t>::max();
     m_flush_blk_num_with_lsn = std::numeric_limits<uint64_t>::max();
 
+    /* PS-11175 test hook: seed the per-group block counters just below the
+    2-byte boundary so a small workload can drive the writer past 65 535 and
+    exercise the truncating mach_write_to_2 path in Arch_Block::add_reset. */
+    DBUG_EXECUTE_IF("page_archiver_seed_blocknum_near_overflow",
+                    m_write_pos.m_block_num = 65530;
+                    m_last_pos.m_block_num = 65530;
+                    m_flush_pos.m_block_num = 65530;);
+
+    /* PS-11175 release-build seed knob: same intent as the DBUG_EXECUTE_IF
+    above, but settable from non-debug builds via the InnoDB system variable
+    innodb_arch_page_initial_block_num. Default 0 means "no seed" so this is
+    a no-op in normal operation. */
+    if (srv_arch_page_initial_block_num != 0) {
+      m_write_pos.m_block_num = srv_arch_page_initial_block_num;
+      m_last_pos.m_block_num = srv_arch_page_initial_block_num;
+      m_flush_pos.m_block_num = srv_arch_page_initial_block_num;
+    }
+
     m_last_lsn = log_sys_lsn;
     m_last_reset_file_index = 0;
 
@@ -2471,8 +2499,20 @@ int Arch_Page_Sys::start(Arch_Group **group, lsn_t *start_lsn,
         static_cast<uint64_t>(ARCH_PAGE_BLK_SIZE) * ARCH_PAGE_FILE_CAPACITY;
 
     /* Initialize archiver file context. */
-    auto db_err = m_current_group->init_file_ctx(
-        ARCH_DIR, ARCH_PAGE_DIR, ARCH_PAGE_FILE, 0, new_file_size, 0);
+    /* When block counter seeding is enabled for PS-11175 tests, align the
+    physical archive file index with the seeded logical block position.
+    Otherwise recovery can map the seeded block_num to ib_page_N while the
+    writer has only created ib_page_0, causing startup-time invalid reads. */
+    uint initial_num_files = 0;
+    if (srv_arch_page_initial_block_num != 0) {
+      initial_num_files =
+          Arch_Block::get_file_index(m_write_pos.m_block_num, ARCH_DATA_BLOCK);
+    }
+
+    auto db_err = m_current_group->init_file_ctx(ARCH_DIR, ARCH_PAGE_DIR,
+                                                 ARCH_PAGE_FILE,
+                                                 initial_num_files, new_file_size,
+                                                 0);
 
     if (db_err != DB_SUCCESS) {
       arch_oper_mutex_exit();
@@ -2984,7 +3024,12 @@ bool Arch_Page_Sys::save_reset_point(bool is_durable) {
 
   m_last_reset_file_index = current_file_index;
 
-  reset_block->add_reset(m_last_lsn, m_last_pos);
+  Arch_Page_Pos persisted_reset_pos = m_last_pos;
+  if (srv_arch_page_reset_block_num_bias != 0) {
+    persisted_reset_pos.m_block_num += srv_arch_page_reset_block_num_bias;
+  }
+
+  reset_block->add_reset(m_last_lsn, persisted_reset_pos);
 
   m_current_group->save_reset_point_in_mem(m_last_lsn, m_last_pos);
 

@@ -23231,6 +23231,23 @@ static MYSQL_SYSVAR_ULONGLONG(
     " statistics (by ANALYZE, default 20)",
     nullptr, nullptr, 20, 1, ~0ULL, 0);
 
+static MYSQL_SYSVAR_ULONGLONG(
+    arch_page_initial_block_num, srv_arch_page_initial_block_num,
+    PLUGIN_VAR_OPCMDARG,
+    "PS-11175 testing-only knob: when non-zero, the next freshly-created "
+    "page-archive group is started with its block-counter seeded to this "
+    "value. Default 0 means no seeding. Used by mtr tests to drive the "
+    "writer past the 2-byte boundary at 65535 with a small workload.",
+    nullptr, nullptr, 0, 0, ~0ULL, 0);
+
+static MYSQL_SYSVAR_ULONGLONG(
+    arch_page_reset_block_num_bias, srv_arch_page_reset_block_num_bias,
+    PLUGIN_VAR_OPCMDARG,
+    "PS-11175 testing-only knob: value added to reset-point block_num before "
+    "it is persisted into reset metadata. Used to drive natural 2-byte "
+    "truncation in Arch_Block::add_reset without direct archive file edits.",
+    nullptr, nullptr, 0, 0, ~0ULL, 0);
+
 static MYSQL_SYSVAR_BOOL(
     adaptive_hash_index, srv_btr_search_enabled, PLUGIN_VAR_OPCMDARG,
     "Enable InnoDB adaptive hash index (enabled by default). "
@@ -24455,6 +24472,8 @@ static SYS_VAR *innobase_system_variables[] = {
     MYSQL_SYSVAR(stats_transient_sample_pages),
     MYSQL_SYSVAR(stats_persistent),
     MYSQL_SYSVAR(stats_persistent_sample_pages),
+    MYSQL_SYSVAR(arch_page_initial_block_num),
+    MYSQL_SYSVAR(arch_page_reset_block_num_bias),
     MYSQL_SYSVAR(stats_auto_recalc),
     MYSQL_SYSVAR(adaptive_hash_index),
     MYSQL_SYSVAR(adaptive_hash_index_parts),
