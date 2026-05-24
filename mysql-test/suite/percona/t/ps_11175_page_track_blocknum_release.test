@@ -1,0 +1,135 @@
+###############################################################################
+#
+# Bug PS-11175 (release-build runtime variant):
+#   Force a malformed reset-point offset so bytes_left underflows in
+#   Arch_Page_Sys::get_pages(), then verify SELECT crashes with invalid reads.
+#
+# Repro strategy:
+#  1) Seed the archive block counter at file-boundary 2043 so reset metadata
+#     lands in ib_page_1 (small dataset, no file_32 dependency).
+#  2) Save a reset point and verify pre-restart SELECT works.
+#  3) Corrupt reset offset in ib_page_1 to 20000 (greater than data_len+header).
+#  4) Restart succeeds.
+#  5) Post-restart SELECT underflows bytes_left and crashes on invalid read.
+#
+# This test intentionally targets release / RelWithDebInfo (have_nodebug).
+###############################################################################
+
+--source include/have_nodebug.inc
+
+call mtr.add_suppression("PS-11175 underflow candidate:");
+call mtr.add_suppression("16777216 bytes should have been read. Only .* bytes read. Retrying for the remaining bytes.");
+call mtr.add_suppression("Retry attempts for reading partial data failed.");
+call mtr.add_suppression("Tried to read 16777216 bytes at offset .*#ib_archive/.*/ib_page_[0-9]+");
+call mtr.add_suppression("Operating system error number 22 in a file operation.");
+call mtr.add_suppression("Error number 22 means 'Invalid argument'");
+call mtr.add_suppression("read' returned OS error 122. Cannot continue operation");
+call mtr.add_suppression("\\[ERROR\\] .*MY-012981.* Cannot continue operation.");
+call mtr.add_suppression("Operating system error number 39 in a file operation.");
+call mtr.add_suppression("Error number 39 means 'Directory not empty'");
+call mtr.add_suppression("File #ib_archive/page_group_.+: 'rmdir' returned OS error 139.");
+call mtr.add_suppression("Page archiver system's recovery failed.");
+
+INSTALL COMPONENT 'file://component_mysqlbackup';
+
+SET GLOBAL mysqlbackup.backupid = '1';
+SET GLOBAL innodb_arch_page_initial_block_num = 2043;
+
+CREATE TABLE t1 (a INT PRIMARY KEY, b INT) ENGINE=InnoDB STATS_PERSISTENT=0;
+CREATE TABLE t_big (id INT PRIMARY KEY AUTO_INCREMENT, pad LONGBLOB)
+  ENGINE=InnoDB STATS_PERSISTENT=0;
+
+INSERT INTO t1 VALUES (1,1),(2,2),(3,3),(4,4),(5,5);
+
+--let $start_lsn = `SELECT mysqlbackup_page_track_set(1)`
+
+# Small workload is enough once we seed at the ib_page_1 boundary.
+--disable_query_log
+let $i = 0;
+while ($i < 4000) {
+  INSERT INTO t_big (pad) VALUES (REPEAT('x', 14000));
+  inc $i;
+}
+--enable_query_log
+
+--disable_query_log
+--disable_result_log
+--let $stop_lsn = `SELECT mysqlbackup_page_track_set(1)`
+--enable_result_log
+--enable_query_log
+
+--echo # ---- Pre-restart SELECT should be fine (in-memory reset state) ----
+--disable_query_log
+--disable_result_log
+--eval SELECT mysqlbackup_page_track_get_changed_pages($start_lsn, $stop_lsn)
+--enable_result_log
+--enable_query_log
+
+let MYSQLD_DATADIR = `SELECT @@datadir`;
+
+--source include/shutdown_mysqld.inc
+
+--echo # ---- Corrupt reset offset so bytes_left underflows after restart ----
+--perl
+use strict;
+my $datadir = $ENV{'MYSQLD_DATADIR'} or die "MYSQLD_DATADIR not set";
+
+my @groups = glob("$datadir/#ib_archive/page_group_*");
+die "no page archive group\n" unless @groups;
+
+# Seed 2043 maps to file index 1 (ARCH_PAGE_FILE_DATA_CAPACITY ~= 2043).
+my $page_file = "$groups[0]/ib_page_1";
+my $dblwr_file = "$datadir/#ib_archive/ib_dblwr/dblwr_0";
+die "missing $page_file\n" unless -f $page_file;
+die "missing $dblwr_file\n" unless -f $dblwr_file;
+
+# Reset block layout: [0..31] header, [32..39] reset_lsn, [40..41] block_num,
+# [42..43] offset. Force offset to 20000 so bytes_left (<=16384) underflows.
+open(my $fh, "+<:raw", $page_file) or die "open page file: $!";
+seek($fh, 42, 0) or die "seek page file: $!";
+print $fh pack("n", 20000) or die "write page file: $!";
+close($fh) or die "close page file: $!";
+
+# Zero block 0 in archive dblwr so recovery does not replay original reset slot.
+open($fh, "+<:raw", $dblwr_file) or die "open dblwr: $!";
+seek($fh, 0, 0) or die "seek dblwr: $!";
+print $fh "\x00" x 16384 or die "write dblwr: $!";
+close($fh) or die "close dblwr: $!";
+EOF
+
+--echo # ---- Restart should succeed in release build ----
+--let $restart_parameters=
+--source include/start_mysqld.inc
+
+SET GLOBAL mysqlbackup.backupid = '1';
+
+--echo # ---- Post-restart SELECT should crash with invalid reads ----
+--source include/expect_crash.inc
+--disable_query_log
+--error 2013,2006,CR_SERVER_LOST,CR_SERVER_GONE_ERROR
+--eval SELECT mysqlbackup_page_track_get_changed_pages($start_lsn, $stop_lsn)
+--enable_query_log
+
+--echo # ---- Assert invalid-read signature in error log ----
+let SEARCH_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err;
+let SEARCH_PATTERN = Tried to read [0-9]+ bytes at offset .*#ib_archive/.*/ib_page_[0-9]+;
+--source include/search_pattern.inc
+
+--echo # ---- Assert underflow telemetry (bytes_left wrapped near 4G) ----
+let SEARCH_PATTERN = PS-11175 underflow candidate: .*bytes_after=42949;
+--source include/search_pattern.inc
+
+--echo # ---- Restart for cleanup ----
+--let $restart_parameters=
+--source include/start_mysqld.inc
+SET GLOBAL mysqlbackup.backupid = '3';
+SET GLOBAL innodb_arch_page_initial_block_num = 0;
+--disable_query_log
+--disable_result_log
+--eval SELECT mysqlbackup_page_track_set(0)
+--enable_result_log
+--enable_query_log
+
+DROP TABLE t_big;
+DROP TABLE t1;
+UNINSTALL COMPONENT 'file://component_mysqlbackup';
