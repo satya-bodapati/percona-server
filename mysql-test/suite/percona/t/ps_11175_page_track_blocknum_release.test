@@ -11,6 +11,7 @@
 #  3) Corrupt reset offset in ib_page_1 to 20000 (greater than data_len+header).
 #  4) Restart succeeds.
 #  5) Post-restart SELECT underflows bytes_left and crashes on invalid read.
+#  6) A subsequent restart attempt fails during archive recovery (unrestartable).
 #
 # This test intentionally targets release / RelWithDebInfo (have_nodebug).
 ###############################################################################
@@ -119,17 +120,11 @@ let SEARCH_PATTERN = Tried to read [0-9]+ bytes at offset .*#ib_archive/.*/ib_pa
 let SEARCH_PATTERN = PS-11175 underflow candidate: .*bytes_after=42949;
 --source include/search_pattern.inc
 
---echo # ---- Restart for cleanup ----
+--echo # ---- Next restart should fail (server unrestartable) ----
 --let $restart_parameters=
---source include/start_mysqld.inc
-SET GLOBAL mysqlbackup.backupid = '3';
-SET GLOBAL innodb_arch_page_initial_block_num = 0;
---disable_query_log
---disable_result_log
---eval SELECT mysqlbackup_page_track_set(0)
---enable_result_log
---enable_query_log
+--source include/start_mysqld_expecting_crash.inc
 
-DROP TABLE t_big;
-DROP TABLE t1;
-UNINSTALL COMPONENT 'file://component_mysqlbackup';
+--echo # ---- Assert startup recovery failure signature ----
+let SEARCH_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err;
+let SEARCH_PATTERN = Page archiver system.s recovery failed.;
+--source include/search_pattern.inc
