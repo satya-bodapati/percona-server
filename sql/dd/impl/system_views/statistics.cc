@@ -25,6 +25,7 @@
 
 #include <string>
 
+#include "sql/dd_table_share.h"  // dd::PERCONA_VECTOR_INDEX_TYPE_KEY
 #include "sql/stateless_allocator.h"
 
 namespace dd::system_views {
@@ -69,10 +70,15 @@ Statistics_base::Statistics_base() {
   m_target_def.add_field(FIELD_PACKED, "PACKED", "NULL");
   m_target_def.add_field(FIELD_NULLABLE, "NULLABLE",
                          "IF (col.is_nullable = 1, 'YES','')");
-  m_target_def.add_field(FIELD_INDEX_TYPE, "INDEX_TYPE",
-                         "CASE WHEN idx.type = 'SPATIAL' THEN 'SPATIAL' "
-                         "WHEN idx.algorithm = 'SE_PRIVATE' THEN '' "
-                         "ELSE idx.algorithm END ");
+  m_target_def.add_field(
+      FIELD_INDEX_TYPE, "INDEX_TYPE",
+      dd::String_type("CASE WHEN idx.type = 'SPATIAL' THEN 'SPATIAL' "
+                      "WHEN idx.algorithm = 'SE_PRIVATE' THEN '' "
+                      "WHEN idx.algorithm = 'SE_SPECIFIC' AND "
+                      "GET_DD_PROPERTY_KEY_VALUE(idx.options, '") +
+          dd::PERCONA_VECTOR_INDEX_TYPE_KEY +
+          "') = 'hnsw' THEN 'VECTOR' "
+          "ELSE idx.algorithm END ");
   m_target_def.add_field(
       FIELD_COMMENT, "COMMENT",
       "IF (idx.type = 'PRIMARY' OR idx.type = 'UNIQUE', "
@@ -114,6 +120,8 @@ Statistics::Statistics() {
       "tbl.hidden != 'Visible' OR idx.hidden OR icu.hidden,"
       "COALESCE(stat.cardinality, CAST(-1 AS UNSIGNED)),"
       "COALESCE(CAST(stat.cached_time as UNSIGNED), 0))");
+
+  m_target_def.add_field(FIELD_INDEX_OPTIONS, "INDEX_OPTIONS", "idx.options");
 
   m_target_def.add_from(
       "LEFT JOIN mysql.index_stats stat"
