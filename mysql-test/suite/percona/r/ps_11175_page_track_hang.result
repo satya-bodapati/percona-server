@@ -1,0 +1,24 @@
+INSTALL COMPONENT "file://component_mysqlbackup";
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=InnoDB;
+# Start page tracking
+# Set max entries to 1 to force frequent block flushes
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+# Insert some rows to trigger block flushes
+# If the bug is present, the server will hang here and the test will timeout.
+CREATE PROCEDURE insert_rows(num_rows INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+START TRANSACTION;
+WHILE i < num_rows DO
+INSERT INTO t1 (a) VALUES (i + 100);
+SET i = i + 1;
+END WHILE;
+COMMIT;
+END//
+CALL insert_rows(10000);
+# Reset max entries
+SET GLOBAL innodb_arch_page_test_max_entries = 0;
+# Cleanup
+DROP TABLE t1;
+DROP PROCEDURE insert_rows;
+UNINSTALL COMPONENT "file://component_mysqlbackup";

@@ -22988,6 +22988,11 @@ static MYSQL_SYSVAR_BOOL(
     "Whether to compute and require checksums for InnoDB redo log blocks",
     nullptr, innodb_log_checksums_update, true);
 
+static MYSQL_SYSVAR_UINT(arch_page_test_max_entries, srv_arch_page_test_max_entries,
+                         PLUGIN_VAR_RQCMDARG,
+                         "Max entries per page tracking block for testing",
+                         nullptr, nullptr, 0, 0, 2044, 0);
+
 static MYSQL_SYSVAR_STR(data_home_dir, innobase_data_home_dir,
                         PLUGIN_VAR_READONLY | PLUGIN_VAR_NOPERSIST,
                         "The common part for InnoDB table spaces.", nullptr,
@@ -23230,23 +23235,6 @@ static MYSQL_SYSVAR_ULONGLONG(
     "The number of leaf index pages to sample when calculating persistent"
     " statistics (by ANALYZE, default 20)",
     nullptr, nullptr, 20, 1, ~0ULL, 0);
-
-static MYSQL_SYSVAR_ULONGLONG(
-    arch_page_initial_block_num, srv_arch_page_initial_block_num,
-    PLUGIN_VAR_OPCMDARG,
-    "PS-11175 testing-only knob: when non-zero, the next freshly-created "
-    "page-archive group is started with its block-counter seeded to this "
-    "value. Default 0 means no seeding. Used by mtr tests to drive the "
-    "writer past the 2-byte boundary at 65535 with a small workload.",
-    nullptr, nullptr, 0, 0, ~0ULL, 0);
-
-static MYSQL_SYSVAR_ULONGLONG(
-    arch_page_reset_block_num_bias, srv_arch_page_reset_block_num_bias,
-    PLUGIN_VAR_OPCMDARG,
-    "PS-11175 testing-only knob: value added to reset-point block_num before "
-    "it is persisted into reset metadata. Used to drive natural 2-byte "
-    "truncation in Arch_Block::add_reset without direct archive file edits.",
-    nullptr, nullptr, 0, 0, ~0ULL, 0);
 
 static MYSQL_SYSVAR_BOOL(
     adaptive_hash_index, srv_btr_search_enabled, PLUGIN_VAR_OPCMDARG,
@@ -24382,6 +24370,7 @@ static SYS_VAR *innobase_system_variables[] = {
     MYSQL_SYSVAR(temp_tablespace_encrypt),
     MYSQL_SYSVAR(sys_tablespace_encrypt),
     MYSQL_SYSVAR(data_home_dir),
+    MYSQL_SYSVAR(arch_page_test_max_entries),
     MYSQL_SYSVAR(extend_and_initialize),
     MYSQL_SYSVAR(doublewrite),
     MYSQL_SYSVAR(doublewrite_dir),
@@ -24472,8 +24461,6 @@ static SYS_VAR *innobase_system_variables[] = {
     MYSQL_SYSVAR(stats_transient_sample_pages),
     MYSQL_SYSVAR(stats_persistent),
     MYSQL_SYSVAR(stats_persistent_sample_pages),
-    MYSQL_SYSVAR(arch_page_initial_block_num),
-    MYSQL_SYSVAR(arch_page_reset_block_num_bias),
     MYSQL_SYSVAR(stats_auto_recalc),
     MYSQL_SYSVAR(adaptive_hash_index),
     MYSQL_SYSVAR(adaptive_hash_index_parts),

@@ -1296,6 +1296,13 @@ bool Arch_Block::add_page(buf_page_t *page, Arch_Page_Pos *pos) {
   ut_ad(m_type == ARCH_DATA_BLOCK);
   ut_ad(pos->m_offset == m_data_len + ARCH_PAGE_BLK_HEADER_LENGTH);
 
+  if (UNIV_UNLIKELY(srv_arch_page_test_max_entries > 0)) {
+    uint current_entries = (pos->m_offset - ARCH_PAGE_BLK_HEADER_LENGTH) / ARCH_BLK_PAGE_ID_SIZE;
+    if (current_entries >= srv_arch_page_test_max_entries) {
+      return (false);
+    }
+  }
+
   if ((pos->m_offset + ARCH_BLK_PAGE_ID_SIZE) > ARCH_PAGE_BLK_SIZE) {
     ut_ad(pos->m_offset == ARCH_PAGE_BLK_SIZE);
     return (false);

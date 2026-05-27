@@ -644,10 +644,6 @@ unsigned long long srv_stats_transient_sample_pages = 8;
 bool srv_stats_persistent = true;
 bool srv_stats_include_delete_marked = false;
 unsigned long long srv_stats_persistent_sample_pages = 20;
-
-/** PS-11175 testing-only knob. See srv0srv.h. */
-unsigned long long srv_arch_page_initial_block_num = 0;
-unsigned long long srv_arch_page_reset_block_num_bias = 0;
 bool srv_stats_auto_recalc = true;
 
 ulong srv_replication_delay = 0;
@@ -3643,3 +3639,4 @@ void set_srv_redo_log(bool enable) {
   srv_redo_log = enable;
   mutex_exit(&srv_innodb_monitor_mutex);
 }
+uint srv_arch_page_test_max_entries = 0;
