@@ -235,6 +235,29 @@ static enum ha_key_alg dd_get_old_index_algorithm_type(
   return HA_KEY_ALG_SE_SPECIFIC;
 }
 
+/**
+  Check whether any visible index element is marked as vector.
+
+  @param[in] idx_obj Index metadata object.
+
+  @return Whether any visible element belongs to a vector column.
+*/
+static bool dd_index_has_vector_column(const dd::Index &idx_obj) {
+  for (const dd::Index_element *idx_elem : idx_obj.elements()) {
+    if (idx_elem->is_hidden()) continue;
+
+    const dd::Properties &col_options = idx_elem->column().options();
+    bool is_vector_column = false;
+    if (col_options.exists("vector_index") &&
+        !col_options.get("vector_index", &is_vector_column) &&
+        is_vector_column) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 /*
   Check if the given key_part is suitable to be promoted as part of
   primary key.
@@ -347,6 +370,8 @@ static bool prepare_share(THD *thd, TABLE_SHARE *share,
              share->key_info[key].algorithm == HA_KEY_ALG_FULLTEXT);
       assert(!(share->key_info[key].flags & HA_SPATIAL) ||
              share->key_info[key].algorithm == HA_KEY_ALG_RTREE);
+      assert(!(share->key_info[key].flags & HA_VECTOR) ||
+             share->key_info[key].algorithm == HA_KEY_ALG_VECTOR);
 
       if (primary_key >= MAX_KEY && (keyinfo->flags & HA_NOSAME)) {
         /*
@@ -1385,6 +1410,8 @@ static bool fill_index_from_dd(THD *thd, TABLE_SHARE *share,
   keyinfo->algorithm = dd_get_old_index_algorithm_type(idx_obj->algorithm());
   keyinfo->is_algorithm_explicit = idx_obj->is_algorithm_explicit();
 
+  const bool has_vector_column = dd_index_has_vector_column(*idx_obj);
+
   // Visibility
   keyinfo->is_visible = idx_obj->is_visible();
 
@@ -1393,6 +1420,11 @@ static bool fill_index_from_dd(THD *thd, TABLE_SHARE *share,
   for (const dd::Index_element *idx_ele : idx_obj->elements()) {
     // Skip hidden index elements
     if (!idx_ele->is_hidden()) keyinfo->user_defined_key_parts++;
+  }
+
+  if (has_vector_column && keyinfo->user_defined_key_parts == 1) {
+    keyinfo->algorithm = HA_KEY_ALG_VECTOR;
+    keyinfo->is_algorithm_explicit = false;
   }
 
   // flags
@@ -1414,6 +1446,10 @@ static bool fill_index_from_dd(THD *thd, TABLE_SHARE *share,
       assert(0); /* purecov: deadcode */
       keyinfo->flags = 0;
       break;
+  }
+
+  if (has_vector_column && keyinfo->user_defined_key_parts == 1) {
+    keyinfo->flags |= HA_VECTOR;
   }
 
   if (idx_obj->is_generated()) keyinfo->flags |= HA_GENERATED_KEY;
