@@ -1774,7 +1774,7 @@ void Arch_Page_Sys::track_page(buf_page_t *bpage, lsn_t track_lsn,
 
       ut_a(cur_blk->get_state() == ARCH_BLOCK_READY_TO_FLUSH);
 
-      auto cbk = std::bind(&Arch_Block::is_flushable, *cur_blk);
+      auto cbk = std::bind(&Arch_Block::is_flushable, cur_blk);
 
       /* Might release operation mutex temporarily. Need to
       loop again verifying the state. */
