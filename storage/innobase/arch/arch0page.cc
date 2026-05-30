@@ -395,7 +395,9 @@ void Arch_File_Ctx::save_reset_point_in_mem(lsn_t lsn, Arch_Page_Pos pos) {
 }
 
 bool Arch_File_Ctx::find_reset_point(lsn_t check_lsn, Arch_Point &reset_point) {
+  ib::info() << "DEBUG_SELECT: find_reset_point called for check_lsn: " << check_lsn;
   if (!m_reset.size()) {
+    ib::info() << "DEBUG_SELECT: find_reset_point failed: m_reset is empty";
     return (false);
   }
 
@@ -415,6 +417,7 @@ bool Arch_File_Ctx::find_reset_point(lsn_t check_lsn, Arch_Point &reset_point) {
   }
 
   if (reset_it == m_reset.begin()) {
+    ib::info() << "DEBUG_SELECT: find_reset_point failed: reset_it == m_reset.begin()";
     return (false);
   }
 
@@ -1823,6 +1826,7 @@ bool Arch_Page_Sys::get_pages(Arch_Group *group, Arch_Page_Pos *read_pos,
 int Arch_Page_Sys::get_pages(MYSQL_THD thd, Page_Track_Callback cbk_func,
                              void *cbk_ctx, lsn_t &start_id, lsn_t &stop_id,
                              byte *buf, uint buf_len) {
+  ib::info() << "DEBUG_SELECT: get_pages called. start_id=" << start_id << ", stop_id=" << stop_id;
   DBUG_PRINT("page_archiver", ("Fetch pages"));
 
   arch_mutex_enter();
@@ -2280,9 +2284,11 @@ void Arch_Page_Sys::set_tracking_buf_pool(lsn_t tracking_lsn) {
 }
 
 int Arch_Page_Sys::recovery_load_and_start(const Arch_Recv_Group_Info &info) {
+  ib::info() << "DEBUG_RECOVERY: recovery_load_and_start called.";
   /* Initialise the page archiver with the info parsed from the files. */
 
   m_current_group = info.m_group;
+  ib::info() << "DEBUG_RECOVERY: m_current_group set to group with begin_lsn: " << m_current_group->get_begin_lsn() << ", end_lsn: " << m_current_group->get_end_lsn() << ", file_count: " << m_current_group->get_file_count();
 
   m_write_pos = info.m_write_pos;
   m_reset_pos = info.m_reset_pos;
@@ -2295,6 +2301,8 @@ int Arch_Page_Sys::recovery_load_and_start(const Arch_Recv_Group_Info &info) {
   m_last_pos = reset_point.pos;
   m_last_lsn = reset_point.lsn;
   m_last_reset_file_index = last_reset_file.m_file_index;
+
+  ib::info() << "DEBUG_RECOVERY: Loaded last reset point. LSN: " << m_last_lsn << ", block_num: " << m_last_pos.m_block_num << ", offset: " << m_last_pos.m_offset;
 
   ut_ad(m_last_lsn != LSN_MAX);
 
@@ -3098,6 +3106,7 @@ bool Arch_Page_Sys::wait_for_reset_info_flush(uint64_t request_blk) {
 
 int Arch_Page_Sys::fetch_group_within_lsn_range(lsn_t &start_id, lsn_t &stop_id,
                                                 Arch_Group **group) {
+  ib::info() << "DEBUG_SELECT: fetch_group_within_lsn_range called. start_id=" << start_id << ", stop_id=" << stop_id;
   ut_ad(mutex_own(&m_mutex));
 
   if (start_id != 0 && stop_id != 0 && start_id >= stop_id) {

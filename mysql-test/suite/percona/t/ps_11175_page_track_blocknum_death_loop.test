@@ -1,0 +1,70 @@
+--disable_query_log
+call mtr.add_suppression(".*");
+--enable_query_log
+
+INSTALL COMPONENT "file://component_mysqlbackup";
+
+CREATE TABLE t_big (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  pad LONGBLOB
+) ENGINE=InnoDB;
+
+DELIMITER //;
+CREATE PROCEDURE insert_rows(n INT)
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  START TRANSACTION;
+  WHILE i < n DO
+    INSERT INTO t_big (pad) VALUES (REPEAT('x', 14000));
+    SET i = i + 1;
+    IF i % 1000 = 0 THEN
+      COMMIT;
+      START TRANSACTION;
+    END IF;
+  END WHILE;
+  COMMIT;
+END//
+DELIMITER ;//
+
+--echo # 1. Start page tracking with an initial block number of 65376 (32 * 2043)
+--echo # This aligns perfectly with the start of ib_page_32
+SET GLOBAL innodb_arch_page_initial_block_num = 65376;
+let $start_lsn = `SELECT mysqlbackup_page_track_set(1)`;
+
+--echo # 2. Set max_entries to 1 to accelerate block generation
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+
+--echo # 3. Insert 2060 rows to reach block 67436.
+--echo # 67436 / 2043 = 33.008 -> start of ib_page_33 (has 32 blocks)
+--echo # Truncated block: 67436 % 65536 = 1900.
+--echo # 1900 % 2043 = 1900.
+--echo # So offset is block 1900, but file only has 32 blocks!
+CALL insert_rows(1850);
+
+--echo # Sleep to allow the archiver to flush the blocks
+--sleep 5
+
+--echo # 4. Set the reset point. This writes the truncated block_num to the file.
+let $reset_lsn = `SELECT mysqlbackup_page_track_set(1)`;
+
+--echo # Sleep to allow the reset block to be flushed
+--sleep 2
+
+--echo # 5. Restart server. It should crash during recovery.
+--source include/shutdown_mysqld.inc
+--let $restart_parameters=
+--source include/start_mysqld_expecting_crash.inc
+
+--echo # Verify the invalid read error in the server log
+let SEARCH_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err;
+let SEARCH_PATTERN = Tried to read .* bytes at offset .*, but was only able to read;
+--source include/search_pattern.inc
+
+--echo # Cleanup
+--force-rmdir $MYSQLTEST_VARDIR/mysqld.1/data/#ib_archive
+
+--source include/start_mysqld.inc
+
+DROP TABLE t_big;
+DROP PROCEDURE insert_rows;
+UNINSTALL COMPONENT "file://component_mysqlbackup";

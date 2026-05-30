@@ -445,6 +445,7 @@ dberr_t Arch_Page_Sys::Recovery::load_archiver() {
     }
 
     m_page_sys->m_group_list.push_back(info.m_group);
+  ib::info() << "DEBUG_RECOVERY: Added group to m_group_list. begin_lsn: " << info.m_group->get_begin_lsn() << ", end_lsn: " << info.m_group->get_end_lsn() << ", file_count: " << info.m_group->get_file_count();
 
     if (!info.m_active) {
       continue;
@@ -580,6 +581,7 @@ dberr_t Arch_Group::Recovery::parse(Arch_Recv_Group_Info &info) {
 
   uint start_index = info.m_file_start_index;
   size_t file_count = start_index + num_files;
+  ib::info() << "DEBUG_RECOVERY: Arch_Group::Recovery::parse. num_files: " << num_files << ", start_index: " << start_index << ", file_count: " << file_count;
 
   auto &file_ctx = m_group->m_file_ctx;
 
@@ -660,6 +662,7 @@ dberr_t Arch_File_Ctx::Recovery::parse_stop_points(bool last_file,
 
 dberr_t Arch_File_Ctx::Recovery::parse_reset_points(
     uint file_index, bool last_file, Arch_Recv_Group_Info &info) {
+  ib::info() << "DEBUG_RECOVERY: parse_reset_points called for file_index: " << file_index;
   ut_ad(!m_file_ctx.is_closed());
   ut_ad(m_file_ctx.m_index == file_index);
 
@@ -678,6 +681,7 @@ dberr_t Arch_File_Ctx::Recovery::parse_reset_points(
 
   auto block_num = Arch_Block::get_block_number(buf);
   auto data_len = Arch_Block::get_data_len(buf);
+  ib::info() << "DEBUG_RECOVERY: parse_reset_points file_index: " << file_index << ", block_num: " << block_num << ", data_len: " << data_len;
 
   if (file_index != block_num) {
     /* This means there was no reset for this file and hence the
@@ -726,6 +730,11 @@ dberr_t Arch_File_Ctx::Recovery::parse_reset_points(
       start_point.lsn = m_file_ctx.fetch_reset_lsn(pos.m_block_num);
       start_point.pos = pos;
 
+      ib::info() << "DEBUG_RECOVERY: Parsed reset point from file " << file_index
+                 << ". Truncated block_num: " << pos.m_block_num
+                 << ", offset: " << pos.m_offset
+                 << ", fetched LSN: " << start_point.lsn;
+
       reset_file.m_start_point.push_back(start_point);
     }
 
@@ -754,6 +763,10 @@ lsn_t Arch_File_Ctx::fetch_reset_lsn(uint64_t block_num) {
   }
 
   auto lsn = Arch_Block::get_reset_lsn(buf);
+
+  ib::info() << "DEBUG_RECOVERY: fetch_reset_lsn for block_num " << block_num
+             << " read from offset " << offset
+             << ", returning LSN " << lsn;
 
   ut_ad(lsn != LSN_MAX);
 
