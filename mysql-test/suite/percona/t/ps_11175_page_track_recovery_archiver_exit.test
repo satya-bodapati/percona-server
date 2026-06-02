@@ -118,35 +118,33 @@ INSERT INTO t_big (pad) SELECT REPEAT('x', 14000) FROM t_1000 LIMIT 100;
 --echo # Let the page cleaner + archiver flush at least one block
 --sleep 10
 
---echo # Confirm the stray low-index file exists before Restart #2
---perl
-use strict;
-my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
-my @stray;
-foreach my $f (glob("$dir/page_group_*/ib_page_*")) {
-  if ($f =~ /ib_page_(\d+)$/ && $1 < 32) {
-    push @stray, $1;
-  }
-}
-@stray = sort { $a <=> $b } @stray;
-if (scalar(@stray) == 0) {
-  die "no stray low-index file appeared after Restart #1; precondition not met";
-}
-print "stray index(es) below 32 present before Restart #2\n";
-EOF
-
 SET GLOBAL innodb_arch_page_test_max_entries = 0;
 
---echo # ---- Phase 4: Restart #2 -- scan_for_groups sees the stray file ----
+--echo # ---- Phase 4: Restart #2 -- recovery should NOT log MY-013581 ----
 --source include/restart_mysqld.inc
 
---echo # ---- Phase 5: verify the graceful-exit signature in the log ----
---echo # The page-archiver recovery returns non-success; Arch_Page_Sys::recover()
---echo # logs MY-013581 and disables page archiving for this boot. The
---echo # server itself comes up.
-let SEARCH_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err;
-let SEARCH_PATTERN = \[MY-013581\].*Page archiver system;
---source include/search_pattern.inc
+--echo # ---- Phase 5: assert no MY-013581 in the error log ----
+--echo # The bug causes scan_for_groups on Restart #2 to see the stray
+--echo # ib_page_<small> from Restart #1, miscompute (start_index,
+--echo # num_files), and fall into cleanup_if_required's
+--echo # DB_CANNOT_OPEN_FILE path -> Arch_Page_Sys::recover() emits
+--echo # ER_IB_ERR_PAGE_ARCH_RECOVERY_FAILED (MY-013581). After the
+--echo # init_file_ctx() fix, no stray file exists, recovery succeeds,
+--echo # and MY-013581 must not appear.
+--perl
+use strict;
+my $log = $ENV{'MYSQLTEST_VARDIR'} . "/log/mysqld.1.err";
+open(my $fh, "<", $log) or die "cannot open $log: $!";
+while (my $line = <$fh>) {
+  if ($line =~ /\[MY-013581\].*Page archiver system/) {
+    die "PS-11175 m_count downstream: MY-013581 ".
+        "'Page archiver system's recovery failed.' appeared after ".
+        "Restart #2 -- stray ib_page_<small> from Restart #1 poisoned ".
+        "scan_for_groups";
+  }
+}
+close($fh);
+EOF
 
 --echo # ---- Teardown ----
 SET GLOBAL innodb_arch_page_initial_block_num = 0;
