@@ -1,0 +1,220 @@
+# PS-11175 m_count off-by-N -- natural-purge variant, checking the
+# OTHER face of the same bug: after a small post-restart flush, a NEW
+# file at file_index = (max pre-restart index) + 1 should appear on
+# disk. The seeded variant catches this as "stray ib_page_<small>";
+# the corruption variant catches it as "existing file's SHA1 changed";
+# this variant catches it as "the file that SHOULD have been created
+# was NOT created".
+#
+# Same root cause as the other two: init_file_ctx() sets m_count =
+# num_files (small) after recovery of a group whose oldest on-disk file
+# is above index 0 -- a state mysqlbackup_page_track_purge_up_to()
+# produces naturally. The first post-recovery flush calls open_new at
+# m_count, which is an existing file. Arch_File_Ctx::open() takes the
+# OS_FILE_OPEN branch instead of OS_FILE_CREATE_PATH, no new file is
+# created, the writer rewrites the existing file in place. The "next"
+# file at the correct index (max + 1) does NOT come into existence
+# until the writer marches through the existing files (~2 files'
+# worth of blocks) -- far past what a single small post-restart flush
+# does.
+#
+# Sequence:
+#  1. Workload creates ib_page_0..ib_page_N on disk;
+#  2. mysqlbackup_page_track_set(1) captures lsn_purge at a point
+#     inside ib_page_2 so files older than lsn_purge are purgeable;
+#  3. More workload to seal ib_page_2..ib_page_N (so the post-purge
+#     range is well-defined);
+#  4. Snapshot the highest pre-purge index N;
+#  5. mysqlbackup_page_track_purge_up_to(lsn_purge);
+#  6. restart_mysqld;
+#  7. Single small post-restart workload + max_entries=1 to make the
+#     archiver flush a few blocks. After the fix open_new creates
+#     ib_page_(N+1) directly. Today open_new opens existing ib_page_M
+#     where M = post-purge num_files -- no new file is created.
+#  8. perl die unless ib_page_(N+1) exists after the flush.
+
+--disable_query_log
+call mtr.add_suppression(".*");
+--enable_query_log
+
+INSTALL COMPONENT "file://component_mysqlbackup";
+
+CREATE TABLE t_1000 (a INT AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE t_big (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  pad LONGBLOB
+) ENGINE=InnoDB;
+
+--disable_query_log
+let $i = 0;
+while ($i < 1000) {
+  INSERT INTO t_1000 VALUES ();
+  inc $i;
+}
+--enable_query_log
+
+--echo # ---- Phase 1: workload that fills ib_page_0 and ib_page_1 ----
+--disable_query_log
+let $start_lsn = `SELECT mysqlbackup_page_track_set(1)`;
+--enable_query_log
+
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+
+--disable_query_log
+let $i = 0;
+while ($i < 8) {
+  INSERT INTO t_big (pad) SELECT REPEAT('x', 14000) FROM t_1000;
+  inc $i;
+}
+--enable_query_log
+
+--sleep 5
+
+--echo # Wait for ib_page_2
+--perl
+use strict;
+my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
+my $found = 0;
+for (my $i = 0; $i < 300; $i++) {
+  my @files = glob("$dir/page_group_*/ib_page_2");
+  if (scalar(@files) > 0) { $found = 1; last; }
+  sleep(1);
+}
+if (!$found) { die "ib_page_2 not created within 300s"; }
+EOF
+
+--echo # ---- Phase 2: capture purge LSN -- a few blocks into ib_page_2 ----
+--disable_query_log
+let $lsn_purge = `SELECT mysqlbackup_page_track_set(1)`;
+--enable_query_log
+
+--echo # ---- Phase 3: more workload to grow the archive ----
+--disable_query_log
+let $i = 0;
+while ($i < 6) {
+  INSERT INTO t_big (pad) SELECT REPEAT('x', 14000) FROM t_1000;
+  inc $i;
+}
+--enable_query_log
+
+--sleep 5
+
+--echo # Wait for ib_page_3 (so ib_page_2 is sealed)
+--perl
+use strict;
+my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
+my $found = 0;
+for (my $i = 0; $i < 300; $i++) {
+  my @files = glob("$dir/page_group_*/ib_page_3");
+  if (scalar(@files) > 0) { $found = 1; last; }
+  sleep(1);
+}
+if (!$found) { die "ib_page_3 not created within 300s"; }
+EOF
+
+SET GLOBAL innodb_arch_page_test_max_entries = 0;
+
+--echo # ---- Phase 4: snapshot the highest pre-purge index ----
+--perl
+use strict;
+my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
+my @indexes;
+foreach my $f (glob("$dir/page_group_*/ib_page_*")) {
+  if ($f =~ /ib_page_(\d+)$/) { push @indexes, $1; }
+}
+@indexes = sort { $a <=> $b } @indexes;
+if (scalar(@indexes) < 3) {
+  die "expected at least 3 archive files; got: " . join(",", @indexes);
+}
+my $max = $indexes[-1];
+my $snap = $ENV{'MYSQLTEST_VARDIR'} . "/tmp/ib_pages_max.txt";
+open(my $out, ">", $snap) or die "cannot write $snap: $!";
+print $out $max;
+close($out);
+EOF
+
+--echo # ---- Phase 5: purge old files via mysqlbackup_page_track_purge_up_to ----
+--disable_query_log
+--disable_result_log
+eval SELECT mysqlbackup_page_track_purge_up_to($lsn_purge);
+--enable_result_log
+--enable_query_log
+
+--echo # Confirm the on-disk range now starts above 0
+--perl
+use strict;
+my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
+my @indexes;
+foreach my $f (glob("$dir/page_group_*/ib_page_*")) {
+  if ($f =~ /ib_page_(\d+)$/) { push @indexes, $1; }
+}
+@indexes = sort { $a <=> $b } @indexes;
+if (scalar(@indexes) < 2 || $indexes[0] == 0) {
+  die "purge did not move the start index above 0; indices: " .
+      join(",", @indexes);
+}
+EOF
+
+--echo # ---- Phase 6: clean restart ----
+--source include/restart_mysqld.inc
+
+SET GLOBAL mysqlbackup.backupid = '1';
+
+--echo # ---- Phase 7: trigger a single small post-restart archive flush ----
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+
+--disable_query_log
+INSERT INTO t_big (pad) SELECT REPEAT('x', 14000) FROM t_1000 LIMIT 30;
+--enable_query_log
+
+--sleep 10
+
+SET GLOBAL innodb_arch_page_test_max_entries = 0;
+
+--echo # ---- Phase 8: assert ib_page_(max+1) exists ----
+--echo # After fix: m_count = start_index + num_files = max + 1 ->
+--echo # open_new creates ib_page_(max+1) -> the file exists.
+--echo # Today: m_count = num_files (small) -> open_new opens an
+--echo # existing file in place -> no new file at max+1 -> die.
+--perl
+use strict;
+my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
+my $snap = $ENV{'MYSQLTEST_VARDIR'} . "/tmp/ib_pages_max.txt";
+open(my $in, "<", $snap) or die "cannot read $snap: $!";
+my $max = <$in>;
+chomp $max;
+close($in);
+my $expected = $max + 1;
+my @files = glob("$dir/page_group_*/ib_page_$expected");
+if (scalar(@files) == 0) {
+  my @indexes;
+  foreach my $f (glob("$dir/page_group_*/ib_page_*")) {
+    if ($f =~ /ib_page_(\d+)$/) { push @indexes, $1; }
+  }
+  @indexes = sort { $a <=> $b } @indexes;
+  die "PS-11175 m_count: expected ib_page_$expected to be created by " .
+      "the post-recovery flush (writer should open_new at file_index = " .
+      "start_index + num_files), but it does not exist. Current " .
+      "indices on disk: " . join(",", @indexes);
+}
+EOF
+
+--echo # ---- Teardown ----
+SET GLOBAL innodb_arch_page_test_max_entries = 0;
+
+--exec rm -rf $MYSQLD_DATADIR/#ib_archive
+--exec rm -rf $MYSQLD_DATADIR/#innodb_redo
+--exec rm -f $MYSQLD_DATADIR/#ib_16384_0.dblwr
+--exec rm -f $MYSQLD_DATADIR/#ib_16384_1.dblwr
+--exec rm -f $MYSQLD_DATADIR/ibdata1
+--exec rm -f $MYSQLD_DATADIR/undo_001
+--exec rm -f $MYSQLD_DATADIR/undo_002
+--exec rm -f $MYSQLD_DATADIR/mysql.ibd
+
+--exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
+--source include/wait_until_connected_again.inc
+
+DROP TABLE t_big;
+DROP TABLE t_1000;
+UNINSTALL COMPONENT "file://component_mysqlbackup";
