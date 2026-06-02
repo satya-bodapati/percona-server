@@ -196,30 +196,21 @@ let $crash_lsn_B = `SELECT mysqlbackup_page_track_set(1)`;
 
 SET GLOBAL innodb_arch_page_reset_block_num_bias = 0;
 
---echo # ---- Phase 4: the underflow SELECT abort ----
---echo # save_A.m_offset (~72) > landing block's data_len + 32 (=40) ->
---echo # bytes_left underflows -> 16-MiB read -> past EOF -> fatal.
---source include/expect_crash.inc
+--echo # ---- Phase 4: SELECT must return cleanly ----
+--echo # Today: save_A.m_offset (~72) > landing block's data_len + 32 (=40)
+--echo # so bytes_left underflows -> uint wrap -> 16-MiB read past EOF ->
+--echo # srv_fatal_error -> server dies -> SELECT 1 below fails ->
+--echo # MTR reports the test as failed. After the mach_write_to_2 fix
+--echo # (and however the data_len/m_offset arithmetic is corrected so the
+--echo # underflow can't happen), the SELECT returns and the test passes.
 --disable_query_log
---error 2013,2006,1053,CR_SERVER_LOST,CR_SERVER_GONE_ERROR
+--disable_result_log
 eval SELECT mysqlbackup_page_track_get_changed_pages($crash_lsn_A, 0);
+--enable_result_log
 --enable_query_log
 
---source include/wait_until_disconnected.inc
-
---echo # Verify the customer's underflow / 16-MiB read signature
-let SEARCH_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err;
-let SEARCH_PATTERN = Tried to read 16777216 bytes at offset;
---source include/search_pattern.inc
-
---echo # Note: the customer's full pattern also shows every subsequent
---echo # restart dying with a 32-byte read past EOF (recovery's
---echo # fetch_reset_lsn hitting save_B's truncated entry inside a
---echo # partial active file). Reproducing that deterministically in MTR
---echo # depends on the writer's exact block_num at Phase 1 shutdown,
---echo # which varies with workload timing. This test pins down the
---echo # primary user-visible symptom (the SELECT crash via underflow);
---echo # the recovery loop is left out to keep this test stable.
+--echo # Liveness check -- if the SELECT killed the server this fails
+SELECT 1;
 
 --echo # ---- Teardown ----
 --exec rm -rf $MYSQLD_DATADIR/#ib_archive
