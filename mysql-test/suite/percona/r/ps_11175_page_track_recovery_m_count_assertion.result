@@ -1,0 +1,24 @@
+INSTALL COMPONENT "file://component_mysqlbackup";
+CREATE TABLE t_1000 (a INT AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE t_big (
+id INT AUTO_INCREMENT PRIMARY KEY,
+pad LONGBLOB
+) ENGINE=InnoDB;
+# ---- Phase 1: seed + workload (populates the dblwr) ----
+SET GLOBAL innodb_arch_page_initial_block_num = 65376;
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+tracking started
+# 5 * 1000 wide-row inserts -- many archive blocks flush
+# through the page-track dblwr
+# Wait for ib_page_33 to appear (proves we have files at index >= 32)
+# Brief settle so the latest workload flush is in the dblwr
+# ---- Phase 2: clean shutdown ----
+# ---- Phase 3: expect recovery to abort on the assertion ----
+# restart_abort: 
+# Verify the assertion signature
+Pattern "Assertion failure: arch0recv.cc:.*:file_index < num_files" found
+# ---- Teardown: remove archive + start fresh ----
+# restart
+DROP TABLE t_big;
+DROP TABLE t_1000;
+UNINSTALL COMPONENT "file://component_mysqlbackup";

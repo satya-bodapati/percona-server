@@ -1,0 +1,132 @@
+# Debug-only: the symptom is the ut_ad assertion at arch0recv.cc:130.
+# In release builds the ut_ad is a no-op and the same root cause
+# instead surfaces post-recovery as a stray ib_page_<small> file --
+# covered by ps_11175_page_track_recovery_m_count_bug.
+let $have_debug = `SELECT VERSION() LIKE '%debug%'`;
+if (!$have_debug)
+{
+  --skip Test requires a debug build (ut_ad assertion target)
+}
+
+# PS-11175 follow-on: the init_file_ctx() m_count off-by-N is the same
+# root cause as the stray-file bug, but in debug builds it asserts
+# *inside* recovery (not after) and prevents the server from starting.
+#
+# Mechanism:
+#  - On clean shutdown the archiver leaves a recent snapshot in the
+#    page-archive doublewrite (#ib_16384_<n>.dblwr). Each dblwr slot
+#    carries the block_num it was flushed at.
+#  - On the next startup, Arch_Group::Recovery::replace_pages_from_dblwr
+#    calls Arch_Dblwr_Ctx::validate_and_fill_blocks(num_files) with
+#    num_files = get_file_count() (the COUNT, not start_index + count).
+#  - validate_and_fill_blocks computes
+#      file_index = Arch_Block::get_file_index(block_num)
+#    for every dblwr slot and asserts
+#      ut_ad(file_index < num_files);  // arch0recv.cc:130
+#  - With the seeded knob innodb_arch_page_initial_block_num=65376 the
+#    on-disk files are at indices [32, 33, 34] so num_files = 2-3 (and
+#    --info.m_num_files for the partial last file makes it 2). The
+#    dblwr's most recent flush has block_num >= 65376 -> file_index
+#    >= 32 -> 32 < 2 is FALSE -> ut_ad fires, recovery aborts.
+#
+# Sequence:
+#  1. Seed initial_block_num=65376 (first file = ib_page_32).
+#  2. max_entries=1 + bulk inserts flush many small archive blocks;
+#     the page-archive dblwr accumulates a recent snapshot.
+#  3. shutdown_mysqld. The latest flushed data block (block_num near
+#     65500-67500) is still in the page-archive dblwr from the
+#     workload above.
+#  4. start_mysqld_expecting_crash: recovery hits arch0recv.cc:130
+#     and aborts.
+#
+# Note: we deliberately do NOT call mysqlbackup_page_track_set(1)
+# again after crossing block_num=65535. That call would route
+# block_num through Arch_Block::add_reset -> mach_write_to_2 and
+# trip the unrelated debug assertion at mach0data.ic:54 BEFORE we
+# get to shutdown. The initial set(1) is fine because it persists
+# the seeded block_num=65376 which still fits in 2 bytes.
+#
+# After the m_count fix (m_count / num_files passed as
+# start_index + num_files), file_index < num_files holds for every
+# dblwr slot and the server starts normally. This test then becomes
+# a clean regression check by being removed or its skip inverted.
+
+--disable_query_log
+call mtr.add_suppression(".*");
+--enable_query_log
+
+INSTALL COMPONENT "file://component_mysqlbackup";
+
+CREATE TABLE t_1000 (a INT AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE t_big (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  pad LONGBLOB
+) ENGINE=InnoDB;
+
+--disable_query_log
+let $i = 0;
+while ($i < 1000) {
+  INSERT INTO t_1000 VALUES ();
+  inc $i;
+}
+--enable_query_log
+
+--echo # ---- Phase 1: seed + workload (populates the dblwr) ----
+SET GLOBAL innodb_arch_page_initial_block_num = 65376;
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+
+--disable_query_log
+let $start_lsn = `SELECT mysqlbackup_page_track_set(1)`;
+--enable_query_log
+--echo tracking started
+
+--echo # 5 * 1000 wide-row inserts -- many archive blocks flush
+--echo # through the page-track dblwr
+--disable_query_log
+let $i = 0;
+while ($i < 5) {
+  INSERT INTO t_big (pad) SELECT REPEAT('x', 14000) FROM t_1000;
+  inc $i;
+}
+--enable_query_log
+
+--echo # Wait for ib_page_33 to appear (proves we have files at index >= 32)
+--perl
+use strict;
+my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
+my $found = 0;
+for (my $i = 0; $i < 300; $i++) {
+    my @files = glob("$dir/page_group_*/ib_page_33");
+    if (scalar(@files) > 0) {
+        $found = 1;
+        last;
+    }
+    sleep(1);
+}
+if (!$found) {
+    die "ib_page_33 not created within 300s";
+}
+EOF
+
+--echo # Brief settle so the latest workload flush is in the dblwr
+--sleep 3
+
+--echo # ---- Phase 2: clean shutdown ----
+--source include/shutdown_mysqld.inc
+
+--echo # ---- Phase 3: expect recovery to abort on the assertion ----
+--let $restart_parameters=
+--source include/start_mysqld_expecting_crash.inc
+
+--echo # Verify the assertion signature
+let SEARCH_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err;
+let SEARCH_PATTERN = Assertion failure: arch0recv.cc:.*:file_index < num_files;
+--source include/search_pattern.inc
+
+--echo # ---- Teardown: remove archive + start fresh ----
+--force-rmdir $MYSQLTEST_VARDIR/mysqld.1/data/#ib_archive
+--source include/start_mysqld.inc
+
+DROP TABLE t_big;
+DROP TABLE t_1000;
+UNINSTALL COMPONENT "file://component_mysqlbackup";
