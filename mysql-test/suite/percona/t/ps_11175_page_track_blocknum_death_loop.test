@@ -1,3 +1,12 @@
+# Release-build only: the truncation we exercise is the silent
+# modulo-65,536 wrap inside mach_write_to_2. Debug builds trip the
+# assertion at mach0data.ic:54 before the truncation happens.
+let $have_debug = `SELECT VERSION() LIKE '%debug%'`;
+if ($have_debug)
+{
+  --skip Test requires a non-debug build
+}
+
 --disable_query_log
 call mtr.add_suppression(".*");
 --enable_query_log
@@ -50,20 +59,12 @@ let $reset_lsn = `SELECT mysqlbackup_page_track_set(1)`;
 --echo # Sleep to allow the reset block to be flushed
 --sleep 2
 
---echo # 5. Restart server. It should crash during recovery.
---source include/shutdown_mysqld.inc
---let $restart_parameters=
---source include/start_mysqld_expecting_crash.inc
-
---echo # Verify the invalid read error in the server log
-let SEARCH_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err;
-let SEARCH_PATTERN = Tried to read .* bytes at offset .*, but was only able to read;
---source include/search_pattern.inc
-
---echo # Cleanup
---force-rmdir $MYSQLTEST_VARDIR/mysqld.1/data/#ib_archive
-
---source include/start_mysqld.inc
+--echo # 5. Restart server. After the mach_write_to_2 fix, recovery must
+--echo # come back cleanly. Today the truncated reset_point.block_num
+--echo # makes fetch_reset_lsn read past the end of a file that's much
+--echo # smaller than the truncated index suggests; os_file_handle_error
+--echo # exits the server and restart_mysqld.inc times out.
+--source include/restart_mysqld.inc
 
 DROP TABLE t_big;
 DROP PROCEDURE insert_rows;
