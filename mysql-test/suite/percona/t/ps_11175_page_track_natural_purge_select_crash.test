@@ -135,22 +135,21 @@ SET GLOBAL mysqlbackup.backupid = '1';
 
 SET GLOBAL mysqlbackup.backupid = '1';
 
---echo # ---- Phase 5: the crashing SELECT ----
---echo # find_reset_point returns A's truncated pos; read_from_file opens
---echo # ib_page_<truncated/2043> in [0, 31]; that file was purged ->
---echo # ENOENT -> srv_fatal_error. Customer's MY-012646.
---source include/expect_crash.inc
+--echo # ---- Phase 5: SELECT must return cleanly ----
+--echo # Today find_reset_point returns A's truncated pos; read_from_file
+--echo # opens ib_page_<truncated/2043> in [0, 31] -- those files were
+--echo # purged -> ENOENT -> srv_fatal_error. The server dies; the
+--echo # liveness check (SELECT 1) below cannot reach the server;
+--echo # MTR reports the test as failed. After the mach_write_to_2 fix
+--echo # the SELECT returns and the test passes.
 --disable_query_log
---error 2013,2006,1053,CR_SERVER_LOST,CR_SERVER_GONE_ERROR
+--disable_result_log
 eval SELECT mysqlbackup_page_track_get_changed_pages($crash_lsn_A, 0);
+--enable_result_log
 --enable_query_log
 
---source include/wait_until_disconnected.inc
-
---echo # Verify the customer's SELECT-side ENOENT signature
-let SEARCH_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err;
-let SEARCH_PATTERN = ib_page_[0-9]+.*'open' returned OS error 71;
---source include/search_pattern.inc
+--echo # Liveness check -- if the SELECT killed the server this fails
+SELECT 1;
 
 --echo # ---- Teardown ----
 --exec rm -rf $MYSQLD_DATADIR/#ib_archive
