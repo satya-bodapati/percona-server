@@ -1,0 +1,149 @@
+# Release-build only: this test exercises the SILENT modulo-65,536 wrap
+# inside mach_write_to_2. In debug builds the debug assertion at
+# mach0data.ic:54 fires before the truncation can happen.
+let $have_debug = `SELECT VERSION() LIKE '%debug%'`;
+if ($have_debug)
+{
+  --skip Test requires a non-debug build (mach_write_to_2 assertion blocks the truncation we exercise)
+}
+
+# PS-11175: customer signature from CS0033890 / replica-with-incremental --
+# the first restart after the truncation is harmless, but the very next
+# SELECT after that restart crashes the server with ENOENT on the small
+# ib_page_<N> implied by the truncated block_num.
+#
+# Sequence:
+#
+#  1. seed at block 65,376 -- writer starts at the head of ib_page_32 so
+#     files 0..31 never exist on disk (mirrors a long-running replica
+#     whose oldest archive file is well past file 31);
+#
+#  2. innodb_arch_page_test_max_entries=1 exhausts the 2-byte block_num
+#     counter on a small workload (no fabricated single-entry data, just
+#     a debug flush-rate knob);
+#
+#  3. inserts drive block_num across 65,535 into ib_page_33; save reset A
+#     (the "incremental-1" reset) is persisted via mach_write_to_2 with
+#     the silent truncation;
+#
+#  4. inserts continue until ib_page_33 is sealed and the writer has
+#     entered ib_page_34;
+#
+#  5. clean shutdown + restart_mysqld. arch0recv.cc parses ib_page_33's
+#     reset block, finds A's truncated entry, fetch_reset_lsn reads
+#     within ib_page_33 -- which is sealed at ~32 MB so the within-file
+#     offset is valid. Recovery completes. This is the "harmless first
+#     restart" the customer reported;
+#
+#  6. SELECT mysqlbackup_page_track_get_changed_pages(A_lsn, 0). stop=0
+#     so fetch_group_within_lsn_range defaults to m_latest_stop_lsn.
+#     find_reset_point returns A's truncated pos. Arch_Group::read_data ->
+#     read_from_file computes file_index = truncated_block_num/2043
+#     (in [0, 31]); none of those files exist on disk -> os_file_create
+#     ENOENT -> srv_fatal_error. Customer's MY-012646 signature in
+#     mysqld.1.err: "File ... ib_page_<small>: 'open' returned OS error
+#     71. Cannot continue operation".
+
+--disable_query_log
+call mtr.add_suppression(".*");
+--enable_query_log
+
+INSTALL COMPONENT "file://component_mysqlbackup";
+
+CREATE TABLE t_big (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  pad LONGBLOB
+) ENGINE=InnoDB;
+
+DELIMITER //;
+CREATE PROCEDURE insert_rows(n INT)
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  START TRANSACTION;
+  WHILE i < n DO
+    INSERT INTO t_big (pad) VALUES (REPEAT('x', 14000));
+    SET i = i + 1;
+    IF i % 500 = 0 THEN
+      COMMIT;
+      START TRANSACTION;
+    END IF;
+  END WHILE;
+  COMMIT;
+END//
+DELIMITER ;//
+
+--echo # ---- Phase 1: seed + cross 65,535 + save A + seal ib_page_33 ----
+SET GLOBAL innodb_arch_page_initial_block_num = 65376;
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+
+let $start_lsn = `SELECT mysqlbackup_page_track_set(1)`;
+
+--echo # drive block_num across 65,535 into ib_page_33
+CALL insert_rows(2050);
+--sleep 5
+
+--echo # save reset A -- persisted block_num truncated via mach_write_to_2
+let $crash_lsn_A = `SELECT mysqlbackup_page_track_set(1)`;
+--echo reset A captured
+
+--sleep 2
+
+--echo # fill ib_page_33 and cross into ib_page_34 so 33 is sealed at 32 MB
+CALL insert_rows(1900);
+--sleep 5
+
+--perl
+use strict;
+my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
+my $found = 0;
+for (my $i = 0; $i < 120; $i++) {
+    my @files = glob("$dir/page_group_*/ib_page_34");
+    if (scalar(@files) > 0) {
+        $found = 1;
+        last;
+    }
+    sleep(1);
+}
+if (!$found) {
+    die "ib_page_34 not created within 120s";
+}
+EOF
+
+--echo # ---- Phase 2: clean reboot -- recovery survives A's truncated entry ----
+--source include/restart_mysqld.inc
+
+SET GLOBAL mysqlbackup.backupid = '1';
+
+--echo # ---- Phase 3: the SELECT abort ----
+--echo # find_reset_point returns A's truncated pos; read_from_file opens
+--echo # ib_page_<truncated/2043> which never existed -> ENOENT -> fatal.
+--source include/expect_crash.inc
+--disable_query_log
+--error 2013,2006,1053,CR_SERVER_LOST,CR_SERVER_GONE_ERROR
+eval SELECT mysqlbackup_page_track_get_changed_pages($crash_lsn_A, 0);
+--enable_query_log
+
+--source include/wait_until_disconnected.inc
+
+--echo # Verify the customer's SELECT-side ENOENT signature
+let SEARCH_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err;
+let SEARCH_PATTERN = ib_page_[0-9]+.*'open' returned OS error 71;
+--source include/search_pattern.inc
+
+--echo # ---- Teardown ----
+--exec rm -rf $MYSQLD_DATADIR/#ib_archive
+--exec rm -rf $MYSQLD_DATADIR/#innodb_redo
+--exec rm -f $MYSQLD_DATADIR/#ib_16384_0.dblwr
+--exec rm -f $MYSQLD_DATADIR/#ib_16384_1.dblwr
+--exec rm -f $MYSQLD_DATADIR/ibdata1
+--exec rm -f $MYSQLD_DATADIR/undo_001
+--exec rm -f $MYSQLD_DATADIR/undo_002
+--exec rm -f $MYSQLD_DATADIR/mysql.ibd
+
+--exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
+--source include/wait_until_connected_again.inc
+
+DROP TABLE t_big;
+DROP PROCEDURE insert_rows;
+UNINSTALL COMPONENT "file://component_mysqlbackup";

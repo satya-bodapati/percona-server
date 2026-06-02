@@ -1,0 +1,41 @@
+INSTALL COMPONENT "file://component_mysqlbackup";
+CREATE TABLE t_big (
+id INT AUTO_INCREMENT PRIMARY KEY,
+pad LONGBLOB
+) ENGINE=InnoDB;
+CREATE PROCEDURE insert_rows(n INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+START TRANSACTION;
+WHILE i < n DO
+INSERT INTO t_big (pad) VALUES (REPEAT('x', 14000));
+SET i = i + 1;
+IF i % 500 = 0 THEN
+COMMIT;
+START TRANSACTION;
+END IF;
+END WHILE;
+COMMIT;
+END//
+# ---- Phase 1: seed + cross 65,535 + save A + seal ib_page_33 ----
+SET GLOBAL innodb_arch_page_initial_block_num = 65376;
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+# drive block_num across 65,535 into ib_page_33
+CALL insert_rows(2050);
+# save reset A -- persisted block_num truncated via mach_write_to_2
+reset A captured
+# fill ib_page_33 and cross into ib_page_34 so 33 is sealed at 32 MB
+CALL insert_rows(1900);
+# ---- Phase 2: clean reboot -- recovery survives A's truncated entry ----
+# restart
+SET GLOBAL mysqlbackup.backupid = '1';
+# ---- Phase 3: the SELECT abort ----
+# find_reset_point returns A's truncated pos; read_from_file opens
+# ib_page_<truncated/2043> which never existed -> ENOENT -> fatal.
+Got one of the listed errors
+# Verify the customer's SELECT-side ENOENT signature
+Pattern "ib_page_[0-9]+.*'open' returned OS error 71" found
+# ---- Teardown ----
+DROP TABLE t_big;
+DROP PROCEDURE insert_rows;
+UNINSTALL COMPONENT "file://component_mysqlbackup";
