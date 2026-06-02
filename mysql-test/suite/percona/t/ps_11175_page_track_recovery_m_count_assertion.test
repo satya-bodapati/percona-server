@@ -111,21 +111,20 @@ EOF
 --echo # Brief settle so the latest workload flush is in the dblwr
 --sleep 3
 
---echo # ---- Phase 2: clean shutdown ----
---source include/shutdown_mysqld.inc
+--echo # ---- Phase 2: clean restart -- recovery must NOT trip the ut_ad ----
+--echo # Today the dblwr's pre-shutdown flush carries a block_num >= 65376
+--echo # so file_index = block_num / 2043 >= 32 in
+--echo # Arch_Dblwr_Ctx::validate_and_fill_blocks, but num_files is the
+--echo # count (2-3). ut_ad(file_index < num_files) fires, the server
+--echo # aborts inside InnoDB recovery, and restart_mysqld.inc times out
+--echo # waiting for the server to come back -- MTR reports failure.
+--echo #
+--echo # After the init_file_ctx() fix propagates the correct
+--echo # start_index + num_files through to validate_and_fill_blocks,
+--echo # the assertion holds and the server starts cleanly.
+--source include/restart_mysqld.inc
 
---echo # ---- Phase 3: expect recovery to abort on the assertion ----
---let $restart_parameters=
---source include/start_mysqld_expecting_crash.inc
-
---echo # Verify the assertion signature
-let SEARCH_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err;
-let SEARCH_PATTERN = Assertion failure: arch0recv.cc:.*:file_index < num_files;
---source include/search_pattern.inc
-
---echo # ---- Teardown: remove archive + start fresh ----
---force-rmdir $MYSQLTEST_VARDIR/mysqld.1/data/#ib_archive
---source include/start_mysqld.inc
+--echo # ---- Teardown ----
 
 DROP TABLE t_big;
 DROP TABLE t_1000;
