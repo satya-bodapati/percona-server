@@ -32,6 +32,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "arch0arch.h"
 #include "os0thread-create.h"
+#include "srv0srv.h"
 
 /** Log Archiver system global */
 Arch_Log_Sys *arch_log_sys = nullptr;
@@ -192,8 +193,12 @@ dberr_t Arch_Group::write_to_file(Arch_File_Ctx *from_file, byte *from_buffer,
   uint write_size;
 
   if (m_file_ctx.is_closed()) {
-    /* First file in the archive group. */
-    ut_ad(m_file_ctx.get_count() == 0);
+    /* First file in the archive group. Normally m_count == 0 here; with
+    the PS-11175 testing-only knob innodb_arch_page_initial_block_num the
+    group is initialised with m_count seeded to the file_index of the
+    seeded block_num, so the first file we open is that index (via
+    open_new, which opens file m_count). */
+    ut_ad(m_file_ctx.get_count() == 0 || srv_arch_page_initial_block_num != 0);
 
     DBUG_EXECUTE_IF("crash_before_archive_file_creation", DBUG_SUICIDE(););
 
