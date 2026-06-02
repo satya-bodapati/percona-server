@@ -114,21 +114,22 @@ EOF
 
 SET GLOBAL mysqlbackup.backupid = '1';
 
---echo # ---- Phase 3: the SELECT abort ----
---echo # find_reset_point returns A's truncated pos; read_from_file opens
---echo # ib_page_<truncated/2043> which never existed -> ENOENT -> fatal.
---source include/expect_crash.inc
+--echo # ---- Phase 3: SELECT must return cleanly ----
+--echo # Today find_reset_point returns A's truncated pos; read_from_file
+--echo # opens ib_page_<truncated/2043> which never existed -> ENOENT ->
+--echo # srv_fatal_error -> the server dies. --disable_query_log so the
+--echo # actual row contents (LSNs) don't show up in any captured output.
+--echo # Today: the SELECT kills the server; MTR fails because the next
+--echo # statement (the SET below) cannot reach the server. After the
+--echo # mach_write_to_2 fix, the SELECT returns and the test passes.
 --disable_query_log
---error 2013,2006,1053,CR_SERVER_LOST,CR_SERVER_GONE_ERROR
+--disable_result_log
 eval SELECT mysqlbackup_page_track_get_changed_pages($crash_lsn_A, 0);
+--enable_result_log
 --enable_query_log
 
---source include/wait_until_disconnected.inc
-
---echo # Verify the customer's SELECT-side ENOENT signature
-let SEARCH_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err;
-let SEARCH_PATTERN = ib_page_[0-9]+.*'open' returned OS error 71;
---source include/search_pattern.inc
+--echo # Liveness check -- if the SELECT killed the server this fails
+SELECT 1;
 
 --echo # ---- Teardown ----
 --exec rm -rf $MYSQLD_DATADIR/#ib_archive
