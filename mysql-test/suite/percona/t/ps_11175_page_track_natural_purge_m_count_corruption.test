@@ -1,0 +1,219 @@
+# PS-11175 m_count off-by-N -- the natural-purge symptom is SILENT
+# in-place corruption of an existing archive file (no stray ib_page_<small>
+# like the seeded variant; no MY-013581 on the next recovery either).
+#
+# After purging old archive files so the surviving on-disk range starts
+# above 0, init_file_ctx() sets m_count = num_files (small) instead of
+# start_index + num_files. The first post-recovery flush calls
+# open_new(file_index = m_count), and m_count lands on an EXISTING file
+# (because num_files <= max_existing_index). Arch_File_Ctx::open() takes
+# the OS_FILE_OPEN branch (exists == true), seeks to offset 0, and the
+# writer rewrites the header on top of the existing file -- then
+# continues writing data blocks past the header, corrupting the live
+# archive. scan_for_groups on the next recovery sees the (now-corrupted)
+# file at its expected index and recovery "succeeds" without
+# MY-013581. The corruption only surfaces when a later
+# get_changed_pages walks through the overwritten region.
+#
+# This test exercises the natural / customer-like path: a real workload
+# creates files [0, 1, 2, 3] then mysqlbackup_page_track_purge_up_to()
+# trims the oldest. Today the test FAILS because the SHA1 of at least
+# one surviving (non-active) file changes after the post-restart flush.
+# After the init_file_ctx() fix lands (m_count = start_index +
+# num_files), open_new creates a brand-new file at the correct next
+# index and every existing file's SHA1 stays exactly the same.
+
+--disable_query_log
+call mtr.add_suppression(".*");
+--enable_query_log
+
+INSTALL COMPONENT "file://component_mysqlbackup";
+
+CREATE TABLE t_1000 (a INT AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE t_big (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  pad LONGBLOB
+) ENGINE=InnoDB;
+
+--disable_query_log
+let $i = 0;
+while ($i < 1000) {
+  INSERT INTO t_1000 VALUES ();
+  inc $i;
+}
+--enable_query_log
+
+--echo # ---- Phase 1: workload that fills ib_page_0 and ib_page_1 ----
+--disable_query_log
+let $start_lsn = `SELECT mysqlbackup_page_track_set(1)`;
+--enable_query_log
+
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+
+--disable_query_log
+let $i = 0;
+while ($i < 8) {
+  INSERT INTO t_big (pad) SELECT REPEAT('x', 14000) FROM t_1000;
+  inc $i;
+}
+--enable_query_log
+
+--sleep 5
+
+--echo # Wait for ib_page_2 (proves the writer is past file 1)
+--perl
+use strict;
+my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
+my $found = 0;
+for (my $i = 0; $i < 300; $i++) {
+  my @files = glob("$dir/page_group_*/ib_page_2");
+  if (scalar(@files) > 0) { $found = 1; last; }
+  sleep(1);
+}
+if (!$found) { die "ib_page_2 not created within 300s"; }
+EOF
+
+--echo # ---- Phase 2: capture purge LSN -- a few blocks into ib_page_2 ----
+--disable_query_log
+let $lsn_purge = `SELECT mysqlbackup_page_track_set(1)`;
+--enable_query_log
+
+--echo # ---- Phase 3: more workload to fill ib_page_2 and start ib_page_3 ----
+--disable_query_log
+let $i = 0;
+while ($i < 6) {
+  INSERT INTO t_big (pad) SELECT REPEAT('x', 14000) FROM t_1000;
+  inc $i;
+}
+--enable_query_log
+
+--sleep 5
+
+--echo # Wait for ib_page_3 (so ib_page_2 is sealed -- its content won't
+--echo # change post-restart except via the bug we're probing)
+--perl
+use strict;
+my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
+my $found = 0;
+for (my $i = 0; $i < 300; $i++) {
+  my @files = glob("$dir/page_group_*/ib_page_3");
+  if (scalar(@files) > 0) { $found = 1; last; }
+  sleep(1);
+}
+if (!$found) { die "ib_page_3 not created within 300s"; }
+EOF
+
+SET GLOBAL innodb_arch_page_test_max_entries = 0;
+
+--echo # ---- Phase 4: snapshot SHA1 of every existing ib_page_* ----
+--perl
+use strict;
+use Digest::SHA;
+my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
+my $snap = $ENV{'MYSQLTEST_VARDIR'} . "/tmp/ib_pages_before.sha1";
+open(my $out, ">", $snap) or die "cannot write $snap: $!";
+foreach my $f (sort glob("$dir/page_group_*/ib_page_*")) {
+  my ($idx) = $f =~ /ib_page_(\d+)$/;
+  my $sha = Digest::SHA->new(1);
+  $sha->addfile($f);
+  print $out "$idx " . $sha->hexdigest . "\n";
+}
+close($out);
+EOF
+
+--echo # ---- Phase 5: purge old files via mysqlbackup_page_track_purge_up_to ----
+--disable_query_log
+--disable_result_log
+eval SELECT mysqlbackup_page_track_purge_up_to($lsn_purge);
+--enable_result_log
+--enable_query_log
+
+--echo # Confirm the on-disk range now starts above 0
+--perl
+use strict;
+my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
+my @indexes;
+foreach my $f (glob("$dir/page_group_*/ib_page_*")) {
+  if ($f =~ /ib_page_(\d+)$/) { push @indexes, $1; }
+}
+@indexes = sort { $a <=> $b } @indexes;
+if (scalar(@indexes) < 2 || $indexes[0] == 0) {
+  die "purge did not move the start index above 0; indices: " .
+      join(",", @indexes);
+}
+EOF
+
+--echo # ---- Phase 6: clean restart ----
+--source include/restart_mysqld.inc
+
+SET GLOBAL mysqlbackup.backupid = '1';
+
+--echo # ---- Phase 7: trigger a single post-restart archive flush ----
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+
+--disable_query_log
+INSERT INTO t_big (pad) SELECT REPEAT('x', 14000) FROM t_1000 LIMIT 30;
+--enable_query_log
+
+--sleep 10
+
+SET GLOBAL innodb_arch_page_test_max_entries = 0;
+
+--echo # ---- Phase 8: assert no surviving file was rewritten ----
+--echo # Today (bug): the first post-recovery open_new opens an existing
+--echo # file at file_index = m_count and rewrites its header. SHA1 of
+--echo # that file changes -> die -> test fails.
+--echo # After fix: open_new creates a fresh file at file_index =
+--echo # start_index + num_files, every existing file is untouched,
+--echo # all SHA1s match the snapshot, test passes.
+--perl
+use strict;
+use Digest::SHA;
+my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
+my $snap = $ENV{'MYSQLTEST_VARDIR'} . "/tmp/ib_pages_before.sha1";
+my %before;
+open(my $in, "<", $snap) or die "cannot read $snap: $!";
+while (my $line = <$in>) {
+  chomp $line;
+  my ($idx, $hex) = split /\s+/, $line;
+  $before{$idx} = $hex;
+}
+close($in);
+
+my @diffs;
+foreach my $f (sort glob("$dir/page_group_*/ib_page_*")) {
+  my ($idx) = $f =~ /ib_page_(\d+)$/;
+  next unless exists $before{$idx};
+  my $sha = Digest::SHA->new(1);
+  $sha->addfile($f);
+  my $hex_after = $sha->hexdigest;
+  if ($before{$idx} ne $hex_after) {
+    push @diffs, "ib_page_$idx ($before{$idx} -> $hex_after)";
+  }
+}
+if (scalar(@diffs) > 0) {
+  die "PS-11175 m_count: post-recovery flush rewrote existing archive " .
+      "file(s) instead of creating a new one. Corrupted: " .
+      join("; ", @diffs);
+}
+EOF
+
+--echo # ---- Teardown ----
+SET GLOBAL innodb_arch_page_test_max_entries = 0;
+
+--exec rm -rf $MYSQLD_DATADIR/#ib_archive
+--exec rm -rf $MYSQLD_DATADIR/#innodb_redo
+--exec rm -f $MYSQLD_DATADIR/#ib_16384_0.dblwr
+--exec rm -f $MYSQLD_DATADIR/#ib_16384_1.dblwr
+--exec rm -f $MYSQLD_DATADIR/ibdata1
+--exec rm -f $MYSQLD_DATADIR/undo_001
+--exec rm -f $MYSQLD_DATADIR/undo_002
+--exec rm -f $MYSQLD_DATADIR/mysql.ibd
+
+--exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
+--source include/wait_until_connected_again.inc
+
+DROP TABLE t_big;
+DROP TABLE t_1000;
+UNINSTALL COMPONENT "file://component_mysqlbackup";
