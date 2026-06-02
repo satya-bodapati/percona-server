@@ -1,0 +1,178 @@
+# Release-build only: the seeded setup that lands files at a non-zero
+# index uses innodb_arch_page_initial_block_num, which works on top of
+# mach_write_to_2. The 2-byte truncation itself is silent in release
+# builds; the related debug assertion at mach0data.ic:54 fires in
+# debug builds before the seeded state can be observed.
+let $have_debug = `SELECT VERSION() LIKE '%debug%'`;
+if ($have_debug)
+{
+  --skip Test requires a non-debug build
+}
+
+# PS-11175 follow-on bug: Arch_File_Ctx::init() sets m_count to the
+# file COUNT, not to start_index + file_count. After recovery of a
+# group whose oldest file is at a non-zero index (because of purge or
+# seeding), m_count therefore points well below the highest existing
+# file. The very next archive flush calls open_new, which opens a new
+# file at file_index = m_count -- producing a stray ib_page_<small>
+# that collides with the live high-index file sequence and confuses
+# subsequent recovery.
+#
+# Sequence:
+#  1. Seed innodb_arch_page_initial_block_num=65376 so the writer's
+#     first archive file is ib_page_32. Files ib_page_0..ib_page_31
+#     are never created.
+#  2. innodb_arch_page_test_max_entries=1 flushes each archive block
+#     immediately, so a small workload fills ib_page_32 and starts
+#     ib_page_33 -- on-disk state at shutdown is {ib_page_32, ib_page_33},
+#     i.e. num_files = 2 starting at index 32.
+#  3. Clean shutdown + restart_mysqld. arch0recv.cc parses the two
+#     files, then calls Arch_File_Ctx::init(..., num_files=2). That
+#     sets m_count = 2 (BUG: should be 32 + 2 = 34).
+#  4. A few post-restart inserts make the page cleaner flush dirty
+#     pages, which fills an in-memory archive block. The first
+#     post-restart write_to_file sees m_file_ctx.is_closed() and calls
+#     prepare_file_with_header -> open_new at file_index = m_count = 2.
+#     A stray ib_page_2 appears on disk.
+#
+# Expected output today (bug present): post-restart indices include
+# a value below the seeded start index 32 (typically 2). After the
+# init_file_ctx fix lands (m_count = start_index + num_files), the
+# stray index disappears and this test's .result needs re-recording.
+
+--disable_query_log
+call mtr.add_suppression(".*");
+--enable_query_log
+
+INSTALL COMPONENT "file://component_mysqlbackup";
+
+CREATE TABLE t_1000 (a INT AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE t_big (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  pad LONGBLOB
+) ENGINE=InnoDB;
+
+--disable_query_log
+let $i = 0;
+while ($i < 1000) {
+  INSERT INTO t_1000 VALUES ();
+  inc $i;
+}
+--enable_query_log
+
+--echo # ---- Phase 1: seed + create files [32, 33] ----
+SET GLOBAL innodb_arch_page_initial_block_num = 65376;
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+
+--disable_query_log
+let $start_lsn = `SELECT mysqlbackup_page_track_set(1)`;
+--enable_query_log
+--echo tracking started
+
+--echo # 5 * 1000 wide-row inserts -- comfortably past 2043 tracked
+--echo # blocks so file 32 is sealed and file 33 has data
+--disable_query_log
+let $i = 0;
+while ($i < 5) {
+  INSERT INTO t_big (pad) SELECT REPEAT('x', 14000) FROM t_1000;
+  inc $i;
+}
+--enable_query_log
+
+--echo # Wait for ib_page_33 to appear
+--perl
+use strict;
+my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
+my $found = 0;
+for (my $i = 0; $i < 300; $i++) {
+    my @files = glob("$dir/page_group_*/ib_page_33");
+    if (scalar(@files) > 0) {
+        $found = 1;
+        last;
+    }
+    sleep(1);
+}
+if (!$found) {
+    die "ib_page_33 not created within 300s";
+}
+EOF
+
+--echo # Pre-restart archive contents (file indices on disk)
+--perl
+use strict;
+my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
+my @indexes;
+foreach my $f (glob("$dir/page_group_*/ib_page_*")) {
+  if ($f =~ /ib_page_(\d+)$/) {
+    push @indexes, $1;
+  }
+}
+@indexes = sort { $a <=> $b } @indexes;
+print "pre-restart indices: " . join(",", @indexes) . "\n";
+EOF
+
+--echo # Turn off the fast-flush knob before shutdown so the archiver's
+--echo # state is in a steady-ish place when init_file_ctx runs at boot.
+SET GLOBAL innodb_arch_page_test_max_entries = 0;
+
+--echo # ---- Phase 2: clean restart ----
+--source include/restart_mysqld.inc
+
+SET GLOBAL mysqlbackup.backupid = '1';
+
+--echo # ---- Phase 3: trigger one archive flush post-restart ----
+--echo # init_file_ctx has set m_count = num_files (small). The first
+--echo # write_to_file calls open_new at that low index.
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+
+--disable_query_log
+INSERT INTO t_big (pad) SELECT REPEAT('x', 14000) FROM t_1000 LIMIT 100;
+--enable_query_log
+
+--echo # Let the page cleaner + archiver flush at least one block
+--sleep 10
+
+--echo # ---- Phase 4: post-restart archive contents -- bug indicator ----
+--perl
+use strict;
+my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
+my @indexes;
+foreach my $f (glob("$dir/page_group_*/ib_page_*")) {
+  if ($f =~ /ib_page_(\d+)$/) {
+    push @indexes, $1;
+  }
+}
+@indexes = sort { $a <=> $b } @indexes;
+print "post-restart indices: " . join(",", @indexes) . "\n";
+
+my @stray = grep { $_ < 32 } @indexes;
+if (scalar(@stray) > 0) {
+  print "BUG: stray low-index file(s) created post-recovery: " .
+        join(",", @stray) . "\n";
+  print "     init_file_ctx() set m_count to num_files instead of\n";
+  print "     start_index + num_files; open_new opened at that low index.\n";
+} else {
+  print "OK: no stray low-index files -- init_file_ctx m_count bug fixed.\n";
+}
+EOF
+
+--echo # ---- Teardown ----
+SET GLOBAL innodb_arch_page_initial_block_num = 0;
+SET GLOBAL innodb_arch_page_test_max_entries = 0;
+
+--exec rm -rf $MYSQLD_DATADIR/#ib_archive
+--exec rm -rf $MYSQLD_DATADIR/#innodb_redo
+--exec rm -f $MYSQLD_DATADIR/#ib_16384_0.dblwr
+--exec rm -f $MYSQLD_DATADIR/#ib_16384_1.dblwr
+--exec rm -f $MYSQLD_DATADIR/ibdata1
+--exec rm -f $MYSQLD_DATADIR/undo_001
+--exec rm -f $MYSQLD_DATADIR/undo_002
+--exec rm -f $MYSQLD_DATADIR/mysql.ibd
+
+--exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
+--source include/wait_until_connected_again.inc
+
+DROP TABLE t_big;
+DROP TABLE t_1000;
+UNINSTALL COMPONENT "file://component_mysqlbackup";
