@@ -1,0 +1,51 @@
+INSTALL COMPONENT "file://component_mysqlbackup";
+CREATE TABLE t_1000 (a INT AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE t_big (
+id INT AUTO_INCREMENT PRIMARY KEY,
+pad LONGBLOB
+) ENGINE=InnoDB;
+# ---- Phase 1A: bulk insert with max_entries=1 to cross 65,535 ----
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+# Confirm ib_page_33 exists (block_num crossed 65,535)
+# ---- Phase 1B: max_entries=0 + sleep + save_A ----
+# The point is to fill the CURRENT archive block to a non-trivial
+# data_len (many page-id entries) so save_A's persisted m_offset is
+# large. Page tracking is lazy -- track_page fires only when the
+# buffer pool flushes a dirty page. With max_entries=0 the current
+# archive block accumulates entries instead of flushing at one
+# entry. A short sleep lets the page cleaner flush whatever dirty
+# pages remain after Phase 1A so their entries land in this block.
+SET GLOBAL innodb_arch_page_test_max_entries = 0;
+# Page cleaner runs in background; give it time to flush the dirty
+# pages so they get tracked into the current archive block.
+# save_A -- saved m_offset should now reflect the accumulated entries
+reset A captured
+# ---- Phase 1C: seal save_A's file by entering F2 ----
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+# Wait for ib_page_34 (F2) so save_A's file (33) is sealed
+SET GLOBAL innodb_arch_page_test_max_entries = 0;
+# ---- Phase 2: clean reboot -- recovery survives ----
+# restart
+SET GLOBAL mysqlbackup.backupid = '1';
+# ---- Phase 3: bias-controlled save_B in partial F2 ----
+SET GLOBAL innodb_arch_page_reset_block_num_bias = 2043;
+reset B saved with bias
+SET GLOBAL innodb_arch_page_reset_block_num_bias = 0;
+# ---- Phase 4: the underflow SELECT abort ----
+# save_A.m_offset (~72) > landing block's data_len + 32 (=40) ->
+# bytes_left underflows -> 16-MiB read -> past EOF -> fatal.
+Got one of the listed errors
+# Verify the customer's underflow / 16-MiB read signature
+Pattern "Tried to read 16777216 bytes at offset" found
+# Note: the customer's full pattern also shows every subsequent
+# restart dying with a 32-byte read past EOF (recovery's
+# fetch_reset_lsn hitting save_B's truncated entry inside a
+# partial active file). Reproducing that deterministically in MTR
+# depends on the writer's exact block_num at Phase 1 shutdown,
+# which varies with workload timing. This test pins down the
+# primary user-visible symptom (the SELECT crash via underflow);
+# the recovery loop is left out to keep this test stable.
+# ---- Teardown ----
+DROP TABLE t_big;
+DROP TABLE t_1000;
+UNINSTALL COMPONENT "file://component_mysqlbackup";

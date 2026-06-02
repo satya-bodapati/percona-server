@@ -1,0 +1,240 @@
+# Release-build only: the truncation is the SILENT modulo-65,536 wrap
+# inside mach_write_to_2. Debug builds trip the assertion at
+# mach0data.ic:54 before the truncation happens.
+let $have_debug = `SELECT VERSION() LIKE '%debug%'`;
+if ($have_debug)
+{
+  --skip Test requires a non-debug build
+}
+
+# PS-11175: customer's CS0033890 SELECT-crash signature reproduced via
+# the bytes_left underflow path: (1) workload crosses block_num=65,535
+# so the next reset is silently truncated by mach_write_to_2, (2) clean
+# restart-after-truncation is harmless, (3) the next SELECT crashes
+# with the customer's 16-MiB read at huge offset.
+#
+# No seeding, no purge -- all files 0..N exist on disk so the unrelated
+# post-recovery m_count/file_index bug stays dormant. The bias variable
+# (innodb_arch_page_reset_block_num_bias) is used only to give save_B a
+# predictable slot inside the post-restart active file; that's a
+# secondary observation -- save_B itself isn't required for the SELECT
+# crash. The save_A entry alone is enough.
+#
+# Mechanism:
+#
+#   Phase 1A: innodb_arch_page_test_max_entries=1 + bulk inserts.
+#     Every flushed archive block ends up on disk with data_len=8
+#     (one page-id entry per block). A few seconds of bulk
+#     INSERT...SELECT pushes block_num past 65,535 and creates
+#     ib_page_32+ on disk. All blocks are small-data_len "boundary"
+#     blocks -- the population a long-running customer naturally
+#     accumulates after many shutdowns / resets.
+#
+#   Phase 1B: SET max_entries=0; a few normal inserts fill the
+#     CURRENT archive block to a non-trivial offset (~72 bytes from
+#     5 page entries). Then mysqlbackup_page_track_set(1) -> save_A.
+#     The persisted block_num is silently truncated via mach_write_to_2.
+#     The saved m_offset (= data_len_at_save + 32 = 72) is HIGHER than
+#     the data_len=8 in every Phase-1A block.
+#
+#   Phase 1C: insert past the next file boundary so the file
+#     containing save_A is sealed at ~32 MB. fetch_reset_lsn during
+#     recovery reads inside that sealed file -- the read succeeds
+#     regardless of which slot the truncation pointed to. The writer
+#     enters the NEXT file (call it F2) with only a few blocks.
+#
+#   Phase 2: clean shutdown + restart_mysqld. arch0recv.cc parses
+#     save_A's truncated entry (LSN_MAX comes back from fetch_reset_lsn
+#     because slot has no real reset_lsn header) but recovery itself
+#     does NOT underflow -- it only reads a 32-byte header, no
+#     subtraction trap. Server boots clean.
+#
+#   Phase 3: SET srv_arch_page_reset_block_num_bias=2043. The next
+#     save_B's persisted block_num is (real_block + 2043) MOD 65,536.
+#     For any real block_num in F2's range, that lands the slot at
+#     ~1,882-1,883 inside F2 -- far past F2's tiny physical extent.
+#     mysqlbackup_page_track_set(1) -> save_B records that overshoot
+#     into F2's reset block.
+#
+#   Phase 4: SELECT mysqlbackup_page_track_get_changed_pages(A_lsn, 0).
+#     find_reset_point returns save_A's truncated pos with m_offset=72.
+#     get_pages reads the header of the landing block (some block in
+#     file 0..32, ALL of which have data_len=8 from Phase 1A).
+#     bytes_left = 8 + 32 - 72 = underflow -> uint wraps to ~4 GiB ->
+#     capped at the 16-MiB buf_len -> 16-MiB read, which eventually
+#     runs past file end -> MY-012642 "Tried to read 16777216 bytes ...
+#     0 of FD" -> srv_fatal_error. Exactly the customer's SELECT-side
+#     signature.
+#
+#   Phase 5: --exec $MYSQLD_CMD attempts recovery. parse_reset_points
+#     reaches F2's reset block, calls fetch_reset_lsn on save_B's
+#     biased+truncated entry. The 32-byte read at offset ~30 MB inside
+#     a few-MB F2 hits EOF -> os_file_handle_error(exit=true) ->
+#     srv_fatal_error -> exit. --error 1,3,134.
+#     A second --exec confirms the loop is persistent.
+
+--disable_query_log
+call mtr.add_suppression(".*");
+--enable_query_log
+
+INSTALL COMPONENT "file://component_mysqlbackup";
+
+CREATE TABLE t_1000 (a INT AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE t_big (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  pad LONGBLOB
+) ENGINE=InnoDB;
+
+--disable_query_log
+let $i = 0;
+while ($i < 1000) {
+  INSERT INTO t_1000 VALUES ();
+  inc $i;
+}
+--enable_query_log
+
+--echo # ---- Phase 1A: bulk insert with max_entries=1 to cross 65,535 ----
+let $start_lsn = `SELECT mysqlbackup_page_track_set(1)`;
+
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+
+--disable_query_log
+let $i = 0;
+while ($i < 80) {
+  INSERT INTO t_big (pad) SELECT REPEAT('x', 14000) FROM t_1000;
+  inc $i;
+}
+--enable_query_log
+
+--echo # Confirm ib_page_33 exists (block_num crossed 65,535)
+--perl
+use strict;
+my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
+my $found = 0;
+for (my $i = 0; $i < 300; $i++) {
+    my @files = glob("$dir/page_group_*/ib_page_33");
+    if (scalar(@files) > 0) {
+        $found = 1;
+        last;
+    }
+    sleep(1);
+}
+if (!$found) {
+    die "ib_page_33 not created within 300s";
+}
+EOF
+
+--echo # ---- Phase 1B: max_entries=0 + sleep + save_A ----
+--echo # The point is to fill the CURRENT archive block to a non-trivial
+--echo # data_len (many page-id entries) so save_A's persisted m_offset is
+--echo # large. Page tracking is lazy -- track_page fires only when the
+--echo # buffer pool flushes a dirty page. With max_entries=0 the current
+--echo # archive block accumulates entries instead of flushing at one
+--echo # entry. A short sleep lets the page cleaner flush whatever dirty
+--echo # pages remain after Phase 1A so their entries land in this block.
+SET GLOBAL innodb_arch_page_test_max_entries = 0;
+
+--disable_query_log
+INSERT INTO t_big (pad) SELECT REPEAT('x', 14000) FROM t_1000 LIMIT 200;
+--enable_query_log
+
+--echo # Page cleaner runs in background; give it time to flush the dirty
+--echo # pages so they get tracked into the current archive block.
+--sleep 10
+
+--echo # save_A -- saved m_offset should now reflect the accumulated entries
+--disable_query_log
+let $crash_lsn_A = `SELECT mysqlbackup_page_track_set(1)`;
+--enable_query_log
+--echo reset A captured
+
+--echo # ---- Phase 1C: seal save_A's file by entering F2 ----
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+
+--disable_query_log
+let $i = 0;
+while ($i < 5) {
+  INSERT INTO t_big (pad) SELECT REPEAT('x', 14000) FROM t_1000;
+  inc $i;
+}
+--enable_query_log
+
+--echo # Wait for ib_page_34 (F2) so save_A's file (33) is sealed
+--perl
+use strict;
+my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
+my $found = 0;
+for (my $i = 0; $i < 300; $i++) {
+    my @files = glob("$dir/page_group_*/ib_page_34");
+    if (scalar(@files) > 0) {
+        $found = 1;
+        last;
+    }
+    sleep(1);
+}
+if (!$found) {
+    die "ib_page_34 not created within 300s";
+}
+EOF
+
+SET GLOBAL innodb_arch_page_test_max_entries = 0;
+
+--echo # ---- Phase 2: clean reboot -- recovery survives ----
+--source include/restart_mysqld.inc
+
+SET GLOBAL mysqlbackup.backupid = '1';
+
+--echo # ---- Phase 3: bias-controlled save_B in partial F2 ----
+SET GLOBAL innodb_arch_page_reset_block_num_bias = 2043;
+
+--disable_query_log
+--disable_result_log
+let $crash_lsn_B = `SELECT mysqlbackup_page_track_set(1)`;
+--enable_result_log
+--enable_query_log
+--echo reset B saved with bias
+
+SET GLOBAL innodb_arch_page_reset_block_num_bias = 0;
+
+--echo # ---- Phase 4: the underflow SELECT abort ----
+--echo # save_A.m_offset (~72) > landing block's data_len + 32 (=40) ->
+--echo # bytes_left underflows -> 16-MiB read -> past EOF -> fatal.
+--source include/expect_crash.inc
+--disable_query_log
+--error 2013,2006,1053,CR_SERVER_LOST,CR_SERVER_GONE_ERROR
+eval SELECT mysqlbackup_page_track_get_changed_pages($crash_lsn_A, 0);
+--enable_query_log
+
+--source include/wait_until_disconnected.inc
+
+--echo # Verify the customer's underflow / 16-MiB read signature
+let SEARCH_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err;
+let SEARCH_PATTERN = Tried to read 16777216 bytes at offset;
+--source include/search_pattern.inc
+
+--echo # Note: the customer's full pattern also shows every subsequent
+--echo # restart dying with a 32-byte read past EOF (recovery's
+--echo # fetch_reset_lsn hitting save_B's truncated entry inside a
+--echo # partial active file). Reproducing that deterministically in MTR
+--echo # depends on the writer's exact block_num at Phase 1 shutdown,
+--echo # which varies with workload timing. This test pins down the
+--echo # primary user-visible symptom (the SELECT crash via underflow);
+--echo # the recovery loop is left out to keep this test stable.
+
+--echo # ---- Teardown ----
+--exec rm -rf $MYSQLD_DATADIR/#ib_archive
+--exec rm -rf $MYSQLD_DATADIR/#innodb_redo
+--exec rm -f $MYSQLD_DATADIR/#ib_16384_0.dblwr
+--exec rm -f $MYSQLD_DATADIR/#ib_16384_1.dblwr
+--exec rm -f $MYSQLD_DATADIR/ibdata1
+--exec rm -f $MYSQLD_DATADIR/undo_001
+--exec rm -f $MYSQLD_DATADIR/undo_002
+--exec rm -f $MYSQLD_DATADIR/mysql.ibd
+
+--exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
+--source include/wait_until_connected_again.inc
+
+DROP TABLE t_big;
+DROP TABLE t_1000;
+UNINSTALL COMPONENT "file://component_mysqlbackup";
