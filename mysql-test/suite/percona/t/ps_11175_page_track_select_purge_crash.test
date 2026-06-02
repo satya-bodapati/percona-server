@@ -132,30 +132,21 @@ eval SELECT mysqlbackup_page_track_purge_up_to($crash_lsn);
 
 --echo # 7. Clean shutdown so the truncated reset block is flushed and
 --echo #    ib_page_33 stops growing while still partially populated.
---source include/shutdown_mysqld.inc
 
---echo # 8. Bring mysqld up manually and confirm the recovery archiver
---echo #    cannot replay the truncated reset point: it reads
---echo #    ib_page_33 at an offset past the file's physical extent
---echo #    and srv_fatal_error()s. We use --exec + --error 1 so the
---echo #    test framework does not try to keep mysqld alive while we
---echo #    are deliberately driving recovery into the assertion path.
-let $restart_log = $MYSQLTEST_VARDIR/log/mysqld.1.restart.err;
-# srv_fatal_error -> abort() -> SIGABRT. The exit code we see from the
-# mysqld_safe wrapper is platform-dependent (1, 3, or 134 commonly), so
-# accept the common values rather than over-constrain.
---error 1,3,134
---exec $MYSQLD_CMD --console > $restart_log 2>&1
+--echo # 8. Recovery must come back cleanly. Today the truncated
+--echo #    reset_point.block_num makes fetch_reset_lsn read at an
+--echo #    offset past ib_page_33's physical extent ->
+--echo #    os_file_handle_error(exit=true) -> srv_fatal_error inside
+--echo #    InnoDB recovery -> server never comes back ->
+--echo #    restart_mysqld.inc times out -> MTR reports failure.
+--echo #    After the mach_write_to_2 fix recovery parses the reset
+--echo #    entry within real bounds and the server starts cleanly.
+--source include/restart_mysqld.inc
 
---echo # 9. Verify the customer's recovery signature: read of 32 bytes
---echo #    inside ib_page_3X failed because the truncated block_num
---echo #    pointed past the physical extent.
-let SEARCH_FILE = $restart_log;
-let SEARCH_PATTERN = Tried to read 32 bytes at offset .* ib_page_;
---source include/search_pattern.inc
+--echo # 9. Teardown
+SET GLOBAL innodb_arch_page_initial_block_num = 0;
+SET GLOBAL innodb_arch_page_test_max_entries = 0;
 
---echo # 10. Wipe the corrupt archive so MTR can restart cleanly for
---echo #     subsequent tests.
 --exec rm -rf $MYSQLD_DATADIR/#ib_archive
 --exec rm -rf $MYSQLD_DATADIR/#innodb_redo
 --exec rm -f $MYSQLD_DATADIR/#ib_16384_0.dblwr
@@ -165,7 +156,9 @@ let SEARCH_PATTERN = Tried to read 32 bytes at offset .* ib_page_;
 --exec rm -f $MYSQLD_DATADIR/undo_002
 --exec rm -f $MYSQLD_DATADIR/mysql.ibd
 
---source include/start_mysqld.inc
+--exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
+--source include/wait_until_connected_again.inc
 
 DROP TABLE t_big;
 DROP PROCEDURE insert_rows;
