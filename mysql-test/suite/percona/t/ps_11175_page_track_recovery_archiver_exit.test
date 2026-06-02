@@ -1,0 +1,170 @@
+# Release-build only: this test needs TWO restarts to succeed. The
+# init_file_ctx m_count bug manifests on Restart #1 (post-recovery
+# writer creates a stray ib_page_2); Restart #2 then sees the stray
+# file and the page-archiver subsystem exits gracefully with
+# MY-013581. In debug builds the ut_ad at arch0recv.cc:130 fires
+# during Restart #1 (covered by ps_11175_page_track_recovery_m_count_assertion)
+# before we can reach the second restart.
+let $have_debug = `SELECT VERSION() LIKE '%debug%'`;
+if ($have_debug)
+{
+  --skip Test requires a non-debug build
+}
+
+# PS-11175 follow-on: side-effect of the init_file_ctx() m_count
+# off-by-N bug. Once the stray ib_page_<small> file from the m_count
+# bug exists on disk, the NEXT recovery's scan_for_groups picks it
+# up and miscomputes (start_index, num_files); cleanup_if_required
+# then tries to open a file past the real range, returns
+# DB_CANNOT_OPEN_FILE, the defensive catch in Arch_Page_Sys::recover()
+# logs ER_IB_ERR_PAGE_ARCH_RECOVERY_FAILED ("Page archiver system's
+# recovery failed.") and the page archiver shuts down for this boot
+# while the server itself continues.
+#
+# Chain (downstream of the m_count bug):
+#  Restart #1:
+#    init_file_ctx(num_files=3) sets m_count=3 (should be 35).
+#    Post-recovery writer flushes a block -> open_new at file_index=
+#    m_count=3 (or 2 once recovery has --m_num_files'd the partial
+#    last file). Stray ib_page_<small> appears on disk.
+#  Restart #2:
+#    scan_for_groups finds ib_page_<small> alongside ib_page_32+.
+#    start_index = min(...) = <small>, num_files = total count.
+#    cleanup_if_required computes positions against start_index +
+#    num_files - 1, opens a file past the live range, gets
+#    DB_CANNOT_OPEN_FILE. arch_recv.recover() returns non-success,
+#    Arch_Page_Sys::recover() emits ER_IB_ERR_PAGE_ARCH_RECOVERY_FAILED
+#    -> "Page archiver system's recovery failed.". Server boots
+#    successfully; page tracking is unavailable for this boot.
+#
+# Fix relationship: this is purely downstream of the m_count bug.
+# Once init_file_ctx() is corrected to set m_count = start_index +
+# num_files, no stray file is created on Restart #1, scan_for_groups
+# on Restart #2 sees only the real high-index files, cleanup_if_required
+# succeeds, and MY-013581 does not fire. This test will then no
+# longer find the search pattern and its .result will need to be
+# re-recorded (the search_pattern.inc line goes from "found" to
+# "not found").
+
+--disable_query_log
+call mtr.add_suppression(".*");
+--enable_query_log
+
+INSTALL COMPONENT "file://component_mysqlbackup";
+
+CREATE TABLE t_1000 (a INT AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB;
+CREATE TABLE t_big (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  pad LONGBLOB
+) ENGINE=InnoDB;
+
+--disable_query_log
+let $i = 0;
+while ($i < 1000) {
+  INSERT INTO t_1000 VALUES ();
+  inc $i;
+}
+--enable_query_log
+
+--echo # ---- Phase 1: seed + workload -> files at indices [32, 33, ...] ----
+SET GLOBAL innodb_arch_page_initial_block_num = 65376;
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+
+--disable_query_log
+let $start_lsn = `SELECT mysqlbackup_page_track_set(1)`;
+--enable_query_log
+--echo tracking started
+
+--disable_query_log
+let $i = 0;
+while ($i < 5) {
+  INSERT INTO t_big (pad) SELECT REPEAT('x', 14000) FROM t_1000;
+  inc $i;
+}
+--enable_query_log
+
+--echo # Wait for ib_page_33 (i.e., at least two files exist at indices >= 32)
+--perl
+use strict;
+my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
+my $found = 0;
+for (my $i = 0; $i < 300; $i++) {
+    my @files = glob("$dir/page_group_*/ib_page_33");
+    if (scalar(@files) > 0) {
+        $found = 1;
+        last;
+    }
+    sleep(1);
+}
+if (!$found) {
+    die "ib_page_33 not created within 300s";
+}
+EOF
+
+SET GLOBAL innodb_arch_page_test_max_entries = 0;
+
+--echo # ---- Phase 2: Restart #1 -- recovery succeeds, m_count is primed ----
+--source include/restart_mysqld.inc
+
+SET GLOBAL mysqlbackup.backupid = '1';
+
+--echo # ---- Phase 3: post-restart flush -> stray ib_page_<small> appears ----
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+
+--disable_query_log
+INSERT INTO t_big (pad) SELECT REPEAT('x', 14000) FROM t_1000 LIMIT 100;
+--enable_query_log
+
+--echo # Let the page cleaner + archiver flush at least one block
+--sleep 10
+
+--echo # Confirm the stray low-index file exists before Restart #2
+--perl
+use strict;
+my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
+my @stray;
+foreach my $f (glob("$dir/page_group_*/ib_page_*")) {
+  if ($f =~ /ib_page_(\d+)$/ && $1 < 32) {
+    push @stray, $1;
+  }
+}
+@stray = sort { $a <=> $b } @stray;
+if (scalar(@stray) == 0) {
+  die "no stray low-index file appeared after Restart #1; precondition not met";
+}
+print "stray index(es) below 32 present before Restart #2\n";
+EOF
+
+SET GLOBAL innodb_arch_page_test_max_entries = 0;
+
+--echo # ---- Phase 4: Restart #2 -- scan_for_groups sees the stray file ----
+--source include/restart_mysqld.inc
+
+--echo # ---- Phase 5: verify the graceful-exit signature in the log ----
+--echo # The page-archiver recovery returns non-success; Arch_Page_Sys::recover()
+--echo # logs MY-013581 and disables page archiving for this boot. The
+--echo # server itself comes up.
+let SEARCH_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err;
+let SEARCH_PATTERN = \[MY-013581\].*Page archiver system;
+--source include/search_pattern.inc
+
+--echo # ---- Teardown ----
+SET GLOBAL innodb_arch_page_initial_block_num = 0;
+SET GLOBAL innodb_arch_page_test_max_entries = 0;
+
+--exec rm -rf $MYSQLD_DATADIR/#ib_archive
+--exec rm -rf $MYSQLD_DATADIR/#innodb_redo
+--exec rm -f $MYSQLD_DATADIR/#ib_16384_0.dblwr
+--exec rm -f $MYSQLD_DATADIR/#ib_16384_1.dblwr
+--exec rm -f $MYSQLD_DATADIR/ibdata1
+--exec rm -f $MYSQLD_DATADIR/undo_001
+--exec rm -f $MYSQLD_DATADIR/undo_002
+--exec rm -f $MYSQLD_DATADIR/mysql.ibd
+
+--exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--enable_reconnect
+--source include/wait_until_connected_again.inc
+
+DROP TABLE t_big;
+DROP TABLE t_1000;
+UNINSTALL COMPONENT "file://component_mysqlbackup";
