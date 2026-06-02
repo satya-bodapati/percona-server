@@ -132,27 +132,23 @@ INSERT INTO t_big (pad) SELECT REPEAT('x', 14000) FROM t_1000 LIMIT 100;
 --echo # Let the page cleaner + archiver flush at least one block
 --sleep 10
 
---echo # ---- Phase 4: post-restart archive contents -- bug indicator ----
+--echo # ---- Phase 4: assert NO stray file below the seeded start index ----
+--echo # The seed put the writer at file_index 32. No post-recovery write
+--echo # should produce a file at any index below 32. Today (bug present)
+--echo # init_file_ctx() leaves m_count = num_files (small) and open_new
+--echo # creates ib_page_<m_count>, which violates this invariant.
 --perl
 use strict;
 my $dir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data/#ib_archive";
-my @indexes;
+my @stray;
 foreach my $f (glob("$dir/page_group_*/ib_page_*")) {
-  if ($f =~ /ib_page_(\d+)$/) {
-    push @indexes, $1;
+  if ($f =~ /ib_page_(\d+)$/ && $1 < 32) {
+    push @stray, $1;
   }
 }
-@indexes = sort { $a <=> $b } @indexes;
-print "post-restart indices: " . join(",", @indexes) . "\n";
-
-my @stray = grep { $_ < 32 } @indexes;
 if (scalar(@stray) > 0) {
-  print "BUG: stray low-index file(s) created post-recovery: " .
-        join(",", @stray) . "\n";
-  print "     init_file_ctx() set m_count to num_files instead of\n";
-  print "     start_index + num_files; open_new opened at that low index.\n";
-} else {
-  print "OK: no stray low-index files -- init_file_ctx m_count bug fixed.\n";
+  die "PS-11175 init_file_ctx m_count bug: stray file(s) below seeded ".
+      "start index 32 -- indices: " . join(",", sort { $a <=> $b } @stray);
 }
 EOF
 
