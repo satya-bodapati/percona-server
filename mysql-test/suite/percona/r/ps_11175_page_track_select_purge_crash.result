@@ -1,0 +1,61 @@
+INSTALL COMPONENT "file://component_mysqlbackup";
+CREATE TABLE t_big (
+id INT AUTO_INCREMENT PRIMARY KEY,
+pad LONGBLOB
+) ENGINE=InnoDB;
+CREATE PROCEDURE insert_rows(n INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+START TRANSACTION;
+WHILE i < n DO
+INSERT INTO t_big (pad) VALUES (REPEAT('x', 14000));
+SET i = i + 1;
+IF i % 500 = 0 THEN
+COMMIT;
+START TRANSACTION;
+END IF;
+END WHILE;
+COMMIT;
+END//
+# 1. Seed at start of ib_page_32 so files 0..31 never exist
+#    (matches a long-running server whose oldest archive file is
+#    well past file 31, like the customer's ib_page_584).
+SET GLOBAL innodb_arch_page_initial_block_num = 65376;
+# 2. One page_id per archive block, so a small workload exhausts
+#    the 2-byte block_num counter.
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+# 3. Start tracking. Emits ib_page_32's first reset entry
+#    (block_num = 65376, no truncation needed).
+start_lsn captured
+# 4. 1850 rows ~ 2060 archive blocks. We cross from ib_page_32
+#    into ib_page_33 (which begins at absolute block 67419),
+#    landing the writer well past 65 535 while ib_page_33 only
+#    has a few dozen blocks physically written.
+CALL insert_rows(1850);
+# 5. Save the truncating reset. block_num is in ib_page_33 and
+#    > 65 535, so add_reset persists (block_num MOD 65536) into
+#    ib_page_33's reset block via mach_write_to_2. This is the
+#    on-disk corruption the customer also had.
+crash_lsn captured
+# 6. The customer's purge step. In our setup files 0..31 never
+#    existed, so nothing is deleted, but the API path is the
+#    same one the customer triggered before their crashing
+#    SELECT.
+# 7. Clean shutdown so the truncated reset block is flushed and
+#    ib_page_33 stops growing while still partially populated.
+# 8. Bring mysqld up manually and confirm the recovery archiver
+#    cannot replay the truncated reset point: it reads
+#    ib_page_33 at an offset past the file's physical extent
+#    and srv_fatal_error()s. We use --exec + --error 1 so the
+#    test framework does not try to keep mysqld alive while we
+#    are deliberately driving recovery into the assertion path.
+# 9. Verify the customer's recovery signature: read of 32 bytes
+#    inside ib_page_3X failed because the truncated block_num
+#    pointed past the physical extent.
+Pattern "Tried to read 32 bytes at offset .* ib_page_" not found
+# 10. Wipe the corrupt archive so MTR can restart cleanly for
+#     subsequent tests.
+# restart
+DROP TABLE t_big;
+DROP PROCEDURE insert_rows;
+UNINSTALL COMPONENT "file://component_mysqlbackup";

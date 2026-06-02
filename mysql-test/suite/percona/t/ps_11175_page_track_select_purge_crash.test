@@ -1,0 +1,172 @@
+# Release-build only: the 2-byte truncation we are exercising is the
+# SILENT modulo-65536 wrap inside mach_write_to_2. In debug builds the
+# debug assertion at mach0data.ic:54 fires before the truncation
+# happens, so the bug we are reproducing cannot exist in that build.
+let $have_debug = `SELECT VERSION() LIKE '%debug%'`;
+if ($have_debug)
+{
+  --skip Test requires a non-debug build (mach_write_to_2 assertion blocks the truncation we exercise)
+}
+
+# PS-11175: customer-style "purge then restart" failure caused by the
+# 2-byte block_num truncation in Arch_Block::add_reset.
+#
+# CS0033890 timeline (from mysql.log):
+#   - long-running server with a truncated reset point persisted to
+#     ib_archive (mach_write_to_2 in add_reset);
+#   - customer ran mysqlbackup_page_track_purge_up_to(); old ib_page_*
+#     files were unlinked, oldest surviving file was ib_page_584;
+#   - SELECT mysqlbackup_page_track_get_changed_pages() crashed the server
+#     with ENOENT on ib_page_1190527724;
+#   - every subsequent restart died in the recovery archiver with
+#     "Tried to read 32 bytes at offset 21528576 ... ib_page_584" - read
+#     past physical EOF on a partial-extent file.
+#
+# We reproduce the second (deterministic) symptom -- recovery cannot
+# parse the persisted truncated reset point because the within-file
+# offset computed from (truncated_block_num MOD 2043) overshoots the
+# physical extent of the active ib_page_*. Same root cause as the
+# customer-visible SELECT crash; this one is timing-independent.
+#
+# Mechanism (no single-entry block fabrication; only the page-track
+# writer's normal flush path is used):
+#
+#  1. innodb_arch_page_initial_block_num=65376 seeds the writer at the
+#     start of ib_page_32. Files 0..31 are never created.
+#  2. innodb_arch_page_test_max_entries=1 makes each tracked page_id
+#     consume its own archive block, so a small workload drives
+#     block_num across 65 535 quickly.
+#  3. Wide-row inserts push block_num just past 65 535 and into a
+#     freshly-opened ib_page_33 (which therefore has only a handful of
+#     blocks physically written).
+#  4. mysqlbackup_page_track_set(1) saves a reset point. Because
+#     m_last_pos.m_block_num is now > 65 535, add_reset persists
+#     (block_num MOD 65 536) into ib_page_33's reset block via
+#     mach_write_to_2 -- the truncation the customer hit.
+#  5. mysqlbackup_page_track_purge_up_to(crash_lsn) -- the customer's
+#     purge action. In our setup files 0..31 do not exist, so this is a
+#     no-op on disk, but it walks the exact API path the customer
+#     invoked and locks in the precondition (only files >= 32 on disk)
+#     before the failing restart.
+#  6. Clean shutdown leaves the truncated reset point persisted in
+#     ib_page_33's reset block while ib_page_33 itself has only ~32
+#     data blocks physically written.
+#  7. Start a fresh mysqld via --exec $MYSQLD_CMD with the log
+#     redirected. The page-archive recovery (arch0recv.cc:parse_reset_-
+#     points -> fetch_reset_lsn) reads the truncated block_num, calls
+#     Arch_Block::get_file_offset which returns (1900 MOD 2043 + 1) *
+#     16384 = 31 145 984, attempts a 32-byte read from ib_page_33 at
+#     that offset, and gets EOF. os_file_handle_error -> srv_fatal_error
+#     -> mysqld aborts. We assert via --error 1.
+#  8. Grep the redirected log for the customer-style MY-012642 EOF read
+#     signature.
+
+--disable_query_log
+call mtr.add_suppression(".*");
+--enable_query_log
+
+INSTALL COMPONENT "file://component_mysqlbackup";
+
+CREATE TABLE t_big (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  pad LONGBLOB
+) ENGINE=InnoDB;
+
+DELIMITER //;
+CREATE PROCEDURE insert_rows(n INT)
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  START TRANSACTION;
+  WHILE i < n DO
+    INSERT INTO t_big (pad) VALUES (REPEAT('x', 14000));
+    SET i = i + 1;
+    IF i % 500 = 0 THEN
+      COMMIT;
+      START TRANSACTION;
+    END IF;
+  END WHILE;
+  COMMIT;
+END//
+DELIMITER ;//
+
+--echo # 1. Seed at start of ib_page_32 so files 0..31 never exist
+--echo #    (matches a long-running server whose oldest archive file is
+--echo #    well past file 31, like the customer's ib_page_584).
+SET GLOBAL innodb_arch_page_initial_block_num = 65376;
+
+--echo # 2. One page_id per archive block, so a small workload exhausts
+--echo #    the 2-byte block_num counter.
+SET GLOBAL innodb_arch_page_test_max_entries = 1;
+
+--echo # 3. Start tracking. Emits ib_page_32's first reset entry
+--echo #    (block_num = 65376, no truncation needed).
+let $start_lsn = `SELECT mysqlbackup_page_track_set(1)`;
+--echo start_lsn captured
+
+--echo # 4. 1850 rows ~ 2060 archive blocks. We cross from ib_page_32
+--echo #    into ib_page_33 (which begins at absolute block 67419),
+--echo #    landing the writer well past 65 535 while ib_page_33 only
+--echo #    has a few dozen blocks physically written.
+CALL insert_rows(1850);
+
+--sleep 5
+
+--echo # 5. Save the truncating reset. block_num is in ib_page_33 and
+--echo #    > 65 535, so add_reset persists (block_num MOD 65536) into
+--echo #    ib_page_33's reset block via mach_write_to_2. This is the
+--echo #    on-disk corruption the customer also had.
+let $crash_lsn = `SELECT mysqlbackup_page_track_set(1)`;
+--echo crash_lsn captured
+
+--sleep 2
+
+--echo # 6. The customer's purge step. In our setup files 0..31 never
+--echo #    existed, so nothing is deleted, but the API path is the
+--echo #    same one the customer triggered before their crashing
+--echo #    SELECT.
+--disable_query_log
+--disable_result_log
+eval SELECT mysqlbackup_page_track_purge_up_to($crash_lsn);
+--enable_result_log
+--enable_query_log
+
+--echo # 7. Clean shutdown so the truncated reset block is flushed and
+--echo #    ib_page_33 stops growing while still partially populated.
+--source include/shutdown_mysqld.inc
+
+--echo # 8. Bring mysqld up manually and confirm the recovery archiver
+--echo #    cannot replay the truncated reset point: it reads
+--echo #    ib_page_33 at an offset past the file's physical extent
+--echo #    and srv_fatal_error()s. We use --exec + --error 1 so the
+--echo #    test framework does not try to keep mysqld alive while we
+--echo #    are deliberately driving recovery into the assertion path.
+let $restart_log = $MYSQLTEST_VARDIR/log/mysqld.1.restart.err;
+# srv_fatal_error -> abort() -> SIGABRT. The exit code we see from the
+# mysqld_safe wrapper is platform-dependent (1, 3, or 134 commonly), so
+# accept the common values rather than over-constrain.
+--error 1,3,134
+--exec $MYSQLD_CMD --console > $restart_log 2>&1
+
+--echo # 9. Verify the customer's recovery signature: read of 32 bytes
+--echo #    inside ib_page_3X failed because the truncated block_num
+--echo #    pointed past the physical extent.
+let SEARCH_FILE = $restart_log;
+let SEARCH_PATTERN = Tried to read 32 bytes at offset .* ib_page_;
+--source include/search_pattern.inc
+
+--echo # 10. Wipe the corrupt archive so MTR can restart cleanly for
+--echo #     subsequent tests.
+--exec rm -rf $MYSQLD_DATADIR/#ib_archive
+--exec rm -rf $MYSQLD_DATADIR/#innodb_redo
+--exec rm -f $MYSQLD_DATADIR/#ib_16384_0.dblwr
+--exec rm -f $MYSQLD_DATADIR/#ib_16384_1.dblwr
+--exec rm -f $MYSQLD_DATADIR/ibdata1
+--exec rm -f $MYSQLD_DATADIR/undo_001
+--exec rm -f $MYSQLD_DATADIR/undo_002
+--exec rm -f $MYSQLD_DATADIR/mysql.ibd
+
+--source include/start_mysqld.inc
+
+DROP TABLE t_big;
+DROP PROCEDURE insert_rows;
+UNINSTALL COMPONENT "file://component_mysqlbackup";
