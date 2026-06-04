@@ -31,7 +31,9 @@ this program; if not, write to the Free Software Foundation, Inc.,
  *******************************************************/
 
 #include "arch0arch.h"
+#include "arch0page.h"
 #include "os0thread-create.h"
+#include "srv0srv.h"
 
 /** Log Archiver system global */
 Arch_Log_Sys *arch_log_sys = nullptr;
@@ -193,7 +195,12 @@ dberr_t Arch_Group::write_to_file(Arch_File_Ctx *from_file, byte *from_buffer,
 
   if (m_file_ctx.is_closed()) {
     /* First file in the archive group. */
-    ut_ad(m_file_ctx.get_count() == 0);
+    /* PS-11175 test seeding: when innodb_arch_page_initial_block_num is
+    non-zero, init_file_ctx is called with num_files == seeded file index
+    so the first open_new() lands at ib_page_<seed/2043> instead of
+    ib_page_0. This breaks the "m_count == 0 means no files yet" invariant
+    this assert encodes; allow the seeded case explicitly. */
+    ut_ad(m_file_ctx.get_count() == 0 || srv_arch_page_initial_block_num != 0);
 
     DBUG_EXECUTE_IF("crash_before_archive_file_creation", DBUG_SUICIDE(););
 
@@ -435,6 +442,15 @@ dberr_t Arch_File_Ctx::open_new(lsn_t start_lsn, uint64_t new_file_size,
   auto err = open(false, start_lsn, m_count, initial_file_size, new_file_size);
   if (err != DB_SUCCESS) {
     return err;
+  }
+  /* PS-11175 diagnostic: when the seed knob is in use, log every newly
+  created ib_page_N so tests and investigations can correlate file rolls
+  with workload progress and reset-point activity. Gated by the seed
+  knob so production runs (seed == 0) stay quiet. */
+  if (srv_arch_page_initial_block_num != 0) {
+    ib::info(ER_IB_MSG_26) << "page_archiver: created ib_page_" << m_count
+                           << " (first block_num="
+                           << (m_count * ARCH_PAGE_FILE_DATA_CAPACITY) << ")";
   }
   ++m_count;
   return DB_SUCCESS;

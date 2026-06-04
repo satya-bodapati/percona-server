@@ -644,6 +644,9 @@ unsigned long long srv_stats_transient_sample_pages = 8;
 bool srv_stats_persistent = true;
 bool srv_stats_include_delete_marked = false;
 unsigned long long srv_stats_persistent_sample_pages = 20;
+
+/** PS-11175 testing-only knob. See srv0srv.h. */
+unsigned long long srv_arch_page_initial_block_num = 0;
 bool srv_stats_auto_recalc = true;
 
 ulong srv_replication_delay = 0;

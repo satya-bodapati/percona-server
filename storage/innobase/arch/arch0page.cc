@@ -1375,6 +1375,14 @@ dberr_t Arch_Block::flush(Arch_Group *file_group, Arch_Blk_Flush_Type type) {
   switch (m_type) {
     case ARCH_RESET_BLOCK:
       err = file_group->write_file_header(m_data, m_size);
+      /* PS-11175 diagnostic: every reset-block flush. Low volume (only a
+      handful per test), so unthrottled. Gated by the seed knob. */
+      if (srv_arch_page_initial_block_num != 0 && err == DB_SUCCESS) {
+        ib::info(ER_IB_MSG_26)
+            << "page_archiver: flushed RESET block (data_len=" << m_data_len
+            << " stop_lsn=" << m_stop_lsn << " reset_lsn=" << m_reset_lsn
+            << ") -- on disk now";
+      }
       break;
 
     case ARCH_DATA_BLOCK: {
@@ -1391,6 +1399,35 @@ dberr_t Arch_Block::flush(Arch_Group *file_group, Arch_Blk_Flush_Type type) {
       useful info required during recovery. */
       err = file_group->write_to_file(nullptr, m_data, m_size, is_partial_flush,
                                       true, get_empty_file_header_cbk);
+
+      /* PS-11175 diagnostic: log data-block flushes so the test (and any
+      investigator reading the log) can correlate "writer rolled to block
+      N in memory" with "block N has actually landed on disk". Throttled
+      to every 64th full flush plus every file boundary (the last data
+      slot of each file). Partial flushes get a separate, throttled
+      message so the log shows checkpoint-driven partial writes too.
+      Gated by the seed knob; production stays silent. */
+      if (srv_arch_page_initial_block_num != 0 && err == DB_SUCCESS) {
+        const uint64_t file_idx = m_number / ARCH_PAGE_FILE_DATA_CAPACITY;
+        const uint64_t slot_in_file =
+            (m_number % ARCH_PAGE_FILE_DATA_CAPACITY) + 1;
+        if (is_partial_flush) {
+          if (m_number % 64 == 0) {
+            ib::info(ER_IB_MSG_26)
+                << "page_archiver: PARTIAL flush block_num=" << m_number
+                << " file=ib_page_" << file_idx << " slot=" << slot_in_file
+                << " data_len=" << m_data_len
+                << " (active block image refreshed on disk)";
+          }
+        } else if (m_number % 64 == 0 ||
+                   (m_number % ARCH_PAGE_FILE_DATA_CAPACITY) ==
+                       ARCH_PAGE_FILE_DATA_CAPACITY - 1) {
+          ib::info(ER_IB_MSG_26)
+              << "page_archiver: FULL flush block_num=" << m_number
+              << " file=ib_page_" << file_idx << " slot=" << slot_in_file
+              << " data_len=" << m_data_len << " (block sealed on disk)";
+        }
+      }
       break;
     }
 
@@ -1734,6 +1771,19 @@ void Arch_Page_Sys::track_page(buf_page_t *bpage, lsn_t track_lsn,
 
       m_write_pos.set_next();
 
+      /* PS-11175 diagnostic: gated by the seed knob. Print writer
+      progress every 256 block rolls (~4 MB of archive) so tests can
+      watch m_block_num advance without scanning disk file sizes. */
+      if (srv_arch_page_initial_block_num != 0 &&
+          (m_write_pos.m_block_num % 256 == 0)) {
+        ib::info(ER_IB_MSG_26)
+            << "page_archiver: writer block_num=" << m_write_pos.m_block_num
+            << " file_index="
+            << (m_write_pos.m_block_num / ARCH_PAGE_FILE_DATA_CAPACITY)
+            << " slot="
+            << (m_write_pos.m_block_num % ARCH_PAGE_FILE_DATA_CAPACITY);
+      }
+
       /* Writing to a new file so move to the next reset block. */
       if (m_write_pos.m_block_num % ARCH_PAGE_FILE_DATA_CAPACITY == 0) {
         Arch_Block *reset_block =
@@ -1901,7 +1951,17 @@ int Arch_Page_Sys::get_pages(MYSQL_THD thd, Page_Track_Callback cbk_func,
       ut_ad(bytes_left <= ARCH_PAGE_BLK_SIZE);
       ut_ad(block_stop_lsn != LSN_MAX);
 
+      const uint bytes_before_sub = bytes_left;
       bytes_left -= cur_pos.m_offset;
+
+      if (UNIV_UNLIKELY(bytes_before_sub < cur_pos.m_offset)) {
+        ib::error(ER_IB_MSG_26)
+            << "PS-11175 underflow candidate: block=" << cur_pos.m_block_num
+            << " data_len=" << data_len
+            << " header_len=" << ARCH_PAGE_BLK_HEADER_LENGTH
+            << " bytes_before=" << bytes_before_sub
+            << " offset=" << cur_pos.m_offset << " bytes_after=" << bytes_left;
+      }
 
       if (data_len == 0 || cur_pos.m_block_num == last_pos.m_block_num ||
           block_stop_lsn > stop_id) {
@@ -2451,6 +2511,17 @@ int Arch_Page_Sys::start(Arch_Group **group, lsn_t *start_lsn,
     m_request_blk_num_with_lsn = std::numeric_limits<uint64_t>::max();
     m_flush_blk_num_with_lsn = std::numeric_limits<uint64_t>::max();
 
+    /* PS-11175 testing seed knob. When innodb_arch_page_initial_block_num is
+    non-zero, start the per-group block-counter at that value so a short
+    workload can drive the writer past block_num 65 535 and exercise the
+    truncating mach_write_to_2 path in Arch_Block::add_reset. Default 0 means
+    no seeding -- production behaviour is unchanged. */
+    if (srv_arch_page_initial_block_num != 0) {
+      m_write_pos.m_block_num = srv_arch_page_initial_block_num;
+      m_last_pos.m_block_num = srv_arch_page_initial_block_num;
+      m_flush_pos.m_block_num = srv_arch_page_initial_block_num;
+    }
+
     m_last_lsn = log_sys_lsn;
     m_last_reset_file_index = 0;
 
@@ -2471,8 +2542,24 @@ int Arch_Page_Sys::start(Arch_Group **group, lsn_t *start_lsn,
         static_cast<uint64_t>(ARCH_PAGE_BLK_SIZE) * ARCH_PAGE_FILE_CAPACITY;
 
     /* Initialize archiver file context. */
-    auto db_err = m_current_group->init_file_ctx(
-        ARCH_DIR, ARCH_PAGE_DIR, ARCH_PAGE_FILE, 0, new_file_size, 0);
+    /* When block-counter seeding is enabled for PS-11175 tests, pass the
+    seeded file index in via the num_files parameter so the writer's next
+    open_new() lands on ib_page_<seed/2043> instead of ib_page_0. This
+    leans on the same off-by-N representation in Arch_File_Ctx::init that
+    PS-11247 will properly fix -- there, num_files conflates "files seen"
+    with "next file index", so passing the index in num_files happens to
+    give the right next-create behaviour. When PS-11247's init_file_ctx
+    contract is fixed to take start_index and num_files separately, this
+    block should pass start_index=file_index and num_files=0. */
+    uint initial_num_files = 0;
+    if (srv_arch_page_initial_block_num != 0) {
+      initial_num_files =
+          Arch_Block::get_file_index(m_write_pos.m_block_num, ARCH_DATA_BLOCK);
+    }
+
+    auto db_err =
+        m_current_group->init_file_ctx(ARCH_DIR, ARCH_PAGE_DIR, ARCH_PAGE_FILE,
+                                       initial_num_files, new_file_size, 0);
 
     if (db_err != DB_SUCCESS) {
       arch_oper_mutex_exit();
@@ -2983,6 +3070,28 @@ bool Arch_Page_Sys::save_reset_point(bool is_durable) {
   }
 
   m_last_reset_file_index = current_file_index;
+
+  /* PS-11175 diagnostic: when the seed knob is in use, log every
+  save_reset_point with both the real block_num and the value that
+  mach_write_to_2 will actually persist (low 16 bits only). Lets tests
+  and investigations see exactly which reset entries are truncated and
+  what file/slot recovery will dereference them to. Gated by the seed
+  knob so production (seed == 0) stays quiet. */
+  if (srv_arch_page_initial_block_num != 0) {
+    const uint64_t real_bn = m_last_pos.m_block_num;
+    const uint64_t persisted_bn = real_bn & 0xFFFFULL;
+    const uint64_t implied_slot =
+        (persisted_bn % ARCH_PAGE_FILE_DATA_CAPACITY) + 1;
+    ib::info(ER_IB_MSG_26) << "page_archiver: save_reset_point lsn="
+                           << m_last_lsn << " host_file=ib_page_"
+                           << current_file_index
+                           << " real_block_num=" << real_bn
+                           << " offset=" << m_last_pos.m_offset
+                           << " persisted_block_num=" << persisted_bn
+                           << " (recovery will read slot=" << implied_slot
+                           << " offset=" << (implied_slot * ARCH_PAGE_BLK_SIZE)
+                           << " inside ib_page_" << current_file_index << ")";
+  }
 
   reset_block->add_reset(m_last_lsn, m_last_pos);
 
