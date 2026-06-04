@@ -91,8 +91,10 @@ dberr_t Arch_Dblwr_Ctx::init(const char *dblwr_path,
     return DB_OUT_OF_MEMORY;
   }
 
-  auto err =
-      m_file_ctx.init(ARCH_DIR, dblwr_path, dblwr_base_file, dblwr_num_files);
+  /* Doublewrite buffer files are always indexed 0..(num_files-1) so
+  start_index is 0. */
+  auto err = m_file_ctx.init(ARCH_DIR, dblwr_path, dblwr_base_file, 0,
+                             dblwr_num_files);
 
   return err;
 }
@@ -386,8 +388,8 @@ dberr_t Arch_Group::Recovery::cleanup_if_required(Arch_Recv_Group_Info &info) {
   }
 
   /* Need to reinitialize the file context as num_files has changed. */
-  err =
-      file_ctx.init(ARCH_DIR, ARCH_PAGE_DIR, ARCH_PAGE_FILE, info.m_num_files);
+  err = file_ctx.init(ARCH_DIR, ARCH_PAGE_DIR, ARCH_PAGE_FILE,
+                      info.m_file_start_index, info.m_num_files);
 
   return err;
 }
@@ -478,6 +480,7 @@ dberr_t Arch_Group::recover(Arch_Recv_Group_Info &group_info,
       static_cast<uint64_t>(ARCH_PAGE_BLK_SIZE) * ARCH_PAGE_FILE_CAPACITY;
 
   auto err = init_file_ctx(ARCH_DIR, ARCH_PAGE_DIR, ARCH_PAGE_FILE,
+                           group_info.m_file_start_index,
                            group_info.m_num_files, file_size, 0);
 
   if (err != DB_SUCCESS) {

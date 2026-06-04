@@ -146,7 +146,8 @@ dberr_t Arch_Group::write_to_doublewrite_file(Arch_File_Ctx *from_file,
 
 dberr_t Arch_Group::init_dblwr_file_ctx(const char *path, const char *base_file,
                                         uint num_files, uint64_t file_size) {
-  auto err = s_dblwr_file_ctx.init(ARCH_DIR, path, base_file, num_files);
+  /* Doublewrite files always indexed from 0. */
+  auto err = s_dblwr_file_ctx.init(ARCH_DIR, path, base_file, 0, num_files);
 
   if (err != DB_SUCCESS) {
     ut_ad(s_dblwr_file_ctx.get_phy_size() == file_size);
@@ -2541,25 +2542,21 @@ int Arch_Page_Sys::start(Arch_Group **group, lsn_t *start_lsn,
     const uint64_t new_file_size =
         static_cast<uint64_t>(ARCH_PAGE_BLK_SIZE) * ARCH_PAGE_FILE_CAPACITY;
 
-    /* Initialize archiver file context. */
-    /* When block-counter seeding is enabled for PS-11175 tests, pass the
-    seeded file index in via the num_files parameter so the writer's next
-    open_new() lands on ib_page_<seed/2043> instead of ib_page_0. This
-    leans on the same off-by-N representation in Arch_File_Ctx::init that
-    PS-11247 will properly fix -- there, num_files conflates "files seen"
-    with "next file index", so passing the index in num_files happens to
-    give the right next-create behaviour. When PS-11247's init_file_ctx
-    contract is fixed to take start_index and num_files separately, this
-    block should pass start_index=file_index and num_files=0. */
-    uint initial_num_files = 0;
+    /* Initialize archiver file context.
+    Fresh archive group: no existing files (num_files=0) and the first
+    file to be created is ib_page_<start_index>. start_index is normally
+    zero; under the PS-11175 test seed knob it's set to the file index
+    derived from srv_arch_page_initial_block_num so the writer's first
+    open_new() lands at ib_page_<seed/2043> rather than ib_page_0. */
+    uint start_index = 0;
     if (srv_arch_page_initial_block_num != 0) {
-      initial_num_files =
+      start_index =
           Arch_Block::get_file_index(m_write_pos.m_block_num, ARCH_DATA_BLOCK);
     }
 
     auto db_err =
         m_current_group->init_file_ctx(ARCH_DIR, ARCH_PAGE_DIR, ARCH_PAGE_FILE,
-                                       initial_num_files, new_file_size, 0);
+                                       start_index, 0, new_file_size, 0);
 
     if (db_err != DB_SUCCESS) {
       arch_oper_mutex_exit();

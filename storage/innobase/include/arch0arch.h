@@ -548,10 +548,11 @@ class Arch_File_Ctx {
   @param[in]    path            path to the file
   @param[in]    base_dir        directory name prefix
   @param[in]    base_file       file name prefix
-  @param[in]    num_files       initial number of files
+  @param[in]    start_index     index of the first existing file
+  @param[in]    num_files       number of existing files
   @return error code. */
   dberr_t init(const char *path, const char *base_dir, const char *base_file,
-               uint num_files);
+               uint start_index, uint num_files);
 
   /** Open a file at specific index
   @param[in]  read_only    open in read only mode
@@ -880,16 +881,20 @@ class Arch_Group {
   @param[in]  path        path to the file
   @param[in]  base_dir    directory name prefix
   @param[in]  base_file   file name prefix
-  @param[in]  num_files   initial number of files
+  @param[in]  start_index index of the first existing file (i.e., the
+                          minimum N such that ib_page_N is present on
+                          disk). Zero for a fresh group; non-zero
+                          after a purge that removed file 0..N-1.
+  @param[in]  num_files   number of existing files on disk
   @param[in]  file_size   size of file used when a new file is created
   @param[in]  uuid        uuid of this arch group or 0 if unknown
   @return error code. */
   dberr_t init_file_ctx(const char *path, const char *base_dir,
-                        const char *base_file, uint num_files,
+                        const char *base_file, uint start_index, uint num_files,
                         uint64_t file_size, Arch_group_uuid uuid) {
     m_uuid = uuid;
     m_file_size = file_size;
-    return (m_file_ctx.init(path, base_dir, base_file, num_files));
+    return (m_file_ctx.init(path, base_dir, base_file, start_index, num_files));
   }
 
   /* Close the file contexts when they're not required anymore. */
