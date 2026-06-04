@@ -195,12 +195,11 @@ dberr_t Arch_Group::write_to_file(Arch_File_Ctx *from_file, byte *from_buffer,
 
   if (m_file_ctx.is_closed()) {
     /* First file in the archive group. */
-    /* PS-11247: m_count is the next-file-to-create index and m_index is
-    the first-existing-file index. For a "first file in group" case
-    there are no existing files yet, so m_count == m_index. This used
-    to be ut_ad(m_count == 0) but that assumed start_index == 0 -- broken
-    under the seed knob (start_index > 0) and broken in general after
-    the PS-11247 init contract was fixed to take start_index explicitly. */
+    /* PS-11247: m_count is the next-file-to-create index, m_index is
+    the first-existing-file index. On the "first file in group" path
+    no files exist yet, so m_count == m_index (count of existing files
+    = m_count - m_index = 0). Previously this was `m_count == 0` which
+    assumed start_index == 0. */
     ut_ad(m_file_ctx.get_count() == m_file_ctx.get_index());
 
     DBUG_EXECUTE_IF("crash_before_archive_file_creation", DBUG_SUICIDE(););

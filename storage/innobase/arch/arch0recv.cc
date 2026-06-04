@@ -535,7 +535,9 @@ void Arch_File_Ctx::Recovery::reset_print(uint file_start_index) {
   Arch_Reset_File reset_file;
   Arch_Point start_point;
 
-  DBUG_PRINT("page_archiver", ("No. of files : %u", m_file_ctx.m_count));
+  DBUG_PRINT("page_archiver", ("No. of files : %u (range [%u, %u))",
+                               m_file_ctx.get_count() - m_file_ctx.get_index(),
+                               m_file_ctx.get_index(), m_file_ctx.get_count()));
 
   if (m_file_ctx.m_reset.size() == 0) {
     DBUG_PRINT("page_archiver", ("No reset info available for this group."));
@@ -574,15 +576,19 @@ void Arch_File_Ctx::Recovery::reset_print(uint file_start_index) {
 dberr_t Arch_Group::Recovery::parse(Arch_Recv_Group_Info &info) {
   dberr_t err = DB_SUCCESS;
 
-  size_t num_files = m_group->get_file_count();
+  /* PS-11247: get_file_count() now returns the next-to-create file
+  index (= start_index + count_of_files). The loop bound is therefore
+  just file_count, NOT start_index + file_count -- the latter would
+  double-count start_index and make this walk off the end of the
+  on-disk file list, tripping MY-013581 and triggering purge. */
+  size_t file_count = m_group->get_file_count();
 
-  if (num_files == 0) {
+  uint start_index = info.m_file_start_index;
+
+  if (file_count == start_index) {
     DBUG_PRINT("page_archiver", ("No group information available"));
     return DB_SUCCESS;
   }
-
-  uint start_index = info.m_file_start_index;
-  size_t file_count = start_index + num_files;
 
   auto &file_ctx = m_group->m_file_ctx;
 

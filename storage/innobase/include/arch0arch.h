@@ -667,12 +667,16 @@ class Arch_File_Ctx {
   @return file offset */
   uint64_t get_offset() const { return (m_offset); }
 
-  /** Get current file index.
-  @return current file index */
+  /** Get current file index (the first existing file's index, also the
+  read cursor used by sequential recovery scans). For a fresh group with
+  no files this equals m_count. */
   uint get_index() const { return m_index; }
 
-  /** Get number of files
-  @return current file count */
+  /** Get the next file index to be created (used by open_new). Under
+  the PS-11247 contract this is start_index + num_files; consumers that
+  want a plain "count of files" must use `get_count() - get_index()`.
+  Old code that did `start_index + get_count()` is broken -- get_count()
+  already includes start_index. */
   uint get_count() const { return (m_count); }
 
   /** Get the physical size of a file that is open in this context.

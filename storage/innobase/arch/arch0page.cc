@@ -710,12 +710,18 @@ bool Arch_File_Ctx::validate_reset_block_in_file(pfs_os_file_t file,
 
 bool Arch_Group::validate_info_in_files() {
   uint reset_count = 0;
+  /* PS-11247: get_count() is the next-to-create file index, get_index()
+  is the first-existing file index. The valid file range is
+  [get_index(), get_count()), NOT [0, get_count()). The old loop bound
+  assumed start_index == 0 -- broken under the seed knob and after
+  purge. */
   uint file_count = m_file_ctx.get_count();
   bool success = true;
 
   DBUG_PRINT("page_archiver", ("RESET PAGE"));
 
-  for (uint file_index = 0; file_index < file_count; ++file_index) {
+  for (uint file_index = m_file_ctx.get_index(); file_index < file_count;
+       ++file_index) {
     bool last_file = file_index + 1 == file_count;
 
     if (last_file && m_file_ctx.get_phy_size() == 0) {
