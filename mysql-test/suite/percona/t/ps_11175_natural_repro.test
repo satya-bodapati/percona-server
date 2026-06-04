@@ -1,0 +1,419 @@
+# PS-11175 customer-shape natural repro -- BOTH bug faces.
+#
+# Reproduces the full customer-reported chain:
+#   face A: recovery cannot start the server because a truncated reset
+#           entry in a partial archive file points 30+ MB past EOF
+#           ([MY-012642] Tried to read 32 bytes at offset N)
+#   face B: SELECT-side mysqlbackup_page_track_get_changed_pages crashes
+#           the server because a truncated reset entry implies a file
+#           index (0 or 1) that never existed
+#           ([MY-012646] 'open' returned OS error 71)
+#
+# Workload is production-shape -- no artificial knobs in the workload:
+#   - default ARCH_PAGE_FILE_DATA_CAPACITY (2043) and block size (16384)
+#   - sealed blocks reach data_len = 16352 (full); no max_entries=1 hack
+#   - 12 parallel client connections, each driving a distinct wide-row
+#     table via a stored procedure that wraps bulk INSERT...SELECT
+#     against a 100K-row driver. 4 parallel workers only achieved
+#     ~0.44 archive blocks/sec because the cleaner sat idle between
+#     insert bursts; 12 workers + larger BP + more page_cleaners
+#     keeps the cleaner saturated.
+#
+# The only debug knob is the seed (innodb_arch_page_initial_block_num)
+# which skips the writer ahead to file 33 -- without it, naturally
+# crossing block_num 65535 would take hours.
+#
+# Sequence:
+#   1-3) seed, create driver + wide-row table
+#   4)   set(1) #1 with writer at start of ib_page_33 -> truncated reset
+#        entry persisted into ib_page_33's reset block (block_num=1883,
+#        implied file index 0)
+#   5)   bulk inserts to seal ib_page_33 (full at 33,488,896 bytes) and
+#        roll the writer into ib_page_34
+#   6)   set(1) #2 while ib_page_34 is still small -> truncated reset
+#        entry persisted into ib_page_34's reset block (block_num=3926,
+#        implied slot 1884 == 30.86 MB > ib_page_34's physical size)
+#   7)   restart_mysqld -- this is the face A regression assertion;
+#        today the recovery crashes parsing ib_page_34's reset entry
+#   8)   mysqlbackup_page_track_get_changed_pages + post-call SELECT 1 --
+#        this is the face B regression assertion; today the call crashes
+#        the server while opening ib_page_0
+#
+# After the mach_write_to_2 fix both restart and get_changed_pages
+# behave correctly and the test passes.
+
+# Release-build only: the truncation we exercise is the silent
+# modulo-65,536 wrap inside mach_write_to_2. Debug builds trip the
+# assertion at mach0data.ic:54 before the truncation happens.
+let $have_debug = `SELECT VERSION() LIKE '%debug%'`;
+if ($have_debug)
+{
+  --skip Test requires a non-debug build
+}
+
+# Big test: filling ib_page_33 naturally takes several minutes even with
+# wide rows + bulk inserts.
+--source include/big_test.inc
+
+--disable_query_log
+call mtr.add_suppression(".*");
+--enable_query_log
+
+INSTALL COMPONENT "file://component_mysqlbackup";
+
+# --------------------------------------------------------------------------
+# 1. Build a driver table -- ~100K rows -- used to amplify INSERT...SELECT
+#    so each statement dirties many leaf pages in a single round trip.
+# --------------------------------------------------------------------------
+CREATE TABLE driver (a INT AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB;
+
+--disable_query_log
+INSERT INTO driver VALUES (), (), (), (), (), (), (), (), (), ();
+INSERT INTO driver VALUES (), (), (), (), (), (), (), (), (), ();
+INSERT INTO driver VALUES (), (), (), (), (), (), (), (), (), ();
+INSERT INTO driver VALUES (), (), (), (), (), (), (), (), (), ();
+INSERT INTO driver VALUES (), (), (), (), (), (), (), (), (), ();
+INSERT INTO driver VALUES (), (), (), (), (), (), (), (), (), ();
+INSERT INTO driver VALUES (), (), (), (), (), (), (), (), (), ();
+INSERT INTO driver VALUES (), (), (), (), (), (), (), (), (), ();
+INSERT INTO driver VALUES (), (), (), (), (), (), (), (), (), ();
+INSERT INTO driver VALUES (), (), (), (), (), (), (), (), (), ();
+# now 100 rows; double 10 times -> ~100K
+INSERT INTO driver SELECT NULL FROM driver;
+INSERT INTO driver SELECT NULL FROM driver;
+INSERT INTO driver SELECT NULL FROM driver;
+INSERT INTO driver SELECT NULL FROM driver;
+INSERT INTO driver SELECT NULL FROM driver;
+INSERT INTO driver SELECT NULL FROM driver;
+INSERT INTO driver SELECT NULL FROM driver;
+INSERT INTO driver SELECT NULL FROM driver;
+INSERT INTO driver SELECT NULL FROM driver;
+INSERT INTO driver SELECT NULL FROM driver;
+--enable_query_log
+
+# --------------------------------------------------------------------------
+# 2. TWELVE wide-row target tables -- 50 x CHAR(100) BINARY = ~5KB per row.
+#    Each leaf page (16KB) holds ~3 rows so every insert allocates / splits
+#    a leaf and dirties 1-2 pages. Using 12 tables lets us drive 12
+#    concurrent writer connections in the workload phase below, which
+#    multiplies the dirty-page production rate (single-threaded was
+#    bottlenecked at one ~30s INSERT statement at a time, 4 parallel
+#    workers only hit ~0.44 archive blocks/sec, 12 should saturate the
+#    cleaner's burst capability).
+# --------------------------------------------------------------------------
+--let $j = 1
+while ($j <= 12)
+{
+  eval CREATE TABLE t$j (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    c01 CHAR(100) BINARY, c02 CHAR(100) BINARY, c03 CHAR(100) BINARY,
+    c04 CHAR(100) BINARY, c05 CHAR(100) BINARY, c06 CHAR(100) BINARY,
+    c07 CHAR(100) BINARY, c08 CHAR(100) BINARY, c09 CHAR(100) BINARY,
+    c10 CHAR(100) BINARY, c11 CHAR(100) BINARY, c12 CHAR(100) BINARY,
+    c13 CHAR(100) BINARY, c14 CHAR(100) BINARY, c15 CHAR(100) BINARY,
+    c16 CHAR(100) BINARY, c17 CHAR(100) BINARY, c18 CHAR(100) BINARY,
+    c19 CHAR(100) BINARY, c20 CHAR(100) BINARY, c21 CHAR(100) BINARY,
+    c22 CHAR(100) BINARY, c23 CHAR(100) BINARY, c24 CHAR(100) BINARY,
+    c25 CHAR(100) BINARY, c26 CHAR(100) BINARY, c27 CHAR(100) BINARY,
+    c28 CHAR(100) BINARY, c29 CHAR(100) BINARY, c30 CHAR(100) BINARY,
+    c31 CHAR(100) BINARY, c32 CHAR(100) BINARY, c33 CHAR(100) BINARY,
+    c34 CHAR(100) BINARY, c35 CHAR(100) BINARY, c36 CHAR(100) BINARY,
+    c37 CHAR(100) BINARY, c38 CHAR(100) BINARY, c39 CHAR(100) BINARY,
+    c40 CHAR(100) BINARY, c41 CHAR(100) BINARY, c42 CHAR(100) BINARY,
+    c43 CHAR(100) BINARY, c44 CHAR(100) BINARY, c45 CHAR(100) BINARY,
+    c46 CHAR(100) BINARY, c47 CHAR(100) BINARY, c48 CHAR(100) BINARY,
+    c49 CHAR(100) BINARY, c50 CHAR(100) BINARY
+  ) ENGINE=InnoDB;
+  --inc $j
+}
+
+# Single stored procedure that does the wide-row INSERT via dynamic SQL,
+# parameterized by table name. Cuts the per-round MTR boilerplate from
+# 12 x ~10 lines of literal INSERT down to 12 x 2 lines of CALL.
+DELIMITER //;
+CREATE PROCEDURE ins_table(IN tab VARCHAR(20))
+BEGIN
+  SET @sql = CONCAT(
+    'INSERT INTO ', tab, ' (',
+    'c01,c02,c03,c04,c05,c06,c07,c08,c09,c10,',
+    'c11,c12,c13,c14,c15,c16,c17,c18,c19,c20,',
+    'c21,c22,c23,c24,c25,c26,c27,c28,c29,c30,',
+    'c31,c32,c33,c34,c35,c36,c37,c38,c39,c40,',
+    'c41,c42,c43,c44,c45,c46,c47,c48,c49,c50',
+    ') SELECT ',
+    "REPEAT('a',100),REPEAT('b',100),REPEAT('c',100),REPEAT('d',100),",
+    "REPEAT('e',100),REPEAT('f',100),REPEAT('g',100),REPEAT('h',100),",
+    "REPEAT('i',100),REPEAT('j',100),REPEAT('k',100),REPEAT('l',100),",
+    "REPEAT('m',100),REPEAT('n',100),REPEAT('o',100),REPEAT('p',100),",
+    "REPEAT('q',100),REPEAT('r',100),REPEAT('s',100),REPEAT('t',100),",
+    "REPEAT('u',100),REPEAT('v',100),REPEAT('w',100),REPEAT('x',100),",
+    "REPEAT('y',100),REPEAT('z',100),REPEAT('A',100),REPEAT('B',100),",
+    "REPEAT('C',100),REPEAT('D',100),REPEAT('E',100),REPEAT('F',100),",
+    "REPEAT('G',100),REPEAT('H',100),REPEAT('I',100),REPEAT('J',100),",
+    "REPEAT('K',100),REPEAT('L',100),REPEAT('M',100),REPEAT('N',100),",
+    "REPEAT('O',100),REPEAT('P',100),REPEAT('Q',100),REPEAT('R',100),",
+    "REPEAT('S',100),REPEAT('T',100),REPEAT('U',100),REPEAT('V',100),",
+    "REPEAT('W',100),REPEAT('X',100) FROM driver"
+  );
+  PREPARE stmt FROM @sql;
+  EXECUTE stmt;
+  DEALLOCATE PREPARE stmt;
+END//
+DELIMITER ;//
+
+# --------------------------------------------------------------------------
+# 3. Open 12 extra connections. The default connection is the orchestrator;
+#    w1..w12 are the parallel workers, one per target table.
+# --------------------------------------------------------------------------
+connect (w1,  localhost, root,,);
+connect (w2,  localhost, root,,);
+connect (w3,  localhost, root,,);
+connect (w4,  localhost, root,,);
+connect (w5,  localhost, root,,);
+connect (w6,  localhost, root,,);
+connect (w7,  localhost, root,,);
+connect (w8,  localhost, root,,);
+connect (w9,  localhost, root,,);
+connect (w10, localhost, root,,);
+connect (w11, localhost, root,,);
+connect (w12, localhost, root,,);
+connection default;
+
+# --------------------------------------------------------------------------
+# 4. Start tracking. The writer is seeded at block_num = 67419 = 33*2043,
+#    i.e., the very first slot of ib_page_33. This first set(1) writes a
+#    reset entry into ib_page_33's reset block. mach_write_to_2 truncates
+#    the real value:
+#        persisted_bn = 67419 mod 65536 = 1883
+#    1883 / 2043 = 0  ->  reset entry implies file 0, which doesn't exist.
+# --------------------------------------------------------------------------
+let $start_lsn = `SELECT mysqlbackup_page_track_set(1)`;
+
+# --------------------------------------------------------------------------
+# 5. Heavy bulk-insert workload to fill ib_page_33 to 33,488,896 bytes
+#    (full = reset block + 2043 sealed data blocks) and roll the writer
+#    into ib_page_34. Each CALL ins_table('tN') does ~100K wide-row
+#    INSERT...SELECT FROM driver against the named table.
+#
+#    Pattern per loop iteration: --send the CALL on each of w1..w12
+#    concurrently (all 12 INSERTs kicked off in parallel), then --reap
+#    each in order. With 12 concurrent writers the dirty-page production
+#    rate should saturate the cleaner's burst capability instead of
+#    leaving it idle between insert bursts.
+# --------------------------------------------------------------------------
+--disable_query_log
+let $loops = 12;
+let $i = 0;
+while ($i < $loops)
+{
+  let $j = 0;
+  while ($j < 12)
+  {
+    inc $j;
+    connection w$j;
+    --send_eval CALL ins_table('t$j')
+  }
+
+  let $j = 0;
+  while ($j < 12)
+  {
+    inc $j;
+    connection w$j;
+    --reap
+  }
+
+  inc $i;
+}
+connection default;
+--enable_query_log
+
+# --------------------------------------------------------------------------
+# 5. Wait until ib_page_33 is FULL (33,488,896 bytes) and ib_page_34 exists.
+#    Full ib_page_33 is what makes the post-restart picture customer-shape:
+#    recovery's fetch_reset_lsn(persisted_bn=1883) reads at slot 1884 inside
+#    ib_page_33 successfully -- so the restart looks clean. The SELECT-side
+#    crash happens later, when the truncated entry is dereferenced via the
+#    implied file index.
+# --------------------------------------------------------------------------
+--perl
+use strict;
+my $datadir = $ENV{'MYSQLD_DATADIR'};
+$datadir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data" unless $datadir;
+my $arch_dir;
+for (my $i = 0; $i < 300; $i++) {
+  my @groups = glob("$datadir/#ib_archive/page_group_*");
+  if (@groups) { $arch_dir = $groups[0]; last; }
+  sleep 1;
+}
+die "no #ib_archive/page_group_* directory found within 300s"
+  unless defined $arch_dir;
+print "Archive group dir: $arch_dir\n";
+
+my $done = 0;
+my $last_sz33 = -1;
+my $stuck_iters = 0;
+for (my $i = 0; $i < 1800; $i++) {
+  my $f33 = "$arch_dir/ib_page_33";
+  my $f34 = "$arch_dir/ib_page_34";
+  my $sz33 = -e $f33 ? (-s $f33) : 0;
+  my $sz34 = -e $f34 ? (-s $f34) : 0;
+
+  # Every 10 seconds, print progress so we can see whether the workload
+  # is making forward progress or stuck.
+  if ($i % 10 == 0) {
+    my $blocks33 = $sz33 / 16384;
+    my $pct = sprintf("%.1f", 100.0 * $sz33 / 33488896);
+    printf "[wait t=%4ds] ib_page_33 = %d bytes (%d blocks, %s%% full)"
+          ." ib_page_34 = %d bytes\n",
+          $i, $sz33, $blocks33, $pct, $sz34;
+  }
+
+  # Forward-progress watchdog: if ib_page_33 size hasn't changed for 60s,
+  # the cleaner/archiver has stalled -- bail out rather than wait silently
+  # to the 1800s ceiling.
+  if ($sz33 == $last_sz33) {
+    $stuck_iters++;
+    if ($stuck_iters >= 60 && $sz33 > 0 && $sz33 < 33488896) {
+      die "ib_page_33 has not grown in 60s (stuck at ${sz33} bytes / "
+        . ($sz33/16384) . " blocks). Cleaner appears blocked. Killing "
+        . "the wait so we can inspect the error log.";
+    }
+  } else {
+    $stuck_iters = 0;
+    $last_sz33 = $sz33;
+  }
+
+  if ($sz33 == 33488896 && $sz34 > 0) {
+    print "ib_page_33 sealed at 33,488,896 bytes; ib_page_34 exists "
+          . "(size=${sz34}). Workload complete after ${i}s.\n";
+    $done = 1;
+    last;
+  }
+  sleep 1;
+}
+die "ib_page_33 did not seal to 33,488,896 bytes within 1800s; "
+  . "consider raising the parallel-insert loop count (`let \$loops`) "
+  . "above its current value, or tuning master.opt for higher flush throughput"
+  unless $done;
+EOF
+
+# --------------------------------------------------------------------------
+# 6. Second reset point -- in ib_page_34 -- engineered to crash recovery.
+#
+# The writer is now inside ib_page_34 (its first data slot) but ib_page_34
+# is still small (~16-32 KB) because almost no work has hit it yet. Firing
+# set(1) here writes a reset entry whose persisted block_num truncates to
+# ~3926 -- implying slot 1884 within ib_page_34. Since ib_page_34 is far
+# smaller than 30.86 MB (1884 * 16384), recovery's fetch_reset_lsn on this
+# entry will try to read 32 bytes at 30.86 MB inside a sub-MB file -> EOF
+# -> MY-012642 -> srv_fatal_error. That's the face A (recovery cannot
+# restart) symptom -- the death loop.
+#
+# We sleep briefly to let the cleaner drain any remaining dirty pages, but
+# then immediately check ib_page_34 is still small enough (< 2 MB =
+# < 160 blocks) so the implied slot has not yet wrapped down into the [1,
+# 1883] range where the file would naturally cover it.
+# --------------------------------------------------------------------------
+--sleep 5
+
+--perl
+use strict;
+my $datadir = $ENV{'MYSQLD_DATADIR'};
+$datadir = $ENV{'MYSQLTEST_VARDIR'} . "/mysqld.1/data" unless $datadir;
+my ($p34) = glob("$datadir/#ib_archive/page_group_*/ib_page_34");
+die "ib_page_34 vanished" unless defined $p34 && -e $p34;
+my $sz34 = -s $p34;
+if ($sz34 >= 160 * 16384) {
+  die "ib_page_34 grew to ${sz34} bytes (>= 160 blocks); the implied slot "
+    . "of the upcoming set(1) reset entry would wrap into [1, 1883] and the "
+    . "face A recovery-EOF crash would not fire. Reduce the bulk-insert loop "
+    . "count or tune --innodb_max_dirty_pages_pct so less overrun lands in "
+    . "ib_page_34.";
+}
+print "ib_page_34 size is ${sz34} bytes -- below the 2 MB wrap threshold; "
+      . "the second set(1) will write a truncated reset entry whose implied "
+      . "slot lies past EOF.\n";
+EOF
+
+SET GLOBAL mysqlbackup_backup_id = '12345';
+let $reset2_lsn = `SELECT mysqlbackup_page_track_set(1)`;
+
+# Allow the reset block + active data block to flush so the killer reset
+# entry is durably on disk.
+--sleep 3
+
+# --------------------------------------------------------------------------
+# 7. Clean restart. After the fix, recovery is well-defined and both reset
+#    entries (ib_page_33's at slot 1884 of a full file; ib_page_34's at slot
+#    1 of a small file) resolve cleanly. Today:
+#      - ib_page_33's reset entry: slot 1884 inside the 2044-slot full file
+#        --> read succeeds, recovery moves on
+#      - ib_page_34's reset entry: slot 1884 inside a sub-MB partial file
+#        --> os_file_read returns 0 bytes at a 30 MB offset
+#        --> [MY-012642] [InnoDB] Tried to read 32 bytes at offset...
+#        --> srv_fatal_error; mysqld cannot restart; restart_mysqld.inc
+#            times out and the test FAILS.
+#    Regression style: we expect the restart to succeed.
+# --------------------------------------------------------------------------
+--source include/restart_mysqld.inc
+
+# Liveness check: server is reachable after restart. Reaching this line
+# already establishes that the face A recovery-EOF crash did NOT fire --
+# today this SELECT 1 never runs because restart_mysqld.inc above timed
+# out on the recovery crash. So passing this point is itself the face A
+# regression assertion.
+SELECT 1;
+
+# --------------------------------------------------------------------------
+# 8. Face B: SELECT-side crash. After recovery, m_reset has been rebuilt
+#    from disk so every reset entry carries the TRUNCATED block_num (1883
+#    for the ib_page_33 entry, 3926 for the ib_page_34 entry). When
+#    get_changed_pages walks m_reset and dereferences either entry, it
+#    computes implied file index from the truncated value (1883/2043 = 0,
+#    3926/2043 = 1) and tries to open ib_page_0 or ib_page_1 -- neither
+#    of which ever existed (the writer was seeded above file 32). The
+#    open returns ENOENT and srv_fatal_error fires:
+#      [MY-012646] [InnoDB] 'open' returned OS error 71. Cannot continue
+#      operation
+#
+#    Regression style: run the query, then SELECT 1 afterwards. Today the
+#    server crashes during the get_changed_pages call and the post-call
+#    SELECT 1 disconnects. After the mach_write_to_2 fix: the in-memory
+#    reset entries carry the full block_num, the file index is correct,
+#    and get_changed_pages returns cleanly.
+# --------------------------------------------------------------------------
+# get_changed_pages needs a non-empty digit-only backup_id.
+SET GLOBAL mysqlbackup_backup_id = '12345';
+
+--disable_query_log
+--disable_result_log
+SELECT mysqlbackup_page_track_get_changed_pages($start_lsn, 0);
+--enable_result_log
+--enable_query_log
+
+# Post-call liveness check -- the face B regression assertion.
+SELECT 1;
+
+# --------------------------------------------------------------------------
+# 9. Cleanup. Ordered so that the component is uninstalled before the
+#    tables are dropped (it holds references on the system). The parallel
+#    worker connections are killed implicitly by restart_mysqld above; we
+#    don't reconnect them after the restart so no explicit disconnect is
+#    required here.
+# --------------------------------------------------------------------------
+UNINSTALL COMPONENT "file://component_mysqlbackup";
+--disable_query_log
+let $j = 1;
+while ($j <= 12)
+{
+  eval DROP TABLE t$j;
+  inc $j;
+}
+--enable_query_log
+DROP PROCEDURE ins_table;
+DROP TABLE driver;
+
+# Remove any archive groups the test produced so subsequent tests start
+# with a clean datadir.
+--let $datadir = `SELECT @@datadir`
+--exec rm -rf $datadir/#ib_archive
