@@ -1403,25 +1403,25 @@ dberr_t Arch_Block::flush(Arch_Group *file_group, Arch_Blk_Flush_Type type) {
       /* PS-11175 diagnostic: log data-block flushes so the test (and any
       investigator reading the log) can correlate "writer rolled to block
       N in memory" with "block N has actually landed on disk". Throttled
-      to every 64th full flush plus every file boundary (the last data
-      slot of each file). Partial flushes get a separate, throttled
+      to every 16th full flush plus every file boundary (the last data
+      slot of each file). Partial flushes get a separate throttled
       message so the log shows checkpoint-driven partial writes too.
       Gated by the seed knob; production stays silent. */
       if (srv_arch_page_initial_block_num != 0 && err == DB_SUCCESS) {
         const uint64_t file_idx = m_number / ARCH_PAGE_FILE_DATA_CAPACITY;
         const uint64_t slot_in_file =
             (m_number % ARCH_PAGE_FILE_DATA_CAPACITY) + 1;
+        const uint64_t bn_within_file = m_number % ARCH_PAGE_FILE_DATA_CAPACITY;
         if (is_partial_flush) {
-          if (m_number % 64 == 0) {
+          if (bn_within_file % 16 == 0) {
             ib::info(ER_IB_MSG_26)
                 << "page_archiver: PARTIAL flush block_num=" << m_number
                 << " file=ib_page_" << file_idx << " slot=" << slot_in_file
                 << " data_len=" << m_data_len
                 << " (active block image refreshed on disk)";
           }
-        } else if (m_number % 64 == 0 ||
-                   (m_number % ARCH_PAGE_FILE_DATA_CAPACITY) ==
-                       ARCH_PAGE_FILE_DATA_CAPACITY - 1) {
+        } else if (bn_within_file % 16 == 0 ||
+                   bn_within_file == ARCH_PAGE_FILE_DATA_CAPACITY - 1) {
           ib::info(ER_IB_MSG_26)
               << "page_archiver: FULL flush block_num=" << m_number
               << " file=ib_page_" << file_idx << " slot=" << slot_in_file

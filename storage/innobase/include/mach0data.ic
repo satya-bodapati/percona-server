@@ -32,6 +32,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
  Created 11/28/1995 Heikki Tuuri
  ***********************************************************************/
 
+#include "my_dbug.h"
 #include "mtr0types.h"
 #include "ut0byte.h"
 
@@ -51,7 +52,16 @@ bytes. We store the most significant byte to the lower address.
 @param[in]      n       2 byte integer to be stored, >= 0, < 64k */
 static inline void mach_write_to_2(byte *b, ulint n) {
   ut_ad(b);
-  ut_ad((n | 0xFFFFUL) <= 0xFFFFUL);
+  /* PS-11175 test escape hatch: when innodb_arch_page_initial_block_num is
+  seeded above the 2-byte boundary, every reset-entry persistence trips
+  the ut_ad below before the truncation bug can be observed. A debug-mode
+  test can SET GLOBAL DEBUG='+d,disable_mach_2_write_assertion' to bypass
+  the assert so the same silent truncation that fires in release builds
+  is reproducible in debug builds too. Production behaviour unchanged. */
+  bool allow_2byte_overflow = false;
+  DBUG_EXECUTE_IF("disable_mach_2_write_assertion",
+                  allow_2byte_overflow = true;);
+  ut_ad(allow_2byte_overflow || (n | 0xFFFFUL) <= 0xFFFFUL);
 
   b[0] = (byte)(n >> 8);
   b[1] = (byte)(n);
