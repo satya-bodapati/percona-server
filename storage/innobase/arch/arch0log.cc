@@ -358,7 +358,7 @@ int Arch_Log_Sys::start(Arch_Group *&group, lsn_t &start_lsn, byte *header,
 
     auto db_err =
         m_current_group->init_file_ctx(ARCH_DIR, ARCH_LOG_DIR, ARCH_LOG_FILE, 0,
-                                       get_recommended_file_size(), uuid);
+                                       0, get_recommended_file_size(), uuid);
 
     if (db_err != DB_SUCCESS) {
       arch_mutex_exit();
@@ -858,7 +858,7 @@ bool Arch_Log_Sys::archive(bool init, Arch_File_Ctx *curr_ctx, lsn_t *arch_lsn,
     avoid any such limitation in practice. */
     const auto path = log_directory_path(log_sys->m_files_ctx);
 
-    err = curr_ctx->init(path.c_str(), nullptr, LOG_FILE_BASE_NAME,
+    err = curr_ctx->init(path.c_str(), nullptr, LOG_FILE_BASE_NAME, 0,
                          std::numeric_limits<uint>::max());
 
     if (err != DB_SUCCESS) {

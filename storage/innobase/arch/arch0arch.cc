@@ -193,7 +193,11 @@ dberr_t Arch_Group::write_to_file(Arch_File_Ctx *from_file, byte *from_buffer,
 
   if (m_file_ctx.is_closed()) {
     /* First file in the archive group. */
-    ut_ad(m_file_ctx.get_count() == 0);
+    /* PS-11247: m_count is the next-file-to-create index, m_index the first
+    existing file index; for the first file in a group there are no existing
+    files yet, so m_count == m_index (was ut_ad(m_count == 0), broken once
+    init() takes start_index explicitly). */
+    ut_ad(m_file_ctx.get_count() == m_file_ctx.get_index());
 
     DBUG_EXECUTE_IF("crash_before_archive_file_creation", DBUG_SUICIDE(););
 
@@ -313,7 +317,8 @@ void Arch_File_Ctx::delete_files(lsn_t begin_lsn) {
 }
 
 dberr_t Arch_File_Ctx::init(const char *path, const char *base_dir,
-                            const char *base_file, uint num_files) {
+                            const char *base_file, uint start_index,
+                            uint num_files) {
   m_base_len = static_cast<uint>(strlen(path));
 
   m_name_len =
@@ -354,8 +359,18 @@ dberr_t Arch_File_Ctx::init(const char *path, const char *base_dir,
 
   m_file.m_file = OS_FILE_CLOSED;
 
-  m_index = 0;
-  m_count = num_files;
+  /* PS-11247: m_count is the NEXT file index to be created (used by
+  open_new) and m_index is the FIRST existing file index (used as the
+  read cursor by sequential scans). Both must take start_index into
+  account so that:
+    - after a purge that removed files 0..K-1, the writer's next
+      open_new creates ib_page_<K+N> instead of overwriting an
+      existing ib_page_N
+    - reads start at the lowest existing file index
+  Previously m_count = num_files, which conflated "count of files"
+  with "next file index" -- correct only when start_index == 0. */
+  m_index = start_index;
+  m_count = start_index + num_files;
 
   m_offset = 0;
 

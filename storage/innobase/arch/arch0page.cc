@@ -146,7 +146,8 @@ dberr_t Arch_Group::write_to_doublewrite_file(Arch_File_Ctx *from_file,
 
 dberr_t Arch_Group::init_dblwr_file_ctx(const char *path, const char *base_file,
                                         uint num_files, uint64_t file_size) {
-  auto err = s_dblwr_file_ctx.init(ARCH_DIR, path, base_file, num_files);
+  /* Doublewrite files always indexed from 0. */
+  auto err = s_dblwr_file_ctx.init(ARCH_DIR, path, base_file, 0, num_files);
 
   if (err != DB_SUCCESS) {
     ut_ad(s_dblwr_file_ctx.get_phy_size() == file_size);
@@ -709,12 +710,17 @@ bool Arch_File_Ctx::validate_reset_block_in_file(pfs_os_file_t file,
 
 bool Arch_Group::validate_info_in_files() {
   uint reset_count = 0;
+  /* PS-11247 follow-up: get_count() is the next-file-to-create index, i.e. the
+  exclusive upper bound of existing file indices; the first existing file is at
+  get_index() (= start_index), which is non-zero for seeded/post-purge groups.
+  Iterate [get_index(), get_count()) rather than [0, count). */
   uint file_count = m_file_ctx.get_count();
   bool success = true;
 
   DBUG_PRINT("page_archiver", ("RESET PAGE"));
 
-  for (uint file_index = 0; file_index < file_count; ++file_index) {
+  for (uint file_index = m_file_ctx.get_index(); file_index < file_count;
+       ++file_index) {
     bool last_file = file_index + 1 == file_count;
 
     if (last_file && m_file_ctx.get_phy_size() == 0) {
@@ -2470,9 +2476,11 @@ int Arch_Page_Sys::start(Arch_Group **group, lsn_t *start_lsn,
     const uint64_t new_file_size =
         static_cast<uint64_t>(ARCH_PAGE_BLK_SIZE) * ARCH_PAGE_FILE_CAPACITY;
 
-    /* Initialize archiver file context. */
+    /* Initialize archiver file context. Fresh archive group; this branch has
+    no seed knob, so start_index = 0 and num_files = 0 (new init() signature
+    from the PS-11247 m_count fix). */
     auto db_err = m_current_group->init_file_ctx(
-        ARCH_DIR, ARCH_PAGE_DIR, ARCH_PAGE_FILE, 0, new_file_size, 0);
+        ARCH_DIR, ARCH_PAGE_DIR, ARCH_PAGE_FILE, 0, 0, new_file_size, 0);
 
     if (db_err != DB_SUCCESS) {
       arch_oper_mutex_exit();
