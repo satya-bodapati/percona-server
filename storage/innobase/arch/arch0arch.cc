@@ -451,6 +451,11 @@ dberr_t Arch_File_Ctx::open_new(lsn_t start_lsn, uint64_t new_file_size,
   if (err != DB_SUCCESS) {
     return err;
   }
+  /* PS-11175 diagnostic: a new archive data file is being created. */
+  if (srv_arch_page_bombard != 0) {
+    ib::info(ER_IB_MSG_26) << "page_archiver: created data file index="
+                           << m_count << " (m_index=" << m_index << ")";
+  }
   ++m_count;
   return DB_SUCCESS;
 }

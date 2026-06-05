@@ -1302,8 +1302,25 @@ bool Arch_Block::add_page(buf_page_t *page, Arch_Page_Pos *pos) {
   ut_ad(m_type == ARCH_DATA_BLOCK);
   ut_ad(pos->m_offset == m_data_len + ARCH_PAGE_BLK_HEADER_LENGTH);
 
-  if ((pos->m_offset + ARCH_BLK_PAGE_ID_SIZE) > ARCH_PAGE_BLK_SIZE) {
-    ut_ad(pos->m_offset == ARCH_PAGE_BLK_SIZE);
+  /* PS-11175 reproduction (simulate branch): when srv_arch_page_bombard != 0
+  treat the data block as "full" after only that many page-id entries instead
+  of the natural ~2040. This makes m_write_pos.m_block_num roll forward fast
+  under an ORDINARY workload (each track_page still adds exactly one entry and
+  holds the archiver mutex only briefly, so unlike amplifying entries-per-page
+  this neither over-holds BUF_POOL_FLUSH_STATE nor overruns the 32-block
+  archiver ring). Crossing block 65535 makes save_reset_point persist a
+  truncated position via mach_write_to_2 -- the real bug. Files ib_page_0..N
+  are still created naturally (file capacity in BLOCKS is unchanged), giving a
+  faithful on-disk layout. */
+  uint block_cap = ARCH_PAGE_BLK_SIZE;
+  if (srv_arch_page_bombard != 0) {
+    uint capped = ARCH_PAGE_BLK_HEADER_LENGTH +
+                  static_cast<uint>(srv_arch_page_bombard) * ARCH_BLK_PAGE_ID_SIZE;
+    if (capped < block_cap) block_cap = capped;
+  }
+
+  if ((pos->m_offset + ARCH_BLK_PAGE_ID_SIZE) > block_cap) {
+    ut_ad(srv_arch_page_bombard != 0 || pos->m_offset == ARCH_PAGE_BLK_SIZE);
     return (false);
   }
 
@@ -1739,6 +1756,18 @@ void Arch_Page_Sys::track_page(buf_page_t *bpage, lsn_t track_lsn,
       cur_blk->end_write();
 
       m_write_pos.set_next();
+
+      /* PS-11175 bombard diagnostic: watch m_block_num advance toward/past
+      65535 without scanning disk. Throttled to every 1024 block rolls. */
+      if (srv_arch_page_bombard != 0 &&
+          (m_write_pos.m_block_num % 1024 == 0)) {
+        ib::info(ER_IB_MSG_26)
+            << "page_archiver bombard: writer block_num="
+            << m_write_pos.m_block_num << " file_index="
+            << (m_write_pos.m_block_num / ARCH_PAGE_FILE_DATA_CAPACITY)
+            << " slot="
+            << (m_write_pos.m_block_num % ARCH_PAGE_FILE_DATA_CAPACITY);
+      }
 
       /* Writing to a new file so move to the next reset block. */
       if (m_write_pos.m_block_num % ARCH_PAGE_FILE_DATA_CAPACITY == 0) {
@@ -2993,6 +3022,26 @@ bool Arch_Page_Sys::save_reset_point(bool is_durable) {
   m_last_reset_file_index = current_file_index;
 
   reset_block->add_reset(m_last_lsn, m_last_pos);
+
+  /* PS-11175 diagnostic: add_reset persists reset_pos.m_block_num via
+  mach_write_to_2, truncating the 8-byte block number to 16 bits. Once the
+  real block number exceeds 65535 the persisted value is mangled. Show the
+  real vs truncated value and which file/slot/offset recovery (and
+  get_changed_pages) will subsequently dereference from the truncated value. */
+  {
+    const uint64_t real_bn = m_last_pos.m_block_num;
+    const uint64_t trunc_bn = real_bn & 0xFFFF;
+    ib::info(ER_IB_MSG_26)
+        << "page_archiver: save_reset_point lsn=" << m_last_lsn
+        << " host_file=ib_page_" << current_file_index
+        << " real_block_num=" << real_bn << " offset=" << m_last_pos.m_offset
+        << " persisted_block_num=" << trunc_bn
+        << (real_bn > 0xFFFF ? " [TRUNCATED]" : "")
+        << " (deref -> ib_page_"
+        << (trunc_bn / ARCH_PAGE_FILE_DATA_CAPACITY)
+        << " slot=" << (trunc_bn % ARCH_PAGE_FILE_DATA_CAPACITY) << " offset="
+        << Arch_Block::get_file_offset(trunc_bn, ARCH_DATA_BLOCK) << ")";
+  }
 
   m_current_group->save_reset_point_in_mem(m_last_lsn, m_last_pos);
 

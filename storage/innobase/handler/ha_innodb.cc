@@ -24186,6 +24186,18 @@ static MYSQL_SYSVAR_BOOL(
     "Print all DDl logs to MySQL error log (off by default)", nullptr, nullptr,
     false);
 
+/* PS-11175 reproduction knob (simulate branch). Max page-id entries per
+archive DATA block before it rolls (0 = natural ~2040). A small value makes
+the page archiver's m_block_num roll forward fast under an ordinary workload,
+crossing block 65535 (where mach_write_to_2 truncates the persisted reset
+position) in seconds-to-minutes. NOT under UNIV_DEBUG so it works in the
+release build. Dynamic so a test can switch it on/off around the fill phase. */
+static MYSQL_SYSVAR_ULONG(arch_page_bombard, srv_arch_page_bombard,
+                          PLUGIN_VAR_OPCMDARG,
+                          "PS-11175 repro: max page-id entries per archive "
+                          "block (0 = natural ~2040).",
+                          nullptr, nullptr, 0, 0, UINT_MAX32, 0);
+
 #ifdef UNIV_DEBUG
 static MYSQL_SYSVAR_UINT(trx_rseg_n_slots_debug, trx_rseg_n_slots_debug,
                          PLUGIN_VAR_RQCMDARG,
@@ -24554,6 +24566,7 @@ static SYS_VAR *innobase_system_variables[] = {
     MYSQL_SYSVAR(redo_log_archive_dirs),
     MYSQL_SYSVAR(redo_log_encrypt),
     MYSQL_SYSVAR(print_ddl_logs),
+    MYSQL_SYSVAR(arch_page_bombard),
 #ifdef UNIV_DEBUG
     MYSQL_SYSVAR(trx_rseg_n_slots_debug),
     MYSQL_SYSVAR(limit_optimistic_insert_debug),

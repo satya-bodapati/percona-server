@@ -166,6 +166,9 @@ segments. */
 ulong srv_undo_tablespaces = FSP_IMPLICIT_UNDO_TABLESPACES;
 
 #ifndef UNIV_HOTBACKUP
+/* PS-11175 reproduction knob (simulate branch). See srv0srv.h. */
+ulong srv_arch_page_bombard = 0;
+
 /* The number of rollback segments per tablespace */
 ulong srv_rollback_segments = TRX_SYS_N_RSEGS;
 

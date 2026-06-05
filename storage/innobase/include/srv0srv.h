@@ -395,6 +395,15 @@ extern uint32_t srv_rseg_init_threads;
 /** Number of pages per doublewrite thread/segment */
 extern ulong srv_dblwr_pages;
 
+/** PS-11175 reproduction knob (simulate branch only): max page-id entries per
+archive DATA block before it rolls (0 = natural ~2040). A small value makes the
+page-archiver's m_block_num roll forward fast under an ordinary workload,
+crossing 65535 (where mach_write_to_2 truncates the persisted reset position)
+without millions of real dirty-page flushes. Implemented as a fill cap in
+Arch_Block::add_page -- track_page still adds one entry per call, so it neither
+over-holds buffer-pool mutexes nor overruns the 32-block archiver ring. */
+extern ulong srv_arch_page_bombard;
+
 /** Set if InnoDB must operate in read-only mode. We don't do any
 recovery and open all tables in RO mode instead of RW mode. We don't
 sync the max trx id to disk either. */

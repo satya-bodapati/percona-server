@@ -749,13 +749,28 @@ dberr_t Arch_File_Ctx::Recovery::parse_reset_points(
 
 lsn_t Arch_File_Ctx::fetch_reset_lsn(uint64_t block_num) {
   ut_ad(!is_closed());
-  ut_ad(Arch_Block::get_file_index(block_num, ARCH_DATA_BLOCK) == m_index);
 
   byte buf[ARCH_PAGE_BLK_SIZE];
 
   auto offset = Arch_Block::get_file_offset(block_num, ARCH_DATA_BLOCK);
 
-  ut_ad(offset + ARCH_PAGE_BLK_SIZE <= get_phy_size());
+  /* PS-11175 diagnostic: block_num here is the (possibly 2-byte-truncated)
+  value read back from the reset block. We compute a read offset from it and
+  read against the file we are parsing (m_index). If the truncated value maps
+  to an offset beyond this file's physical size, the read below goes past EOF
+  -> MY-012642 -> recovery fatal (face A). Show what we are about to do. */
+  ib::info(ER_IB_MSG_26)
+      << "page_archiver recover: fetch_reset_lsn block_num=" << block_num
+      << " file_index_from_block="
+      << Arch_Block::get_file_index(block_num, ARCH_DATA_BLOCK)
+      << " parsing_m_index=" << m_index << " read_offset=" << offset
+      << " file_phy_size=" << get_phy_size()
+      << (offset + ARCH_PAGE_BLK_SIZE > get_phy_size() ? " [PAST EOF!]" : "");
+
+  /* PS-11175: the debug assertions below assume an untruncated block_num
+  (file index matches, offset within file). With the truncation bug present
+  they would fire in a debug build before we can observe the real failure,
+  so they are intentionally not relied upon here. */
 
   auto err = read(buf, offset, ARCH_PAGE_BLK_HEADER_LENGTH);
 
