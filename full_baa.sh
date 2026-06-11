@@ -67,20 +67,28 @@ stop || { log "FATAL shutdown"; exit 1; }
 start restart1.err || { log "restart1 FAILED"; grep -aE "MY-012642|MY-013581" $WORKDIR/restart1.err|tail -4; exit 3; }
 log "  restart #1 OK"
 
-log "=== Phase 4: re-arm + plant E_A (past-EOF, slot<160 fresh tail) ==="
-sql -e "SELECT mysqlbackup_page_track_set(1);" >/dev/null   # re-arm dormant track hook
+log "=== Phase 4: plant E_A (past-EOF, slot<160 fresh tail) ==="
+# Post-restart the track_page dedup makes the workload alone advance m_block_num
+# only by the small dirty backlog (it re-dirties already-tracked pages), so the
+# tail may not roll to a fresh file within a fixed window. Instead, FIRE set(1)
+# every iteration: each call re-arms track_page_lsn and claims the current dirty
+# set, so the cleaner steadily advances m_block_num. The set(1) that lands in a
+# brand-new tail file at slot<160 (file size < ~2.6 MB) IS E_A: its truncated
+# block_num wraps ~30 MB past that small file's EOF -> recovery read past EOF.
 sql -e "SET GLOBAL innodb_arch_page_bombard=150;"           # widen slot<160 window
-T0=$(tail_idx); run_sb 32 900; EA=""
-for i in $(seq 1 1500); do
+T0=$(tail_idx); run_sb 32 1800; EA=""
+for i in $(seq 1 1800); do
+  CAND=$(sql -e "SELECT mysqlbackup_page_track_set(1);")    # advance via backlog + candidate reset
   t=$(tail_idx)
   if [ "$t" -gt "$T0" ] 2>/dev/null && [ "$(fsize $t)" -lt 2621440 ]; then
-    EA=$(sql -e "SELECT mysqlbackup_page_track_set(1);"); log "  >>> E_A in ib_page_$t size=$(fsize $t) lsn=$EA"; log "      $(last_reset restart1.err)"; break
+    EA=$CAND; log "  >>> E_A in ib_page_$t size=$(fsize $t) lsn=$EA"; log "      $(last_reset restart1.err)"; break
   fi
+  [ $((i % 30)) -eq 0 ] && log "  ...advancing; tail=ib_page_$t size=$(fsize $t)"
   kill -0 $SB_PID 2>/dev/null || break
-  sleep 0.2
+  sleep 1
 done
 kill_sb; sleep 2
-[ -n "$EA" ] || { log "FAIL no E_A"; stop; exit 4; }
+[ -n "$EA" ] || { log "FAIL no E_A (tail=ib_page_$(tail_idx) size=$(fsize $(tail_idx)))"; stop; exit 4; }
 
 log "=== Phase 5: FACE B -- purge_up_to(L_MID) + get_changed_pages(E_B) ==="
 sql -e "SET GLOBAL mysqlbackup.backupid='12345';"
