@@ -17,6 +17,10 @@ DATADIR=$WORKDIR/data
 SOCK=$WORKDIR/sock
 ARCH_GLOB="$DATADIR/#ib_archive/page_group_*"
 BOMBARD=16; SB_TABLES=20; SB_TABLE_SIZE=200000
+# No fixed step timeouts (slow machines vary wildly): each wait runs until its
+# condition is met, prints progress so it's visibly alive, and only gives up if
+# the archive makes NO progress at all for STALL seconds (default 1h).
+STALL=${STALL:-3600}
 log(){ echo "[$(date +%T)] $*"; }
 sql(){ $MYSQL --socket=$SOCK -uroot --batch --skip-column-names "$@"; }
 cur_block(){ local s=0 f; for f in $ARCH_GLOB/ib_page_*; do [ -e "$f" ] && s=$((s+$(stat -c%s "$f"))); done; echo $((s/16384)); }
@@ -31,7 +35,10 @@ start(){ rm -f $SOCK; $MYSQLD --no-defaults --basedir=$BLD --datadir=$DATADIR --
   --innodb_flush_log_at_trx_commit=0 --innodb_page_cleaners=8 --innodb_doublewrite=OFF \
   --innodb_arch_page_bombard=$BOMBARD --max_connections=512 --log-error-verbosity=3 --skip-mysqlx \
   --skip-name-resolve --user=$(whoami) >> $WORKDIR/stdout.log 2>&1 &
-  MPID=$!; for i in $(seq 1 180); do [ -S $SOCK ] && return 0; kill -0 $MPID 2>/dev/null || return 1; sleep 1; done; return 1; }
+  # Wait for the socket; a failed/aborted start returns immediately via the
+  # process-exit check (kill -0), so the long cap only bounds a genuinely-slow
+  # but healthy recovery on a slow box -- it is not a per-step timeout.
+  MPID=$!; for i in $(seq 1 1800); do [ -S $SOCK ] && return 0; kill -0 $MPID 2>/dev/null || return 1; sleep 1; done; return 1; }
 stop(){ sql -e "SHUTDOWN;" 2>/dev/null; for i in $(seq 1 240); do kill -0 $MPID 2>/dev/null || return 0; sleep 1; done; return 1; }
 run_sb(){ sysbench oltp_write_only --db-driver=mysql --mysql-socket=$SOCK --mysql-user=root --mysql-db=sbtest \
   --tables=$SB_TABLES --table-size=$SB_TABLE_SIZE --threads=$1 --time=$2 --report-interval=10 run >> $WORKDIR/sb.log 2>&1 & SB_PID=$!; }
@@ -47,16 +54,17 @@ sysbench oltp_write_only --db-driver=mysql --mysql-socket=$SOCK --mysql-user=roo
 TRACK=$(sql -e "SELECT mysqlbackup_page_track_set(1);"); log "TRACK_LSN=$TRACK"
 
 log "=== Phase 2: bombard, plant L_MID + E_B ==="
-run_sb 32 3600; LMID=""; EB=""; last=0; stuck=0
+run_sb 32 86400; LMID=""; EB=""; last=-1; last_adv=$SECONDS
 while true; do
   blk=$(cur_block)
-  log "  block~$blk tail=ib_page_$(tail_idx)"
+  log "  block~$blk tail=ib_page_$(tail_idx)  (target 65535)"
   if [ -z "$LMID" ] && [ "$blk" -ge 9000 ]; then LMID=$(sql -e "SELECT mysqlbackup_page_track_set(1);"); log "  >>> L_MID lsn=$LMID $(last_reset boot.err)"; fi
   if [ -n "$LMID" ] && [ -z "$EB" ] && [ "$blk" -ge 65700 ]; then EB=$(sql -e "SELECT mysqlbackup_page_track_set(1);"); log "  >>> E_B lsn=$EB $(last_reset boot.err)"; fi
   if [ -n "$EB" ] && [ "$blk" -ge 69000 ]; then log "  E_B host sealed (~$blk)"; break; fi
-  if [ "$blk" -eq "$last" ]; then stuck=$((stuck+1)); else stuck=0; last=$blk; fi
-  [ $stuck -ge 24 ] && { log "  WARN stalled ~$blk"; break; }
-  kill -0 $SB_PID 2>/dev/null || { log "  sysbench exited"; break; }
+  # progress / stall backstop: only bail if the archive hasn't grown for STALL s
+  if [ "$blk" -ne "$last" ]; then last=$blk; last_adv=$SECONDS; fi
+  if [ $((SECONDS - last_adv)) -ge $STALL ]; then log "  WARN no archive growth for ${STALL}s (block stuck ~$blk) -- giving up"; break; fi
+  kill -0 $SB_PID 2>/dev/null || { log "  sysbench exited -- restarting workload"; run_sb 32 86400; }
   sleep 5
 done
 kill_sb; sleep 2
@@ -68,23 +76,46 @@ start restart1.err || { log "restart1 FAILED"; grep -aE "MY-012642|MY-013581" $W
 log "  restart #1 OK"
 
 log "=== Phase 4: plant E_A (past-EOF, slot<160 fresh tail) ==="
-# Post-restart the track_page dedup makes the workload alone advance m_block_num
-# only by the small dirty backlog (it re-dirties already-tracked pages), so the
-# tail may not roll to a fresh file within a fixed window. Instead, FIRE set(1)
-# every iteration: each call re-arms track_page_lsn and claims the current dirty
-# set, so the cleaner steadily advances m_block_num. The set(1) that lands in a
-# brand-new tail file at slot<160 (file size < ~2.6 MB) IS E_A: its truncated
-# block_num wraps ~30 MB past that small file's EOF -> recovery read past EOF.
-sql -e "SET GLOBAL innodb_arch_page_bombard=150;"           # widen slot<160 window
-T0=$(tail_idx); run_sb 32 1800; EA=""
-for i in $(seq 1 1800); do
-  CAND=$(sql -e "SELECT mysqlbackup_page_track_set(1);")    # advance via backlog + candidate reset
+# Post-restart, track_page dedup means the workload alone advances m_block_num
+# only by its small dirty backlog, so the tail rolls to a fresh file slowly.
+# FIRE set(1) each iteration: every call re-arms track_page_lsn and claims the
+# current dirty set, so the cleaner steadily advances m_block_num.
+#
+# We deliberately keep the post-restart flush LAZY (we do NOT re-arm the
+# aggressive io_capacity / max_dirty_pages knobs here). A lazy cleaner advances
+# slowly -- a fresh tail file rolls in ~minutes, not seconds -- but it keeps that
+# fresh tail SMALL, which is exactly what FACE A needs. An aggressive cleaner
+# rolls the file in seconds but then keeps FILLING it during the FACE B window,
+# so by recovery time the reset's host file is no longer partial and the past-EOF
+# read never happens (FACE A silently does not fire). Slower-but-reliable on
+# purpose -- the harness just waits with visible progress.
+#
+# E_A is the set(1) whose reset is HOSTED IN a brand-new, still-partial tail file
+# (size < ~2.6 MB => real slot < 160): its truncated block_num wraps ~30 MB past
+# that small file's EOF, so recovery reads past EOF (MY-012642). We VERIFY from
+# the save_reset_point log that the candidate's host_file is exactly that fresh
+# partial tail and that it TRUNCATED -- otherwise the reset can land in the
+# just-completed FULL file (a timing race) and recovery reads in-bounds (no crash).
+#
+# No fixed timeout (slow machines vary wildly): loop until E_A is anchored, print
+# progress every ~10s, and only give up after STALL s of zero archive growth.
+sql -e "SET GLOBAL innodb_arch_page_bombard=150;"           # widen slot<160 window (flush stays lazy)
+T0=$(tail_idx); run_sb 32 86400; EA=""; lastblk=-1; last_adv=$SECONDS; last_print=$SECONDS
+while true; do
+  CAND=$(sql -e "SELECT mysqlbackup_page_track_set(1);")    # advance + candidate reset
   t=$(tail_idx)
   if [ "$t" -gt "$T0" ] 2>/dev/null && [ "$(fsize $t)" -lt 2621440 ]; then
-    EA=$CAND; log "  >>> E_A in ib_page_$t size=$(fsize $t) lsn=$EA"; log "      $(last_reset restart1.err)"; break
+    RS=$(grep -a "save_reset_point lsn=$CAND " $WORKDIR/restart1.err 2>/dev/null | tail -1 | sed 's/.*page_archiver://')
+    hf=$(echo "$RS" | grep -o 'host_file=ib_page_[0-9]*' | grep -o '[0-9]*$')
+    if [ "$hf" = "$t" ] && echo "$RS" | grep -q TRUNCATED; then
+      EA=$CAND; log "  >>> E_A hosted in partial ib_page_$t size=$(fsize $t) lsn=$EA"; log "     $RS"; break
+    fi
   fi
-  [ $((i % 30)) -eq 0 ] && log "  ...advancing; tail=ib_page_$t size=$(fsize $t)"
-  kill -0 $SB_PID 2>/dev/null || break
+  blk=$(cur_block)
+  if [ "$blk" -ne "$lastblk" ]; then lastblk=$blk; last_adv=$SECONDS; fi
+  if [ $((SECONDS - last_print)) -ge 10 ]; then log "  ...advancing block~$blk tail=ib_page_$t size=$(fsize $t) (waiting for a TRUNCATED reset hosted in a fresh slot<160 tail)"; last_print=$SECONDS; fi
+  if [ $((SECONDS - last_adv)) -ge $STALL ]; then log "  no archive growth for ${STALL}s -- giving up"; break; fi
+  kill -0 $SB_PID 2>/dev/null || { log "  sysbench exited -- restarting workload"; run_sb 32 86400; }
   sleep 1
 done
 kill_sb; sleep 2
