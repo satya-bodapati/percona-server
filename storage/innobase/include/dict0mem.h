@@ -262,7 +262,7 @@ ROW_FORMAT=REDUNDANT.  InnoDB engines do not check these flags
 for unknown bits in order to protect backward incompatibility. */
 /** @{ */
 /** Total number of bits in table->flags2. */
-constexpr uint32_t DICT_TF2_BITS = 11;
+constexpr uint32_t DICT_TF2_BITS = 12;
 constexpr uint32_t DICT_TF2_UNUSED_BIT_MASK = ~0U << DICT_TF2_BITS;
 constexpr uint32_t DICT_TF2_BIT_MASK = ~DICT_TF2_UNUSED_BIT_MASK;
 
@@ -313,6 +313,11 @@ constexpr uint32_t DICT_TF2_AUX = 512;
 
 /** Table is opened by resurrected trx during crash recovery. */
 constexpr uint32_t DICT_TF2_RESURRECT_PREPARED = 1024;
+
+/** Vector auxiliary hidden table bit. Parallels DICT_TF2_AUX (FTS),
+but vector aux tables must remain distinguishable so handlers that
+truly need "FTS only" semantics aren't fooled by a vec aux's flag. */
+constexpr uint32_t DICT_TF2_VEC_AUX = 2048;
 /** @} */
 
 /** Tables could be chained together with Foreign key constraint. When
@@ -1220,7 +1225,34 @@ struct dict_index_t {
   /** if the index is an hidden index */
   bool hidden;
 
-  /** true if this is a vector index according to DD metadata */
+  /** true if this is a vector index according to DD metadata.
+
+  DEVIATION FROM FTS: FTS encodes "this is an FTS index" as
+  `type & DICT_FTS` (a bit in the existing `type` bitmap; see
+  dict0types.h DICT_FTS = 32). Vec deliberately uses a bool
+  instead of adding a DICT_VECTOR bit to the same bitmap. Reasons:
+
+    1. Every existing `type & DICT_FTS` callsite (~40 sites across
+       row0*, dict0*, log0ddl, handler0alter, etc.) is a NARROW
+       predicate — "skip in this specific path because there's no
+       B-tree". Vec has the same needs but a DIFFERENT set of sites
+       (audit-driven, matches FTS almost 1:1). Introducing
+       DICT_VECTOR would force every existing FTS check to add
+       `|| DICT_VECTOR` — one bit-op — and every future test to
+       remember to include vec. A separate bool at each callsite
+       (`index->is_vector()`) makes the two categories independently
+       greppable and immediately visible in a diff.
+
+    2. Zero storage cost: is_vector_index sits inside dict_index_t's
+       existing bool-block padding, no wider struct.
+
+    3. Consistent with the fts_t-vs-inline-fields deviation on
+       dict_table_t below (line ~2444): both boil down to "FTS's
+       generality carries cost we don't need in phase 1; refactor
+       only when the cost pays for itself".
+
+  The parallel field Index_defn::m_is_vector at ddl0ddl.h:132
+  carries the same rationale — see comment there. */
   bool is_vector_index;
 #endif /* !UNIV_HOTBACKUP */
 
@@ -2424,6 +2456,53 @@ detect this and will eventually quit sooner. */
   be no conflict to access it, so no protection is needed. */
   ulint autoinc_field_no;
 
+  /* DEVIATION FROM FTS (applies to vec_next_id and vec_idx_id_col
+  below): FTS hangs per-table runtime state off `dict_table_t::fts`,
+  a pointer to fts_t (fts0fts.h:364). fts_t carries 8 fields:
+
+      bg_threads_mutex, bg_threads, fts_status, add_wq   — async "Add"
+        thread infrastructure
+      cache (fts_cache_t*)                               — token cache
+                                                           batched to
+                                                           aux tables
+      doc_col                                            — hidden col
+                                                           ordinal
+      indexes (ib_vector_t*)                             — cached list
+                                                           of FTS indexes
+      fts_heap                                           — heap for
+                                                           fts_t itself
+
+  Of those 8, vec (phase 1) needs exactly ONE — the col-ordinal — plus
+  one field FTS doesn't have (a persistence counter for the auto-
+  assigned id). Concretely:
+
+    - No background thread → no bg_threads_mutex/bg_threads/fts_status/
+      add_wq.
+    - No cache: HNSW graph state is a phase-2 concern (PS-11300).
+      Aux tables are empty in phase 1.
+    - PS-11264 caps at one vector index per table → an ib_vector_t of
+      indexes would hold at most one element; iterating table->indexes
+      with is_vector() filter is cheaper.
+    - No fts_heap: inline scalar fields need no separate allocation.
+
+  So a companion `vec_t *vec` sub-struct would allocate a heap, add a
+  pointer chase to every INSERT-time stamp, and carry two scalars.
+  YAGNI. Phase 2 is the natural point to introduce vec_t — when we
+  actually add HNSW graph state, background maintenance, or lift the
+  one-vec-index-per-table cap. Until then, direct fields are the
+  honest representation. */
+
+  /** Counter for the hidden vec_idx_id column (auto-assigned on INSERT).
+  Valid IDs start at 1. Set by vec_assign_next_idx_id via fetch_add.
+  Phase 1 (PS-11299): not persisted across restart — duplicates are
+  benign because the aux table is empty. PS-11300 will switch to the
+  autoinc-style dynamic-metadata persistence path. */
+  std::atomic<uint64_t> vec_next_id;
+
+  /** Ordinal position of vec_idx_id in cols[]. ULINT_UNDEFINED when the
+  table has no hidden vec_idx_id column. Set by vec_add_idx_id_column. */
+  ulint vec_idx_id_col;
+
   /** The transaction that currently holds the the AUTOINC lock on this table.
   Protected by lock_sys table shard latch. To "peek" the current value one
   can read it without any latch, understanding that in general it may change.
@@ -2745,10 +2824,25 @@ detect this and will eventually quit sooner. */
     return (flags2 & DICT_TF2_TEMPORARY);
   }
 
-  /** Determine if this is a FTS AUX table. */
+  /** Determine if this is an InnoDB-owned auxiliary table (FTS or
+  vector). Returns true if either DICT_TF2_AUX (FTS) or
+  DICT_TF2_VEC_AUX (vector) is set. Use the specific predicates
+  @ref is_fts_aux / @ref is_vec_aux when behavior must differ. */
+  bool is_aux() const {
+    ut_ad(magic_n == DICT_TABLE_MAGIC_N);
+    return (flags2 & (DICT_TF2_AUX | DICT_TF2_VEC_AUX));
+  }
+
+  /** Determine if this is specifically an FTS auxiliary table. */
   bool is_fts_aux() const {
     ut_ad(magic_n == DICT_TABLE_MAGIC_N);
     return (flags2 & DICT_TF2_AUX);
+  }
+
+  /** Determine if this is specifically a vector auxiliary table. */
+  bool is_vec_aux() const {
+    ut_ad(magic_n == DICT_TABLE_MAGIC_N);
+    return (flags2 & DICT_TF2_VEC_AUX);
   }
 
   /** Determine whether the table is intrinsic.

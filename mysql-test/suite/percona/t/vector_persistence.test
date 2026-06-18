@@ -1,0 +1,44 @@
+--echo #
+--echo # PS-11299: Vector index persistence — phase 1.
+--echo # CREATE TABLE creates one aux .ibd per vector index and auto-adds the
+--echo # hidden vec_idx_id column. SHOW CREATE must not expose vec_idx_id.
+--echo #
+
+CREATE TABLE t1 (
+  id BIGINT UNSIGNED PRIMARY KEY,
+  v1 VECTOR(8),
+  VECTOR KEY (v1) TYPE hnsw
+);
+
+--echo # SHOW CREATE TABLE must NOT mention vec_idx_id (HT_HIDDEN_SE).
+SHOW CREATE TABLE t1;
+
+--echo # Exactly one aux .ibd per vector index must exist on disk.
+--echo # Names are vec_<hex_table_id>_<hex_index_id>.ibd — mask the ids so the
+--echo # result file is stable across runs.
+--let $MYSQLD_DATADIR = `SELECT @@datadir`
+--replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+\.ibd/vec_hnsw_<TID>_<IID>.ibd/
+--list_files $MYSQLD_DATADIR/test vec_*.ibd
+
+--echo # User cannot declare a column named vec_idx_id when the table has a
+--echo # vector index — the name is reserved.
+--error ER_WRONG_COLUMN_NAME
+CREATE TABLE t2 (
+  id BIGINT UNSIGNED PRIMARY KEY,
+  vec_idx_id BIGINT UNSIGNED,
+  v1 VECTOR(8),
+  VECTOR KEY (v1) TYPE hnsw
+);
+
+--echo # ... but it is fine to declare vec_idx_id on a table that has no
+--echo # vector index — the name is only reserved when InnoDB needs it.
+CREATE TABLE t3 (
+  id BIGINT UNSIGNED PRIMARY KEY,
+  vec_idx_id BIGINT UNSIGNED
+);
+DROP TABLE t3;
+
+DROP TABLE t1;
+
+--echo # After DROP TABLE the aux .ibd files must be gone too — no orphans.
+--list_files $MYSQLD_DATADIR/test vec_*.ibd

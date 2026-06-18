@@ -52,13 +52,14 @@ const char *VEC_AUX_PREFIX = "vec_";
 namespace {
 
 /** Extract the flags2 bits an aux table should inherit from its parent —
-file_per_table, encryption, temporary, plus DICT_TF2_AUX. Same set the FTS
-aux path preserves (see fts_get_table_flags2_for_aux_tables in fts0fts.cc;
-that helper is file-static so we re-derive it here). */
+file_per_table, encryption, temporary, plus DICT_TF2_VEC_AUX. Same shape
+the FTS aux path uses (DICT_TF2_AUX over there); the two flags are
+distinct so predicates can tell vector aux from FTS aux without parsing
+the on-disk name. */
 inline uint32_t aux_flags2_from_parent(const dict_table_t *parent) {
   return (parent->flags2 & DICT_TF2_USE_FILE_PER_TABLE) |
          (parent->flags2 & DICT_TF2_ENCRYPTION_FILE_PER_TABLE) |
-         (parent->flags2 & DICT_TF2_TEMPORARY) | DICT_TF2_AUX;
+         (parent->flags2 & DICT_TF2_TEMPORARY) | DICT_TF2_VEC_AUX;
 }
 
 /** Build the database-prefix portion of a parent name "db/tbl" — returns
@@ -120,6 +121,38 @@ bool vec_aux_is_aux_table_name(const char *name) {
   return strncmp(after_db, VEC_AUX_PREFIX, strlen(VEC_AUX_PREFIX)) == 0;
 }
 
+bool vec_aux_parse_table_name(const char *name, table_id_t *parent_id_out,
+                              space_index_t *index_id_out,
+                              Vec_index_type *type_out) {
+  if (!vec_aux_is_aux_table_name(name)) return false;
+  const char *slash = strchr(name, '/');
+  const char *after_db = slash != nullptr ? slash + 1 : name;
+  const char *token =
+      after_db + strlen(VEC_AUX_PREFIX);  // "<type>_<parent_id>_<index_id>"
+
+  /* The type token runs to the next '_' and must resolve in the
+  registry (SPANN R4) — an unknown token means "reserved vec_ name
+  that is not an aux table". */
+  const char *token_end = strchr(token, '_');
+  if (token_end == nullptr || token_end == token) return false;
+  const Vector_index *impl =
+      vec_index_by_name(token, static_cast<size_t>(token_end - token));
+  if (impl == nullptr) return false;
+
+  const char *tail = token_end + 1;  // "<parent_id>_<index_id>"
+  table_id_t pid = 0;
+  if (!fts_read_object_id(&pid, tail)) return false;
+  const char *sep = strchr(tail, '_');
+  if (sep == nullptr) return false;
+  space_index_t iid = 0;
+  if (!fts_read_object_id(&iid, sep + 1)) return false;
+
+  if (parent_id_out != nullptr) *parent_id_out = pid;
+  if (index_id_out != nullptr) *index_id_out = iid;
+  if (type_out != nullptr) *type_out = impl->type();
+  return true;
+}
+
 bool vec_aux_table_has_vector_index(const dict_table_t *table) {
   if (table == nullptr) return false;
   for (const dict_index_t *idx = UT_LIST_GET_FIRST(table->indexes);
@@ -130,6 +163,10 @@ bool vec_aux_table_has_vector_index(const dict_table_t *table) {
 }
 
 void vec_add_idx_id_column(dict_table_t *table, mem_heap_t *heap) {
+  /* No phy_pos plumbing needed: INSTANT ADD/DROP COLUMN is blocked on
+  vec-indexed tables (see innobase_support_instant, mirrors FTS), so
+  vec_idx_id can never live on a table with row_versions > 0. Shape
+  matches fts_add_doc_id_column for the same reason. */
   dict_mem_table_add_col(
       table, heap, VEC_IDX_ID_COL_NAME, DATA_INT,
       dtype_form_prtype(DATA_NOT_NULL | DATA_UNSIGNED | DATA_BINARY_TYPE, 0),
@@ -236,6 +273,33 @@ dberr_t vec_aux_create_all_tables(trx_t *trx, const dict_table_t *parent) {
     if (err != DB_SUCCESS) return err;
   }
   return DB_SUCCESS;
+}
+
+bool vec_aux_create_dd_tables(dict_table_t *parent) {
+  ut_a(parent != nullptr);
+
+  /* DEVIATION FROM FTS: fts_create_index_dd_tables (fts0fts.cc) gates
+  each iteration on `index->fill_dd` so a re-entrant CREATE-time call
+  registers exactly the pending aux tables. Vec has no `fill_dd` per-
+  index gate because PS-11264 currently allows at most one vector
+  index per table (see dd::create_dd_table validation) — so the loop
+  either finds zero vec indexes or exactly one, and idempotency isn't
+  a concern. If phase 2 lifts the one-vec-index cap AND supports
+  partial DD materialization, mirror fts's fill_dd gate here. */
+  for (const dict_index_t *idx = UT_LIST_GET_FIRST(parent->indexes);
+       idx != nullptr; idx = UT_LIST_GET_NEXT(indexes, idx)) {
+    if (!idx->is_vector()) continue;
+
+    char aux_name[MAX_FULL_NAME_LEN];
+    vec_aux_get_table_name(parent, idx->id, Vec_index_type::HNSW, aux_name,
+                           sizeof(aux_name));
+    dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, false);
+    ut_a(aux != nullptr);
+    const bool ok = dd_create_vec_aux_table(parent, aux);
+    dd_table_close(aux, nullptr, nullptr, false);
+    if (!ok) return false;
+  }
+  return true;
 }
 
 dberr_t vec_aux_drop_one_table(trx_t *trx, const dict_table_t *parent,

@@ -247,6 +247,12 @@ dict_table_t *dict_mem_table_create(const char *name, space_id_t space,
   table->autoinc = 0;
   table->autoinc_persisted = 0;
   table->autoinc_field_no = ULINT_UNDEFINED;
+  table->vec_idx_id_col = ULINT_UNDEFINED;
+  /* Placement-new the std::atomic on the heap-allocated struct
+  (the whole dict_table_t sits in a memory heap; no default ctor
+  ran on this field). Mirrors the ULINT_UNDEFINED init above for
+  vec_idx_id_col. Value 0 is fine — first stamp fetches then adds. */
+  new (&table->vec_next_id) std::atomic<uint64_t>(0);
   table->sess_row_id = 0;
   table->sess_trx_id = 0;
 

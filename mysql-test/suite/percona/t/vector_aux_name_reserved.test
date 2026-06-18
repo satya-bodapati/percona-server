@@ -1,0 +1,31 @@
+--echo #
+--echo # PS-11299: the "<db>/vec_<id>_<id>" name pattern is reserved for
+--echo # InnoDB-managed vector auxiliary tables. CREATE TABLE with a name
+--echo # matching the pattern must fail at the ha_innobase::create gate,
+--echo # mirroring the reservation FTS already enforces for "fts_<...>".
+--echo #
+--echo # Without the reservation a user could pre-create a table called
+--echo # e.g. "vec_42_99", and a later CREATE VECTOR INDEX whose computed
+--echo # aux name happens to be "vec_42_99" would conflict at the
+--echo # dict_sys level — silent name collision is exactly what FTS
+--echo # already guards against.
+--echo #
+
+--echo # Plain hex digits — must be rejected.
+--error ER_WRONG_TABLE_NAME
+CREATE TABLE vec_1_2 (id INT PRIMARY KEY);
+
+--error ER_WRONG_TABLE_NAME
+CREATE TABLE `vec_a_b` (id INT PRIMARY KEY);
+
+--echo # Common-looking hex ids — must be rejected.
+--error ER_WRONG_TABLE_NAME
+CREATE TABLE `vec_0000000000000042_0000000000000099` (id INT PRIMARY KEY);
+
+--echo # Sanity: a name that merely starts with "vec" but is not the
+--echo # full prefix (no trailing underscore) is unaffected.
+CREATE TABLE vector_thing (id INT PRIMARY KEY);
+DROP TABLE vector_thing;
+
+CREATE TABLE vecstuff (id INT PRIMARY KEY);
+DROP TABLE vecstuff;

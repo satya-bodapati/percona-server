@@ -51,9 +51,14 @@ static constexpr auto PARTITION_IN_SHARED_TABLESPACE =
 
 /** HA_DUPLICATE_POS and HA_READ_BEFORE_WRITE_REMOVAL is not
 set from ha_innobase, but cannot yet be supported in ha_innopart.
-Full text and geometry is not yet supported. */
+Full text, geometry and vector indexes are not yet supported.
+Vector uses the same disable mechanism FTS does: masking the
+capability here makes the SQL layer reject VECTOR KEY on
+partitioned tables (sql_table.cc HA_CAN_VECTOR check), keeping
+per-partition aux-table lifecycle (naming, create/drop/alter,
+DD registration) out of scope for PS-11299 phase 1. */
 const handler::Table_flags HA_INNOPART_DISABLED_TABLE_FLAGS =
-    (HA_CAN_FULLTEXT | HA_CAN_FULLTEXT_EXT | HA_CAN_GEOMETRY |
+    (HA_CAN_FULLTEXT | HA_CAN_FULLTEXT_EXT | HA_CAN_GEOMETRY | HA_CAN_VECTOR |
      HA_DUPLICATE_POS | HA_READ_BEFORE_WRITE_REMOVAL);
 
 typedef Bitset<> Sql_stat_start_parts;
