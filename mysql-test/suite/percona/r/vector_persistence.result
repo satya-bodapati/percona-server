@@ -43,6 +43,29 @@ DROP TABLE t3;
 # Cross-schema rename is currently rejected — phase 2 will lift
 # this once the aux DD plumbing exists.
 #
+#
+# TRUNCATE TABLE — InnoDB implements truncate as drop+create, so the
+# aux table gets removed and recreated. New table_id/index_id means
+# the aux .ibd name changes, but the count stays at one per vector
+# index.
+#
+# Capture the aux name before truncate.
+vec_<BEFORE>.ibd
+TRUNCATE TABLE t1;
+# Still exactly one aux .ibd in test/ (likely with a different id).
+vec_<AFTER>.ibd
+#
+# OPTIMIZE TABLE — for InnoDB this maps to ALTER TABLE FORCE
+# (full rebuild). Aux table should be re-minted with the new
+# parent table_id; count stays at one per vector index. Same
+# shape as TRUNCATE.
+#
+OPTIMIZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	optimize	note	Table does not support optimize, doing recreate + analyze instead
+test.t1	optimize	status	OK
+# Still exactly one aux .ibd in test/ post-OPTIMIZE.
+vec_<POST_OPTIMIZE>.ibd
 # Same-schema rename: aux file unchanged.
 RENAME TABLE t1 TO t1_renamed;
 vec_<TID>_<IID>.ibd

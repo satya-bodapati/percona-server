@@ -45,6 +45,34 @@ DROP TABLE t3;
 --echo # this once the aux DD plumbing exists.
 --echo #
 
+--echo #
+--echo # TRUNCATE TABLE — InnoDB implements truncate as drop+create, so the
+--echo # aux table gets removed and recreated. New table_id/index_id means
+--echo # the aux .ibd name changes, but the count stays at one per vector
+--echo # index.
+--echo #
+
+--echo # Capture the aux name before truncate.
+--replace_regex /vec_[0-9a-f]+_[0-9a-f]+\.ibd/vec_<BEFORE>.ibd/
+--list_files $MYSQLD_DATADIR/test vec_*.ibd
+
+TRUNCATE TABLE t1;
+
+--echo # Still exactly one aux .ibd in test/ (likely with a different id).
+--replace_regex /vec_[0-9a-f]+_[0-9a-f]+\.ibd/vec_<AFTER>.ibd/
+--list_files $MYSQLD_DATADIR/test vec_*.ibd
+
+--echo #
+--echo # OPTIMIZE TABLE — for InnoDB this maps to ALTER TABLE FORCE
+--echo # (full rebuild). Aux table should be re-minted with the new
+--echo # parent table_id; count stays at one per vector index. Same
+--echo # shape as TRUNCATE.
+--echo #
+OPTIMIZE TABLE t1;
+--echo # Still exactly one aux .ibd in test/ post-OPTIMIZE.
+--replace_regex /vec_[0-9a-f]+_[0-9a-f]+\.ibd/vec_<POST_OPTIMIZE>.ibd/
+--list_files $MYSQLD_DATADIR/test vec_*.ibd
+
 --echo # Same-schema rename: aux file unchanged.
 RENAME TABLE t1 TO t1_renamed;
 --replace_regex /vec_[0-9a-f]+_[0-9a-f]+\.ibd/vec_<TID>_<IID>.ibd/
