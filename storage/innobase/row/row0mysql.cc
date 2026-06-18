@@ -4721,6 +4721,17 @@ dberr_t row_rename_table_for_mysql(const char *old_name, const char *new_name,
       !dict_tables_have_same_db(old_name, new_name)) {
     err = fts_rename_aux_tables(table, new_name, trx, replay);
   }
+
+  /* Vector aux tables are named "<db>/vec_<table_id>_<index_id>" — keyed
+  by ids, so SAME-schema RENAME is a no-op. CROSS-schema RENAME needs
+  each aux's dd::Table reparented to the new schema and its
+  dd::Tablespace file path updated; vec_aux_rename_tables does both
+  through the same plumbing FTS aux uses. */
+  if (err == DB_SUCCESS &&
+      DICT_TF2_FLAG_IS_SET(table, DICT_TF2_VEC_HAS_IDX_ID) &&
+      !dict_tables_have_same_db(old_name, new_name)) {
+    err = vec_aux_rename_tables(trx, table, new_name, replay);
+  }
   if (err != DB_SUCCESS) {
     if (err == DB_DUPLICATE_KEY) {
       ib::error(ER_IB_MSG_998) << "Possible reasons:";
