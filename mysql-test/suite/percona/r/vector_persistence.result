@@ -38,3 +38,4 @@ vec_idx_id BIGINT UNSIGNED
 );
 DROP TABLE t3;
 DROP TABLE t1;
+# After DROP TABLE the aux .ibd files must be gone too — no orphans.

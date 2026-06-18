@@ -39,3 +39,6 @@ CREATE TABLE t3 (
 DROP TABLE t3;
 
 DROP TABLE t1;
+
+--echo # After DROP TABLE the aux .ibd files must be gone too — no orphans.
+--list_files $MYSQLD_DATADIR/test vec_*.ibd

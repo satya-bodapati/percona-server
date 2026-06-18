@@ -80,6 +80,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "trx0undo.h"
 #include "ut0cpu_cache.h"
 #include "ut0new.h"
+#include "vec0aux.h"
 #include "zlib.h"
 
 #include "current_thd.h"
@@ -4489,9 +4490,11 @@ dberr_t row_drop_table_for_mysql(const char *name, trx_t *trx, bool nonatomic,
       break;
     case TRX_DICT_OP_INDEX:
       /* If the transaction was previously flagged as
-      TRX_DICT_OP_INDEX, we should be dropping auxiliary
-      tables for full-text indexes or temp tables. */
+      TRX_DICT_OP_INDEX, we should be dropping auxiliary tables for
+      full-text or vector indexes, or temp tables. Vec aux names
+      start with "<db>/vec_". */
       ut_ad(strstr(table->name.m_name, "/fts_") != nullptr ||
+            strstr(table->name.m_name, "/vec_") != nullptr ||
             strstr(table->name.m_name, TEMP_FILE_PREFIX_INNODB) != nullptr);
   }
 
@@ -4551,6 +4554,19 @@ dberr_t row_drop_table_for_mysql(const char *name, trx_t *trx, bool nonatomic,
 
     err = row_drop_ancillary_fts_tables(table, &aux_vec, trx);
     if (err != DB_SUCCESS) {
+      goto funct_exit;
+    }
+  }
+
+  /* Drop the per-vector-index auxiliary tables. Symmetric with the FTS
+  ancillary drop above — same flag-style gate. See PS-11299. */
+  if (DICT_TF2_FLAG_IS_SET(table, DICT_TF2_VEC_HAS_IDX_ID)) {
+    ut_ad(!is_temp);
+    err = vec_aux_drop_all_tables(trx, table);
+    if (err != DB_SUCCESS) {
+      ib::error(ER_IB_MSG_988)
+          << " Unable to remove vector aux tables for table " << table->name
+          << " : " << ut_strerr(err);
       goto funct_exit;
     }
   }
