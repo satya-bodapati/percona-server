@@ -80,6 +80,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "trx0undo.h"
 #include "ut0cpu_cache.h"
 #include "ut0new.h"
+#include "vec0aux.h"
 #include "zlib.h"
 
 #include "current_thd.h"
@@ -4549,6 +4550,19 @@ dberr_t row_drop_table_for_mysql(const char *name, trx_t *trx, bool nonatomic,
 
     err = row_drop_ancillary_fts_tables(table, &aux_vec, trx);
     if (err != DB_SUCCESS) {
+      goto funct_exit;
+    }
+  }
+
+  /* Drop the per-vector-index auxiliary tables. Symmetric with the FTS
+  ancillary drop above. See PS-11299. */
+  if (vec_aux_table_has_vector_index(table)) {
+    ut_ad(!is_temp);
+    err = vec_aux_drop_all_tables(trx, table);
+    if (err != DB_SUCCESS) {
+      ib::error(ER_IB_MSG_988)
+          << " Unable to remove vector aux tables for table " << table->name
+          << " : " << ut_strerr(err);
       goto funct_exit;
     }
   }
