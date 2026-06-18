@@ -78,6 +78,7 @@ Data dictionary interface */
 #include "sql_base.h"
 #include "sql_table.h"
 #include "univ.i"  // Using OS_PATH_SEPARATOR
+#include "vec0aux.h"
 #endif             /* !UNIV_HOTBACKUP */
 
 const char *DD_instant_col_val_coder::encode(const byte *stream, size_t in_len,
@@ -3706,7 +3707,8 @@ template <typename Table>
 static inline void fill_dict_columns(const Table *dd_table, const TABLE *m_form,
                                      dict_table_t *dict_table,
                                      const unsigned n_mysql_cols,
-                                     mem_heap_t *heap, bool add_doc_id) {
+                                     mem_heap_t *heap, bool add_doc_id,
+                                     bool add_vec_idx_id) {
   IF_DEBUG(uint32_t crv = 0;)
 
   /* Add existing columns metadata information. */
@@ -3719,6 +3721,12 @@ static inline void fill_dict_columns(const Table *dd_table, const TABLE *m_form,
   if (add_doc_id) {
     /* Add the hidden FTS_DOC_ID column. */
     fts_add_doc_id_column(dict_table, heap);
+  }
+
+  if (add_vec_idx_id) {
+    /* Materialize the hidden vec_idx_id column on dict_table_t.
+    vec_add_idx_id_column also sets DICT_TF2_VEC_HAS_IDX_ID. */
+    vec_add_idx_id_column(dict_table, heap);
   }
 
   /* Add system columns to make adding index work */
@@ -3859,7 +3867,22 @@ static inline dict_table_t *dd_fill_dict_table(const Table *dd_tab,
     add_doc_id = true;
   }
 
-  const unsigned n_cols = n_mysql_cols + (add_doc_id ? 1 : 0);
+  /* Same shape for the vector vec_idx_id auxiliary column: detect it in
+  the dd::Table and reserve a cols slot so fill_dict_columns can
+  materialize it into dict_table_t. Mirrors FTS_DOC_ID. */
+  bool add_vec_idx_id = false;
+  {
+    const dd::Column *vec_col =
+        dd_find_column(&dd_tab->table(), VEC_IDX_ID_COL_NAME);
+    if (vec_col != nullptr &&
+        vec_col->type() == dd::enum_column_types::LONGLONG &&
+        !vec_col->is_nullable() && vec_col->is_se_hidden()) {
+      add_vec_idx_id = true;
+    }
+  }
+
+  const unsigned n_cols =
+      n_mysql_cols + (add_doc_id ? 1 : 0) + (add_vec_idx_id ? 1 : 0);
 
   row_type real_type = ROW_TYPE_NOT_USED;
 
@@ -4029,7 +4052,8 @@ static inline dict_table_t *dd_fill_dict_table(const Table *dd_tab,
   mem_heap_t *heap = mem_heap_create(1000, UT_LOCATION_HERE);
 
   /* Fill out each column info */
-  fill_dict_columns(dd_tab, m_form, m_table, n_mysql_cols, heap, add_doc_id);
+  fill_dict_columns(dd_tab, m_form, m_table, n_mysql_cols, heap, add_doc_id,
+                    add_vec_idx_id);
 
 #ifdef UNIV_DEBUG
   if (m_table->is_upgraded_instant()) {
@@ -6579,6 +6603,124 @@ bool dd_create_fts_index_table(const dict_table_t *parent_table,
   /* Store table to dd */
   bool fail = client->store(dd_table);
   if (fail) {
+    ut_d(ut_error);
+    ut_o(return false);
+  }
+
+  return true;
+}
+
+bool dd_create_vec_aux_table(const dict_table_t *parent_table,
+                             dict_table_t *table) {
+  std::string db_name;
+  std::string table_name;
+  dict_name::get_table(table->name.m_name, db_name, table_name);
+
+  THD *thd = current_thd;
+  dd::Schema_MDL_locker mdl_locker(thd);
+  dd::cache::Dictionary_client *client = dd::get_dd_client(thd);
+  dd::cache::Dictionary_client::Auto_releaser releaser(client);
+
+  const dd::Schema *schema = nullptr;
+  if (mdl_locker.ensure_locked(db_name.c_str()) ||
+      client->acquire<dd::Schema>(db_name.c_str(), &schema)) {
+    return false;
+  }
+  if (schema == nullptr) {
+    my_error(ER_BAD_DB_ERROR, MYF(0), db_name.c_str());
+    return false;
+  }
+
+  std::unique_ptr<dd::Table> dd_table_obj(schema->create_table(thd));
+  dd::Table *dd_table = dd_table_obj.get();
+
+  dd_table->set_name(table_name.c_str());
+  dd_table->set_schema_id(schema->id());
+
+  /* Re-use the FTS aux table options (hidden, dynamic, binary collation,
+  no compression/encryption) — the vec aux is the same kind of object. */
+  dd_set_fts_table_options(dd_table, table);
+
+  /* Columns. Order and types must match the in-memory dict_table_t
+  created by vec_aux_create_one_table; see vec0aux.h for the layout. */
+
+  /* 1: id BIGINT UNSIGNED NOT NULL */
+  dd::Column *col = dd_table->add_column();
+  col->set_name("id");
+  col->set_type(dd::enum_column_types::LONGLONG);
+  col->set_char_length(20);
+  col->set_numeric_scale(0);
+  col->set_nullable(false);
+  col->set_unsigned(true);
+  col->set_collation_id(my_charset_bin.number);
+  dd_set_fts_nullability(col, table->get_col(0));
+  dd::Column *key_col = col;
+
+  /* 2: vec BLOB NOT NULL */
+  col = dd_table->add_column();
+  col->set_name("vec");
+  col->set_type(dd::enum_column_types::BLOB);
+  col->set_char_length(8);
+  col->set_nullable(false);
+  col->set_collation_id(my_charset_bin.number);
+
+  /* 3: row_ref VARBINARY(3072) NULLABLE */
+  col = dd_table->add_column();
+  col->set_name("row_ref");
+  col->set_type(dd::enum_column_types::VARCHAR);
+  col->set_char_length(VEC_AUX_ROW_REF_COL_LEN);
+  col->set_nullable(true);
+  col->set_collation_id(my_charset_bin.number);
+
+  /* 4: level TINYINT NOT NULL */
+  col = dd_table->add_column();
+  col->set_name("level");
+  col->set_type(dd::enum_column_types::TINY);
+  col->set_char_length(1);
+  col->set_numeric_scale(0);
+  col->set_nullable(false);
+  col->set_collation_id(my_charset_bin.number);
+
+  /* 5: neighbors BLOB NOT NULL */
+  col = dd_table->add_column();
+  col->set_name("neighbors");
+  col->set_type(dd::enum_column_types::BLOB);
+  col->set_char_length(8);
+  col->set_nullable(false);
+  col->set_collation_id(my_charset_bin.number);
+
+  /* Clustered PRIMARY index on `id`. */
+  dd::Index *index = dd_table->add_index();
+  index->set_name("VEC_AUX_TABLE_PK");
+  index->set_algorithm(dd::Index::IA_BTREE);
+  index->set_algorithm_explicit(false);
+  index->set_visible(true);
+  index->set_type(dd::Index::IT_PRIMARY);
+  index->set_ordinal_position(1);
+  index->set_generated(false);
+  index->set_engine(dd_table->engine());
+  index->options().set("flags", 32);
+
+  dd::Index_element *index_elem = index->add_element(key_col);
+  index_elem->set_length(VEC_AUX_ID_COL_LEN);
+
+  /* Tablespace. Same machinery FTS uses for its per-aux tablespace. */
+  dd::Object_id dd_space_id;
+  if (!dd_get_or_assign_fts_tablespace_id(parent_table, table, dd_space_id)) {
+    return false;
+  }
+  table->dd_space_id = dd_space_id;
+
+  dd_write_table(dd_space_id, dd_table, table);
+
+  MDL_ticket *mdl_ticket = nullptr;
+  if (dd::acquire_exclusive_table_mdl(thd, db_name.c_str(), table_name.c_str(),
+                                      false, &mdl_ticket)) {
+    ut_d(ut_error);
+    ut_o(return false);
+  }
+
+  if (client->store(dd_table)) {
     ut_d(ut_error);
     ut_o(return false);
   }

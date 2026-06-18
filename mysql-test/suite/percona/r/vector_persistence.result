@@ -1,0 +1,40 @@
+#
+# PS-11299: Vector index persistence — phase 1.
+# CREATE TABLE creates one aux .ibd per vector index and auto-adds the
+# hidden vec_idx_id column. SHOW CREATE must not expose vec_idx_id.
+#
+CREATE TABLE t1 (
+id BIGINT UNSIGNED PRIMARY KEY,
+v1 VECTOR(8),
+VECTOR KEY (v1) SECONDARY_ENGINE_ATTRIBUTE '{ "type" : "hnsw" }'
+);
+# SHOW CREATE TABLE must NOT mention vec_idx_id (HT_HIDDEN_SE).
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` bigint unsigned NOT NULL,
+  `v1` vector(8) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `v1` (`v1`) /*!80021 SECONDARY_ENGINE_ATTRIBUTE '{"type": "hnsw"}' */
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+# Exactly one aux .ibd per vector index must exist on disk.
+# Names are vec_<hex_table_id>_<hex_index_id>.ibd — mask the ids so the
+# result file is stable across runs.
+vec_<TID>_<IID>.ibd
+# User cannot declare a column named vec_idx_id when the table has a
+# vector index — the name is reserved.
+CREATE TABLE t2 (
+id BIGINT UNSIGNED PRIMARY KEY,
+vec_idx_id BIGINT UNSIGNED,
+v1 VECTOR(8),
+VECTOR KEY (v1) SECONDARY_ENGINE_ATTRIBUTE '{ "type" : "hnsw" }'
+);
+ERROR 42000: Incorrect column name 'vec_idx_id'
+# ... but it is fine to declare vec_idx_id on a table that has no
+# vector index — the name is only reserved when InnoDB needs it.
+CREATE TABLE t3 (
+id BIGINT UNSIGNED PRIMARY KEY,
+vec_idx_id BIGINT UNSIGNED
+);
+DROP TABLE t3;
+DROP TABLE t1;

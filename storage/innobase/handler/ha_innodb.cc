@@ -213,6 +213,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "sql-common/json_binary.h"
 #include "sql-common/json_dom.h"
 
+#include "vec0aux.h"
 #include "vec0vec.h"
 
 #include "os0enc.h"
@@ -8042,11 +8043,21 @@ int ha_innobase::open(const char *name, int, uint open_flags,
     }
   }
 
+  /* table->s->fields is the user-visible count. Each InnoDB-owned
+  hidden auxiliary column (FTS_DOC_ID, vec_idx_id) contributes one
+  extra column on the InnoDB side; subtract them before comparing. */
+  const ulint innodb_hidden_extra =
+      (ib_table != nullptr &&
+               DICT_TF2_FLAG_IS_SET(ib_table, DICT_TF2_FTS_HAS_DOC_ID)
+           ? 1
+           : 0) +
+      (ib_table != nullptr &&
+               DICT_TF2_FLAG_IS_SET(ib_table, DICT_TF2_VEC_HAS_IDX_ID)
+           ? 1
+           : 0);
   if (ib_table != nullptr &&
-      ((!DICT_TF2_FLAG_IS_SET(ib_table, DICT_TF2_FTS_HAS_DOC_ID) &&
-        table->s->fields != dict_table_get_n_tot_u_cols(ib_table)) ||
-       (DICT_TF2_FLAG_IS_SET(ib_table, DICT_TF2_FTS_HAS_DOC_ID) &&
-        (table->s->fields != dict_table_get_n_tot_u_cols(ib_table) - 1)))) {
+      table->s->fields !=
+          dict_table_get_n_tot_u_cols(ib_table) - innodb_hidden_extra) {
     ib::warn(ER_IB_MSG_556)
         << "Table " << norm_name << " contains " << ib_table->get_n_user_cols()
         << " user"
@@ -12253,6 +12264,7 @@ dberr_t create_table_info_t::enable_encryption(dict_table_t *table) {
   uint32_t c_c = 0;
   uint32_t t_c = 0;
   uint32_t c_r_v = 0;
+  bool has_vec_idx_id_in_dd = false;
 
   DBUG_TRACE;
   DBUG_PRINT("enter", ("table_name: %s", m_table_name));
@@ -12330,6 +12342,16 @@ dberr_t create_table_info_t::enable_encryption(dict_table_t *table) {
   /* Adjust the number of columns for the FTS hidden field */
   actual_n_cols = n_cols;
   if (m_flags2 & (DICT_TF2_FTS | DICT_TF2_FTS_ADD_DOC_ID) && !has_doc_id_col) {
+    actual_n_cols += 1;
+  }
+  /* And the same +1 reservation for vec_idx_id when the dd::Table
+  carries it (CREATE TABLE with VECTOR KEY, or ALTER carry-forward).
+  The column is materialized below via vec_add_idx_id_column —
+  symmetric to fts_add_doc_id_column. */
+  has_vec_idx_id_in_dd =
+      dd_table != nullptr &&
+      dd_find_column(&dd_table->table(), VEC_IDX_ID_COL_NAME) != nullptr;
+  if (has_vec_idx_id_in_dd) {
     actual_n_cols += 1;
   }
 
@@ -12617,6 +12639,12 @@ dberr_t create_table_info_t::enable_encryption(dict_table_t *table) {
   /* Add the FTS doc_id hidden column. */
   if (m_flags2 & (DICT_TF2_FTS | DICT_TF2_FTS_ADD_DOC_ID) && !has_doc_id_col) {
     fts_add_doc_id_column(table, heap);
+  }
+
+  /* Materialize the hidden vec_idx_id column on dict_table_t.
+  vec_add_idx_id_column also sets DICT_TF2_VEC_HAS_IDX_ID. */
+  if (has_vec_idx_id_in_dd) {
+    vec_add_idx_id_column(table, heap);
   }
 
   if (!keyring_encryption_option_none) {
@@ -14793,6 +14821,16 @@ int create_table_info_t::create_table(const dd::Table *dd_table,
     }
   }
 
+  /* Create one auxiliary table per vector index. Must run after the index
+  creation loop so dict_index_t::is_vector_index is set on every vector
+  index attached to m_table. See PS-11299. */
+  if (vec_aux_table_has_vector_index(m_table)) {
+    dberr_t verr = vec_aux_create_all_tables(m_trx, m_table);
+    if (verr != DB_SUCCESS) {
+      return convert_error_code_to_mysql(verr, m_flags, nullptr);
+    }
+  }
+
   initialize_autoinc();
 
   /* Cache all the FTS indexes on this table in the FTS specific
@@ -15001,6 +15039,27 @@ int create_table_info_t::create_table_update_global_dd(Table *dd_table) {
     ut_d(bool ret =) fts_create_common_dd_tables(m_table);
     ut_ad(ret);
     fts_create_index_dd_tables(m_table);
+  }
+
+  /* Register the per-vector-index aux tables in the DD too. The
+  in-memory dict_table_t entries were created by vec_aux_create_all_tables
+  during ha_innobase::create; here we mint the matching dd::Table +
+  dd::Tablespace pair for each, so cross-schema RENAME, IMPORT and the
+  generic DD catalog views all work. Mirrors fts_create_index_dd_tables. */
+  if (vec_aux_table_has_vector_index(m_table)) {
+    for (const dict_index_t *idx = UT_LIST_GET_FIRST(m_table->indexes);
+         idx != nullptr; idx = UT_LIST_GET_NEXT(indexes, idx)) {
+      if (!idx->is_vector()) continue;
+      char aux_name[MAX_FULL_NAME_LEN];
+      vec_aux_get_table_name(m_table, idx->id, aux_name, sizeof(aux_name));
+      dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, false);
+      ut_a(aux != nullptr);
+      const bool ok = dd_create_vec_aux_table(m_table, aux);
+      dd_table_close(aux, nullptr, nullptr, false);
+      if (!ok) {
+        return HA_ERR_GENERIC;
+      }
+    }
   }
 
   ut_ad(dd_table_match(m_table, dd_table));
@@ -15740,6 +15799,7 @@ int ha_innobase::get_extra_columns_and_keys(const HA_CREATE_INFO *,
   THD *thd = ha_thd();
   dd::Index *primary = nullptr;
   bool has_fulltext = false;
+  bool has_vector = false;
   const dd::Index *fts_doc_id_index = nullptr;
 
   for (dd::Index *i : *dd_table->indexes()) {
@@ -15756,6 +15816,7 @@ int ha_innobase::get_extra_columns_and_keys(const HA_CREATE_INFO *,
     }
 
     if (dd_is_vector_index(i)) {
+      has_vector = true;
       continue;
     }
 
@@ -15870,6 +15931,34 @@ int ha_innobase::get_extra_columns_and_keys(const HA_CREATE_INFO *,
     if (fts_doc_id_index == nullptr) {
       dd_set_hidden_unique_index(dd_table->add_index(), FTS_DOC_ID_INDEX_NAME,
                                  fts_doc_id);
+    }
+  }
+
+  if (has_vector) {
+    /* Auto-add hidden vec_idx_id BIGINT UNSIGNED NOT NULL when the table
+    owns any vector index. Unlike FTS_DOC_ID, vec_idx_id has NO secondary
+    index, and the name is fully reserved — a user-declared column named
+    vec_idx_id is rejected. If the column already exists as HT_HIDDEN_SE
+    (e.g., ALTER carries it forward from a previous CREATE), reuse it:
+    never recreate, never error. See PS-11299. */
+    const dd::Column *existing = dd_find_column(dd_table, VEC_IDX_ID_COL_NAME);
+    if (existing != nullptr) {
+      if (!existing->is_se_hidden()) {
+        my_error(ER_WRONG_COLUMN_NAME, MYF(0), VEC_IDX_ID_COL_NAME);
+        push_warning(thd, Sql_condition::SL_WARNING, ER_WRONG_COLUMN_NAME,
+                     " InnoDB: Column name " VEC_IDX_ID_COL_NAME
+                     " is reserved for vector index bookkeeping.");
+        return ER_WRONG_COLUMN_NAME;
+      }
+      /* Already present and SE-hidden — nothing to do. */
+    } else {
+      dd::Column *col = dd_table->add_column();
+      col->set_hidden(dd::Column::enum_hidden_type::HT_HIDDEN_SE);
+      col->set_name(VEC_IDX_ID_COL_NAME);
+      col->set_type(dd::enum_column_types::LONGLONG);
+      col->set_nullable(false);
+      col->set_unsigned(true);
+      col->set_collation_id(1);
     }
   }
 
