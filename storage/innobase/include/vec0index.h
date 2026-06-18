@@ -70,4 +70,10 @@ TYPEs at CREATE/ALTER is what keeps them out of every engine path.
 /** The implementation for a known TYPE — O(1), never nullptr. */
 [[nodiscard]] const Vector_index *vec_index_by_enum(Vec_index_type type);
 
+/** The registered token for a known TYPE, e.g. "hnsw" — the string
+embedded in aux table names (vec_<token>_<tid>_<iid>, SPANN R4) and
+printed by SHOW CREATE. Tokens are lowercase ASCII identifiers and
+MUST NOT contain '_' (the aux-name field separator). */
+[[nodiscard]] const char *vec_index_token(Vec_index_type type);
+
 #endif /* vec0index_h */

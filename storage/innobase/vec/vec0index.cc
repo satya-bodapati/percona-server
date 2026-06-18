@@ -82,3 +82,9 @@ const Vector_index *vec_index_by_enum(Vec_index_type type) {
   ut_ad(impl->type() == type);
   return impl;
 }
+
+const char *vec_index_token(Vec_index_type type) {
+  const auto i = static_cast<size_t>(type);
+  ut_a(i < UT_ARR_SIZE(vec_type_registry));
+  return vec_type_registry[i].token;
+}
