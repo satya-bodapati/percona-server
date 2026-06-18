@@ -1461,7 +1461,7 @@ void row_prebuilt_free(row_prebuilt_t *prebuilt, bool dict_locked) {
   }
 
   if (prebuilt->table) {
-    ut_ad(!prebuilt->table->is_fts_aux());
+    ut_ad(!prebuilt->table->is_aux());
     dd_table_close(prebuilt->table, nullptr, nullptr, dict_locked);
   }
 
@@ -3244,9 +3244,11 @@ dberr_t row_create_table_for_mysql(dict_table_t *&table,
       break;
     case TRX_DICT_OP_INDEX:
       /* If the transaction was previously flagged as
-      TRX_DICT_OP_INDEX, we should be creating auxiliary
-      tables for full-text indexes. */
-      ut_ad(strstr(table->name.m_name, "/fts_") != nullptr);
+      TRX_DICT_OP_INDEX, we should be creating auxiliary tables for
+      full-text or vector indexes. Vec aux names start with
+      "<db>/vec_" — see VEC_AUX_PREFIX / vec_aux_get_table_name. */
+      ut_ad(strstr(table->name.m_name, "/fts_") != nullptr ||
+            strstr(table->name.m_name, "/vec_") != nullptr);
   }
 
   /* Assign table id and build table space. */
@@ -4364,7 +4366,7 @@ dberr_t row_drop_table_for_mysql(const char *name, trx_t *trx, bool nonatomic,
   /* make sure background stats thread is not running on the table */
   ut_ad(!(table->stats_bg_flag & BG_STAT_IN_PROGRESS));
 
-  if (!table->is_temporary() && !table->is_fts_aux()) {
+  if (!table->is_temporary() && !table->is_aux()) {
     if (srv_thread_is_active(srv_threads.m_dict_stats)) {
       dict_stats_recalc_pool_del(table);
     }

@@ -1,0 +1,26 @@
+#
+# PS-11299: the "<db>/vec_<id>_<id>" name pattern is reserved for
+# InnoDB-managed vector auxiliary tables. CREATE TABLE with a name
+# matching the pattern must fail at the ha_innobase::create gate,
+# mirroring the reservation FTS already enforces for "fts_<...>".
+#
+# Without the reservation a user could pre-create a table called
+# e.g. "vec_42_99", and a later CREATE VECTOR INDEX whose computed
+# aux name happens to be "vec_42_99" would conflict at the
+# dict_sys level — silent name collision is exactly what FTS
+# already guards against.
+#
+# Plain hex digits — must be rejected.
+CREATE TABLE vec_1_2 (id INT PRIMARY KEY);
+ERROR 42000: Incorrect table name 'vec_1_2'
+CREATE TABLE `vec_a_b` (id INT PRIMARY KEY);
+ERROR 42000: Incorrect table name 'vec_a_b'
+# Common-looking hex ids — must be rejected.
+CREATE TABLE `vec_0000000000000042_0000000000000099` (id INT PRIMARY KEY);
+ERROR 42000: Incorrect table name 'vec_0000000000000042_0000000000000099'
+# Sanity: a name that merely starts with "vec" but is not the
+# full prefix (no trailing underscore) is unaffected.
+CREATE TABLE vector_thing (id INT PRIMARY KEY);
+DROP TABLE vector_thing;
+CREATE TABLE vecstuff (id INT PRIMARY KEY);
+DROP TABLE vecstuff;

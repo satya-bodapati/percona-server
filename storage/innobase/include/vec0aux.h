@@ -82,6 +82,14 @@ void vec_aux_get_table_name(const dict_table_t *parent, space_index_t index_id,
 aux tables from INFORMATION_SCHEMA and SHOW TABLES. */
 bool vec_aux_is_aux_table_name(const char *name);
 
+/** Parse a "<db>/vec_<parent_id>_<index_id>" name into its components.
+Used at DD reload time (dd_open_table_one) to reconstruct
+dict_table_t::parent_id and DICT_TF2_VEC_AUX from the on-disk name.
+Either output pointer may be nullptr. Returns false if `name` does not
+match the vector aux pattern. */
+bool vec_aux_parse_table_name(const char *name, table_id_t *parent_id_out,
+                              space_index_t *index_id_out);
+
 /** Create one aux table for a single vector index. Uses the InnoDB C API
 only (no pars_sql).
 @param[in,out] trx        transaction
@@ -94,6 +102,12 @@ dberr_t vec_aux_create_one_table(trx_t *trx, const dict_table_t *parent,
 
 /** Create aux tables for every vector index already attached to `parent`. */
 dberr_t vec_aux_create_all_tables(trx_t *trx, const dict_table_t *parent);
+
+/** DD-register every vector aux table already attached to `parent`.
+The in-memory dict_table_t entries must have been created by
+@ref vec_aux_create_all_tables / @ref vec_aux_create_one_table first.
+Mirrors fts_create_index_dd_tables. Returns true on success. */
+bool vec_aux_create_dd_tables(dict_table_t *parent);
 
 /** Drop the aux table for a single vector index. */
 dberr_t vec_aux_drop_one_table(trx_t *trx, const dict_table_t *parent,
