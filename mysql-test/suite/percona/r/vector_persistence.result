@@ -37,5 +37,21 @@ id BIGINT UNSIGNED PRIMARY KEY,
 vec_idx_id BIGINT UNSIGNED
 );
 DROP TABLE t3;
-DROP TABLE t1;
+#
+# RENAME TABLE — aux name is "<db>/vec_<table_id>_<index_id>" so a
+# same-schema rename is a no-op on disk (aux name unchanged).
+# Cross-schema rename is currently rejected — phase 2 will lift
+# this once the aux DD plumbing exists.
+#
+# Same-schema rename: aux file unchanged.
+RENAME TABLE t1 TO t1_renamed;
+vec_<TID>_<IID>.ibd
+# Cross-schema rename: blocked.
+CREATE DATABASE vec_other;
+RENAME TABLE t1_renamed TO vec_other.t1;
+ERROR HY000: Error on rename of './test/t1_renamed' to './vec_other/t1' (errno: NN - Unsupported extension used for table)
+DROP DATABASE vec_other;
+# Aux file still in test/ after the failed cross-db rename.
+vec_<TID>_<IID>.ibd
+DROP TABLE t1_renamed;
 # After DROP TABLE the aux .ibd files must be gone too — no orphans.

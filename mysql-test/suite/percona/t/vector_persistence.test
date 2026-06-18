@@ -38,7 +38,30 @@ CREATE TABLE t3 (
 );
 DROP TABLE t3;
 
-DROP TABLE t1;
+--echo #
+--echo # RENAME TABLE — aux name is "<db>/vec_<table_id>_<index_id>" so a
+--echo # same-schema rename is a no-op on disk (aux name unchanged).
+--echo # Cross-schema rename is currently rejected — phase 2 will lift
+--echo # this once the aux DD plumbing exists.
+--echo #
+
+--echo # Same-schema rename: aux file unchanged.
+RENAME TABLE t1 TO t1_renamed;
+--replace_regex /vec_[0-9a-f]+_[0-9a-f]+\.ibd/vec_<TID>_<IID>.ibd/
+--list_files $MYSQLD_DATADIR/test vec_*.ibd
+
+--echo # Cross-schema rename: blocked.
+CREATE DATABASE vec_other;
+--replace_regex /errno: [0-9]+ - /errno: NN - /
+--error ER_ERROR_ON_RENAME
+RENAME TABLE t1_renamed TO vec_other.t1;
+DROP DATABASE vec_other;
+
+--echo # Aux file still in test/ after the failed cross-db rename.
+--replace_regex /vec_[0-9a-f]+_[0-9a-f]+\.ibd/vec_<TID>_<IID>.ibd/
+--list_files $MYSQLD_DATADIR/test vec_*.ibd
+
+DROP TABLE t1_renamed;
 
 --echo # After DROP TABLE the aux .ibd files must be gone too — no orphans.
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
