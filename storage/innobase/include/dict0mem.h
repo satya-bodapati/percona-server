@@ -286,6 +286,19 @@ constexpr uint32_t DICT_TF2_USE_FILE_PER_TABLE = 16;
 /** Set when we discard/detach the tablespace */
 constexpr uint32_t DICT_TF2_DISCARDED = 32;
 
+/** The table has an auto-added hidden vec_idx_id column (BIGINT UNSIGNED
+NOT NULL) because at least one vector (HNSW) index lives on it. The
+column persists across ALTER drop-of-last-vector-index; mirrors
+DICT_TF2_FTS_HAS_DOC_ID semantically.
+
+DEVIATION FROM FTS: there are no DICT_TF2_VEC / DICT_TF2_VEC_ADD_IDX_ID
+parallels to DICT_TF2_FTS / DICT_TF2_FTS_ADD_DOC_ID. FTS needs the trio
+to coordinate its common-vs-index aux split and the user-declared-
+FTS_DOC_ID variant; vec has neither. This single sticky bit plus
+per-index is_vector() scans serve every gate (CREATE, DROP, ALTER,
+INSTANT block, BULK block, stamp). */
+constexpr uint32_t DICT_TF2_VEC_HAS_IDX_ID = 64;
+
 /** Intrinsic table bit
 Intrinsic table is table created internally by MySQL modules viz. Optimizer,
 FTS, etc.... Intrinsic table has all the properties of the normal table except
