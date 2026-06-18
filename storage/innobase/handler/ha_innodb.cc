@@ -16209,6 +16209,19 @@ int ha_innobase::discard_or_import_tablespace(bool discard,
     return HA_ERR_NOT_ALLOWED_COMMAND;
   }
 
+  /* Vector aux tablespaces are not yet covered by DISCARD/IMPORT —
+  phase 1 (PS-11299) ships only the create/drop/alter wiring. Block
+  the operation if any vector index is attached to this table. */
+  if (vec_aux_table_has_vector_index(dict_table)) {
+    my_printf_error(ER_NOT_ALLOWED_COMMAND,
+                    "InnoDB: Cannot %s table `%s` because it has a vector"
+                    " index. DISCARD/IMPORT TABLESPACE is not yet supported"
+                    " for tables with vector indexes.",
+                    MYF(0), discard ? "discard" : "import",
+                    dict_table->name.m_name);
+    return HA_ERR_NOT_ALLOWED_COMMAND;
+  }
+
   TrxInInnoDB trx_in_innodb(m_prebuilt->trx);
 
   if (trx_in_innodb.is_aborted()) {
