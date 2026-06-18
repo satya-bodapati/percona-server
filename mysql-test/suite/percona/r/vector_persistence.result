@@ -37,5 +37,21 @@ id BIGINT UNSIGNED PRIMARY KEY,
 vec_idx_id BIGINT UNSIGNED
 );
 DROP TABLE t3;
-DROP TABLE t1;
+#
+# RENAME TABLE — aux name is "<db>/vec_<table_id>_<index_id>" so a
+# same-schema rename is a no-op on disk. Cross-schema rename
+# moves each aux .ibd to the new schema directory and reparents
+# its dd::Table — full FTS parity via dd_rename_fts_table.
+#
+# Same-schema rename: aux file unchanged.
+RENAME TABLE t1 TO t1_renamed;
+vec_<TID>_<IID>.ibd
+# Cross-schema rename: aux follows the parent to the new schema dir.
+CREATE DATABASE vec_other;
+RENAME TABLE t1_renamed TO vec_other.t1;
+# No more vec_*.ibd in test/.
+# ... they now live under vec_other/.
+vec_<TID>_<IID>.ibd
+DROP TABLE vec_other.t1;
+DROP DATABASE vec_other;
 # After DROP TABLE the aux .ibd files must be gone too — no orphans.

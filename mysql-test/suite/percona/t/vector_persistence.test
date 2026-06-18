@@ -38,7 +38,29 @@ CREATE TABLE t3 (
 );
 DROP TABLE t3;
 
-DROP TABLE t1;
+--echo #
+--echo # RENAME TABLE — aux name is "<db>/vec_<table_id>_<index_id>" so a
+--echo # same-schema rename is a no-op on disk. Cross-schema rename
+--echo # moves each aux .ibd to the new schema directory and reparents
+--echo # its dd::Table — full FTS parity via dd_rename_fts_table.
+--echo #
+
+--echo # Same-schema rename: aux file unchanged.
+RENAME TABLE t1 TO t1_renamed;
+--replace_regex /vec_[0-9a-f]+_[0-9a-f]+\.ibd/vec_<TID>_<IID>.ibd/
+--list_files $MYSQLD_DATADIR/test vec_*.ibd
+
+--echo # Cross-schema rename: aux follows the parent to the new schema dir.
+CREATE DATABASE vec_other;
+RENAME TABLE t1_renamed TO vec_other.t1;
+--echo # No more vec_*.ibd in test/.
+--list_files $MYSQLD_DATADIR/test vec_*.ibd
+--echo # ... they now live under vec_other/.
+--replace_regex /vec_[0-9a-f]+_[0-9a-f]+\.ibd/vec_<TID>_<IID>.ibd/
+--list_files $MYSQLD_DATADIR/vec_other vec_*.ibd
+
+DROP TABLE vec_other.t1;
+DROP DATABASE vec_other;
 
 --echo # After DROP TABLE the aux .ibd files must be gone too — no orphans.
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
