@@ -43,6 +43,17 @@ DROP TABLE t3;
 # moves each aux .ibd to the new schema directory and reparents
 # its dd::Table — full FTS parity via dd_rename_fts_table.
 #
+#
+# TRUNCATE TABLE — InnoDB implements truncate as drop+create, so the
+# aux table gets removed and recreated. New table_id/index_id means
+# the aux .ibd name changes, but the count stays at one per vector
+# index.
+#
+# Capture the aux name before truncate.
+vec_<BEFORE>.ibd
+TRUNCATE TABLE t1;
+# Still exactly one aux .ibd in test/ (likely with a different id).
+vec_<AFTER>.ibd
 # Same-schema rename: aux file unchanged.
 RENAME TABLE t1 TO t1_renamed;
 vec_<TID>_<IID>.ibd
