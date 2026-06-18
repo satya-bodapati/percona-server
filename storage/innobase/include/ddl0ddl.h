@@ -126,6 +126,15 @@ struct Index_defn {
 
   /** SRID obtained from dd column */
   uint32_t m_srid{};
+
+  /** true if this is a vector (HNSW) index. Propagated to
+  dict_index_t::is_vector_index by ddl::create_index.
+
+  DEVIATION FROM FTS: FTS encodes the same information as
+  `m_ind_type & DICT_FTS`. Vec uses a separate bool for the
+  same reason dict_index_t::is_vector_index does (see
+  dict0mem.h:1222 comment for the full rationale). */
+  bool m_is_vector{};
 };
 
 /** Structure for reporting duplicate records. */
