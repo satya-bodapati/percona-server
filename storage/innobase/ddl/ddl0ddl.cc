@@ -232,6 +232,7 @@ dict_index_t *create_index(trx_t *trx, dict_table_t *table,
   ut_a(index);
 
   index->set_committed(index_def->m_rebuild);
+  index->is_vector_index = index_def->m_is_vector;
 
   bool has_new_v_col{};
 

@@ -109,6 +109,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "trx0trx.h"
 #include "ut0new.h"
 #include "ut0stage.h"
+#include "vec0aux.h"
 
 /* For supporting Native InnoDB Partitioning. */
 #include "ha_innopart.h"
@@ -2758,6 +2759,11 @@ static void innobase_create_index_def(const TABLE *altered_table,
     index_def->m_ind_type = (key->flags & HA_NOSAME) ? DICT_UNIQUE : 0;
   }
 
+  /* Propagate the vector flag so ddl::create_index can stamp it on the
+  new dict_index_t. Vector indexes are non-clustered, non-FTS, non-SPATIAL
+  in the type bits; the distinguishing signal is HA_VECTOR in key->flags. */
+  index_def->m_is_vector = (key->flags & HA_VECTOR) != 0;
+
   if (!(key->flags & HA_SPATIAL)) {
     for (i = 0; i < n_fields; i++) {
       innobase_create_index_field_def(altered_table, &key->key_part[i],
@@ -3423,27 +3429,50 @@ to column numbers in altered_table */
 
   i = table->s->fields - old_table->n_v_cols;
 
-  /* Add the InnoDB hidden FTS_DOC_ID column, if any. */
-  if (i + DATA_N_SYS_COLS < old_table->n_cols) {
-    /* There should be exactly one extra field,
-    the FTS_DOC_ID. */
-    assert(DICT_TF2_FLAG_IS_SET(old_table, DICT_TF2_FTS_HAS_DOC_ID));
-    assert(i + DATA_N_SYS_COLS + 1 == old_table->n_cols);
+  /* InnoDB-owned hidden auxiliary columns (FTS_DOC_ID, vec_idx_id) sit
+  between the user columns and the system columns. They are added in
+  the same order by fill_dict_columns / create_table_def: FTS_DOC_ID
+  first, then vec_idx_id. Map each one, in that order, to its slot on
+  the new table (or ULINT_UNDEFINED when the new table dropped it). */
+  const bool old_has_doc_id =
+      DICT_TF2_FLAG_IS_SET(old_table, DICT_TF2_FTS_HAS_DOC_ID);
+  const bool old_has_vec_idx_id =
+      DICT_TF2_FLAG_IS_SET(old_table, DICT_TF2_VEC_HAS_IDX_ID);
+  const bool new_has_doc_id =
+      DICT_TF2_FLAG_IS_SET(new_table, DICT_TF2_FTS_HAS_DOC_ID);
+  const bool new_has_vec_idx_id =
+      DICT_TF2_FLAG_IS_SET(new_table, DICT_TF2_VEC_HAS_IDX_ID);
+
+  const ulint old_extra =
+      (old_has_doc_id ? 1u : 0u) + (old_has_vec_idx_id ? 1u : 0u);
+  assert(i + DATA_N_SYS_COLS + old_extra == old_table->n_cols);
+
+  ulint new_hidden_slot = altered_table->s->fields - new_table->n_v_cols;
+#ifdef UNIV_DEBUG
+  const ulint new_extra =
+      (new_has_doc_id ? 1u : 0u) + (new_has_vec_idx_id ? 1u : 0u);
+  assert(altered_table->s->fields + DATA_N_SYS_COLS + new_extra ==
+         static_cast<ulint>(new_table->n_cols + new_table->n_v_cols));
+#endif
+
+  if (old_has_doc_id) {
     assert(!strcmp(old_table->get_col_name(i), FTS_DOC_ID_COL_NAME));
-    if (altered_table->s->fields + DATA_N_SYS_COLS - new_table->n_v_cols <
-        new_table->n_cols) {
-      assert(DICT_TF2_FLAG_IS_SET(new_table, DICT_TF2_FTS_HAS_DOC_ID));
-      assert(altered_table->s->fields + DATA_N_SYS_COLS + 1 ==
-             static_cast<ulint>(new_table->n_cols + new_table->n_v_cols));
-      col_map[i] = altered_table->s->fields - new_table->n_v_cols;
+    if (new_has_doc_id) {
+      col_map[i] = new_hidden_slot++;
     } else {
-      assert(!DICT_TF2_FLAG_IS_SET(new_table, DICT_TF2_FTS_HAS_DOC_ID));
       col_map[i] = ULINT_UNDEFINED;
     }
-
     i++;
-  } else {
-    assert(!DICT_TF2_FLAG_IS_SET(old_table, DICT_TF2_FTS_HAS_DOC_ID));
+  }
+
+  if (old_has_vec_idx_id) {
+    assert(!strcmp(old_table->get_col_name(i), VEC_IDX_ID_COL_NAME));
+    if (new_has_vec_idx_id) {
+      col_map[i] = new_hidden_slot++;
+    } else {
+      col_map[i] = ULINT_UNDEFINED;
+    }
+    i++;
   }
 
   for (; i < old_table->n_cols; i++) {
@@ -4339,6 +4368,13 @@ static void dd_commit_inplace_alter_table(
                                  FTS_DOC_ID_INDEX_NAME, col);
     }
 
+    /* Note: vec_idx_id is intentionally NOT carried forward here.
+    Unlike FTS_DOC_ID (anchored by FTS_DOC_ID_INDEX, which keeps the
+    column alive across ALTERs), vec_idx_id has no index by design —
+    dropping the last vector index legitimately drops the column too.
+    The next ALTER ADD VECTOR INDEX recreates it cleanly via
+    get_extra_columns_and_keys. See PS-11299. */
+
     /* This can happen only with expanded fast index creation. On the
     intermediate table during ALTER COPY, we drop secondary indexes using
     inplace alter APIs. The old definition here is old copy of table. Hence we
@@ -4972,6 +5008,20 @@ template <typename Table>
       fts_index = ctx->add_index[a];
     }
 
+    /* Create the per-vector-index auxiliary table immediately after the
+    new index is added to dict_sys. Mirrors the way FTS calls
+    fts_create_index_tables below, but per-index. */
+    if (ctx->add_index[a]->is_vector()) {
+      dict_sys_mutex_exit();
+      dberr_t verr = vec_aux_create_one_table(ctx->trx, ctx->new_table,
+                                              ctx->add_index[a]->id);
+      dict_sys_mutex_enter();
+      if (verr != DB_SUCCESS) {
+        error = verr;
+        goto error_handling;
+      }
+    }
+
     /* If only online ALTER TABLE operations have been
     requested, allocate a modification log. If the table
     will be locked anyway, the modification
@@ -5133,6 +5183,24 @@ template <typename Table>
     if (fts_index) {
       error = fts_create_index_dd_tables(ctx->new_table);
       if (error != DB_SUCCESS) {
+        goto error_handling;
+      }
+    }
+
+    /* DD-register every newly added vector aux table — mirrors the FTS
+    fts_create_index_dd_tables call right above. The in-memory dict
+    entries were created earlier in the add_index loop. */
+    for (ulint a = 0; error == DB_SUCCESS && a < ctx->num_to_add_index; a++) {
+      if (!ctx->add_index[a]->is_vector()) continue;
+      char aux_name[MAX_FULL_NAME_LEN];
+      vec_aux_get_table_name(ctx->new_table, ctx->add_index[a]->id, aux_name,
+                             sizeof(aux_name));
+      dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, false);
+      ut_a(aux != nullptr);
+      const bool ok = dd_create_vec_aux_table(ctx->new_table, aux);
+      dd_table_close(aux, nullptr, nullptr, false);
+      if (!ok) {
+        error = DB_ERROR;
         goto error_handling;
       }
     }
@@ -7308,6 +7376,13 @@ after a successful commit_try_norebuild() call.
         ctx->fts_drop_aux_vec = new aux_name_vec_t;
         fts_drop_index(index->table, index, trx, ctx->fts_drop_aux_vec,
                        adding_fts_index);
+      }
+
+      /* Drop the per-vector-index aux table alongside the index. The
+      surrounding loop holds dict_sys mutex; row_drop_table_for_mysql is
+      invoked with nonatomic=false so it does not try to re-acquire. */
+      if (index->is_vector()) {
+        (void)vec_aux_drop_one_table(trx, index->table, index->id);
       }
 
       /* It is a single table tablespace and the .ibd file is

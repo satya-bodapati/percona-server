@@ -126,6 +126,10 @@ struct Index_defn {
 
   /** SRID obtained from dd column */
   uint32_t m_srid{};
+
+  /** true if this is a vector (HNSW) index. Propagated to
+  dict_index_t::is_vector_index by ddl::create_index. */
+  bool m_is_vector{};
 };
 
 /** Structure for reporting duplicate records. */
