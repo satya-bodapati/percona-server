@@ -1,0 +1,186 @@
+#
+# PS-11299: ALTER TABLE interactions with vector indexes.
+# Section A/B: column ops on tables that already have a vector index.
+# Section C: non-vector secondary index ADD/DROP alongside vector.
+# Section D: ADD VECTOR INDEX after INSTANT column ADD (forces rebuild).
+# Section E: ADD VECTOR INDEX after INSTANT column DROP (forces rebuild).
+# Section F: DROP vector index then INSTANT ADD COLUMN.
+#
+#
+# === Section A: ADD COLUMN on a table that already has a vector index
+#
+CREATE TABLE ta1 (
+id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(8),
+VECTOR KEY (v) TYPE hnsw WITH (M = 6)
+);
+# A.1 ADD COLUMN ... ALGORITHM=INSTANT
+ALTER TABLE ta1 ADD COLUMN c1 INT, ALGORITHM=INSTANT;
+SHOW CREATE TABLE ta1;
+Table	Create Table
+ta1	CREATE TABLE `ta1` (
+  `id` bigint unsigned NOT NULL,
+  `v` vector(8) DEFAULT NULL,
+  `c1` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `v` (`v`) TYPE `hnsw`
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+# A.2 ADD COLUMN ... ALGORITHM=INPLACE
+ALTER TABLE ta1 ADD COLUMN c2 INT, ALGORITHM=INPLACE;
+SHOW CREATE TABLE ta1;
+Table	Create Table
+ta1	CREATE TABLE `ta1` (
+  `id` bigint unsigned NOT NULL,
+  `v` vector(8) DEFAULT NULL,
+  `c1` int DEFAULT NULL,
+  `c2` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `v` (`v`) TYPE `hnsw`
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+# A.3 ADD COLUMN ... ALGORITHM=COPY (full rebuild — aux .ibd gets a new id)
+ALTER TABLE ta1 ADD COLUMN c3 INT, ALGORITHM=COPY;
+SHOW CREATE TABLE ta1;
+Table	Create Table
+ta1	CREATE TABLE `ta1` (
+  `id` bigint unsigned NOT NULL,
+  `v` vector(8) DEFAULT NULL,
+  `c1` int DEFAULT NULL,
+  `c2` int DEFAULT NULL,
+  `c3` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `v` (`v`) TYPE `hnsw`
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+vec_<TID>_<IID>.ibd
+# A.4 Default ADD COLUMN (server picks algorithm)
+ALTER TABLE ta1 ADD COLUMN c4 INT;
+SHOW CREATE TABLE ta1;
+Table	Create Table
+ta1	CREATE TABLE `ta1` (
+  `id` bigint unsigned NOT NULL,
+  `v` vector(8) DEFAULT NULL,
+  `c1` int DEFAULT NULL,
+  `c2` int DEFAULT NULL,
+  `c3` int DEFAULT NULL,
+  `c4` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `v` (`v`) TYPE `hnsw`
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+DROP TABLE ta1;
+#
+# === Section B: DROP COLUMN on a table with a vector index
+#
+CREATE TABLE tb1 (
+id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(8),
+c1 INT, c2 INT, c3 INT,
+VECTOR KEY (v) TYPE hnsw WITH (M = 6)
+);
+# B.1 DROP COLUMN ... ALGORITHM=INSTANT
+ALTER TABLE tb1 DROP COLUMN c1, ALGORITHM=INSTANT;
+# B.2 DROP COLUMN ... ALGORITHM=COPY
+ALTER TABLE tb1 DROP COLUMN c2, ALGORITHM=COPY;
+SHOW CREATE TABLE tb1;
+Table	Create Table
+tb1	CREATE TABLE `tb1` (
+  `id` bigint unsigned NOT NULL,
+  `v` vector(8) DEFAULT NULL,
+  `c3` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `v` (`v`) TYPE `hnsw`
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+DROP TABLE tb1;
+#
+# === Section C: ADD/DROP non-vector secondary index alongside vector
+#
+CREATE TABLE tc1 (
+id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(8),
+c INT,
+VECTOR KEY (v) TYPE hnsw WITH (M = 6)
+);
+# C.1 ADD a non-vector secondary index
+ALTER TABLE tc1 ADD INDEX ix_c (c);
+SHOW INDEXES FROM tc1;
+Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_part	Packed	Null	Index_type	Comment	Index_comment	Visible	Expression
+tc1	0	PRIMARY	1	id	A	0	NULL	NULL		BTREE			YES	NULL
+tc1	1	v	1	v	A	0	1	NULL	YES	VECTOR			YES	NULL
+tc1	1	ix_c	1	c	A	0	NULL	NULL	YES	BTREE			YES	NULL
+# C.2 DROP that secondary index
+ALTER TABLE tc1 DROP INDEX ix_c;
+SHOW INDEXES FROM tc1;
+Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_part	Packed	Null	Index_type	Comment	Index_comment	Visible	Expression
+tc1	0	PRIMARY	1	id	A	0	NULL	NULL		BTREE			YES	NULL
+tc1	1	v	1	v	A	0	1	NULL	YES	VECTOR			YES	NULL
+DROP TABLE tc1;
+#
+# === Section D: ADD VECTOR INDEX after INSTANT ADD COLUMN
+#
+# Until PS-11299's rebuild-forcing fix, this crashed at dict0dd.cc:2682
+# because vec_idx_id was missing from the rebuilt dict_table_t while
+# the dd::Table carried it. ADD VECTOR INDEX now forces a rebuild that
+# materializes vec_idx_id on a fresh dict_table_t (current_row_version=0),
+# mirroring how ADD FULLTEXT forces a rebuild via add_fts_doc_id.
+CREATE TABLE td1 (
+id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(8)
+);
+# D.1 INSTANT ADD COLUMN bumps current_row_version on the base table.
+ALTER TABLE td1 ADD COLUMN c1 INT, ALGORITHM=INSTANT;
+ALTER TABLE td1 ADD COLUMN c2 INT, ALGORITHM=INSTANT;
+# D.2 Adding the first vector index now succeeds — rebuild forced.
+CREATE VECTOR INDEX vix ON td1 (v) TYPE hnsw WITH (M = 6);
+SHOW CREATE TABLE td1;
+Table	Create Table
+td1	CREATE TABLE `td1` (
+  `id` bigint unsigned NOT NULL,
+  `v` vector(8) DEFAULT NULL,
+  `c1` int DEFAULT NULL,
+  `c2` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `vix` (`v`) TYPE `hnsw` WITH (`M`=6)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+vec_<TID>_<IID>.ibd
+DROP TABLE td1;
+#
+# === Section E: ADD VECTOR INDEX after INSTANT DROP COLUMN
+#
+CREATE TABLE te1 (
+id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(8),
+c1 INT, c2 INT
+);
+ALTER TABLE te1 DROP COLUMN c1, ALGORITHM=INSTANT;
+CREATE VECTOR INDEX vix ON te1 (v) TYPE hnsw WITH (M = 6);
+SHOW CREATE TABLE te1;
+Table	Create Table
+te1	CREATE TABLE `te1` (
+  `id` bigint unsigned NOT NULL,
+  `v` vector(8) DEFAULT NULL,
+  `c2` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `vix` (`v`) TYPE `hnsw` WITH (`M`=6)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+DROP TABLE te1;
+#
+# === Section F: DROP vector index then INSTANT ADD COLUMN
+#
+# The hidden vec_idx_id column is retained across DROP of the last
+# vector index (PS-11299 phase 1 policy). Following INSTANT ADD on
+# such a table must therefore preserve and re-read its phy_pos.
+CREATE TABLE tf1 (
+id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(8),
+VECTOR KEY (v) TYPE hnsw WITH (M = 6)
+);
+ALTER TABLE tf1 DROP KEY v;
+ALTER TABLE tf1 ADD COLUMN c1 INT, ALGORITHM=INSTANT;
+SHOW CREATE TABLE tf1;
+Table	Create Table
+tf1	CREATE TABLE `tf1` (
+  `id` bigint unsigned NOT NULL,
+  `v` vector(8) DEFAULT NULL,
+  `c1` int DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+DROP TABLE tf1;
+# After all DROP TABLEs, no aux .ibd left over.
