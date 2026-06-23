@@ -63,48 +63,50 @@ bool validate_options(const Key_spec &index_def) {
 }
 
 bool parse_options(const Key_spec &index_def, VectorIndexParam &vip) {
-  if (index_def.key_create_info.algorithm == HA_KEY_ALG_SE_SPECIFIC) {
-    if (index_def.key_create_info.vector_index_type.str == nullptr) {
+  if (index_def.key_create_info.algorithm != HA_KEY_ALG_SE_SPECIFIC) {
+    if (index_def.type == KEYTYPE_VECTOR) {
       my_error(ER_NO_INDEX_TYPE, MYF(0), "");
       return true;
     }
-    if (my_strcasecmp(system_charset_info,
-                      index_def.key_create_info.vector_index_type.str,
-                      "HNSW") == 0) {
-      vip = HnswParam();
-      auto &hnsw_param = std::get<HnswParam>(vip);
-      for (const IndexConstructionParam &p : index_def.construction_params) {
-        if (my_strcasecmp(system_charset_info, p.key.str, "M") == 0) {
-          if (!std::all_of(p.value.str, p.value.str + p.value.length,
-                           [](auto c) { return std::isdigit(c); })) {
-            my_error(ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER_VALUE, MYF(0),
-                     p.value.str);
-            return true;
-          }
-          hnsw_param.M = std::atoi(p.value.str);
-        } else if (my_strcasecmp(system_charset_info, p.key.str, "metric") ==
-                   0) {
-          if (my_strcasecmp(system_charset_info, p.value.str, "euclidean") ==
-              0) {
-            hnsw_param.metric = "euclidean";
-          } else {
-            my_error(ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER_VALUE, MYF(0),
-                     p.value.str);
-            return true;
-          }
-        } else {
-          my_error(ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER, MYF(0), p.key.str);
-          return true;
-        }
-      }
-      return false;
-    }
-    my_error(ER_INDEX_TYPE_NOT_SUPPORTED_FOR_VECTOR_INDEX, MYF(0),
-             index_def.key_create_info.vector_index_type.str);
-    return true;
+    return false;
   }
 
-  return false;
+  if (index_def.key_create_info.vector_index_type.str == nullptr) {
+    my_error(ER_NO_INDEX_TYPE, MYF(0), "");
+    return true;
+  }
+  if (my_strcasecmp(system_charset_info,
+                    index_def.key_create_info.vector_index_type.str,
+                    "HNSW") == 0) {
+    vip = HnswParam();
+    auto &hnsw_param = std::get<HnswParam>(vip);
+    for (const IndexConstructionParam &p : index_def.construction_params) {
+      if (my_strcasecmp(system_charset_info, p.key.str, "M") == 0) {
+        if (!std::all_of(p.value.str, p.value.str + p.value.length,
+                         [](auto c) { return std::isdigit(c); })) {
+          my_error(ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER_VALUE, MYF(0),
+                   p.value.str);
+          return true;
+        }
+        hnsw_param.M = std::atoi(p.value.str);
+      } else if (my_strcasecmp(system_charset_info, p.key.str, "metric") == 0) {
+        if (my_strcasecmp(system_charset_info, p.value.str, "euclidean") == 0) {
+          hnsw_param.metric = "euclidean";
+        } else {
+          my_error(ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER_VALUE, MYF(0),
+                   p.value.str);
+          return true;
+        }
+      } else {
+        my_error(ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER, MYF(0), p.key.str);
+        return true;
+      }
+    }
+    return false;
+  }
+  my_error(ER_INDEX_TYPE_NOT_SUPPORTED_FOR_VECTOR_INDEX, MYF(0),
+           index_def.key_create_info.vector_index_type.str);
+  return true;
 }
 
 }  // namespace storage::innobase::vec
