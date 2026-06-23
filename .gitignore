@@ -40,3 +40,4 @@ scalability_jobs_*
 
 .serena
 .merge_conflicts
+build.dir/
