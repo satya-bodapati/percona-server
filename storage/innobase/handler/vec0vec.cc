@@ -30,6 +30,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <algorithm>
 #include <cassert>
 #include <cctype>
+#include <cstdlib>
 #include <string>
 #include <variant>
 
@@ -57,6 +58,11 @@ using namespace std;
 namespace storage::innobase::vec {
 
 bool validate_options(const Key_spec &index_def) {
+  VectorIndexParam vip;
+  return parse_options(index_def, vip);
+}
+
+bool parse_options(const Key_spec &index_def, VectorIndexParam &vip) {
   if (index_def.key_create_info.algorithm == HA_KEY_ALG_SE_SPECIFIC) {
     if (index_def.key_create_info.vector_index_type.str == nullptr) {
       my_error(ER_NO_INDEX_TYPE, MYF(0), "");
@@ -65,6 +71,8 @@ bool validate_options(const Key_spec &index_def) {
     if (my_strcasecmp(system_charset_info,
                       index_def.key_create_info.vector_index_type.str,
                       "HNSW") == 0) {
+      vip = HnswParam();
+      auto &hnsw_param = std::get<HnswParam>(vip);
       for (const IndexConstructionParam &p : index_def.construction_params) {
         if (my_strcasecmp(system_charset_info, p.key.str, "M") == 0) {
           if (!std::all_of(p.value.str, p.value.str + p.value.length,
@@ -73,10 +81,13 @@ bool validate_options(const Key_spec &index_def) {
                      p.value.str);
             return true;
           }
+          hnsw_param.M = std::atoi(p.value.str);
         } else if (my_strcasecmp(system_charset_info, p.key.str, "metric") ==
                    0) {
-          if (my_strcasecmp(system_charset_info, p.value.str, "euclidean") !=
+          if (my_strcasecmp(system_charset_info, p.value.str, "euclidean") ==
               0) {
+            hnsw_param.metric = "euclidean";
+          } else {
             my_error(ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER_VALUE, MYF(0),
                      p.value.str);
             return true;

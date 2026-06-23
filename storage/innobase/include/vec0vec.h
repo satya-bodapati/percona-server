@@ -39,8 +39,11 @@ struct HnswParam {
   int M{25};
   int max_elements{10000};
   int ef_construction{200};
+  std::string_view metric{"euclidean"};
 };
 
 using VectorIndexParam = std::variant<std::monostate, HnswParam>;
+
+bool parse_options(const Key_spec &index_def, VectorIndexParam &vip);
 
 }  // namespace storage::innobase::vec
