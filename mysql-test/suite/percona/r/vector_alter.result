@@ -23,7 +23,7 @@ ta1	CREATE TABLE `ta1` (
   `v` vector(8) DEFAULT NULL,
   `c1` int DEFAULT NULL,
   PRIMARY KEY (`id`),
-  VECTOR KEY `v` (`v`) TYPE `hnsw`
+  VECTOR KEY `v` (`v`) TYPE `hnsw` WITH (`M`=6)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 # A.2 ADD COLUMN ... ALGORITHM=INPLACE
 ALTER TABLE ta1 ADD COLUMN c2 INT, ALGORITHM=INPLACE;
@@ -35,7 +35,7 @@ ta1	CREATE TABLE `ta1` (
   `c1` int DEFAULT NULL,
   `c2` int DEFAULT NULL,
   PRIMARY KEY (`id`),
-  VECTOR KEY `v` (`v`) TYPE `hnsw`
+  VECTOR KEY `v` (`v`) TYPE `hnsw` WITH (`M`=6)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 # A.3 ADD COLUMN ... ALGORITHM=COPY (full rebuild — aux .ibd gets a new id)
 ALTER TABLE ta1 ADD COLUMN c3 INT, ALGORITHM=COPY;
@@ -48,7 +48,7 @@ ta1	CREATE TABLE `ta1` (
   `c2` int DEFAULT NULL,
   `c3` int DEFAULT NULL,
   PRIMARY KEY (`id`),
-  VECTOR KEY `v` (`v`) TYPE `hnsw`
+  VECTOR KEY `v` (`v`) TYPE `hnsw` WITH (`M`=6)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 vec_<TID>_<IID>.ibd
 # A.4 Default ADD COLUMN (server picks algorithm)
@@ -63,7 +63,7 @@ ta1	CREATE TABLE `ta1` (
   `c3` int DEFAULT NULL,
   `c4` int DEFAULT NULL,
   PRIMARY KEY (`id`),
-  VECTOR KEY `v` (`v`) TYPE `hnsw`
+  VECTOR KEY `v` (`v`) TYPE `hnsw` WITH (`M`=6)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 DROP TABLE ta1;
 #
@@ -86,7 +86,7 @@ tb1	CREATE TABLE `tb1` (
   `v` vector(8) DEFAULT NULL,
   `c3` int DEFAULT NULL,
   PRIMARY KEY (`id`),
-  VECTOR KEY `v` (`v`) TYPE `hnsw`
+  VECTOR KEY `v` (`v`) TYPE `hnsw` WITH (`M`=6)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 DROP TABLE tb1;
 #

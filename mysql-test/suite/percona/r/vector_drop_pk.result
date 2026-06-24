@@ -63,7 +63,7 @@ c1	CREATE TABLE `c1` (
   `id2` bigint unsigned NOT NULL,
   `v` vector(8) DEFAULT NULL,
   PRIMARY KEY (`id2`),
-  VECTOR KEY `v` (`v`) TYPE `hnsw`
+  VECTOR KEY `v` (`v`) TYPE `hnsw` WITH (`M`=6)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 # One vector aux file present (re-minted with the new table_id).
 vec_<TID>_<IID>.ibd

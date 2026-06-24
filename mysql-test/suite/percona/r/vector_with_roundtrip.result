@@ -1,0 +1,80 @@
+#
+# PS-11203 (formerly bug 7 in PS-11203-syntax-bugs.md):
+# VECTOR KEY (...) TYPE hnsw WITH (...) options must survive an
+# ALTER TABLE that rebuilds the table.
+#
+# Root cause: mysql_prepare_alter_table built a Key_spec for the
+# carried-forward vector index without populating its
+# construction_params. fill_dd_indexes_from_keyinfo then skipped
+# writing vector_construction_params into the new dd::Index, and
+# SHOW CREATE TABLE had nothing to print.
+#
+# Fix: re-parse key_info->vector_construction_params (the
+# serialized "k=v,k=v" form persisted on the OLD dd::Index) back
+# into IndexConstructionParam entries in the new Key_spec.
+#
+# === Single WITH option (M) ===
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+id2 BIGINT UNSIGNED NOT NULL,
+v VECTOR(8),
+VECTOR KEY (v) TYPE hnsw WITH (M = 6));
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` bigint unsigned NOT NULL,
+  `id2` bigint unsigned NOT NULL,
+  `v` vector(8) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `v` (`v`) TYPE `hnsw` WITH (`M`=6)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY (id2);
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` bigint unsigned NOT NULL,
+  `id2` bigint unsigned NOT NULL,
+  `v` vector(8) DEFAULT NULL,
+  PRIMARY KEY (`id2`),
+  VECTOR KEY `v` (`v`) TYPE `hnsw` WITH (`M`=6)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+DROP TABLE t1;
+# === Multiple WITH options (M + metric) ===
+CREATE TABLE t2 (id BIGINT UNSIGNED PRIMARY KEY,
+id2 BIGINT UNSIGNED NOT NULL,
+v VECTOR(8),
+VECTOR KEY (v) TYPE hnsw WITH (M = 4, metric = euclidean));
+SHOW CREATE TABLE t2;
+Table	Create Table
+t2	CREATE TABLE `t2` (
+  `id` bigint unsigned NOT NULL,
+  `id2` bigint unsigned NOT NULL,
+  `v` vector(8) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `v` (`v`) TYPE `hnsw` WITH (`M`=4, `metric`=euclidean)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+ALTER TABLE t2 DROP PRIMARY KEY, ADD PRIMARY KEY (id2);
+SHOW CREATE TABLE t2;
+Table	Create Table
+t2	CREATE TABLE `t2` (
+  `id` bigint unsigned NOT NULL,
+  `id2` bigint unsigned NOT NULL,
+  `v` vector(8) DEFAULT NULL,
+  PRIMARY KEY (`id2`),
+  VECTOR KEY `v` (`v`) TYPE `hnsw` WITH (`M`=4, `metric`=euclidean)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+DROP TABLE t2;
+# === Carry through an ADD COLUMN that triggers rebuild ===
+CREATE TABLE t3 (id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(8),
+VECTOR KEY (v) TYPE hnsw WITH (M = 8));
+ALTER TABLE t3 ADD COLUMN c INT, ALGORITHM=COPY;
+SHOW CREATE TABLE t3;
+Table	Create Table
+t3	CREATE TABLE `t3` (
+  `id` bigint unsigned NOT NULL,
+  `v` vector(8) DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `v` (`v`) TYPE `hnsw` WITH (`M`=8)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+DROP TABLE t3;

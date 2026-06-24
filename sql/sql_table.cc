@@ -16411,6 +16411,50 @@ bool prepare_fields_and_keys(THD *thd, const dd::Table *src_table, TABLE *table,
           Key_spec(thd->mem_root, key_type, to_lex_cstring(key_name),
                    &key_create_info, (key_info->flags & HA_GENERATED_KEY),
                    index_column_dropped, key_parts);
+
+      /* Carry forward the parsed WITH (...) clause for a vector index.
+      vector_construction_params is the serialized "k1=v1,k2=v2" form
+      stored on the existing dd::Index; without splitting it back into
+      IndexConstructionParam entries here, fill_dd_indexes_from_keyinfo's
+      `if (!key->construction_params.empty())` branch never fires and
+      the new dd::Index loses its options — SHOW CREATE TABLE then
+      prints `TYPE hnsw` with no `WITH (...)` clause.
+
+      The validator (storage::innobase::vec::parse_options) calls
+      my_strcasecmp() on icp.key.str / icp.value.str expecting NUL
+      termination, so each substring must be its own allocation.
+
+      DEVIATION FROM FTS: FTS has no equivalent block here because its
+      analog — the fulltext parser plugin name — round-trips through
+      KEY_CREATE_INFO::parser_name via prepare_fields_and_keys' normal
+      key-copy path. Vector's WITH (...) options weren't wired through
+      that path (they land in dd::Index se_private_data, not in
+      KEY_CREATE_INFO), so we reconstruct them here at ALTER-copy time
+      by re-parsing the flat string. Better long-term fix (deferred):
+      add a KEY_CREATE_INFO field mirroring parser_name for vec, then
+      remove this branch. */
+      if (key_type == KEYTYPE_VECTOR &&
+          key_info->vector_construction_params.length > 0) {
+        const char *p = key_info->vector_construction_params.str;
+        const char *const end_p =
+            p + key_info->vector_construction_params.length;
+        while (p < end_p) {
+          const char *eq = static_cast<const char *>(memchr(p, '=', end_p - p));
+          if (eq == nullptr) break;
+          const char *comma =
+              static_cast<const char *>(memchr(eq + 1, ',', end_p - eq - 1));
+          const char *val_end = (comma != nullptr) ? comma : end_p;
+          IndexConstructionParam icp;
+          icp.key.length = eq - p;
+          icp.key.str = strmake_root(thd->mem_root, p, icp.key.length);
+          icp.value.length = val_end - eq - 1;
+          icp.value.str = strmake_root(thd->mem_root, eq + 1, icp.value.length);
+          if (icp.key.str == nullptr || icp.value.str == nullptr) return true;
+          if (key->construction_params.push_back(icp)) return true;
+          p = (val_end < end_p) ? val_end + 1 : end_p;
+        }
+      }
+
       new_key_list.push_back(key);
       if (skip_secondary && key_type & KEYTYPE_MULTIPLE) {
         delayed_key_list.push_back(key);
