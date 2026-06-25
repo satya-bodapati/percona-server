@@ -1927,7 +1927,11 @@ static bool innobase_init_foreign(
   index = table->first_index();
 
   while (index != nullptr) {
-    if (!(index->type & DICT_FTS) &&
+    /* Exclude both FTS and vector indexes: neither has a B-tree
+    (page == FIL_NULL) that FK enforcement can walk. Sibling
+    dict_foreign_find_index at dict0dict.cc:3409 already filters
+    vec — keep both helpers symmetric. */
+    if (!(index->type & DICT_FTS) && !dict_index_is_vector(index) &&
         dict_foreign_qualify_index(table, col_names, columns, n_cols, index,
                                    nullptr, true, 0)) {
       for (ulint i = 0; i < n_drop_index; i++) {
@@ -5108,6 +5112,10 @@ template <typename Table>
     } else if (ctx->add_index[a]->type & DICT_FTS) {
       /* Fulltext indexes are not covered
       by a modification log. */
+    } else if (ctx->add_index[a]->is_vector()) {
+      /* Vector indexes have no online build path in phase 1, so they
+      need no modification log either — same exemption shape as FTS
+      above. The aux .ibd is the persistence for HNSW (PS-11300). */
     } else {
       DBUG_EXECUTE_IF("innodb_OOM_prepare_inplace_alter",
                       error = DB_OUT_OF_MEMORY;
@@ -7691,7 +7699,12 @@ static void alter_stats_norebuild(Alter_inplace_info *ha_alter_info,
     dict_index_t *index = ctx->add_index[i];
     assert(index->table == ctx->new_table);
 
-    if (!(index->type & DICT_FTS)) {
+    /* Skip FTS and vector indexes — neither has a B-tree for
+    dict_stats_update_for_index to analyze. Currently ADD VECTOR
+    INDEX forces rebuild (via add_vec_idx_id), so this loop
+    doesn't see a vec index in the norebuild path today; the
+    filter is defensive parity in case that invariant relaxes. */
+    if (!(index->type & DICT_FTS) && !index->is_vector()) {
       dict_stats_init(ctx->new_table);
       dict_stats_update_for_index(index);
     }
