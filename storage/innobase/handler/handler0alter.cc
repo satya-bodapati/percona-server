@@ -457,6 +457,20 @@ static bool innobase_fulltext_exist(const TABLE *table) {
   return (false);
 }
 
+/** Determine if vector indexes exist in a given table.
+Mirrors innobase_fulltext_exist above.
+@param table MySQL table
+@return whether vector indexes exist on the table */
+static bool innobase_vector_exist(const TABLE *table) {
+  for (uint i = 0; i < table->s->keys; i++) {
+    if (table->key_info[i].flags & HA_VECTOR) {
+      return (true);
+    }
+  }
+
+  return (false);
+}
+
 /** Determine if spatial indexes exist in a given table.
 @param table MySQL table
 @return whether spatial indexes exist on the table */
@@ -861,6 +875,33 @@ static inline Instant_Type innobase_support_instant(
   /* During upgrade, if columns are added in system tables, avoid instant */
   if (current_thd->is_server_upgrade_thread()) {
     return (Instant_Type::INSTANT_IMPOSSIBLE);
+  }
+
+  /* Block INSTANT ADD / DROP COLUMN on tables that own the hidden
+  vec_idx_id column. Rationale: an INSTANT-added trailing user column
+  ends up at a higher InnoDB col-ordinal than vec_idx_id, but MySQL's
+  n_fields loop in ha_innobase::build_template maps user fields to
+  InnoDB positions contiguously via `i - num_v`. That mapping doesn't
+  know how to skip HT_HIDDEN_SE cols, so a subsequent SELECT reads
+  vec_idx_id's 8 bytes where the INSTANT-added INT column's 4 bytes
+  belong, tripping row0sel.ic:199 (mysql_col_len == len).
+
+  FTS is protected by ER_INNODB_FT_LIMIT (see below); vector reaches
+  here because we deliberately allowed ADD VECTOR INDEX + subsequent
+  ALTER. For phase 1 we take the same defensive stance as FTS.
+  ALLOWED: rename, virtual-column only, and rebuild-shape ALTERs —
+  the rebuild path reshuffles cols and avoids the mismatch entirely.
+
+  TODO PS-11300: fix build_template to skip HT_HIDDEN_SE cols when
+  computing the InnoDB→MySQL column map, then remove this block. */
+  if (DICT_TF2_FLAG_IS_SET(table, DICT_TF2_VEC_HAS_IDX_ID)) {
+    const auto flags = alter_inplace_flags;
+    const auto column_add_drop_mask =
+        Alter_inplace_info::ADD_STORED_BASE_COLUMN |
+        Alter_inplace_info::DROP_STORED_COLUMN;
+    if (flags & column_add_drop_mask) {
+      return (Instant_Type::INSTANT_IMPOSSIBLE);
+    }
   }
 
   enum class INSTANT_OPERATION {
@@ -1344,9 +1385,10 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
                Alter_inplace_info::ADD_PK_INDEX) ||
               innobase_need_rebuild(ha_alter_info)) &&
              (innobase_fulltext_exist(altered_table) ||
-              innobase_spatial_exist(altered_table))) {
+              innobase_spatial_exist(altered_table) ||
+              innobase_vector_exist(altered_table))) {
     /* Refuse to rebuild the table online, if
-    FULLTEXT OR SPATIAL indexes are to survive the rebuild. */
+    FULLTEXT, SPATIAL or VECTOR indexes are to survive the rebuild. */
     online = false;
     /* If the table already contains fulltext indexes,
     refuse to rebuild the table natively altogether. */
@@ -1356,9 +1398,35 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
       return HA_ALTER_INPLACE_NOT_SUPPORTED;
     }
 
+    /* Mirror the FTS refusal above for vector indexes: if the table
+    already contains a vector index, refuse to rebuild natively.
+    A native rebuild re-inserts every row into a new table_id /
+    index_id — the vector aux table would be re-minted empty and the
+    HNSW graph contents lost. ALGORITHM=COPY rebuilds the aux
+    organically because every row goes through the normal INSERT
+    stamping path. The first ADD VECTOR INDEX is unaffected: the old
+    table has no vector index yet, so this gate does not fire and the
+    native rebuild that materializes vec_idx_id stays allowed — same
+    shape as FTS's first-ADD-FULLTEXT rebuild.
+
+    This refusal is full FTS parity — no deviation today. If a later
+    phase implements aux carry-over (copy vec_idx_id, re-parent the
+    aux to the new table_id/index_id atomically) or an HNSW
+    rebuild-during-copy, native/online rebuild could be re-enabled;
+    THAT would be a deliberate improvement beyond FTS (which never got
+    it) and must be justified as a deviation then. PS-11300+. */
+    if (vec_aux_table_has_vector_index(m_prebuilt->table)) {
+      ha_alter_info->unsupported_reason = innobase_get_err_msg(
+          ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR);
+      return HA_ALTER_INPLACE_NOT_SUPPORTED;
+    }
+
     if (innobase_spatial_exist(altered_table)) {
       ha_alter_info->unsupported_reason =
           innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_GIS);
+    } else if (innobase_vector_exist(altered_table)) {
+      ha_alter_info->unsupported_reason = innobase_get_err_msg(
+          ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR);
     } else {
       ha_alter_info->unsupported_reason =
           innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_FTS);
@@ -11492,6 +11560,17 @@ bool ha_innobase::bulk_load_check(THD *) const {
 
   if (dict_table_has_fts_index(table) || table->fts_doc_id_index != nullptr) {
     my_error(ER_FEATURE_UNSUPPORTED, MYF(0), "Full-Text Index",
+             "LOAD DATA ALGORITHM = BULK");
+    return false;
+  }
+
+  /* Vector index — mirror the FTS block above. The hidden vec_idx_id
+  column requires per-row stamping via vec_stamp_idx_id, and BULK bypasses
+  the row-insert path. Retention (Option A) keeps the flag sticky, so
+  once-vec-indexed tables remain blocked even after all vec indexes are
+  dropped — same lifecycle as DICT_TF2_FTS_HAS_DOC_ID above. */
+  if (DICT_TF2_FLAG_IS_SET(table, DICT_TF2_VEC_HAS_IDX_ID)) {
+    my_error(ER_FEATURE_UNSUPPORTED, MYF(0), "Vector Index",
              "LOAD DATA ALGORITHM = BULK");
     return false;
   }

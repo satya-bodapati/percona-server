@@ -69,12 +69,12 @@ HANDLER t_hand READ vidx NEXT;
 HANDLER t_hand CLOSE;
 DROP TABLE t_hand;
 
---echo # === F1: INPLACE rebuild on populated vec-indexed table ===
---echo # Populated table + rebuild that isn't adding a new vec index.
---echo # Without the add_vec_idx_id extension, the fresh dict_table_t
---echo # lacks the vec_idx_id slot but the DD keeps the column, so the
---echo # data copy drops per-row vec_idx_id bytes and the .ibd disagrees
---echo # with the DD on first SELECT.
+--echo # === F1: rebuild on populated vec-indexed table ===
+--echo # INPLACE rebuild with a surviving vector index is refused
+--echo # (FTS-parity gate in check_if_supported_inplace_alter — the aux
+--echo # contents cannot be carried across a native rebuild). The
+--echo # server-picked fallback (COPY) must preserve all rows and keep
+--echo # the vec_idx_id stamp path working.
 CREATE TABLE t_rebuild (id BIGINT UNSIGNED PRIMARY KEY,
                        v VECTOR(8),
                        c INT,
@@ -82,8 +82,11 @@ CREATE TABLE t_rebuild (id BIGINT UNSIGNED PRIMARY KEY,
 INSERT INTO t_rebuild VALUES (1, STRING_TO_VECTOR('[1,1,1,1,1,1,1,1]'), 10);
 INSERT INTO t_rebuild VALUES (2, STRING_TO_VECTOR('[2,2,2,2,2,2,2,2]'), 20);
 INSERT INTO t_rebuild VALUES (3, STRING_TO_VECTOR('[3,3,3,3,3,3,3,3]'), 30);
---echo # FORCE ALGORITHM=INPLACE — triggers rebuild without adding a vec index.
+--echo # Explicit INPLACE rebuild: refused with the vector reason.
+--error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
 ALTER TABLE t_rebuild FORCE, ALGORITHM=INPLACE;
+--echo # Server-picked algorithm falls back to COPY and succeeds.
+ALTER TABLE t_rebuild FORCE;
 --echo # SELECT must return all 3 rows correctly (no col-count mismatch).
 SELECT id, c, VECTOR_TO_STRING(v) FROM t_rebuild
   FORCE INDEX (PRIMARY) ORDER BY id;
