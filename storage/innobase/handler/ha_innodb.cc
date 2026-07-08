@@ -98,6 +98,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "buf0stats.h"
 #include "clone0api.h"
 #include "clone0clone.h"
+#include "clone0journal.h"
 #include "dd/dd.h"
 #include "dd/dictionary.h"
 #include "dd/impl/bootstrap/bootstrap_ctx.h"
@@ -23145,6 +23146,31 @@ static MYSQL_SYSVAR_BOOL(
     "Whether to compute and require checksums for InnoDB redo log blocks",
     nullptr, innodb_log_checksums_update, true);
 
+/** Enable/disable the backup DDL journal (see clone0journal.h). Used by
+Percona XtraBackup delta backup mode; not persisted across restarts. */
+static void innodb_backup_ddl_journal_update(THD *, SYS_VAR *, void *var_ptr,
+                                             const void *save) {
+  const bool target = *static_cast<const bool *>(save);
+  bool result = target;
+
+  if (target) {
+    if (!backup_ddl_journal.enable()) {
+      result = false;
+    }
+  } else {
+    backup_ddl_journal.disable();
+  }
+
+  *static_cast<bool *>(var_ptr) = result;
+}
+
+static MYSQL_SYSVAR_BOOL(
+    backup_ddl_journal, srv_backup_ddl_journal,
+    PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_NOPERSIST,
+    "Journal DDL notifications to #ib_backup_tracking/ddl_journal for backup"
+    " tools (Percona XtraBackup delta backup)",
+    nullptr, innodb_backup_ddl_journal_update, false);
+
 static MYSQL_SYSVAR_STR(data_home_dir, innobase_data_home_dir,
                         PLUGIN_VAR_READONLY | PLUGIN_VAR_NOPERSIST,
                         "The common part for InnoDB table spaces.", nullptr,
@@ -24494,6 +24520,7 @@ static SYS_VAR *innobase_system_variables[] = {
     MYSQL_SYSVAR(flush_neighbors),
     MYSQL_SYSVAR(checksum_algorithm),
     MYSQL_SYSVAR(log_checksums),
+    MYSQL_SYSVAR(backup_ddl_journal),
     MYSQL_SYSVAR(commit_concurrency),
     MYSQL_SYSVAR(concurrency_tickets),
     MYSQL_SYSVAR(compression_level),
