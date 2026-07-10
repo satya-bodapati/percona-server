@@ -1,0 +1,123 @@
+# Backup DDL journal (innodb_backup_ddl_journal_* UDFs) used by
+# Percona XtraBackup delta backup mode.
+#
+# Model: session_start registers a session; every Clone_notify DDL
+# notification is appended (JSONL) to a single internal stream; cut
+# materializes the session's slice into
+# <datadir>/#ib_backup_tracking/ddl_journal.<backup_id>; stop removes the
+# slice and (for the last session) the internal stream.
+
+
+--let MYSQLD_DATADIR = `SELECT @@datadir`
+
+--disable_query_log
+call mtr.add_suppression("Backup DDL journal: cut for unknown session");
+call mtr.add_suppression("Backup DDL journal: stop for unknown session");
+--enable_query_log
+
+--echo #
+--echo # Session lifecycle and event capture
+--echo #
+
+--let $id = `SELECT innodb_backup_ddl_journal_start()`
+
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=InnoDB;
+RENAME TABLE t1 TO t2;
+ALTER TABLE t2 ADD INDEX ia (a);
+DROP TABLE t2;
+
+--disable_query_log
+--eval SET @slice = innodb_backup_ddl_journal_cut($id)
+--enable_query_log
+
+SELECT @slice LIKE '#ib_backup_tracking/ddl_journal.%' AS slice_name_ok;
+
+--let SLICE = `SELECT @slice`
+
+perl;
+  my $path = "$ENV{MYSQLD_DATADIR}/$ENV{SLICE}";
+  open(my $fh, '<', $path) or die "cannot open slice $path: $!";
+  my %count;
+  my $header = 0;
+  my $json_ok = 1;
+  while (my $line = <$fh>) {
+    chomp $line;
+    $header++ if $line =~ /^\{"event":"header","version":2,/;
+    $count{$1}++ if $line =~ /"ev":"END","type":"([A-Z_]+)"/;
+    # every line must be a one-line JSON object
+    $json_ok = 0 unless $line =~ /^\{.*\}$/;
+  }
+  close($fh);
+  print "header_lines: $header\n";
+  print "json_lines_ok: $json_ok\n";
+  print "create_events: " . (($count{SPACE_CREATE} // 0) >= 1 ? "YES" : "NO") . "\n";
+  print "rename_events: " . (($count{SPACE_RENAME} // 0) >= 1 ? "YES" : "NO") . "\n";
+  print "bulk_events: "   . (($count{SPACE_ALTER_INPLACE_BULK} // 0) >= 1 ? "YES" : "NO") . "\n";
+  print "drop_events: "   . (($count{SPACE_DROP} // 0) >= 1 ? "YES" : "NO") . "\n";
+EOF
+
+--echo #
+--echo # Stop removes the slice and the internal stream (last session)
+--echo #
+
+--disable_query_log
+--eval SELECT innodb_backup_ddl_journal_stop($id) AS stop_ok
+--enable_query_log
+
+perl;
+  my $slice = "$ENV{MYSQLD_DATADIR}/$ENV{SLICE}";
+  my $stream = "$ENV{MYSQLD_DATADIR}/#ib_backup_tracking/ddl_journal";
+  print "slice_gone: "  . (-e $slice  ? "NO" : "YES") . "\n";
+  print "stream_gone: " . (-e $stream ? "NO" : "YES") . "\n";
+EOF
+
+--echo #
+--echo # Unknown session ids: cut returns NULL, stop returns 1
+--echo #
+
+SELECT innodb_backup_ddl_journal_cut(999999) IS NULL AS cut_unknown_is_null;
+SELECT innodb_backup_ddl_journal_stop(999999) AS stop_unknown;
+
+--echo #
+--echo # Two concurrent sessions get independent slices of the shared stream
+--echo #
+
+--let $id1 = `SELECT innodb_backup_ddl_journal_start()`
+CREATE TABLE s1 (a INT) ENGINE=InnoDB;
+--let $id2 = `SELECT innodb_backup_ddl_journal_start()`
+CREATE TABLE s2 (a INT) ENGINE=InnoDB;
+
+--disable_query_log
+--eval SET @slice1 = innodb_backup_ddl_journal_cut($id1)
+--eval SET @slice2 = innodb_backup_ddl_journal_cut($id2)
+--enable_query_log
+
+--let SLICE1 = `SELECT @slice1`
+--let SLICE2 = `SELECT @slice2`
+
+perl;
+  my $d = $ENV{MYSQLD_DATADIR};
+  my %n;
+  for my $which (qw(SLICE1 SLICE2)) {
+    $n{$which} = 0;
+    open(my $fh, '<', "$d/$ENV{$which}") or die "cannot open $ENV{$which}";
+    while (<$fh>) { $n{$which}++ if /"type":"SPACE_CREATE"/; }
+    close($fh);
+  }
+  # each CREATE emits BEGIN+END: session 1 saw both creates, session 2 one
+  print "s1_sees_both: "     . ($n{SLICE1} == 4 ? "YES" : "NO ($n{SLICE1})") . "\n";
+  print "s2_sees_only_one: " . ($n{SLICE2} == 2 ? "YES" : "NO ($n{SLICE2})") . "\n";
+EOF
+
+--disable_query_log
+--eval SET @stop1 = innodb_backup_ddl_journal_stop($id1)
+--eval SET @stop2 = innodb_backup_ddl_journal_stop($id2)
+--enable_query_log
+SELECT @stop1 AS stop1, @stop2 AS stop2;
+
+perl;
+  my $stream = "$ENV{MYSQLD_DATADIR}/#ib_backup_tracking/ddl_journal";
+  print "stream_gone_after_last_stop: " . (-e $stream ? "NO" : "YES") . "\n";
+EOF
+
+DROP TABLE s1, s2;
