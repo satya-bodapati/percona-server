@@ -264,6 +264,12 @@ void Backup_ddl_journal::log(Clone_notify::Type type, space_id_t space,
   pseudo space id of SYSTEM_REDO_DISABLE). */
   char *path = fil_space_get_first_path(space);
 
+  /* Record the tablespace flags authoritatively (0 when the space is not
+  currently known, e.g. a BEGIN or a completed DROP). Backup tools need these
+  for a reimported space (its final id may never have been file-copied) so
+  they do not have to guess the flags. */
+  const uint32_t space_flags = fil_space_get_flags(space);
+
   const lsn_t lsn = log_get_lsn(*log_sys);
 
   const std::string escaped = json_escape(path);
@@ -282,12 +288,14 @@ void Backup_ddl_journal::log(Clone_notify::Type type, space_id_t space,
 
   ++m_seq;
 
-  const int len = snprintf(buf, sizeof(buf),
-                           "{\"seq\":" UINT64PF
-                           ",\"ev\":\"%s\",\"type\":\"%s\",\"space\":%u,"
-                           "\"lsn\":" LSN_PF ",\"path\":\"%s\"}\n",
-                           m_seq, begin ? "BEGIN" : "END", type_str(type),
-                           static_cast<unsigned>(space), lsn, escaped.c_str());
+  const int len = snprintf(
+      buf, sizeof(buf),
+      "{\"seq\":" UINT64PF
+      ",\"ev\":\"%s\",\"type\":\"%s\",\"space\":%u,\"flags\":%u,"
+      "\"lsn\":" LSN_PF ",\"path\":\"%s\"}\n",
+      m_seq, begin ? "BEGIN" : "END", type_str(type),
+      static_cast<unsigned>(space),
+      space_flags == UINT32_UNDEFINED ? 0u : space_flags, lsn, escaped.c_str());
 
   write_all(m_fd, buf, static_cast<size_t>(len));
   m_offset += static_cast<uint64_t>(len);

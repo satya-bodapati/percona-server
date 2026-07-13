@@ -98,6 +98,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "buf0stats.h"
 #include "clone0api.h"
 #include "clone0clone.h"
+#include "clone0journal.h"
 #include "dd/dd.h"
 #include "dd/dictionary.h"
 #include "dd/impl/bootstrap/bootstrap_ctx.h"
@@ -16114,6 +16115,18 @@ int ha_innobase::discard_or_import_tablespace(bool discard,
     if (err == DB_SUCCESS) {
       info(HA_STATUS_TIME | HA_STATUS_CONST | HA_STATUS_VARIABLE |
            HA_STATUS_AUTO);
+
+      /* Record the imported tablespace in the backup DDL journal under its
+      final space id. IMPORT assigns a new space id and does not emit a
+      normal SPACE_CREATE (the only import notify is SPACE_IMPORT, which
+      carries no space id), so a backup running concurrently would otherwise
+      keep the stale pre-import file and lose the imported data. The DISCARD
+      that preceded the import journaled a SPACE_DROP for the old space id,
+      so backup reconciles: drop the old file, recopy the new one. */
+      backup_ddl_journal.log(Clone_notify::Type::SPACE_CREATE,
+                             dict_table->space, true);
+      backup_ddl_journal.log(Clone_notify::Type::SPACE_CREATE,
+                             dict_table->space, false);
     }
   }
 
