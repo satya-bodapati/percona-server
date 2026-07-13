@@ -35,6 +35,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "clone0api.h"
 #include "clone0clone.h"
+#include "clone0journal.h"
 #include "os0thread-create.h"
 
 #include "sql/clone_handler.h"
@@ -2500,6 +2501,10 @@ Clone_notify::Clone_notify(Clone_notify::Type type, space_id_t space,
       m_error() {
   DEBUG_SYNC_C("clone_notify_ddl");
 
+  /* Journal for backup tools before any early return so that
+  SPACE_ALTER_INPLACE events are also recorded. */
+  backup_ddl_journal.log(type, space, true);
+
   if (fsp_is_system_temporary(space) || m_type == Type::SPACE_ALTER_INPLACE) {
     /* No need to block clone. */
     return;
@@ -2595,6 +2600,10 @@ Clone_notify::Clone_notify(Clone_notify::Type type, space_id_t space,
 }
 
 Clone_notify::~Clone_notify() {
+  /* Journal the end event for backup tools; the begin/end pair brackets the
+  LSN of the operation's redo record(s). */
+  backup_ddl_journal.log(m_type, m_space_id, false);
+
   IB_mutex_guard sys_mutex(clone_sys->get_mutex(), UT_LOCATION_HERE);
 
   switch (m_wait) {

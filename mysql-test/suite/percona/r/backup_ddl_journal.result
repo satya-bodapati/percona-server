@@ -1,0 +1,44 @@
+#
+# Session lifecycle and event capture
+#
+CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE=InnoDB;
+RENAME TABLE t1 TO t2;
+ALTER TABLE t2 ADD INDEX ia (a);
+DROP TABLE t2;
+SELECT @slice LIKE '#ib_backup_tracking/ddl_journal.%' AS slice_name_ok;
+slice_name_ok
+1
+header_lines: 1
+json_lines_ok: 1
+create_events: YES
+rename_events: YES
+bulk_events: YES
+drop_events: YES
+#
+# Stop removes the session's slice file (last session)
+#
+stop_ok
+0
+slice_gone: YES
+stream_gone: YES
+#
+# Unknown session ids: cut returns NULL, stop returns 1
+#
+SELECT innodb_backup_ddl_journal_cut(999999) IS NULL AS cut_unknown_is_null;
+cut_unknown_is_null
+1
+SELECT innodb_backup_ddl_journal_stop(999999) AS stop_unknown;
+stop_unknown
+1
+#
+# Two concurrent sessions get independent slice files
+#
+CREATE TABLE s1 (a INT) ENGINE=InnoDB;
+CREATE TABLE s2 (a INT) ENGINE=InnoDB;
+s1_sees_both: YES
+s2_sees_only_one: YES
+SELECT @stop1 AS stop1, @stop2 AS stop2;
+stop1	stop2
+0	0
+stream_gone_after_last_stop: YES
+DROP TABLE s1, s2;

@@ -84,6 +84,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "log0files_governor.h"
 
 /* log_limits_mutex, ... */
+#include "clone0journal.h"
 #include "log0log.h"
 
 /* redo_log_archive_init, ... */
@@ -953,6 +954,8 @@ void log_start_background_threads(log_t &log) {
   log_control_writer_threads(log);
 
   meb::redo_log_archive_init();
+
+  backup_ddl_journal_init();
 }
 
 void log_stop_background_threads(log_t &log) {

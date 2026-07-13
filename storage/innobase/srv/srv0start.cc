@@ -106,6 +106,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "buf0rea.h"
 #include "clone0api.h"
 #include "clone0clone.h"
+#include "clone0journal.h"
 #include "dict0boot.h"
 #include "dict0crea.h"
 #include "dict0load.h"
@@ -3244,6 +3245,8 @@ void srv_shutdown() {
   os_thread_close();
 
   meb::redo_log_archive_deinit();
+
+  backup_ddl_journal_deinit();
 
   /* 6. Free the synchronisation infrastructure. */
   sync_check_close();
