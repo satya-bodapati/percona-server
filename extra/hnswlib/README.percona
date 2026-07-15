@@ -1,0 +1,34 @@
+hnswlib — header-only HNSW approximate-nearest-neighbor library
+================================================================
+
+Upstream:   https://github.com/nmslib/hnswlib (Apache License 2.0, see LICENSE)
+Imported:   from the Percona vector-search prototype (PS-10258, branch
+            vector-proto in percona-server-private), which is itself a fork
+            of upstream hnswlib.
+
+Percona modifications relative to upstream hnswlib
+--------------------------------------------------
+
+1. hnswalg.h: persistence callbacks for HierarchicalNSW:
+     - setAddPointInsertCallback(): fired once per addPoint() with the new
+       node's label, level and per-level neighbor lists, so the embedding
+       storage engine can persist the node.
+     - setAddPointUpdateCallback(): fired (batched via
+       flushAddPointUpdateCallbackForNeighborIds) for every EXISTING node
+       whose neighbor lists were mutated by an addPoint(), so the engine
+       can re-persist those nodes.
+2. hnswalg.h: loadIndex(const std::vector<VecAuxLoadedRowTuple>&) — rebuild
+   the in-memory graph from rows loaded from the InnoDB vector-index
+   auxiliary table (label, level, vector, neighbors-by-level), instead of
+   from upstream's file-based serialization.
+3. hnswlib.h: HNSWERR override hook (upstream PR #508).
+4. hnswlib.h: include <x86intrin.h>/<intrin.h> for the USE_SSE-only case —
+   the fork's cpuid/xgetbv restructure had left the intrinsics header
+   AVX-conditional, breaking SSE-only compilation units.
+
+Used by the InnoDB vector index implementation (PS-11299 storage skeleton,
+PS-11300 population). InnoDB is the only in-tree consumer; the library is
+header-only and compiled into the innobase target — no separate build.
+
+Local policy: keep diffs against upstream minimal; fixes belong upstream
+or in the callback layer, not scattered through the algorithm code.
