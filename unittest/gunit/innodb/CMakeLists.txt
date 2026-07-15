@@ -48,6 +48,7 @@ SET(TESTS
   fts0vlc
   ha_innodb
   fts0fts
+  hnswlib
   log0log
   mem0mem
   os0file
