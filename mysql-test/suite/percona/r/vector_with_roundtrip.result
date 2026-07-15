@@ -78,3 +78,32 @@ t3	CREATE TABLE `t3` (
   VECTOR KEY `v` (`v`) TYPE `hnsw` WITH (`M`=8)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 DROP TABLE t3;
+# === ef_construction option (PS-11300) — accepted + round-trips ===
+CREATE TABLE t4 (id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(8),
+VECTOR KEY (v) TYPE hnsw WITH (M = 4, ef_construction = 64));
+SHOW CREATE TABLE t4;
+Table	Create Table
+t4	CREATE TABLE `t4` (
+  `id` bigint unsigned NOT NULL,
+  `v` vector(8) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `v` (`v`) TYPE `hnsw` WITH (`M`=4, `ef_construction`=64)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+# Survives a COPY rebuild.
+ALTER TABLE t4 ADD COLUMN c INT, ALGORITHM=COPY;
+SHOW CREATE TABLE t4;
+Table	Create Table
+t4	CREATE TABLE `t4` (
+  `id` bigint unsigned NOT NULL,
+  `v` vector(8) DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `v` (`v`) TYPE `hnsw` WITH (`M`=4, `ef_construction`=64)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+DROP TABLE t4;
+# Non-numeric ef_construction rejected.
+CREATE TABLE t5 (id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(8),
+VECTOR KEY (v) TYPE hnsw WITH (ef_construction = bogusval));
+ERROR HY000: Illegal index construction parameter value: bogusval.

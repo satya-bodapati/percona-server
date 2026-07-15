@@ -111,4 +111,64 @@ TEST_F(Vec0VecTest, NonSeSpecificAlgorithm) {
   EXPECT_FALSE(parse_options(*ks, m_vip));
 }
 
+TEST_F(Vec0VecTest, HnswEfConstruction) {
+  EXPECT_FALSE(
+      parse("CREATE TABLE t1 ("
+            "  id BIGINT UNSIGNED PRIMARY KEY,"
+            "  v1 VECTOR(128),"
+            "  VECTOR KEY(v1) TYPE hnsw WITH (M = 16, ef_construction = 100)"
+            ")"));
+  ASSERT_TRUE(std::holds_alternative<HnswParam>(m_vip));
+  EXPECT_EQ(16, std::get<HnswParam>(m_vip).M);
+  EXPECT_EQ(100, std::get<HnswParam>(m_vip).ef_construction);
+}
+
+TEST_F(Vec0VecTest, HnswEfConstructionRejectsNonNumeric) {
+  /* Note: the bad value must not be a lexer keyword (e.g. `fast`), or
+  the statement dies as a syntax error before reaching parse_options. */
+  EXPECT_TRUE(
+      parse("CREATE TABLE t1 ("
+            "  id BIGINT UNSIGNED PRIMARY KEY,"
+            "  v1 VECTOR(128),"
+            "  VECTOR KEY(v1) TYPE hnsw WITH (ef_construction = bogusval)"
+            ")",
+            ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER_VALUE));
+}
+
+/* The serialized "k=v,k=v" form parsed on the table-open path must
+agree with the Key_spec form parsed at DDL time. */
+TEST_F(Vec0VecTest, ConstructionParamsStringForm) {
+  HnswParam p;
+
+  EXPECT_FALSE(parse_construction_params({nullptr, 0}, p));
+  EXPECT_EQ(25, p.M); /* defaults */
+  EXPECT_EQ(200, p.ef_construction);
+
+  const char *s1 = "M=16,ef_construction=100";
+  EXPECT_FALSE(parse_construction_params({s1, strlen(s1)}, p));
+  EXPECT_EQ(16, p.M);
+  EXPECT_EQ(100, p.ef_construction);
+
+  const char *s2 = "metric=euclidean";
+  EXPECT_FALSE(parse_construction_params({s2, strlen(s2)}, p));
+  EXPECT_EQ("euclidean", p.metric);
+  EXPECT_EQ(25, p.M); /* reset to default per call */
+
+  const char *bad1 = "M=abc";
+  Server_initializer::set_expected_error(
+      ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER_VALUE);
+  EXPECT_TRUE(parse_construction_params({bad1, strlen(bad1)}, p));
+
+  const char *bad2 = "bogus=1";
+  Server_initializer::set_expected_error(
+      ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER);
+  EXPECT_TRUE(parse_construction_params({bad2, strlen(bad2)}, p));
+
+  const char *bad3 = "M16"; /* no '=' */
+  Server_initializer::set_expected_error(
+      ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER);
+  EXPECT_TRUE(parse_construction_params({bad3, strlen(bad3)}, p));
+  Server_initializer::set_expected_error(0);
+}
+
 }  // namespace innodb_vec0vec_unittest
