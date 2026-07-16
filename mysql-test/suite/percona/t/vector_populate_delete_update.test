@@ -1,0 +1,106 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # PS-11300 C8: DELETE and UPDATE against the vector index.
+--echo # DELETE = tombstone the aux row (row_ref -> NULL, geometry kept)
+--echo # + markDelete in the graph. Vector-column UPDATE = delete + insert
+--echo # under a FRESH label (no in-place update, secondary-index
+--echo # discipline). PK-only UPDATE just repoints row_ref. Rollbacks
+--echo # invert both the aux (undo) and the graph (tracking).
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(4),
+                 VECTOR KEY (v) TYPE hnsw WITH (M = 4, ef_construction = 32));
+
+INSERT INTO t1 VALUES (100, STRING_TO_VECTOR('[1,0,0,0]')),
+                      (101, STRING_TO_VECTOR('[0,1,0,0]')),
+                      (102, STRING_TO_VECTOR('[0,0,1,0]')),
+                      (103, NULL);
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # DELETE: id=2 becomes a tombstone (dead), base row gone. The
+--echo # survivors' neighbor lists still reference it — geometry is kept
+--echo # until reload drops the dangling edges.
+DELETE FROM t1 WHERE id = 101;
+SELECT id FROM t1 ORDER BY id;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # ROLLBACK of a DELETE: undo restores row_ref, tracking unmarks
+--echo # the node — the point is fully live again.
+BEGIN;
+DELETE FROM t1 WHERE id = 100;
+ROLLBACK;
+SELECT id FROM t1 ORDER BY id;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # UPDATE vector value -> value: old label 3 tombstones, the new
+--echo # point gets a FRESH label (5).
+UPDATE t1 SET v = STRING_TO_VECTOR('[0,0,0.9,0.1]') WHERE id = 102;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # UPDATE NULL -> value: a FRESH label (6), never the row's
+--echo # INSERT-time id — that id never reached the aux, so the restart
+--echo # counter cannot reserve it and a post-restart insert may own it.
+UPDATE t1 SET v = STRING_TO_VECTOR('[0.7,0.7,0,0]') WHERE id = 103;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # UPDATE value -> NULL: tombstone only.
+UPDATE t1 SET v = NULL WHERE id = 103;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # Non-vector, non-PK UPDATE: the index is untouched.
+ALTER TABLE t1 ADD COLUMN k INT DEFAULT 0, ALGORITHM=COPY;
+UPDATE t1 SET k = 7 WHERE id = 100;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # PK-only UPDATE: same label, row_ref repointed (not visible in
+--echo # the dump, but the statement must succeed and the graph must not
+--echo # churn — same ids before and after).
+UPDATE t1 SET id = 90 WHERE id = 100;
+SELECT id FROM t1 ORDER BY id;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # ROLLBACK of a vector UPDATE: both halves invert — the fresh
+--echo # label vanishes, the old label comes back to life.
+BEGIN;
+UPDATE t1 SET v = STRING_TO_VECTOR('[0.2,0.8,0,0]') WHERE id = 90;
+ROLLBACK;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo #
+--echo # Restart: tombstones stay out of the graph, live rows load, the
+--echo # counter continues past everything ever committed.
+--echo #
+--source include/restart_mysqld.inc
+SELECT id FROM t1 ORDER BY id;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+INSERT INTO t1 VALUES (104, STRING_TO_VECTOR('[0.3,0.3,0.3,0.3]'), 0);
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo #
+--echo # Regression: NULL-vector row before a restart, insert after it
+--echo # (which may take the same numeric id the NULL row consumed),
+--echo # then NULL -> value on the old row. The fresh-label rule keeps
+--echo # the aux collision-free.
+--echo #
+INSERT INTO t1 VALUES (105, NULL, 0);
+--source include/restart_mysqld.inc
+INSERT INTO t1 VALUES (106, STRING_TO_VECTOR('[0.6,0,0.6,0]'), 0);
+UPDATE t1 SET v = STRING_TO_VECTOR('[0,0.6,0,0.6]') WHERE id = 105;
+SELECT id FROM t1 ORDER BY id;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+DROP TABLE t1;

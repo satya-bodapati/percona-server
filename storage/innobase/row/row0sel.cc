@@ -39,6 +39,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
  *******************************************************/
 
 #include "row0sel.h"
+#include "vec0aux.h"
 
 #include <sys/types.h>
 
@@ -2846,6 +2847,17 @@ bool row_sel_store_mysql_rec(byte *mysql_rec, row_prebuilt_t *prebuilt,
       prebuilt->fts_doc_id =
           fts_get_doc_id_from_rec(rec_index->table, rec, rec_index, nullptr);
     }
+  }
+
+  /* Mirror of the FTS doc_id capture above for vector indexes: the
+  DELETE/UPDATE hooks need the victim row's hidden vec_idx_id (its
+  graph label). Captured at fetch time like FTS because the update
+  node's stored old row is not always available (row_upd_store_row is
+  conditional on ordering-field changes). */
+  if (rec_index->table->vec_idx_id_col != ULINT_UNDEFINED &&
+      rec_index->is_clustered() && !clust_templ_for_sec) {
+    prebuilt->vec_idx_id =
+        vec_get_idx_id_from_rec(rec_index->table, rec, rec_index);
   }
 
   return true;

@@ -931,6 +931,99 @@ dberr_t vec_insert_point(trx_t *trx, dict_table_t *table, THD *thd, uint64_t id,
   return err;
 }
 
+dberr_t vec_delete_point(trx_t *trx, dict_table_t *table, THD *thd,
+                         uint64_t label) {
+  vec_t *vec = vec_hnsw(table);
+  ut_a(vec != nullptr);
+
+  MDL_ticket *mdl = nullptr;
+  dict_table_t *aux = vec_aux_open_for_dml(table, vec->index_id, thd, &mdl);
+  if (aux == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  rw_lock_s_lock(&vec->latch, UT_LOCATION_HERE);
+  if (vec->stale.load() || !vec->loaded) {
+    rw_lock_s_unlock(&vec->latch);
+    dberr_t lerr = vec_load(table, thd);
+    if (lerr != DB_SUCCESS) {
+      vec_aux_close_for_dml(aux, thd, &mdl);
+      return lerr;
+    }
+    rw_lock_s_lock(&vec->latch, UT_LOCATION_HERE);
+  }
+
+  const undo_no_t undo_mark = trx->undo_no;
+
+  dberr_t err = vec_aux_tombstone(trx, aux, label);
+
+  bool marked = false;
+  if (err == DB_SUCCESS) {
+    try {
+      vec->hnsw->markDelete(label);
+      marked = true;
+    } catch (...) {
+      /* Label not in the graph: a reload since the row was inserted
+      (tombstones are skipped at load, or an exception reload). The
+      aux tombstone above still stands. */
+    }
+  }
+
+  rw_lock_s_unlock(&vec->latch);
+  vec_aux_close_for_dml(aux, thd, &mdl);
+
+  if (marked) {
+    vec_trx_record(trx, table, label, vec_trx_op_type::MARKED, undo_mark);
+  }
+
+  return err;
+}
+
+dberr_t vec_refresh_row_ref(trx_t *trx, dict_table_t *table, THD *thd,
+                            uint64_t label, const byte *row_ref,
+                            ulint row_ref_len) {
+  vec_t *vec = vec_hnsw(table);
+  ut_a(vec != nullptr);
+
+  MDL_ticket *mdl = nullptr;
+  dict_table_t *aux = vec_aux_open_for_dml(table, vec->index_id, thd, &mdl);
+  if (aux == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  dberr_t err = vec_aux_update_row_ref(trx, aux, label, row_ref, row_ref_len);
+
+  vec_aux_close_for_dml(aux, thd, &mdl);
+  return err;
+}
+
+uint64_t vec_get_idx_id_from_rec(const dict_table_t *table, const rec_t *rec,
+                                 const dict_index_t *index) {
+  ulint offsets_[REC_OFFS_NORMAL_SIZE];
+  ulint *offsets = offsets_;
+  mem_heap_t *heap = nullptr;
+
+  ut_a(table->vec_idx_id_col != ULINT_UNDEFINED);
+  ut_ad(index->is_clustered());
+
+  rec_offs_init(offsets_);
+  offsets = rec_get_offsets(rec, index, offsets, ULINT_UNDEFINED,
+                            UT_LOCATION_HERE, &heap);
+
+  const ulint col_no = index->get_col_pos(table->vec_idx_id_col);
+  ut_ad(col_no != ULINT_UNDEFINED);
+
+  ulint len;
+  const byte *data = rec_get_nth_field(index, rec, offsets, col_no, &len);
+  ut_a(len == 8);
+  const uint64_t id = mach_read_from_8(data);
+
+  if (heap != nullptr) {
+    mem_heap_free(heap);
+  }
+  return id;
+}
+
 void vec_trx_record(trx_t *trx, dict_table_t *table, uint64_t label,
                     vec_trx_op_type type, undo_no_t undo_no) {
   ut_a(trx != nullptr);

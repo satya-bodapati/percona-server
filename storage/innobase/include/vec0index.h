@@ -92,6 +92,18 @@ class Vector_index {
                                        const byte *row_ref,
                                        ulint row_ref_len) const = 0;
 
+  /** Retire one point (DELETE, or the delete half of an UPDATE) on the
+  USER transaction. See vec_delete_point. */
+  [[nodiscard]] virtual dberr_t remove(trx_t *trx, dict_table_t *table,
+                                       THD *thd, uint64_t label) const = 0;
+
+  /** PK changed, vector unchanged: repoint the stored base-row
+  reference. See vec_refresh_row_ref. */
+  [[nodiscard]] virtual dberr_t refresh_row_ref(trx_t *trx, dict_table_t *table,
+                                                THD *thd, uint64_t label,
+                                                const byte *row_ref,
+                                                ulint row_ref_len) const = 0;
+
   /** Free the in-memory runtime. Safe on tables that never opened
   one. See vec_close. */
   virtual void close(dict_table_t *table) const = 0;

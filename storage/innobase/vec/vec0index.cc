@@ -62,6 +62,18 @@ class Vec_hnsw_index final : public Vector_index {
                             row_ref_len);
   }
 
+  [[nodiscard]] dberr_t remove(trx_t *trx, dict_table_t *table, THD *thd,
+                               uint64_t label) const override {
+    return vec_delete_point(trx, table, thd, label);
+  }
+
+  [[nodiscard]] dberr_t refresh_row_ref(trx_t *trx, dict_table_t *table,
+                                        THD *thd, uint64_t label,
+                                        const byte *row_ref,
+                                        ulint row_ref_len) const override {
+    return vec_refresh_row_ref(trx, table, thd, label, row_ref, row_ref_len);
+  }
+
   void close(dict_table_t *table) const override { vec_close(table); }
 };
 
