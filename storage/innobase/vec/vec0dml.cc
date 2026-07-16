@@ -228,12 +228,19 @@ dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
   return DB_SUCCESS;
 }
 
-dberr_t vec_aux_update_neighbors(trx_t *trx, dict_table_t *aux, uint64_t id,
-                                 const byte *neighbors, ulint neighbors_len,
-                                 bool row_ref_null) {
+/** Shared body for the three targeted aux-row updates (neighbors,
+tombstone, row_ref refresh): position on the PK, lock like a regular
+UPDATE would, run one row_upd_step. Which columns land in the update
+vector is driven by the arguments. */
+static dberr_t vec_aux_update_row_low(trx_t *trx, dict_table_t *aux,
+                                      uint64_t id, const byte *neighbors,
+                                      ulint neighbors_len, bool set_neighbors,
+                                      bool row_ref_null, const byte *row_ref,
+                                      ulint row_ref_len) {
   ut_a(trx != nullptr);
   ut_a(aux != nullptr);
-  ut_a(neighbors != nullptr || neighbors_len == 0);
+  ut_a(!set_neighbors || neighbors != nullptr || neighbors_len == 0);
+  ut_a(!(row_ref_null && row_ref != nullptr));
 
   mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
   dict_index_t *clust = aux->first_index();
@@ -326,12 +333,12 @@ dberr_t vec_aux_update_neighbors(trx_t *trx, dict_table_t *aux, uint64_t id,
     mem_heap_free(offset_heap);
   }
 
-  /* Single-field (or two-field, with the tombstone) update vector. */
+  /* One- or two-field update vector, per the caller's request. */
   upd_t *update = upd_create(2, heap);
   update->table = aux;
   ulint n_fields = 0;
 
-  {
+  if (set_neighbors) {
     upd_field_t *uf = upd_get_nth_field(update, n_fields++);
     const dict_col_t *col = aux->get_col(VEC_AUX_COL_NEIGHBORS);
     upd_field_set_field_no(uf, dict_col_get_clust_pos(col, clust), clust);
@@ -342,13 +349,19 @@ dberr_t vec_aux_update_neighbors(trx_t *trx, dict_table_t *aux, uint64_t id,
     col->copy_type(dfield_get_type(&uf->new_val));
   }
 
-  if (row_ref_null) {
+  if (row_ref_null || row_ref != nullptr) {
     upd_field_t *uf = upd_get_nth_field(update, n_fields++);
     const dict_col_t *col = aux->get_col(VEC_AUX_COL_ROW_REF);
     upd_field_set_field_no(uf, dict_col_get_clust_pos(col, clust), clust);
-    dfield_set_null(&uf->new_val);
+    if (row_ref_null) {
+      dfield_set_null(&uf->new_val);
+    } else {
+      dfield_set_data(&uf->new_val, mem_heap_dup(heap, row_ref, row_ref_len),
+                      row_ref_len);
+    }
     col->copy_type(dfield_get_type(&uf->new_val));
   }
+  ut_a(n_fields > 0);
 
   update->n_fields = n_fields;
   node->update = update;
@@ -384,6 +397,28 @@ dberr_t vec_aux_update_neighbors(trx_t *trx, dict_table_t *aux, uint64_t id,
   return DB_SUCCESS;
 }
 
+dberr_t vec_aux_update_neighbors(trx_t *trx, dict_table_t *aux, uint64_t id,
+                                 const byte *neighbors, ulint neighbors_len,
+                                 bool row_ref_null) {
+  return vec_aux_update_row_low(trx, aux, id, neighbors, neighbors_len,
+                                true /* set_neighbors */, row_ref_null, nullptr,
+                                0);
+}
+
+dberr_t vec_aux_tombstone(trx_t *trx, dict_table_t *aux, uint64_t id) {
+  return vec_aux_update_row_low(trx, aux, id, nullptr, 0,
+                                false /* set_neighbors */,
+                                true /* row_ref_null */, nullptr, 0);
+}
+
+dberr_t vec_aux_update_row_ref(trx_t *trx, dict_table_t *aux, uint64_t id,
+                               const byte *row_ref, ulint row_ref_len) {
+  ut_a(row_ref != nullptr);
+  return vec_aux_update_row_low(trx, aux, id, nullptr, 0,
+                                false /* set_neighbors */,
+                                false /* row_ref_null */, row_ref, row_ref_len);
+}
+
 /** Copy one (possibly externally stored) field of an aux clustered-index
 record into a byte vector.
 @return true on success */
@@ -404,7 +439,8 @@ static bool vec_aux_copy_field(trx_t *trx, const dict_index_t *clust,
 
 dberr_t vec_aux_load_rows(dict_table_t *aux, uint32_t dims,
                           std::vector<vec_loaded_row_t> *rows,
-                          uint64_t *raw_max_id, bool *saw_invisible) {
+                          uint64_t *raw_max_id, bool *saw_invisible,
+                          std::vector<uint64_t> *dead_labels) {
   ut_a(aux != nullptr);
   ut_a(rows != nullptr);
   ut_a(raw_max_id != nullptr);
@@ -499,11 +535,16 @@ dberr_t vec_aux_load_rows(dict_table_t *aux, uint32_t dims,
     const byte *id_ptr = rec_get_nth_field(clust, vrec, voffsets, 0, &id_len);
     const uint64_t id = mach_read_from_8(id_ptr);
 
-    /* row_ref NULL = tombstone: not part of the graph. */
+    /* row_ref NULL = tombstone: not part of the graph. Committed
+    neighbor lists may still reference it — loadIndex drops those
+    edges (dangling-label tolerance). */
     {
       ulint rr_len;
       rec_get_nth_field(clust, vrec, voffsets, pos_row_ref, &rr_len);
       if (rr_len == UNIV_SQL_NULL) {
+        if (dead_labels != nullptr) {
+          dead_labels->push_back(id);
+        }
         continue;
       }
     }

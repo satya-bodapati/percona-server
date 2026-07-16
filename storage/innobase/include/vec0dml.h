@@ -121,6 +121,19 @@ dberr_t vec_aux_update_neighbors(trx_t *trx, dict_table_t *aux, uint64_t id,
                                  const byte *neighbors, ulint neighbors_len,
                                  bool row_ref_null = false);
 
+/** Tombstone one aux row: set row_ref to SQL NULL, leaving the graph
+geometry (vec/level/neighbors) in place. The node stops being loadable
+(vec_aux_load_rows skips tombstones); a rollback restores row_ref via
+the undo log like any column.
+@return DB_SUCCESS, DB_RECORD_NOT_FOUND if no such id, or error */
+dberr_t vec_aux_tombstone(trx_t *trx, dict_table_t *aux, uint64_t id);
+
+/** Point one aux row's row_ref at a new base-PK image (the base row's
+PRIMARY KEY changed under it; the graph node is untouched).
+@return DB_SUCCESS, DB_RECORD_NOT_FOUND if no such id, or error */
+dberr_t vec_aux_update_row_ref(trx_t *trx, dict_table_t *aux, uint64_t id,
+                               const byte *row_ref, ulint row_ref_len);
+
 /** Load every visible row of a vector aux table under a fresh read view
 (background transaction), for graph reconstruction.
 @param[in]  aux            aux table
@@ -138,6 +151,7 @@ dberr_t vec_aux_update_neighbors(trx_t *trx, dict_table_t *aux, uint64_t id,
 @return DB_SUCCESS or error */
 dberr_t vec_aux_load_rows(dict_table_t *aux, uint32_t dims,
                           std::vector<vec_loaded_row_t> *rows,
-                          uint64_t *raw_max_id, bool *saw_invisible);
+                          uint64_t *raw_max_id, bool *saw_invisible,
+                          std::vector<uint64_t> *dead_labels = nullptr);
 
 #endif /* vec0dml_h */

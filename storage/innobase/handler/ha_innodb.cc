@@ -10217,7 +10217,12 @@ static dberr_t calc_row_difference(
   ulint comp = 0;
   ulint num_v = 0;
 
+  bool vec_changed = false;
+  bool vec_new_null = false;
+
   ut_ad(!srv_read_only_mode || prebuilt->table->is_intrinsic());
+
+  prebuilt->vec_new_idx_id = 0;
 
   comp = dict_table_is_comp(prebuilt->table);
 
@@ -10517,6 +10522,14 @@ static dberr_t calc_row_difference(
       checking only once here. Later we will need to
       note which columns have been updated and do
       selective processing. */
+      /* The vector column changed — note the NULLness transition; the
+      post-loop block and the update_row hook key off it (PS-11300). */
+      if (prebuilt->table->vec != nullptr && !is_virtual &&
+          i == prebuilt->table->vec->field_no) {
+        vec_changed = true;
+        vec_new_null = (n_len == UNIV_SQL_NULL);
+      }
+
       if (prebuilt->table->fts != nullptr && !is_virtual) {
         ulint offset;
         dict_table_t *innodb_table;
@@ -10614,6 +10627,36 @@ static dberr_t calc_row_difference(
     fts_next_doc_id to UINT64_UNDEFINED, which means do not
     update the Doc ID column */
     trx->fts_next_doc_id = UINT64_UNDEFINED;
+  }
+
+  /* Vector column changed to a non-NULL value: piggy-back a FRESH
+  vec_idx_id on this UPDATE (the fts_update_doc_id pattern above).
+  The update_row hook then inserts the new point under it (and, for
+  value-to-value, tombstones the old label first). NULL->value must
+  NOT reuse the row's existing id: ids stamped on NULL-vector rows
+  never reach the aux table, so the restart counter restoration
+  (max id over aux records) cannot account for them — a post-restart
+  insert may have legitimately taken the same number. Fresh ids come
+  from the counter, which is always past every aux id. */
+  if (vec_changed && !vec_new_null) {
+    dict_table_t *innodb_table = prebuilt->table;
+    ut_a(innodb_table->vec_idx_id_col != ULINT_UNDEFINED);
+
+    ufield = uvect->fields + n_changed;
+    dict_col_t *col = innodb_table->get_col(innodb_table->vec_idx_id_col);
+
+    ufield->exp = nullptr;
+    ufield->old_v_val = nullptr;
+    ufield->field_no = dict_col_get_clust_pos(col, clust_index);
+    col->copy_type(dfield_get_type(&ufield->new_val));
+
+    prebuilt->vec_new_idx_id = vec_assign_next_idx_id(innodb_table);
+    mach_write_to_8(prebuilt->vec_new_idx_id_stor, prebuilt->vec_new_idx_id);
+    ufield->new_val.data = prebuilt->vec_new_idx_id_stor;
+    ufield->new_val.len = 8;
+    ufield->new_val.ext = 0;
+
+    ++n_changed;
   }
 
   uvect->n_fields = n_changed;
@@ -10717,6 +10760,70 @@ int ha_innobase::update_row(const uchar *old_row, uchar *new_row) {
   }
 
   error = row_update_for_mysql((byte *)old_row, m_prebuilt);
+
+  /* Vector-index maintenance (PS-11300). The vector index has no
+  in-place update: a changed vector is a DELETE of the old point plus
+  an INSERT of a new one under the fresh label calc_row_difference
+  stamped into this UPDATE. The victim label was captured at fetch
+  time (row0sel -> m_prebuilt->vec_idx_id). */
+  if (error == DB_SUCCESS && m_prebuilt->table->vec != nullptr) {
+    dict_table_t *ib_table = m_prebuilt->table;
+    Field *vfield = table->field[ib_table->vec->field_no];
+    const bool old_null = vfield->is_null_in_record(old_row);
+    const bool new_null = vfield->is_null_in_record(new_row);
+    const uint64_t old_id = m_prebuilt->vec_idx_id;
+
+    Field *pk_field =
+        table->key_info[table->s->primary_key].key_part[0].field;
+    const ptrdiff_t pk_off = pk_field->offset(table->record[0]);
+    const bool pk_changed =
+        memcmp(old_row + pk_off, new_row + pk_off,
+               pk_field->pack_length()) != 0;
+    /* Single-column BIGINT UNSIGNED PK (PS-11264): its InnoDB storage
+    image is the big-endian value — same bytes vec_row_ref_serialize
+    produces on the insert path. */
+    byte new_pk_ref[8];
+    mach_write_to_8(new_pk_ref, uint8korr(new_row + pk_off));
+
+    dberr_t verr = DB_SUCCESS;
+
+    /* Only full-width vectors are indexable (same gate as write_row). */
+    if (!new_null && static_cast<Field_vector *>(vfield)->get_length() !=
+                         static_cast<Field_vector *>(vfield)->max_data_length()) {
+      verr = DB_UNSUPPORTED;
+    } else if (!old_null && !new_null && m_prebuilt->vec_new_idx_id != 0) {
+      /* value -> value: delete + insert under the fresh label. */
+      verr = vec_delete_point(trx, ib_table, m_user_thd, old_id);
+      if (verr == DB_SUCCESS) {
+        auto *field_vec = static_cast<Field_vector *>(vfield);
+        verr = vec_insert_point(
+            trx, ib_table, m_user_thd, m_prebuilt->vec_new_idx_id,
+            reinterpret_cast<const float *>(field_vec->get_blob_data()),
+            new_pk_ref, sizeof(new_pk_ref));
+      }
+    } else if (!old_null && new_null) {
+      /* value -> NULL: the point leaves the index. */
+      verr = vec_delete_point(trx, ib_table, m_user_thd, old_id);
+    } else if (old_null && !new_null) {
+      /* NULL -> value: insert under the fresh label (never the row's
+      old id — see calc_row_difference; it may be duplicated by a
+      post-restart insert). */
+      ut_a(m_prebuilt->vec_new_idx_id != 0);
+      auto *field_vec = static_cast<Field_vector *>(vfield);
+      verr = vec_insert_point(
+          trx, ib_table, m_user_thd, m_prebuilt->vec_new_idx_id,
+          reinterpret_cast<const float *>(field_vec->get_blob_data()),
+          new_pk_ref, sizeof(new_pk_ref));
+    } else if (!old_null && pk_changed) {
+      /* Vector unchanged but the PK moved: repoint row_ref. */
+      verr = vec_refresh_row_ref(trx, ib_table, m_user_thd, old_id,
+                                 new_pk_ref, sizeof(new_pk_ref));
+    }
+
+    if (verr != DB_SUCCESS) {
+      error = verr;
+    }
+  }
 
   if (dict_table_has_autoinc_col(m_prebuilt->table)) {
     new_counter = row_upd_get_new_autoinc_counter(
@@ -10845,6 +10952,17 @@ int ha_innobase::delete_row(
   if (error == DB_SUCCESS) {
     error = row_update_for_mysql((byte *)record, m_prebuilt);
     innobase_srv_conc_exit_innodb(m_prebuilt);
+  }
+
+  /* Vector-index maintenance (PS-11300): tombstone the deleted row's
+  graph point. NULL vector = no point ever existed. The label was
+  captured at fetch time (row0sel -> m_prebuilt->vec_idx_id). */
+  if (error == DB_SUCCESS && m_prebuilt->table->vec != nullptr) {
+    Field *vfield = table->field[m_prebuilt->table->vec->field_no];
+    if (!vfield->is_null_in_record(record)) {
+      error = vec_delete_point(trx, m_prebuilt->table, m_user_thd,
+                               m_prebuilt->vec_idx_id);
+    }
   }
 
   /* Tell the InnoDB server that there might be work for

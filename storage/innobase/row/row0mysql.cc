@@ -1383,6 +1383,8 @@ row_prebuilt_t *row_create_prebuilt(
 
   /* During UPDATE and DELETE we need the doc id. */
   prebuilt->fts_doc_id = 0;
+  prebuilt->vec_idx_id = 0;
+  prebuilt->vec_new_idx_id = 0;
 
   prebuilt->mysql_row_len = mysql_row_len;
 

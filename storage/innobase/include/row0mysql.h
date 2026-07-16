@@ -725,6 +725,20 @@ struct row_prebuilt_t {
                                 but in the future we must only fetch
                                 it when FTS columns are being
                                 updated */
+  uint64_t vec_idx_id;          /*!< the fts_doc_id analog for vector
+                                indexes: hidden vec_idx_id of the last
+                                clustered-record fetch; the DELETE and
+                                UPDATE hooks read the victim graph
+                                label from here (PS-11300) */
+  uint64_t vec_new_idx_id;      /*!< fresh label stamped into the
+                                update vector by calc_row_difference
+                                when a vector column changes value to
+                                value (label reuse would turn addPoint
+                                into hnswlib updatePoint, a different
+                                persistence contract); 0 = no restamp
+                                in this statement */
+  byte vec_new_idx_id_stor[8];  /*!< storage-format image the update
+                                vector's new_val points at */
   dtuple_t *clust_ref;          /*!< prebuilt dtuple used in
                                 sel/upd/del */
   ulint select_lock_type;       /*!< LOCK_NONE, LOCK_S, or LOCK_X */

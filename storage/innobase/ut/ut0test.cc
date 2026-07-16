@@ -623,8 +623,9 @@ Ret_t Tester::vec_aux_dump(std::vector<std::string> &tokens) noexcept {
   std::vector<vec_loaded_row_t> rows;
   uint64_t raw_max_id = 0;
   bool saw_invisible = false;
+  std::vector<uint64_t> dead;
   const dberr_t err =
-      vec_aux_load_rows(aux, dims, &rows, &raw_max_id, &saw_invisible);
+      vec_aux_load_rows(aux, dims, &rows, &raw_max_id, &saw_invisible, &dead);
   if (err != DB_SUCCESS) {
     XLOG("FAIL: vec_aux_load_rows err=" << static_cast<int>(err));
     set_output(sout);
@@ -632,7 +633,17 @@ Ret_t Tester::vec_aux_dump(std::vector<std::string> &tokens) noexcept {
   }
 
   sout << "count=" << rows.size() << " max_id=" << raw_max_id
-       << " invisible=" << (saw_invisible ? 1 : 0) << "\n";
+       << " invisible=" << (saw_invisible ? 1 : 0);
+  /* Tombstoned rows (row_ref NULL, skipped from the graph) — printed
+  only when present so pre-DELETE recordings stay stable. */
+  if (!dead.empty()) {
+    sout << " dead=";
+    for (size_t i = 0; i < dead.size(); ++i) {
+      if (i != 0) sout << ":";
+      sout << dead[i];
+    }
+  }
+  sout << "\n";
   for (const auto &r : rows) {
     sout << "id=" << std::get<0>(r) << " level=" << std::get<1>(r) << " nb=";
     const auto &nbl = std::get<3>(r);

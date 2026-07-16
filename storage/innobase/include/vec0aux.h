@@ -239,6 +239,28 @@ dberr_t vec_insert_point(trx_t *trx, dict_table_t *table, THD *thd, uint64_t id,
                          const float *vec_data, const byte *row_ref,
                          ulint row_ref_len);
 
+/** DELETE (or the delete half of a vector-column UPDATE) of one graph
+point: tombstone the aux row (row_ref -> NULL, geometry kept) on the
+user trx, markDelete the in-memory node, and record a MARKED tracking
+entry so rollback unmarks it (the undo log un-tombstones the aux row).
+@return DB_SUCCESS or error */
+dberr_t vec_delete_point(trx_t *trx, dict_table_t *table, THD *thd,
+                         uint64_t label);
+
+/** The base row's PRIMARY KEY changed but its vector did not: repoint
+the aux row's row_ref at the new PK image. Pure aux-row update — no
+graph change, no tracking (the undo log alone inverts it).
+@return DB_SUCCESS or error */
+dberr_t vec_refresh_row_ref(trx_t *trx, dict_table_t *table, THD *thd,
+                            uint64_t label, const byte *row_ref,
+                            ulint row_ref_len);
+
+/** Read the hidden vec_idx_id column out of a clustered-index record
+(the fts_get_doc_id_from_rec analog; row0sel captures it at fetch time
+into row_prebuilt_t::vec_idx_id for the DELETE/UPDATE hooks). */
+uint64_t vec_get_idx_id_from_rec(const dict_table_t *table, const rec_t *rec,
+                                 const dict_index_t *index);
+
 /** Free the graph, latch and vec_t itself; charge released. Safe on
 tables that never opened a graph. */
 void vec_close(dict_table_t *table);
