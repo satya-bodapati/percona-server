@@ -2503,6 +2503,14 @@ detect this and will eventually quit sooner. */
   table has no hidden vec_idx_id column. Set by vec_add_idx_id_column. */
   ulint vec_idx_id_col;
 
+  /** In-memory HNSW graph state, or nullptr. Analog of `fts` above.
+  DEVIATION FROM FTS: created LAZILY by vec_open at first table open
+  (fts_t is created eagerly in dict_mem_table_create) — a table that is
+  never opened never pays for a graph. Freed beside fts_free in
+  dict_mem_table_free, and explicitly before the aux drop on DROP
+  TABLE / ALTER DROP VECTOR INDEX. */
+  struct vec_t *vec;
+
   /** The transaction that currently holds the the AUTOINC lock on this table.
   Protected by lock_sys table shard latch. To "peek" the current value one
   can read it without any latch, understanding that in general it may change.

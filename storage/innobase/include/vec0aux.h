@@ -36,10 +36,23 @@ pars_sql/que_eval_sql, which serializes on the global pars_mutex. */
 #ifndef vec0aux_h
 #define vec0aux_h
 
+#include <atomic>
+
 #include "data0types.h"
 #include "dict0mem.h"
+#include "sync0rw.h"
 #include "trx0trx.h"
 #include "univ.i"
+
+class THD;
+
+/* Forward declarations so this engine-wide header never pulls in the
+hnswlib headers; only vec0aux.cc sees the library. */
+namespace hnswlib {
+template <typename dist_t>
+class HierarchicalNSW;
+class L2Space;
+}  // namespace hnswlib
 
 /** Lowercase on-disk / DD prefix shared by all vector aux tables. */
 extern const char *VEC_AUX_PREFIX;
@@ -167,5 +180,71 @@ the per-table counter. No-op for tables without the hidden column.
 Allocations come from `heap` so they outlive this call. Called from
 the INSERT path (mirrors fts_create_doc_id). */
 void vec_stamp_idx_id(dict_table_t *table, dtuple_t *row, mem_heap_t *heap);
+
+/* ------------------------------------------------------------------
+In-memory HNSW graph state (PS-11300 phase 2a). */
+
+/** Per-table in-memory vector index state — the analog of fts_t.
+
+DEVIATION FROM FTS: fts_t carries background-thread state, a token
+cache, an indexes vector and its own allocation heap; vec_t is only the
+graph handle plus parameters, created LAZILY at first table open (FTS
+creates fts_t eagerly in dict_mem_table_create). Promote fields here —
+not a new global — if phase 3 grows state. */
+struct vec_t {
+  /** back pointer */
+  dict_table_t *table;
+  /** the (single, PS-11264) vector index this graph serves */
+  space_index_t index_id;
+  /** MySQL field ordinal of the vector column (write_row extraction) */
+  uint16_t field_no;
+  /** vector dimensions (floats) */
+  uint32_t dims;
+  /** HNSW construction parameters, from the WITH() options */
+  int M;
+  int ef_construction;
+  /** graph built from the aux table */
+  bool loaded;
+  /** exception fallback only: an addPoint threw mid-flight and the
+  graph may hold a half-linked node — rebuilt from the aux on next
+  use. Rollback of clean inserts does NOT use this (C6 delete-marks
+  instead). */
+  std::atomic<bool> stale;
+  /** S: addPoint + its callback persistence (concurrent inserts run
+  in parallel — hnswlib locks internally); X: resizeIndex and the
+  exception reload. */
+  rw_lock_t latch;
+  hnswlib::L2Space *space;
+  hnswlib::HierarchicalNSW<float> *hnsw;
+  /** bytes charged against the global budget (consumed by C5) */
+  std::atomic<uint64_t> mem_used;
+};
+
+/** Get-or-create table->vec (lazy; thread-safe via dict_sys mutex).
+Parameters are only applied on creation. */
+vec_t *vec_open(dict_table_t *table, uint16_t field_no, uint32_t dims, int M,
+                int ef_construction);
+
+/** Build (or rebuild, if stale) the in-memory graph from the aux table
+under the X latch, install the persistence callbacks, and restore
+table->vec_next_id from the aux's max id. No-op when already loaded and
+not stale. Called at table open — the "first access" load — and as the
+exception fallback. */
+dberr_t vec_load(dict_table_t *table, THD *thd);
+
+/** Insert one point: resize-if-needed, addPoint under the S latch,
+persistence via the callbacks on `trx` (the user transaction). vec_data
+must hold vec->dims floats; row_ref is the serialized base PK. */
+dberr_t vec_insert_point(trx_t *trx, dict_table_t *table, THD *thd, uint64_t id,
+                         const float *vec_data, const byte *row_ref,
+                         ulint row_ref_len);
+
+/** Free the graph, latch and vec_t itself; charge released. Safe on
+tables that never opened a graph. */
+void vec_close(dict_table_t *table);
+
+/** Total bytes currently charged by all in-memory vector graphs
+(the C5 budget reads this). */
+uint64_t vec_total_memory();
 
 #endif /* vec0aux_h */

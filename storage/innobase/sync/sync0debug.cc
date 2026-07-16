@@ -538,6 +538,7 @@ LatchDebug::LatchDebug() {
   LEVEL_MAP_INSERT(SYNC_AHI_ENABLED);
   LEVEL_MAP_INSERT(SYNC_PARSER);
   LEVEL_MAP_INSERT(SYNC_FTS_CACHE);
+  LEVEL_MAP_INSERT(SYNC_VEC_INDEX);
   LEVEL_MAP_INSERT(SYNC_DICT_OPERATION);
   LEVEL_MAP_INSERT(SYNC_TRX_I_S_LAST_READ);
   LEVEL_MAP_INSERT(SYNC_TRX_I_S_RWLOCK);
@@ -725,6 +726,7 @@ Latches *LatchDebug::check_order(const latch_t *latch,
     case SYNC_FTS_OPTIMIZE:
     case SYNC_FTS_CACHE:
     case SYNC_FTS_CACHE_INIT:
+    case SYNC_VEC_INDEX:
     case SYNC_PAGE_CLEANER:
     case SYNC_LOG_ONLINE:
     case SYNC_LOG_CHECKPOINTER:
@@ -1454,6 +1456,8 @@ static void sync_latch_meta_init() UNIV_NOTHROW {
   LATCH_ADD_RWLOCK(FIL_SPACE, SYNC_FSP, fil_space_latch_key);
 
   LATCH_ADD_RWLOCK(FTS_CACHE, SYNC_FTS_CACHE, fts_cache_rw_lock_key);
+
+  LATCH_ADD_RWLOCK(VEC_INDEX, SYNC_VEC_INDEX, vec_index_rw_lock_key);
 
   LATCH_ADD_RWLOCK(FTS_CACHE_INIT, SYNC_FTS_CACHE_INIT,
                    fts_cache_init_rw_lock_key);

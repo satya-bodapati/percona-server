@@ -7653,6 +7653,12 @@ after a successful commit_try_norebuild() call.
       batch window. Revisit with PS-11300's crash-atomicity work —
       adopting the aux_vec deferral pattern is the fix if needed. */
       if (index->is_vector()) {
+        /* The base table survives this ALTER — free the in-memory HNSW
+        graph before its aux table goes away (the commit phase holds
+        exclusive MDL, so no writer is inside the graph). Rebuild and
+        DROP TABLE paths need no call: their dict_table_t is freed and
+        dict_mem_table_free closes the graph. */
+        vec_close(index->table);
         (void)vec_aux_drop_one_table(trx, index->table, index->id);
       }
 

@@ -214,6 +214,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "sql-common/json_dom.h"
 
 #include "vec0aux.h"
+#include "vec0dml.h"
 #include "vec0vec.h"
 
 #include "os0enc.h"
@@ -844,6 +845,7 @@ static PSI_rwlock_info all_innodb_rwlocks[] = {
     PSI_RWLOCK_KEY(rsegs_lock, 0, PSI_DOCUMENT_ME),
     PSI_RWLOCK_KEY(lock_sys_global_rw_lock, 0, PSI_DOCUMENT_ME),
     PSI_RWLOCK_KEY(fts_cache_rw_lock, 0, PSI_DOCUMENT_ME),
+    PSI_RWLOCK_KEY(vec_index_rw_lock, 0, PSI_DOCUMENT_ME),
     PSI_RWLOCK_KEY(fts_cache_init_rw_lock, 0, PSI_DOCUMENT_ME),
     PSI_RWLOCK_KEY(trx_i_s_cache_lock, 0, PSI_DOCUMENT_ME),
     PSI_RWLOCK_KEY(trx_purge_latch, 0, PSI_DOCUMENT_ME),
@@ -8357,6 +8359,40 @@ int ha_innobase::open(const char *name, int, uint open_flags,
     }
   }
 
+  /* Vector index: create the vec_t companion (lazily, first open only)
+  and build the in-memory HNSW graph from the aux table — this is the
+  load-on-first-access point after a restart or cache eviction.
+  DEVIATION FROM FTS: FTS warms its cache lazily per query; an HNSW
+  graph must be complete before the first addPoint, so it loads here.
+  A load failure is not fatal to open(): the graph stays unloaded and
+  the first INSERT retries the load, surfacing the error there. */
+  for (uint i = 0; i < table->s->keys; i++) {
+    if (table->key_info[i].algorithm == HA_KEY_ALG_VECTOR) {
+      /* Resolve the REAL table field: KEY_PART_INFO::field is a
+      key-image copy whose field_length is the key-part length, not
+      the column width — get_max_dimensions on it is garbage. */
+      auto *field_vec = static_cast<Field_vector *>(
+          table->field[table->key_info[i].key_part[0].field->field_index()]);
+
+      storage::innobase::vec::HnswParam param;
+      if (table->key_info[i].vector_construction_params.str != nullptr) {
+        (void)storage::innobase::vec::parse_construction_params(
+            table->key_info[i].vector_construction_params, param);
+      }
+
+      vec_open(ib_table, field_vec->field_index(),
+               field_vec->get_max_dimensions(), param.M,
+               param.ef_construction);
+
+      const dberr_t verr = vec_load(ib_table, thd);
+      if (verr != DB_SUCCESS) {
+        ib::warn() << "Failed to load vector index graph for table "
+                   << ib_table->name.m_name << ": " << ut_strerr(verr)
+                   << ". Will retry on first insert.";
+      }
+    }
+  }
+
   info(HA_STATUS_NO_LOCK | HA_STATUS_VARIABLE | HA_STATUS_CONST);
 
   dberr_t err =
@@ -9893,6 +9929,47 @@ int ha_innobase::write_row(uchar *record) /*!< in: a row in MySQL format */
   error = row_insert_for_mysql((byte *)record, m_prebuilt);
 
   DEBUG_SYNC(m_user_thd, "ib_after_row_insert");
+
+  /* Mirror the committed-to-be base row into the vector index: add the
+  point to the in-memory HNSW graph; the graph's persistence callbacks
+  write every affected aux row on THIS transaction, so base row and
+  graph rows commit or roll back together (PS-11300-design.md par 6). */
+  if (error == DB_SUCCESS && m_prebuilt->table->vec != nullptr &&
+      m_prebuilt->ins_node != nullptr) {
+    Field *vfield = table->field[m_prebuilt->table->vec->field_no];
+
+    /* SQL NULL vector: base row exists, no graph point — same posture
+    as a NULL value in any secondary index. */
+    if (!vfield->is_null()) {
+      auto *field_vec = static_cast<Field_vector *>(vfield);
+
+      /* Only full-width vectors are indexable. */
+      if (field_vec->get_length() != field_vec->max_data_length()) {
+        error_result = HA_ERR_GENERIC;
+        my_error(ER_UNKNOWN_ERROR, MYF(0));
+        goto func_exit;
+      }
+
+      /* vec_idx_id was stamped into the insert row by
+      row_mysql_convert_row_to_innobase; it is the graph label. */
+      const dfield_t *idf = dtuple_get_nth_field(
+          m_prebuilt->ins_node->row, m_prebuilt->table->vec_idx_id_col);
+      const uint64_t vec_id =
+          mach_read_from_8(static_cast<const byte *>(dfield_get_data(idf)));
+
+      byte row_ref[VEC_AUX_ROW_REF_COL_LEN];
+      const ulint ref_len = vec_row_ref_serialize(
+          m_prebuilt->ins_node->row, m_prebuilt->table, row_ref);
+
+      const dberr_t verr = vec_insert_point(
+          trx, m_prebuilt->table, m_user_thd, vec_id,
+          reinterpret_cast<const float *>(field_vec->get_blob_data()),
+          row_ref, ref_len);
+      if (verr != DB_SUCCESS) {
+        error = verr;
+      }
+    }
+  }
 
   /* Handling of errors related to auto-increment. */
   if (auto_inc_used) {

@@ -1,0 +1,112 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # PS-11300 C4: INSERT populates the vector aux table through the
+--echo # in-memory HNSW graph (addPoint persistence callbacks), the graph
+--echo # loads from the aux table on FIRST ACCESS after restart, and the
+--echo # vec_idx_id counter continues past the pre-restart maximum.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(4),
+                 VECTOR KEY (v) TYPE hnsw WITH (M = 4, ef_construction = 32));
+
+--echo # Single insert: exactly one aux row, id=1, level recorded, row_ref set.
+INSERT INTO t1 VALUES (100, STRING_TO_VECTOR('[1,0,0,0]'));
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # NULL vector: base row inserted, NO graph point / aux row (same
+--echo # posture as NULL in any secondary index). It still consumes a
+--echo # vec_idx_id (the hidden column is NOT NULL and stamped per row),
+--echo # so id=2 becomes a hole in the aux.
+INSERT INTO t1 VALUES (101, NULL);
+SELECT id FROM t1 ORDER BY id;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # Multi-row insert: neighbor lists must interlink (the update
+--echo # callback persists existing nodes whose lists changed).
+INSERT INTO t1 VALUES (102, STRING_TO_VECTOR('[0,1,0,0]')),
+                      (103, STRING_TO_VECTOR('[0,0,1,0]')),
+                      (104, STRING_TO_VECTOR('[0,0,0,1]'));
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # Statement atomicity: duplicate base PK mid-statement rolls the
+--echo # whole statement back — aux rows from that statement are undone
+--echo # with it (they ride the same transaction).
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (200, STRING_TO_VECTOR('[9,9,9,9]')), (100, STRING_TO_VECTOR('[8,8,8,8]'));
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo #
+--echo # Load-on-first-access + counter persistence across restart.
+--echo #
+--source include/restart_mysqld.inc
+
+--echo # Not loaded yet: the vec_load log line must NOT be in the error
+--echo # log from startup alone (the graph loads on table open, not boot).
+SET GLOBAL debug = '+d,vec_load_log';
+--let $assert_text = graph not loaded before first table access
+--let $assert_select = vec_load: table test/t1
+--let $assert_count = 0
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--source include/assert_grep.inc
+
+--echo # First access opens the table and loads the graph from the aux.
+--echo # (PK-ordered scan; COUNT(*) is unusable here — the phase-1 open
+--echo # issue where the optimizer wrongly scans the vector index.)
+SELECT id FROM t1 ORDER BY id;
+
+--let $assert_text = graph loaded from aux on first table access
+--let $assert_select = vec_load: table test/t1 rows=4 max_id=5
+--let $assert_count = 1
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--source include/assert_grep.inc
+SET GLOBAL debug = '-d,vec_load_log';
+
+--echo # Counter proof: the restored counter continues from the committed
+--echo # maximum (rollback of an insert removes its records physically, so
+--echo # an id consumed only by a rolled-back statement may be reused —
+--echo # only COMMITTED-id reuse must be impossible). The new point links
+--echo # into the reloaded graph.
+INSERT INTO t1 VALUES (105, STRING_TO_VECTOR('[1,1,0,0]'));
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+DROP TABLE t1;
+
+--echo #
+--echo # Off-page BLOB: VECTOR(2048) = 8KB values force external storage
+--echo # on both the base row and the aux row; insert and reload must
+--echo # round-trip them whole.
+--echo #
+CREATE TABLE t2 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(2048),
+                 VECTOR KEY (v) TYPE hnsw WITH (M = 4));
+
+--disable_query_log
+--let $i = 1
+while ($i <= 3) {
+  --let $csv = $i
+  --let $j = 2
+  while ($j <= 2048) {
+    --let $csv = $csv,$i
+    --inc $j
+  }
+  --eval INSERT INTO t2 VALUES ($i, STRING_TO_VECTOR('[$csv]'))
+  --inc $i
+}
+--enable_query_log
+SELECT id FROM t2 ORDER BY id;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t2';
+SELECT @@session.innodb_interpreter_output;
+
+--source include/restart_mysqld.inc
+SELECT id FROM t2 ORDER BY id;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t2';
+SELECT @@session.innodb_interpreter_output;
+
+DROP TABLE t2;
