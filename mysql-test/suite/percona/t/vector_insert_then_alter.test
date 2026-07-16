@@ -1,13 +1,11 @@
+--source include/have_debug.inc
 --echo #
---echo # PS-11299: ALTER ADD VECTOR INDEX on a table with existing data.
+--echo # PS-11299/PS-11300: ALTER ADD VECTOR INDEX on a table with data.
 --echo #
---echo # The ADD forces a rebuild (vec_idx_id must materialise on a
---echo # fresh dict_table_t with current_row_version = 0; see PS-11299
---echo # rebuild-forcing rule). The rebuild's row copy must:
---echo #   - populate vec_idx_id on each copied row via the per-table
---echo #     counter (commit 1's helper);
---echo #   - leave the vector index aux .ibd empty (HNSW build is
---echo #     PS-11300, no row-level work here).
+--echo # Since PS-11300 the ADD goes through ALGORITHM=COPY (INPLACE is
+--echo # refused — it cannot build the graph): every copied row passes
+--echo # through write_row, which stamps vec_idx_id, adds the point to
+--echo # the HNSW graph, and persists it to the aux table.
 --echo #
 
 --let $MYSQLD_DATADIR = `SELECT @@datadir`
@@ -37,9 +35,12 @@ SHOW CREATE TABLE t1;
 SELECT id, k, VECTOR_TO_STRING(v) AS v_text FROM t1 ORDER BY id;
 SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
 
---echo # === Aux .ibd created, holds 0 user rows (HNSW = PS-11300) ===
+--echo # === Aux .ibd created and POPULATED by the COPY (one graph row
+--echo # === per copied base row, compact ids 1..5) ===
 --replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+\.ibd/vec_hnsw_<TID>_<IID>.ibd/
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
 
 --echo # === Further INSERTs after the rebuild continue to work ===
 INSERT INTO t1 VALUES

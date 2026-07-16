@@ -234,12 +234,16 @@ SELECT id, VECTOR_TO_STRING(v) FROM tg1 FORCE INDEX (PRIMARY);
 id	VECTOR_TO_STRING(v)
 1	[1.00000e+00,1.00000e+00,1.00000e+00,1.00000e+00,1.00000e+00,1.00000e+00,1.00000e+00,1.00000e+00]
 vec_hnsw_<TID>_<IID>.ibd
-# G.4 First ADD VECTOR INDEX stays native: gate checks the OLD
-# table, which has no vector index yet — mirrors FTS's
-# first-ADD-FULLTEXT native rebuild.
+# G.4 First ADD VECTOR INDEX: refused for INPLACE since PS-11300 —
+# the native rebuild would stamp vec_idx_id but leave the aux
+# empty and no graph built (an incomplete index over existing
+# rows). The server-picked fallback is COPY, whose per-row
+# write_row path builds the graph and populates the aux.
 CREATE TABLE tg2 (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(8));
 INSERT INTO tg2 VALUES (1, STRING_TO_VECTOR('[2,2,2,2,2,2,2,2]'));
 ALTER TABLE tg2 ADD VECTOR KEY vk (v) TYPE hnsw, ALGORITHM=INPLACE;
+ERROR 0A000: ALGORITHM=INPLACE is not supported. Reason: InnoDB does not support rebuilding a table with a vector index in-place; the vector index contents cannot be carried across a native rebuild. Try ALGORITHM=COPY.
+ALTER TABLE tg2 ADD VECTOR KEY vk (v) TYPE hnsw;
 SELECT id, VECTOR_TO_STRING(v) FROM tg2 FORCE INDEX (PRIMARY);
 id	VECTOR_TO_STRING(v)
 1	[2.00000e+00,2.00000e+00,2.00000e+00,2.00000e+00,2.00000e+00,2.00000e+00,2.00000e+00,2.00000e+00]

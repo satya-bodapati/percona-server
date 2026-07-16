@@ -110,6 +110,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ut0new.h"
 #include "ut0stage.h"
 #include "vec0aux.h"
+#include "vec0index.h"
 
 /* For supporting Native InnoDB Partitioning. */
 #include "ha_innopart.h"
@@ -1047,6 +1048,25 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
     ha_alter_info->unsupported_reason =
         innobase_get_err_msg(ER_TOO_MANY_FIELDS);
     return HA_ALTER_INPLACE_NOT_SUPPORTED;
+  }
+
+  /* ADD VECTOR INDEX is never INPLACE: the native rebuild would stamp
+  vec_idx_id on every row but leave the aux table empty and no HNSW
+  graph built — an incomplete index over existing rows. Falling back
+  to ALGORITHM=COPY routes every copied row through write_row, which
+  builds the graph and populates the aux organically (PS-11300).
+  DEVIATION FROM FTS: FTS allows INPLACE ADD because it has a real
+  index-build pass (row0ft); revisit if an HNSW build-during-rebuild
+  is implemented. Rebuilds where a vector index SURVIVES are refused
+  further down (vec_aux_table_has_vector_index gate). */
+  for (uint i = 0; i < ha_alter_info->index_add_count; i++) {
+    const KEY *key =
+        &ha_alter_info->key_info_buffer[ha_alter_info->index_add_buffer[i]];
+    if (key->flags & HA_VECTOR) {
+      ha_alter_info->unsupported_reason =
+          innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR);
+      return HA_ALTER_INPLACE_NOT_SUPPORTED;
+    }
   }
 
   /* We don't support change encryption attribute with inplace algorithm. */
@@ -7658,7 +7678,7 @@ after a successful commit_try_norebuild() call.
         exclusive MDL, so no writer is inside the graph). Rebuild and
         DROP TABLE paths need no call: their dict_table_t is freed and
         dict_mem_table_free closes the graph. */
-        vec_close(index->table);
+        vec_index_for(index->table)->close(index->table);
         (void)vec_aux_drop_one_table(trx, index->table, index->id);
       }
 

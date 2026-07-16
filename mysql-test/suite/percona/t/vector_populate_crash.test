@@ -1,0 +1,48 @@
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+--echo #
+--echo # PS-11300 C7: crash atomicity. The aux rows ride the user
+--echo # transaction, so a server crash between the row operations and
+--echo # the commit must recover to NEITHER the base row NOR its aux
+--echo # rows — and a crash after commit must recover to BOTH.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(4),
+                 VECTOR KEY (v) TYPE hnsw WITH (M = 4));
+
+INSERT INTO t1 VALUES (100, STRING_TO_VECTOR('[1,0,0,0]'));
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # Crash BEFORE the commit of an insert: recovery rolls the
+--echo # transaction back — base row and aux rows both absent.
+--exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+SET SESSION debug = '+d,crash_commit_before';
+--error 2013
+INSERT INTO t1 VALUES (101, STRING_TO_VECTOR('[0,1,0,0]'));
+--source include/wait_until_connected_again.inc
+
+SELECT id FROM t1 ORDER BY id;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # And the graph reloaded from that recovered aux keeps working:
+--echo # the counter must not reuse the committed id 1.
+INSERT INTO t1 VALUES (102, STRING_TO_VECTOR('[0,0,1,0]'));
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # Crash AFTER commit: both sides recover to present.
+--exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+SET SESSION debug = '+d,crash_commit_after';
+--error 2013
+INSERT INTO t1 VALUES (103, STRING_TO_VECTOR('[0,0,0,1]'));
+--source include/wait_until_connected_again.inc
+
+SELECT id FROM t1 ORDER BY id;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+DROP TABLE t1;

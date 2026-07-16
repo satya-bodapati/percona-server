@@ -1,13 +1,10 @@
 #
-# PS-11299: ALTER ADD VECTOR INDEX on a table with existing data.
+# PS-11299/PS-11300: ALTER ADD VECTOR INDEX on a table with data.
 #
-# The ADD forces a rebuild (vec_idx_id must materialise on a
-# fresh dict_table_t with current_row_version = 0; see PS-11299
-# rebuild-forcing rule). The rebuild's row copy must:
-#   - populate vec_idx_id on each copied row via the per-table
-#     counter (commit 1's helper);
-#   - leave the vector index aux .ibd empty (HNSW build is
-#     PS-11300, no row-level work here).
+# Since PS-11300 the ADD goes through ALGORITHM=COPY (INPLACE is
+# refused — it cannot build the graph): every copied row passes
+# through write_row, which stamps vec_idx_id, adds the point to
+# the HNSW graph, and persists it to the aux table.
 #
 # === Build a populated table WITHOUT a vector index ===
 CREATE TABLE t1 (
@@ -53,8 +50,19 @@ id	k	v_text
 SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
 COUNT(*)
 5
-# === Aux .ibd created, holds 0 user rows (HNSW = PS-11300) ===
+# === Aux .ibd created and POPULATED by the COPY (one graph row
+# === per copied base row, compact ids 1..5) ===
 vec_hnsw_<TID>_<IID>.ibd
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+count=5 max_id=5 invisible=0
+id=1 level=1 nb=2:3:4:5|
+id=2 level=0 nb=1:3:4:5
+id=3 level=0 nb=1:2:4:5
+id=4 level=0 nb=1:2:3:5
+id=5 level=0 nb=1:2:3:4
+
 # === Further INSERTs after the rebuild continue to work ===
 INSERT INTO t1 VALUES
 (6, 60, STRING_TO_VECTOR('[6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0]'));
