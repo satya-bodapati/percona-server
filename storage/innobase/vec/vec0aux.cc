@@ -542,12 +542,21 @@ In-memory HNSW graph state (PS-11300 phase 2a). */
 /** Total bytes charged by all in-memory vector graphs. */
 static std::atomic<uint64_t> vec_mem_total{0};
 
+/** Budget for the above; bound to the innodb_hnsw_max_memory sysvar
+in ha_innodb.cc (see the header comment for the FTS deviation). */
+unsigned long long vec_hnsw_max_memory;
+
 uint64_t vec_total_memory() { return vec_mem_total.load(); }
 
 /** The hnsw runtime of `table`, or nullptr. This file allocated it
 (vec_open), so this file alone may interpret the subtype (SPANN R2). */
 static inline vec_t *vec_hnsw(const dict_table_t *table) {
   return static_cast<vec_t *>(table->vec);
+}
+
+/** @return true if charging `extra` bytes would cross the budget */
+static bool vec_mem_would_exceed(uint64_t extra) {
+  return vec_mem_total.load() + extra > vec_hnsw_max_memory;
 }
 
 static void vec_mem_charge(vec_t *vec, uint64_t bytes) {
@@ -767,6 +776,19 @@ static dberr_t vec_load_locked(vec_t *vec, THD *thd) {
   for (const auto &row : rows) {
     bytes += vec->hnsw->size_links_per_element_ * std::get<1>(row);
   }
+
+  if (vec_mem_would_exceed(bytes)) {
+    ib::warn() << "Vector index graph for " << table->name.m_name << " needs "
+               << bytes << " bytes but innodb_hnsw_max_memory is "
+               << vec_hnsw_max_memory << " (in use: " << vec_mem_total.load()
+               << "). Not loading; raise the limit to enable inserts.";
+    delete vec->hnsw;
+    vec->hnsw = nullptr;
+    delete vec->space;
+    vec->space = nullptr;
+    return DB_OUT_OF_MEMORY;
+  }
+
   vec_mem_charge(vec, bytes);
 
   /* Counter restoration: ids strictly increase past everything the aux
@@ -813,6 +835,13 @@ dberr_t vec_insert_point(trx_t *trx, dict_table_t *table, THD *thd, uint64_t id,
     return DB_TABLE_NOT_FOUND;
   }
 
+  /* Terminal past the budget: per-node link charges can cross the
+  limit without a resize, so gate every insert, not just growth. */
+  if (vec_mem_would_exceed(0)) {
+    vec_aux_close_for_dml(aux, thd, &mdl);
+    return DB_OUT_OF_MEMORY;
+  }
+
   vec_addpoint_ctx_t ctx;
   ctx.trx = trx;
   ctx.vec = vec;
@@ -842,6 +871,13 @@ dberr_t vec_insert_point(trx_t *trx, dict_table_t *table, THD *thd, uint64_t id,
     if (vec->hnsw->cur_element_count.load() >= vec->hnsw->max_elements_) {
       const size_t old_max = vec->hnsw->max_elements_;
       const size_t new_max = old_max * 2;
+      const uint64_t extra = static_cast<uint64_t>(new_max - old_max) *
+                             vec->hnsw->size_data_per_element_;
+      if (vec_mem_would_exceed(extra)) {
+        rw_lock_x_unlock(&vec->latch);
+        vec_aux_close_for_dml(aux, thd, &mdl);
+        return DB_OUT_OF_MEMORY;
+      }
       try {
         vec->hnsw->resizeIndex(new_max);
       } catch (...) {
@@ -849,8 +885,7 @@ dberr_t vec_insert_point(trx_t *trx, dict_table_t *table, THD *thd, uint64_t id,
         vec_aux_close_for_dml(aux, thd, &mdl);
         return DB_OUT_OF_MEMORY;
       }
-      vec_mem_charge(vec, static_cast<uint64_t>(new_max - old_max) *
-                              vec->hnsw->size_data_per_element_);
+      vec_mem_charge(vec, extra);
     }
     rw_lock_x_unlock(&vec->latch);
     rw_lock_s_lock(&vec->latch, UT_LOCATION_HERE);
