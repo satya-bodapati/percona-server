@@ -67,6 +67,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ut0new.h"
 #include "ut0pool.h"
 #include "ut0vec.h"
+#include "vec0aux.h"
 
 #include "my_dbug.h"
 #include "mysql/plugin.h"
@@ -2146,6 +2147,11 @@ written */
   if (trx->fts_trx != nullptr) {
     trx_finalize_for_fts(trx, trx->undo_no != 0);
   }
+
+  /* Committed graph mutations need no inversion — drop the tracking
+  list (a full rollback already inverted and freed it before reaching
+  this commit-of-the-rollback). */
+  vec_trx_free(trx);
 
   trx_mutex_enter(trx);
   trx->dict_operation = TRX_DICT_OP_NONE;

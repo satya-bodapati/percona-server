@@ -1189,6 +1189,15 @@ struct trx_t {
                             transaction hasn't modified tables
                             with FTS indexes (yet). */
   doc_id_t fts_next_doc_id; /* The document id used for updates */
+
+  /** Vector-index graph mutations made by this transaction, or NULL
+  if it has not touched a table with a vector index (lazily created,
+  like fts_trx above). Undo restores the AUX rows; this list is what
+  lets rollback invert the IN-MEMORY graph too: entries at or past
+  the rolled-back-to undo number are inverted in reverse order
+  (ADDED -> markDelete, MARKED -> unmarkDelete) by vec_trx_rollback,
+  and the list is freed at commit (PS-11300-design.md par 7). */
+  struct vec_trx_ops_t *vec_ops;
   /*------------------------------*/
   uint32_t flush_tables; /*!< if "covering" the FLUSH TABLES",
                             count of tables being flushed. */
