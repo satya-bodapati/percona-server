@@ -190,12 +190,16 @@ SELECT id, VECTOR_TO_STRING(v) FROM tg1 FORCE INDEX (PRIMARY);
 --replace_regex /vec_[0-9a-f]+_[0-9a-f]+\.ibd/vec_<TID>_<IID>.ibd/
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
 
---echo # G.4 First ADD VECTOR INDEX stays native: gate checks the OLD
---echo # table, which has no vector index yet — mirrors FTS's
---echo # first-ADD-FULLTEXT native rebuild.
+--echo # G.4 First ADD VECTOR INDEX: refused for INPLACE since PS-11300 —
+--echo # the native rebuild would stamp vec_idx_id but leave the aux
+--echo # empty and no graph built (an incomplete index over existing
+--echo # rows). The server-picked fallback is COPY, whose per-row
+--echo # write_row path builds the graph and populates the aux.
 CREATE TABLE tg2 (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(8));
 INSERT INTO tg2 VALUES (1, STRING_TO_VECTOR('[2,2,2,2,2,2,2,2]'));
+--error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
 ALTER TABLE tg2 ADD VECTOR KEY vk (v) TYPE hnsw, ALGORITHM=INPLACE;
+ALTER TABLE tg2 ADD VECTOR KEY vk (v) TYPE hnsw;
 SELECT id, VECTOR_TO_STRING(v) FROM tg2 FORCE INDEX (PRIMARY);
 
 DROP TABLE tg1, tg2;

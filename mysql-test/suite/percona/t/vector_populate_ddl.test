@@ -1,0 +1,84 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # PS-11300 C7: DDL on tables whose vector aux holds real graph data.
+--echo # Every DDL must leave base rows, aux rows and the reloadable graph
+--echo # consistent: COPY rebuild compacts, TRUNCATE resets, RENAME carries,
+--echo # DROP/re-ADD INDEX re-mints, DROP TABLE removes everything.
+--echo #
+
+--let $MYSQLD_DATADIR = `SELECT @@datadir`
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(4),
+                 VECTOR KEY (v) TYPE hnsw WITH (M = 4, ef_construction = 32));
+
+INSERT INTO t1 VALUES (100, STRING_TO_VECTOR('[1,0,0,0]')),
+                      (101, STRING_TO_VECTOR('[0,1,0,0]')),
+                      (102, STRING_TO_VECTOR('[0,0,1,0]'));
+--echo # Punch a hole in the id sequence so compaction is observable.
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (103, STRING_TO_VECTOR('[9,9,9,9]')), (100, STRING_TO_VECTOR('[8,8,8,8]'));
+INSERT INTO t1 VALUES (104, STRING_TO_VECTOR('[0,0,0,1]'));
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo #
+--echo # COPY rebuild: every row re-runs write_row on the new table —
+--echo # the aux is re-minted with compact ids 1..4 and no holes.
+--echo #
+ALTER TABLE t1 FORCE, ALGORITHM=COPY;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+SELECT id FROM t1 ORDER BY id;
+
+--echo # INPLACE rebuild with a surviving vector index stays refused.
+--error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
+ALTER TABLE t1 FORCE, ALGORITHM=INPLACE;
+
+--echo #
+--echo # RENAME (both kinds): data and graph ride along; the aux is
+--echo # addressed by the new table name afterwards.
+--echo #
+RENAME TABLE t1 TO t1r;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1r';
+SELECT @@session.innodb_interpreter_output;
+ALTER TABLE t1r RENAME TO t1;
+INSERT INTO t1 VALUES (105, STRING_TO_VECTOR('[1,1,0,0]'));
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo #
+--echo # TRUNCATE: aux emptied, counter reset — the first insert after
+--echo # it gets id 1 again.
+--echo #
+TRUNCATE TABLE t1;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+INSERT INTO t1 VALUES (200, STRING_TO_VECTOR('[0.5,0.5,0.5,0.5]'));
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo #
+--echo # DROP VECTOR INDEX with data: aux table and graph go away, base
+--echo # rows stay. Re-ADD re-mints a fresh aux populated via COPY.
+--echo #
+INSERT INTO t1 VALUES (201, STRING_TO_VECTOR('[0.1,0.2,0.3,0.4]'));
+ALTER TABLE t1 DROP KEY v;
+--list_files $MYSQLD_DATADIR/test vec_*.ibd
+SELECT id FROM t1 ORDER BY id;
+ALTER TABLE t1 ADD VECTOR KEY v (v) TYPE hnsw WITH (M = 4);
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo #
+--echo # Everything above survives a restart via load-on-first-access.
+--echo #
+--source include/restart_mysqld.inc
+INSERT INTO t1 VALUES (202, STRING_TO_VECTOR('[0.9,0.9,0,0]'));
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # DROP TABLE removes the aux .ibd with the data in it.
+DROP TABLE t1;
+--list_files $MYSQLD_DATADIR/test vec_*.ibd
