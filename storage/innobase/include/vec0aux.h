@@ -243,8 +243,16 @@ dberr_t vec_insert_point(trx_t *trx, dict_table_t *table, THD *thd, uint64_t id,
 tables that never opened a graph. */
 void vec_close(dict_table_t *table);
 
-/** Total bytes currently charged by all in-memory vector graphs
-(the C5 budget reads this). */
+/** Total bytes currently charged by all in-memory vector graphs. */
 uint64_t vec_total_memory();
+
+/** innodb_hnsw_max_memory: byte budget for ALL in-memory HNSW graphs.
+Graph loads and capacity growth that would cross it are refused — the
+INSERT (or the deferred load) fails with DB_OUT_OF_MEMORY until the
+limit is raised. DEVIATION FROM FTS: innodb_ft_total_cache_size is
+READONLY and triggers sync-to-disk when crossed; graphs cannot spill,
+so ours refuses growth instead and is dynamic (SET GLOBAL) so a stuck
+workload can be unblocked without restart. */
+extern unsigned long long vec_hnsw_max_memory;
 
 #endif /* vec0aux_h */

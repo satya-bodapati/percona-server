@@ -23954,6 +23954,14 @@ static MYSQL_SYSVAR_ULONG(
     "InnoDB Fulltext search query result cache limit in bytes", nullptr,
     nullptr, 2000000000L, 1000000L, 4294967295UL, 0);
 
+static MYSQL_SYSVAR_ULONGLONG(
+    hnsw_max_memory, vec_hnsw_max_memory, PLUGIN_VAR_RQCMDARG,
+    "Total memory budget in bytes for in-memory HNSW vector index graphs;"
+    " graph loads and growth beyond it are refused and inserts into vector"
+    " indexes fail until the limit is raised",
+    nullptr, nullptr, 4ULL << 30 /* 4GB */, 1ULL << 20 /* 1MB */, ULLONG_MAX,
+    0);
+
 static MYSQL_SYSVAR_ULONG(
     ft_min_token_size, fts_min_token_size,
     PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
@@ -24829,6 +24837,7 @@ static SYS_VAR *innobase_system_variables[] = {
     MYSQL_SYSVAR(fill_factor),
     MYSQL_SYSVAR(ft_cache_size),
     MYSQL_SYSVAR(ft_total_cache_size),
+    MYSQL_SYSVAR(hnsw_max_memory),
     MYSQL_SYSVAR(ft_result_cache_limit),
     MYSQL_SYSVAR(ft_enable_stopword),
     MYSQL_SYSVAR(ft_max_token_size),
