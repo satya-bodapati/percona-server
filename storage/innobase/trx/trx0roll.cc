@@ -55,6 +55,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "trx0trx.h"
 #include "trx0undo.h"
 #include "usr0sess.h"
+#include "vec0aux.h"
 
 #include "current_thd.h"
 
@@ -117,6 +118,11 @@ static void trx_rollback_to_savepoint_low(
     /* Free the memory reserved by the undo graph. */
     que_graph_free(static_cast<que_t *>(roll_node->undo_thr->common.parent));
   }
+
+  /* Invert the vector-graph mutations whose aux rows the undo pass
+  above just removed. Must precede trx_rollback_finish: its commit
+  frees the tracking list (PS-11300-design.md par 7). */
+  vec_trx_rollback(trx, savept);
 
   if (savept == nullptr) {
     trx_rollback_finish(trx);

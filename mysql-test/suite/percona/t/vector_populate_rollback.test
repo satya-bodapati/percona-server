@@ -1,0 +1,81 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # PS-11300 C6: transaction rollback inverts the in-memory HNSW graph.
+--echo # The undo log restores the aux rows; the per-trx tracking list
+--echo # (trx->vec_ops) marks the rolled-back nodes deleted in the graph —
+--echo # full rollback, statement rollback, and ROLLBACK TO SAVEPOINT all
+--echo # invert exactly the mutations they undo. Committed rows referencing
+--echo # rolled-back labels (dangling edges) are dropped at reload.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(4),
+                 VECTOR KEY (v) TYPE hnsw WITH (M = 4, ef_construction = 32));
+
+--echo # Full-transaction rollback: aux rows undone (ids 1,2 removed).
+BEGIN;
+INSERT INTO t1 VALUES (100, STRING_TO_VECTOR('[1,0,0,0]'));
+INSERT INTO t1 VALUES (101, STRING_TO_VECTOR('[0,1,0,0]'));
+ROLLBACK;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+SELECT id FROM t1 ORDER BY id;
+
+--echo # Inserts AFTER the rollback keep working in the same graph: the
+--echo # rolled-back nodes are marked deleted, and neighbor updates that
+--echo # target their absent aux rows are skipped, not errors.
+INSERT INTO t1 VALUES (102, STRING_TO_VECTOR('[1,0.1,0,0]')),
+                      (103, STRING_TO_VECTOR('[0,1,0.1,0]')),
+                      (104, STRING_TO_VECTOR('[0,0,1,0]'));
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # ROLLBACK TO SAVEPOINT inverts only past the savepoint: the row
+--echo # before it survives, the row after it is undone, and the insert
+--echo # after the partial rollback proceeds on the same transaction.
+BEGIN;
+INSERT INTO t1 VALUES (105, STRING_TO_VECTOR('[0,0,0,1]'));
+SAVEPOINT s1;
+INSERT INTO t1 VALUES (106, STRING_TO_VECTOR('[0.5,0.5,0,0]'));
+ROLLBACK TO SAVEPOINT s1;
+INSERT INTO t1 VALUES (107, STRING_TO_VECTOR('[0,0.5,0.5,0]'));
+COMMIT;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+SELECT id FROM t1 ORDER BY id;
+
+--echo # Mid-statement failure: statement rollback undoes only that
+--echo # statement's aux rows and marks its graph nodes deleted.
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (200, STRING_TO_VECTOR('[9,9,9,9]')), (102, STRING_TO_VECTOR('[8,8,8,8]'));
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # And inserts continue to work after it, pre-restart.
+INSERT INTO t1 VALUES (108, STRING_TO_VECTOR('[0.2,0.2,0.2,0.2]'));
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo #
+--echo # Reload tolerance: committed aux rows may reference rolled-back
+--echo # labels (a neighbor list persisted before the neighbor's insert
+--echo # rolled back). The graph must load from such an aux, drop the
+--echo # dangling edges, and keep accepting inserts.
+--echo #
+--source include/restart_mysqld.inc
+SET GLOBAL debug = '+d,vec_load_log';
+SELECT id FROM t1 ORDER BY id;
+--let $assert_text = graph reloaded from aux containing dangling references
+--let $assert_select = vec_load: table test/t1
+--let $assert_count = 1
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--source include/assert_grep.inc
+SET GLOBAL debug = '-d,vec_load_log';
+
+INSERT INTO t1 VALUES (109, STRING_TO_VECTOR('[0.9,0,0,0.9]'));
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+SELECT id FROM t1 ORDER BY id;
+
+DROP TABLE t1;

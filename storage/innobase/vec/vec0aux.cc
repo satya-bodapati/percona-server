@@ -639,6 +639,15 @@ static void vec_update_cb(
 
   ctx->err = vec_aux_update_neighbors(ctx->trx, ctx->aux, label, blob.data(),
                                       blob.size());
+
+  /* No aux row for this label: its inserting transaction rolled back
+  (the node survives in the graph marked deleted, and addPoint may
+  still link new points to it). There is nothing to persist — the new
+  node's own row keeps the reference, and loadIndex drops such
+  dangling edges at reload. */
+  if (ctx->err == DB_RECORD_NOT_FOUND) {
+    ctx->err = DB_SUCCESS;
+  }
 }
 
 vec_t *vec_open(dict_table_t *table, uint16_t field_no, uint32_t dims, int M,
@@ -858,9 +867,16 @@ dberr_t vec_insert_point(trx_t *trx, dict_table_t *table, THD *thd, uint64_t id,
     rw_lock_s_lock(&vec->latch, UT_LOCATION_HERE);
   }
 
+  /* Captured BEFORE the aux DML: a rollback undoes this point's aux
+  rows iff it rolls back to (at most) this undo number, and then the
+  tracking entry below inverts the graph side too. */
+  const undo_no_t undo_mark = trx->undo_no;
+
   dberr_t err = DB_SUCCESS;
+  bool node_added = false;
   try {
     vec->hnsw->addPoint(vec_data, id, false, &ctx);
+    node_added = true;
     err = ctx.err;
   } catch (...) {
     /* Mid-flight failure can leave a half-linked node — the one
@@ -872,16 +888,74 @@ dberr_t vec_insert_point(trx_t *trx, dict_table_t *table, THD *thd, uint64_t id,
   rw_lock_s_unlock(&vec->latch);
   vec_aux_close_for_dml(aux, thd, &mdl);
 
-  /* Interim until the rollback-tracking commit (PS-11300-design.md
-  par 7): a callback failure fails the statement and the statement
-  rollback removes the aux rows, but the in-memory node stays —
-  resynchronize via the stale fallback. Rollback tracking replaces
-  this line with per-label markDelete. */
-  if (err != DB_SUCCESS) {
-    vec->stale.store(true);
+  /* Track the node even when a callback failed (err != DB_SUCCESS):
+  the statement will fail and its rollback removes the aux rows; the
+  tracking entry is what marks the in-memory node deleted then. */
+  if (node_added) {
+    vec_trx_record(trx, table, id, vec_trx_op_type::ADDED, undo_mark);
   }
 
   return err;
+}
+
+void vec_trx_record(trx_t *trx, dict_table_t *table, uint64_t label,
+                    vec_trx_op_type type, undo_no_t undo_no) {
+  ut_a(trx != nullptr);
+
+  if (trx->vec_ops == nullptr) {
+    trx->vec_ops =
+        ut::new_withkey<vec_trx_ops_t>(ut::make_psi_memory_key(mem_key_other));
+  }
+  trx->vec_ops->ops.push_back({table, label, type, undo_no});
+}
+
+void vec_trx_rollback(trx_t *trx, const trx_savept_t *savept) {
+  if (trx->vec_ops == nullptr) {
+    return;
+  }
+
+  const undo_no_t limit = savept != nullptr ? savept->least_undo_no : 0;
+  auto &ops = trx->vec_ops->ops;
+
+  /* Entries are appended in undo_no order, so the rolled-back ones
+  are a suffix; invert newest-first, mirroring the undo pass. */
+  while (!ops.empty() && ops.back().undo_no >= limit) {
+    const vec_trx_op_t op = ops.back();
+    ops.pop_back();
+
+    vec_t *vec = op.table->vec;
+    if (vec == nullptr) {
+      continue;
+    }
+
+    rw_lock_s_lock(&vec->latch, UT_LOCATION_HERE);
+    if (vec->loaded && vec->hnsw != nullptr) {
+      try {
+        if (op.type == vec_trx_op_type::ADDED) {
+          vec->hnsw->markDelete(op.label);
+        } else {
+          vec->hnsw->unmarkDelete(op.label);
+        }
+      } catch (...) {
+        /* Label unknown: a stale-exception reload rebuilt the graph
+        from committed rows in between, which already excluded this
+        uncommitted node. Nothing to invert. */
+      }
+    }
+    rw_lock_s_unlock(&vec->latch);
+  }
+
+  if (savept == nullptr) {
+    ut_ad(ops.empty());
+    vec_trx_free(trx);
+  }
+}
+
+void vec_trx_free(trx_t *trx) {
+  if (trx->vec_ops != nullptr) {
+    ut::delete_(trx->vec_ops);
+    trx->vec_ops = nullptr;
+  }
 }
 
 void vec_close(dict_table_t *table) {

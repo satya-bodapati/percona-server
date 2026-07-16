@@ -35,6 +35,7 @@ persistence extensions the InnoDB vector index relies on:
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <random>
@@ -171,6 +172,57 @@ TEST(HnswlibFork, CallbackRowsRoundTripThroughLoadIndex) {
       rb.pop();
     }
   }
+}
+
+/* Dangling neighbor labels are dropped at load, not asserted: a row
+committed by transaction B may reference a label whose inserting
+transaction A rolled back later — A's aux row is gone, B's neighbor
+list still names it. loadIndex must build a valid graph without the
+edge (PS-11300 rollback support). */
+TEST(HnswlibFork, LoadIndexSkipsDanglingNeighborLabels) {
+  L2Space space(DIM);
+  constexpr size_t N = 50;
+
+  HierarchicalNSW<float> a(&space, N, 8, 40);
+  Capture cap;
+  install_capture(&a, &cap);
+  for (uint64_t i = 0; i < N; ++i) {
+    auto v = make_vec(i);
+    a.addPoint(v.data(), i, false, nullptr);
+  }
+
+  /* Simulate label 7's rollback: its row disappears from the aux while
+  every other row keeps whatever references to 7 it had. */
+  std::vector<VecAuxLoadedRowTuple> rows;
+  size_t refs_to_7 = 0;
+  for (auto &kv : cap.rows) {
+    if (kv.first == 7) {
+      continue;
+    }
+    for (const auto &lvl : std::get<3>(kv.second)) {
+      refs_to_7 += std::count(lvl.begin(), lvl.end(), 7);
+    }
+    rows.push_back(kv.second);
+  }
+  ASSERT_GT(refs_to_7, 0u) << "test premise: someone must link to 7";
+
+  HierarchicalNSW<float> b(&space, N, 8, 40);
+  b.loadIndex(rows);
+  ASSERT_EQ(b.cur_element_count.load(), N - 1);
+  EXPECT_EQ(b.label_lookup_.count(7), 0u);
+
+  /* No neighbor list may reference the dropped label, and search over
+  the loaded graph works. */
+  for (auto &kv : b.label_lookup_) {
+    const auto nbl = b.gatherAllNeighborsForNode(kv.second);
+    for (const auto &lvl : nbl) {
+      EXPECT_EQ(std::count(lvl.begin(), lvl.end(), 7), 0)
+          << "label " << kv.first;
+    }
+  }
+  auto probe = make_vec(7);
+  auto res = b.searchKnn(probe.data(), 10);
+  EXPECT_EQ(res.size(), 10u);
 }
 
 /* resizeIndex mid-stream: grow capacity while callbacks stay installed;

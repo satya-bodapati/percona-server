@@ -32,3 +32,9 @@ header-only and compiled into the innobase target — no separate build.
 
 Local policy: keep diffs against upstream minimal; fixes belong upstream
 or in the callback layer, not scattered through the algorithm code.
+
+5. loadIndex(VecAuxLoadedRowTuple): neighbor labels absent from
+   label_lookup_ are skipped instead of asserted. A committed row may
+   reference a label whose inserting transaction rolled back later
+   (cross-transaction link); the aux row for that label is gone, so
+   the edge is dropped at load (PS-11300 rollback support).

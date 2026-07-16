@@ -967,18 +967,25 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                 assert(nbr_cnt <= max_neighbors);
                 assert(nbr_cnt <= static_cast<size_t>(std::numeric_limits<unsigned short>::max()));
                 linklistsizeint *ll = get_linklist_at_level(internal_id, lev);
-                setListCount(ll, static_cast<unsigned short>(nbr_cnt));
                 tableint *data = (tableint *) (ll + 1);
+                size_t kept = 0;
                 for (size_t j = 0; j < nbr_cnt; ++j) {
                     const labeltype nlab =
                         static_cast<labeltype>((*nbr_labels)[j]);
                     auto it = label_lookup_.find(nlab);
-                    assert(it != label_lookup_.end());
+                    if (it == label_lookup_.end()) {
+                        // Percona: dangling neighbor label — the referenced
+                        // row's inserting transaction rolled back after this
+                        // row's transaction committed a link to it. The label
+                        // has no row, so drop the edge (PS-11300).
+                        continue;
+                    }
                     const tableint nid = it->second;
                     assert(nid != internal_id);
                     assert(element_levels_[nid] >= lev);
-                    data[j] = nid;
+                    data[kept++] = nid;
                 }
+                setListCount(ll, static_cast<unsigned short>(kept));
             }
         }
 

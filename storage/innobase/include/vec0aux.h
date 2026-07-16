@@ -246,6 +246,51 @@ void vec_close(dict_table_t *table);
 /** Total bytes currently charged by all in-memory vector graphs. */
 uint64_t vec_total_memory();
 
+/* ------------------------------------------------------------------
+Per-transaction graph-mutation tracking (rollback support).
+
+The aux rows a transaction writes are protected by the undo log like
+any row. The in-memory graph is not: without tracking, a rolled-back
+INSERT leaves a live node whose aux row is gone. Each graph mutation
+is therefore recorded on the transaction and inverted when (and only
+as far as) the transaction rolls back. */
+
+enum class vec_trx_op_type : uint8_t {
+  /** addPoint ran for this label; rollback marks it deleted */
+  ADDED,
+  /** markDelete ran for this label (DELETE); rollback unmarks it */
+  MARKED,
+};
+
+struct vec_trx_op_t {
+  dict_table_t *table; /*!< base table (pinned by the trx's locks) */
+  uint64_t label;      /*!< vec_idx_id of the affected node */
+  vec_trx_op_type type;
+  undo_no_t undo_no; /*!< trx->undo_no BEFORE the mutation's aux DML;
+                     the op is inverted iff the rollback target is at
+                     or below this number */
+};
+
+struct vec_trx_ops_t {
+  std::vector<vec_trx_op_t> ops; /*!< in undo_no order (appended) */
+};
+
+/** Record one graph mutation on the transaction (lazily allocates
+trx->vec_ops). */
+void vec_trx_record(trx_t *trx, dict_table_t *table, uint64_t label,
+                    vec_trx_op_type type, undo_no_t undo_no);
+
+/** Invert the graph mutations undone by a rollback. Called from
+trx_rollback_to_savepoint_low after the undo pass; savept == nullptr
+means full rollback (invert everything and free the list). Inversion
+is in REVERSE order of recording. A label the graph no longer knows
+(a stale-exception reload happened in between) is silently skipped —
+the reload already excluded uncommitted rows. */
+void vec_trx_rollback(trx_t *trx, const trx_savept_t *savept);
+
+/** Free trx->vec_ops without inverting (commit path). */
+void vec_trx_free(trx_t *trx);
+
 /** innodb_hnsw_max_memory: byte budget for ALL in-memory HNSW graphs.
 Graph loads and capacity growth that would cross it are refused — the
 INSERT (or the deferred load) fails with DB_OUT_OF_MEMORY until the
