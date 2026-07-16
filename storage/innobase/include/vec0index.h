@@ -26,18 +26,37 @@ this program; if not, write to the Free Software Foundation, Inc.,
 *****************************************************************************/
 
 /** @file include/vec0index.h
-The vector-index TYPE registry.
+The vector-index type seam (SPANN plan, commit R1).
 
-A vector index TYPE is an identity (Vec_index_type) plus an
-implementation singleton (Vector_index); the registry binds the two to
-the string token SQL uses. Runtime operations are added to the
-interface by the commits that implement them. */
+One abstract interface over the per-type runtime operations of a vector
+index, so a second index TYPE (spann) can be added without touching the
+HNSW implementation or the call sites again. Deliberately MINIMAL:
+only the operations that exist today, no speculative hooks — methods
+are added when a second implementation demands them.
+
+What is BEHIND the seam (type-specific runtime):
+  open / load / insert / remove / refresh_row_ref / knn / size_hint /
+  build / close / recreate_after_import.
+
+What deliberately STAYS OUTSIDE (type-independent machinery):
+  aux naming + predicates, the hidden vec_idx_id column, the label
+  counter and its persistence, prebuilt fetch-time capture, the
+  trx-rollback plumbing (implementations record into it or not), the
+  memory budget. Aux-table DDL lifecycle (create/drop/rename/detach)
+  also stays direct until commit S1 introduces the second aux schema.
+
+The R1 couplings are retired by R2: dict_table_t::vec is the generic
+Vec_runtime base (identity fields only — the gates and field_no/dims
+peeks at the call sites are type-agnostic reads of it), and each
+runtime carries a back-pointer to the Vector_index implementation that
+allocated it, so dispatch never re-resolves the TYPE while a runtime
+is open. Only the allocating implementation may interpret the
+subtype (vec_t for hnsw). */
 
 #ifndef vec0index_h
 #define vec0index_h
 
-#include <cstddef>
-#include <cstdint>
+#include "vec0aux.h"
 
 /** The registered vector index TYPEs. The enum value is the identity
 used everywhere the type is already known (registry indexing, runtime
@@ -49,20 +68,43 @@ enum class Vec_index_type : uint8_t {
   /* SPANN = 1 — added by commit S1 */
 };
 
-/** Per-TYPE vector-index implementations: STATELESS singletons. */
+/** Per-TYPE vector-index runtime operations. Implementations are
+STATELESS singletons — all per-index state lives in the dict_table_t
+companion (vec_t for hnsw), so there is no lifetime to manage here. */
 class Vector_index {
  public:
   virtual ~Vector_index() = default;
 
   /** @return this implementation's registered TYPE */
   [[nodiscard]] virtual Vec_index_type type() const = 0;
+
+  /** Get-or-create the per-table companion (lazy). See vec_open. */
+  virtual void open(dict_table_t *table, uint16_t field_no, uint32_t dims,
+                    int M, int ef_construction) const = 0;
+
+  /** Build/refresh the in-memory runtime from the aux. See vec_load. */
+  [[nodiscard]] virtual dberr_t load(dict_table_t *table, THD *thd) const = 0;
+
+  /** Index one new point on the USER transaction. See vec_insert_point. */
+  [[nodiscard]] virtual dberr_t insert(trx_t *trx, dict_table_t *table,
+                                       THD *thd, uint64_t label,
+                                       const float *vec_data,
+                                       const byte *row_ref,
+                                       ulint row_ref_len) const = 0;
+
+  /** Free the in-memory runtime. Safe on tables that never opened
+  one. See vec_close. */
+  virtual void close(dict_table_t *table) const = 0;
 };
 
 /** Look up the implementation registered under a TYPE token, e.g. the
 "hnsw" of CREATE ... VECTOR KEY (v) TYPE hnsw (case-insensitive; the
-token is not necessarily NUL-terminated). Registering a new TYPE is
-one entry in vec_type_registry[] (vec0index.cc); rejecting unknown
-TYPEs at CREATE/ALTER is what keeps them out of every engine path.
+token is not necessarily NUL-terminated). String lookup is for the
+boundaries only — DDL validation (parse_options) and the sites reading
+KEY::vector_index_type at open/build; once the type is known, use
+vec_index_by_enum(). Registering a new TYPE is one entry in
+vec_type_registry[] (vec0index.cc); rejecting unknown TYPEs at
+CREATE/ALTER is what keeps them out of every engine path.
 @return the implementation, or nullptr for an unknown TYPE */
 [[nodiscard]] const Vector_index *vec_index_by_name(const char *token,
                                                     size_t len);
@@ -75,5 +117,14 @@ embedded in aux table names (vec_<token>_<tid>_<iid>, SPANN R4) and
 printed by SHOW CREATE. Tokens are lowercase ASCII identifiers and
 MUST NOT contain '_' (the aux-name field separator). */
 [[nodiscard]] const char *vec_index_token(Vec_index_type type);
+
+/** Resolve the runtime for `table`'s vector index.
+
+R1: always the HNSW singleton — the only registered TYPE — and
+therefore safe to call for ANY table (close() etc. no-op on tables
+without a vector runtime, preserving today's semantics). R2 turns this
+into a registry lookup keyed by the index's TYPE token.
+@return never nullptr */
+[[nodiscard]] const Vector_index *vec_index_for(const dict_table_t *table);
 
 #endif /* vec0index_h */

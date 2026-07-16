@@ -42,6 +42,8 @@ external tools. */
 #ifndef UNIV_HOTBACKUP
 #ifndef UNIV_LIBRARY
 #include "lock0lock.h"
+#include "vec0aux.h"
+#include "vec0index.h"
 #endif /* !UNIV_LIBRARY */
 #endif /* !UNIV_HOTBACKUP */
 
@@ -106,6 +108,11 @@ void dict_mem_table_free(dict_table_t *table) /*!< in: table */
       fts_free(table);
     }
   }
+
+  /* Free the in-memory vector runtime, if this table built one — the
+  vec analog of fts_free above (dict-cache eviction and shutdown both
+  land here). Runs for EVERY table; close() no-ops without a runtime. */
+  vec_index_for(table)->close(table);
 
   dict_table_mutex_destroy(table);
 
@@ -248,6 +255,7 @@ dict_table_t *dict_mem_table_create(const char *name, space_id_t space,
   table->autoinc_persisted = 0;
   table->autoinc_field_no = ULINT_UNDEFINED;
   table->vec_idx_id_col = ULINT_UNDEFINED;
+  table->vec = nullptr;
   /* Placement-new the std::atomic on the heap-allocated struct
   (the whole dict_table_t sits in a memory heap; no default ctor
   ran on this field). Mirrors the ULINT_UNDEFINED init above for

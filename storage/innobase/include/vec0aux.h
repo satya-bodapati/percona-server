@@ -36,10 +36,23 @@ pars_sql/que_eval_sql, which serializes on the global pars_mutex. */
 #ifndef vec0aux_h
 #define vec0aux_h
 
+#include <atomic>
+
 #include "data0types.h"
 #include "dict0mem.h"
+#include "sync0rw.h"
 #include "trx0trx.h"
 #include "univ.i"
+
+class THD;
+
+/* Forward declarations so this engine-wide header never pulls in the
+hnswlib headers; only vec0aux.cc sees the library. */
+namespace hnswlib {
+template <typename dist_t>
+class HierarchicalNSW;
+class L2Space;
+}  // namespace hnswlib
 
 /** Lowercase on-disk / DD prefix shared by all vector aux tables. */
 extern const char *VEC_AUX_PREFIX;
@@ -183,5 +196,93 @@ the per-table counter. No-op for tables without the hidden column.
 Allocations come from `heap` so they outlive this call. Called from
 the INSERT path (mirrors fts_create_doc_id). */
 void vec_stamp_idx_id(dict_table_t *table, dtuple_t *row, mem_heap_t *heap);
+
+/* ------------------------------------------------------------------
+In-memory vector runtime state (PS-11300 phase 2a; genericized by
+SPANN R2). */
+
+class Vector_index;
+
+/** What EVERY vector-index runtime shares: the SQL-facing identity of
+the index it serves, plus the type implementation that owns it. One
+instance hangs off dict_table_t::vec while a runtime is open; ONLY the
+implementation that allocated it may interpret the subtype (vec_t for
+TYPE hnsw). Everything type-specific — structure pointers, locking
+discipline, state machine, side maps, memory accounting — lives in the
+subtype, invisible to the rest of the engine. */
+struct Vec_runtime {
+  /** back pointer */
+  dict_table_t *table{nullptr};
+  /** the type implementation that allocated this runtime; set before
+  publication under dict_sys mutex, so teardown can always dispatch
+  table->vec->impl->close() without resolving the TYPE again */
+  const Vector_index *impl{nullptr};
+  /** the (single, PS-11264) vector index this runtime serves */
+  space_index_t index_id{0};
+  /** MySQL field ordinal of the vector column (write_row extraction) */
+  uint16_t field_no{0};
+  /** vector dimensions (floats) */
+  uint32_t dims{0};
+
+  virtual ~Vec_runtime() = default;
+};
+
+/** The TYPE hnsw runtime — the analog of fts_t.
+
+DEVIATION FROM FTS: fts_t carries background-thread state, a token
+cache, an indexes vector and its own allocation heap; vec_t is only the
+graph handle plus parameters, created LAZILY at first table open (FTS
+creates fts_t eagerly in dict_mem_table_create). Promote fields to
+Vec_runtime — not a new global — only if they are provably
+type-independent. */
+struct vec_t : public Vec_runtime {
+  /** HNSW construction parameters, from the WITH() options */
+  int M;
+  int ef_construction;
+  /** graph built from the aux table */
+  bool loaded;
+  /** exception fallback only: an addPoint threw mid-flight and the
+  graph may hold a half-linked node — rebuilt from the aux on next
+  use. Rollback of clean inserts does NOT use this (C6 delete-marks
+  instead). */
+  std::atomic<bool> stale;
+  /** S: addPoint + its callback persistence (concurrent inserts run
+  in parallel — hnswlib locks internally); X: resizeIndex and the
+  exception reload. */
+  rw_lock_t latch;
+  hnswlib::L2Space *space;
+  hnswlib::HierarchicalNSW<float> *hnsw;
+  /** bytes charged against the global budget (consumed by C5) */
+  std::atomic<uint64_t> mem_used;
+};
+
+/** Get-or-create table->vec (lazy; thread-safe via dict_sys mutex).
+Parameters are only applied on creation. `impl` is the Vector_index
+that owns the runtime (stored in Vec_runtime::impl before
+publication). */
+vec_t *vec_open(dict_table_t *table, const Vector_index *impl,
+                uint16_t field_no, uint32_t dims, int M, int ef_construction);
+
+/** Build (or rebuild, if stale) the in-memory graph from the aux table
+under the X latch, install the persistence callbacks, and restore
+table->vec_next_id from the aux's max id. No-op when already loaded and
+not stale. Called at table open — the "first access" load — and as the
+exception fallback. */
+dberr_t vec_load(dict_table_t *table, THD *thd);
+
+/** Insert one point: resize-if-needed, addPoint under the S latch,
+persistence via the callbacks on `trx` (the user transaction). vec_data
+must hold vec->dims floats; row_ref is the serialized base PK. */
+dberr_t vec_insert_point(trx_t *trx, dict_table_t *table, THD *thd, uint64_t id,
+                         const float *vec_data, const byte *row_ref,
+                         ulint row_ref_len);
+
+/** Free the graph, latch and vec_t itself; charge released. Safe on
+tables that never opened a graph. */
+void vec_close(dict_table_t *table);
+
+/** Total bytes currently charged by all in-memory vector graphs
+(the C5 budget reads this). */
+uint64_t vec_total_memory();
 
 #endif /* vec0aux_h */

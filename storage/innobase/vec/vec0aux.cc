@@ -31,6 +31,12 @@ naming. No population — that lands in PS-11300. */
 
 #include "vec0aux.h"
 
+#include <algorithm>
+
+#include "extra/hnswlib/hnswlib.h"
+#include "my_dbug.h"
+#include "vec0dml.h"
+
 #include <cstdio>
 #include <cstring>
 
@@ -528,4 +534,367 @@ dberr_t vec_aux_rename_tables(trx_t *trx, dict_table_t *parent,
     }
   }
   return DB_SUCCESS;
+}
+
+/* ------------------------------------------------------------------
+In-memory HNSW graph state (PS-11300 phase 2a). */
+
+/** Total bytes charged by all in-memory vector graphs. */
+static std::atomic<uint64_t> vec_mem_total{0};
+
+uint64_t vec_total_memory() { return vec_mem_total.load(); }
+
+/** The hnsw runtime of `table`, or nullptr. This file allocated it
+(vec_open), so this file alone may interpret the subtype (SPANN R2). */
+static inline vec_t *vec_hnsw(const dict_table_t *table) {
+  return static_cast<vec_t *>(table->vec);
+}
+
+static void vec_mem_charge(vec_t *vec, uint64_t bytes) {
+  vec->mem_used.fetch_add(bytes);
+  vec_mem_total.fetch_add(bytes);
+}
+
+static void vec_mem_release_all(vec_t *vec) {
+  vec_mem_total.fetch_sub(vec->mem_used.exchange(0));
+}
+
+/** Context passed through addPoint to the persistence callbacks. */
+struct vec_addpoint_ctx_t {
+  trx_t *trx; /* the USER trx — aux DML rides it */
+  vec_t *vec;
+  dict_table_t *aux;   /* opened for this operation */
+  const byte *row_ref; /* serialized base PK */
+  ulint row_ref_len;
+  dberr_t err; /* first callback/aux failure */
+};
+
+/** Open the aux table for a DML operation. No aux MDL: the caller holds
+MDL on the BASE table (write_row / table open), and every DDL that can
+drop the aux takes exclusive base MDL first — same protection argument
+FTS relies on for its aux DML. Fast path is the dict cache; fall back to
+the DD (with MDL) only when evicted. */
+static dict_table_t *vec_aux_open_for_dml(dict_table_t *base,
+                                          space_index_t index_id, THD *thd,
+                                          MDL_ticket **mdl) {
+  char aux_name[MAX_FULL_NAME_LEN];
+  vec_aux_get_table_name(base, index_id, Vec_index_type::HNSW, aux_name,
+                         sizeof(aux_name));
+
+  *mdl = nullptr;
+  dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, false);
+  if (aux == nullptr && thd != nullptr) {
+    aux =
+        dd_table_open_on_name(thd, mdl, aux_name, false, DICT_ERR_IGNORE_NONE);
+  }
+  return aux;
+}
+
+static void vec_aux_close_for_dml(dict_table_t *aux, THD *thd,
+                                  MDL_ticket **mdl) {
+  dd_table_close(aux, *mdl != nullptr ? thd : nullptr, mdl, false);
+}
+
+/** The two persistence callbacks — the aux-table mirror of every graph
+mutation (see PS-11300-design.md §6). Both record the FIRST failure in
+ctx->err; addPoint's caller turns that into a statement error, and the
+statement rollback undoes base row + aux rows together. */
+static void vec_insert_cb(
+    hnswlib::labeltype label, hnswlib::tableint internal_id [[maybe_unused]],
+    const void *data_point,
+    const hnswlib::HierarchicalNSW<float>::NeighborLabelListsByLevel
+        &neighbors_by_level,
+    void *arg) {
+  auto *ctx = static_cast<vec_addpoint_ctx_t *>(arg);
+  if (ctx->err != DB_SUCCESS) {
+    return;
+  }
+
+  std::vector<std::vector<std::size_t>> nbl;
+  nbl.reserve(neighbors_by_level.size());
+  for (const auto &lvl : neighbors_by_level) {
+    nbl.emplace_back(lvl.begin(), lvl.end());
+  }
+  std::vector<byte> blob;
+  vec_aux_serialize_neighbors(nbl, blob);
+
+  vec_aux_row_t row;
+  row.id = label;
+  row.vec = static_cast<const float *>(data_point);
+  row.dims = ctx->vec->dims;
+  row.row_ref = ctx->row_ref;
+  row.row_ref_len = ctx->row_ref_len;
+  row.level = neighbors_by_level.empty()
+                  ? 0
+                  : static_cast<int>(neighbors_by_level.size() - 1);
+  row.neighbors = blob.data();
+  row.neighbors_len = blob.size();
+
+  ctx->err = vec_aux_insert(ctx->trx, ctx->aux, row);
+
+  if (ctx->err == DB_SUCCESS && row.level > 0) {
+    /* Upper-level link lists are allocated per node; charge them
+    incrementally (the level-0 block was charged at capacity). */
+    vec_mem_charge(ctx->vec,
+                   ctx->vec->hnsw->size_links_per_element_ * row.level);
+  }
+}
+
+static void vec_update_cb(
+    hnswlib::labeltype label, hnswlib::tableint internal_id [[maybe_unused]],
+    const void *data_point [[maybe_unused]],
+    const hnswlib::HierarchicalNSW<float>::NeighborLabelListsByLevel
+        &neighbors_by_level,
+    void *arg) {
+  auto *ctx = static_cast<vec_addpoint_ctx_t *>(arg);
+  if (ctx->err != DB_SUCCESS) {
+    return;
+  }
+
+  std::vector<std::vector<std::size_t>> nbl;
+  nbl.reserve(neighbors_by_level.size());
+  for (const auto &lvl : neighbors_by_level) {
+    nbl.emplace_back(lvl.begin(), lvl.end());
+  }
+  std::vector<byte> blob;
+  vec_aux_serialize_neighbors(nbl, blob);
+
+  ctx->err = vec_aux_update_neighbors(ctx->trx, ctx->aux, label, blob.data(),
+                                      blob.size());
+}
+
+vec_t *vec_open(dict_table_t *table, const Vector_index *impl,
+                uint16_t field_no, uint32_t dims, int M, int ef_construction) {
+  ut_a(table != nullptr);
+  ut_a(impl != nullptr);
+
+  if (table->vec != nullptr) {
+    return vec_hnsw(table);
+  }
+
+  dict_sys_mutex_enter();
+  if (table->vec == nullptr) {
+    const dict_index_t *vec_index = nullptr;
+    for (const dict_index_t *idx = table->first_index(); idx != nullptr;
+         idx = idx->next()) {
+      if (idx->is_vector()) {
+        vec_index = idx;
+        break;
+      }
+    }
+    ut_a(vec_index != nullptr);
+
+    auto *vec = ut::new_withkey<vec_t>(ut::make_psi_memory_key(mem_key_other));
+    vec->table = table;
+    vec->impl = impl;
+    vec->index_id = vec_index->id;
+    vec->field_no = field_no;
+    vec->dims = dims;
+    vec->M = M;
+    vec->ef_construction = ef_construction;
+    vec->loaded = false;
+    vec->stale = false;
+    vec->space = nullptr;
+    vec->hnsw = nullptr;
+    vec->mem_used = 0;
+    rw_lock_create(vec_index_rw_lock_key, &vec->latch, LATCH_ID_VEC_INDEX);
+    table->vec = vec;
+  }
+  dict_sys_mutex_exit();
+  return vec_hnsw(table);
+}
+
+/** Build the graph from the aux table. Caller holds vec->latch in X. */
+static dberr_t vec_load_locked(vec_t *vec, THD *thd) {
+  ut_ad(rw_lock_own(&vec->latch, RW_LOCK_X));
+
+  dict_table_t *table = vec->table;
+
+  MDL_ticket *mdl = nullptr;
+  dict_table_t *aux = vec_aux_open_for_dml(table, vec->index_id, thd, &mdl);
+  if (aux == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  std::vector<vec_loaded_row_t> rows;
+  uint64_t raw_max_id = 0;
+  bool saw_invisible = false;
+  dberr_t err =
+      vec_aux_load_rows(aux, vec->dims, &rows, &raw_max_id, &saw_invisible);
+  vec_aux_close_for_dml(aux, thd, &mdl);
+  if (err != DB_SUCCESS) {
+    return err;
+  }
+
+  /* Replace any previous graph (exception-fallback reload). */
+  if (vec->hnsw != nullptr) {
+    delete vec->hnsw;
+    vec->hnsw = nullptr;
+  }
+  if (vec->space != nullptr) {
+    delete vec->space;
+    vec->space = nullptr;
+  }
+  vec_mem_release_all(vec);
+
+  const size_t max_elements = std::max<size_t>(1024, 2 * rows.size());
+
+  try {
+    vec->space = new hnswlib::L2Space(vec->dims);
+    vec->hnsw = new hnswlib::HierarchicalNSW<float>(
+        vec->space, max_elements, vec->M, vec->ef_construction);
+    /* vec_loaded_row_t and hnswlib::VecAuxLoadedRowTuple are the same
+    std::tuple type by construction (vec0dml.h) — pass through. */
+    vec->hnsw->loadIndex(rows);
+  } catch (const std::exception &e) {
+    ib::warn() << "vec_load: graph construction failed for "
+               << table->name.m_name << " (dims=" << vec->dims
+               << " rows=" << rows.size() << " max_elements=" << max_elements
+               << "): " << e.what();
+    delete vec->hnsw;
+    vec->hnsw = nullptr;
+    delete vec->space;
+    vec->space = nullptr;
+    return DB_OUT_OF_MEMORY;
+  }
+
+  vec->hnsw->setAddPointInsertCallback(vec_insert_cb);
+  vec->hnsw->setAddPointUpdateCallback(vec_update_cb);
+
+  /* Level-0 block charged at capacity; upper-level lists per node. */
+  uint64_t bytes =
+      static_cast<uint64_t>(max_elements) * vec->hnsw->size_data_per_element_;
+  for (const auto &row : rows) {
+    bytes += vec->hnsw->size_links_per_element_ * std::get<1>(row);
+  }
+  vec_mem_charge(vec, bytes);
+
+  /* Counter restoration: ids strictly increase past everything the aux
+  has ever committed (raw_max_id includes delete-marked and invisible
+  records; vec_assign_next_idx_id returns fetch_add(1)+1). This is the
+  phase-1 restart-reset fix. */
+  table->vec_next_id.store(raw_max_id);
+
+  vec->loaded = true;
+  vec->stale = false;
+
+  DBUG_EXECUTE_IF("vec_load_log",
+                  ib::info()
+                      << "vec_load: table " << table->name.m_name
+                      << " rows=" << rows.size() << " max_id=" << raw_max_id
+                      << " invisible=" << (saw_invisible ? 1 : 0););
+
+  return DB_SUCCESS;
+}
+
+dberr_t vec_load(dict_table_t *table, THD *thd) {
+  vec_t *vec = vec_hnsw(table);
+  ut_a(vec != nullptr);
+
+  rw_lock_x_lock(&vec->latch, UT_LOCATION_HERE);
+  dberr_t err = DB_SUCCESS;
+  if (!vec->loaded || vec->stale.load()) {
+    err = vec_load_locked(vec, thd);
+  }
+  rw_lock_x_unlock(&vec->latch);
+  return err;
+}
+
+dberr_t vec_insert_point(trx_t *trx, dict_table_t *table, THD *thd, uint64_t id,
+                         const float *vec_data, const byte *row_ref,
+                         ulint row_ref_len) {
+  vec_t *vec = vec_hnsw(table);
+  ut_a(vec != nullptr);
+  ut_a(vec_data != nullptr);
+
+  MDL_ticket *mdl = nullptr;
+  dict_table_t *aux = vec_aux_open_for_dml(table, vec->index_id, thd, &mdl);
+  if (aux == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  vec_addpoint_ctx_t ctx;
+  ctx.trx = trx;
+  ctx.vec = vec;
+  ctx.aux = aux;
+  ctx.row_ref = row_ref;
+  ctx.row_ref_len = row_ref_len;
+  ctx.err = DB_SUCCESS;
+
+  rw_lock_s_lock(&vec->latch, UT_LOCATION_HERE);
+
+  /* Exception-fallback reload (rare; see vec_t::stale). */
+  if (vec->stale.load() || !vec->loaded) {
+    rw_lock_s_unlock(&vec->latch);
+    dberr_t lerr = vec_load(table, thd);
+    if (lerr != DB_SUCCESS) {
+      vec_aux_close_for_dml(aux, thd, &mdl);
+      return lerr;
+    }
+    rw_lock_s_lock(&vec->latch, UT_LOCATION_HERE);
+  }
+
+  /* Grow capacity before it runs out; resizeIndex is the one hnswlib
+  operation that is NOT safe against concurrent addPoint — X latch. */
+  while (vec->hnsw->cur_element_count.load() >= vec->hnsw->max_elements_) {
+    rw_lock_s_unlock(&vec->latch);
+    rw_lock_x_lock(&vec->latch, UT_LOCATION_HERE);
+    if (vec->hnsw->cur_element_count.load() >= vec->hnsw->max_elements_) {
+      const size_t old_max = vec->hnsw->max_elements_;
+      const size_t new_max = old_max * 2;
+      try {
+        vec->hnsw->resizeIndex(new_max);
+      } catch (...) {
+        rw_lock_x_unlock(&vec->latch);
+        vec_aux_close_for_dml(aux, thd, &mdl);
+        return DB_OUT_OF_MEMORY;
+      }
+      vec_mem_charge(vec, static_cast<uint64_t>(new_max - old_max) *
+                              vec->hnsw->size_data_per_element_);
+    }
+    rw_lock_x_unlock(&vec->latch);
+    rw_lock_s_lock(&vec->latch, UT_LOCATION_HERE);
+  }
+
+  dberr_t err = DB_SUCCESS;
+  try {
+    vec->hnsw->addPoint(vec_data, id, false, &ctx);
+    err = ctx.err;
+  } catch (...) {
+    /* Mid-flight failure can leave a half-linked node — the one
+    consumer of the stale+reload fallback (design §7). */
+    vec->stale.store(true);
+    err = DB_OUT_OF_MEMORY;
+  }
+
+  rw_lock_s_unlock(&vec->latch);
+  vec_aux_close_for_dml(aux, thd, &mdl);
+
+  /* Interim until the rollback-tracking commit (PS-11300-design.md
+  par 7): a callback failure fails the statement and the statement
+  rollback removes the aux rows, but the in-memory node stays —
+  resynchronize via the stale fallback. Rollback tracking replaces
+  this line with per-label markDelete. */
+  if (err != DB_SUCCESS) {
+    vec->stale.store(true);
+  }
+
+  return err;
+}
+
+void vec_close(dict_table_t *table) {
+  vec_t *vec = vec_hnsw(table);
+  if (vec == nullptr) {
+    return;
+  }
+  table->vec = nullptr;
+
+  delete vec->hnsw;
+  delete vec->space;
+  vec_mem_release_all(vec);
+  /* No rw_lock_free: that is the in-place ~rw_lock_t call for structs
+  whose destructor never runs (the FTS mem-heap pattern). vec_t is
+  deleted as a C++ object, so the member destructor below does the
+  teardown — calling both trips rw_lock_validate. */
+  ut::delete_(vec);
 }

@@ -26,12 +26,13 @@ this program; if not, write to the Free Software Foundation, Inc.,
 *****************************************************************************/
 
 /** @file vec/vec0index.cc
-The vector-index TYPE registry: one static table binding each TYPE
-token to its implementation singleton. */
+The HNSW implementation of the Vector_index seam (SPANN plan, R1):
+a stateless forwarding shim over the vec0aux free functions. All
+per-index state stays in dict_table_t::vec; rollback tracking stays
+INSIDE vec_insert_point / vec_delete_point — an implementation detail
+this seam deliberately does not expose (spann needs none). */
 
 #include "vec0index.h"
-
-#include "univ.i"
 
 #include "m_string.h"
 
@@ -43,6 +44,25 @@ class Vec_hnsw_index final : public Vector_index {
   [[nodiscard]] Vec_index_type type() const override {
     return Vec_index_type::HNSW;
   }
+
+  void open(dict_table_t *table, uint16_t field_no, uint32_t dims, int M,
+            int ef_construction) const override {
+    (void)vec_open(table, this, field_no, dims, M, ef_construction);
+  }
+
+  [[nodiscard]] dberr_t load(dict_table_t *table, THD *thd) const override {
+    return vec_load(table, thd);
+  }
+
+  [[nodiscard]] dberr_t insert(trx_t *trx, dict_table_t *table, THD *thd,
+                               uint64_t label, const float *vec_data,
+                               const byte *row_ref,
+                               ulint row_ref_len) const override {
+    return vec_insert_point(trx, table, thd, label, vec_data, row_ref,
+                            row_ref_len);
+  }
+
+  void close(dict_table_t *table) const override { vec_close(table); }
 };
 
 const Vec_hnsw_index vec_hnsw_singleton;
@@ -87,4 +107,23 @@ const char *vec_index_token(Vec_index_type type) {
   const auto i = static_cast<size_t>(type);
   ut_a(i < UT_ARR_SIZE(vec_type_registry));
   return vec_type_registry[i].token;
+}
+
+const Vector_index *vec_index_for(const dict_table_t *table) {
+  /* An open runtime is self-describing (SPANN R2): dispatch on the
+  implementation that allocated it — this is what makes teardown
+  (dict_mem_table_free) correct once several TYPEs coexist, without
+  re-resolving the TYPE from the DD. */
+  if (table != nullptr && table->vec != nullptr &&
+      table->vec->impl != nullptr) {
+    return table->vec->impl;
+  }
+
+  /* No runtime open. The token-carrying paths (open, build) resolve
+  via vec_index_by_name() and never reach here; what does reach here
+  is teardown/close on runtime-less tables (a no-op for every type)
+  and IMPORT re-mint before first open. hnsw is the correct answer for
+  all of them while it is the sole registered type; S1 threads the
+  TYPE token through the IMPORT site when the second type lands. */
+  return vec_index_by_enum(Vec_index_type::HNSW);
 }
