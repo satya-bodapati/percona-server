@@ -177,3 +177,33 @@ Mismatch → no activation, exact scan. COSINE/DOT graphs
   via `ef_search`/`ef_construction`/`M`.
 - `WHERE distance(...) <= r` is always exact (never the index) — by design.
 - Query vector must be constant for the statement (no correlated vectors).
+
+## 9. Implementation notes (post-landing, 2026-07-17)
+
+All of S1-S3 landed (`c68d5d42bbc`, `42686d2a4fa`, `01bd09cd22a`).
+Deviations and findings recorded during execution:
+
+- **Handler contract is the FTS idiom**: `JT_VECTOR` +
+  `vec_init/vec_read_first/vec_read_next` on the BASE table's handler,
+  mirroring `JT_FT` + `ft_init/ft_read`. The aux table has no handler
+  surface and is never touched at query time. The prototype's unused
+  `HA_CAN_VECTOR` table flag was not ported; activation keys off the
+  `HA_VECTOR` index flag.
+- **KEY_PART_INFO::field is a key-image copy** in our tree: the
+  activation match compares `field_index()`, never Field pointers
+  (the same trap previously hit by `get_max_dimensions` at open).
+- **COUNT(*) fix**: `ha_innobase::index_flags()` returns 0 for vector
+  keys (FULLTEXT mirror) — the stub B-tree is excluded from scans,
+  ordered reads and keyread. Side effect: SHOW INDEXES reports
+  Collation NULL for vector keys (no HA_READ_ORDER; semantically
+  correct); two phase-1 results re-recorded.
+- **NULL-ordering difference codified**: the exact path sorts
+  NULL-distance rows first (`DISTANCE(NULL,...)` is NULL, NULLs sort
+  first ASC); the index path never returns rows absent from the graph.
+  Documented in `vector_search.test`.
+- **REFRESHED tracking op** (beyond the write-phase doc): the
+  label -> row_ref map repoint on PK-only UPDATE is inverted on
+  rollback via a third `vec_trx_op_type` carrying the old 8-byte
+  image; the aux column itself is restored by the undo log.
+- `ef` is applied by widening the search k (`max(k, ef)`), never by
+  mutating the shared graph's `ef_` (cross-session race).
