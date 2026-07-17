@@ -411,6 +411,86 @@ dberr_t vec_aux_tombstone(trx_t *trx, dict_table_t *aux, uint64_t id) {
                                 true /* row_ref_null */, nullptr, 0);
 }
 
+dberr_t vec_aux_lookup_row_ref(dict_table_t *aux, uint64_t id,
+                               std::string *row_ref_out) {
+  ut_a(aux != nullptr);
+  ut_a(row_ref_out != nullptr);
+
+  row_ref_out->clear();
+
+  dict_index_t *clust = aux->first_index();
+
+  mem_heap_t *heap = mem_heap_create(256, UT_LOCATION_HERE);
+
+  /* Search tuple for the label. Positioning only — no locks and no
+  upd_node, unlike vec_aux_update_row_low. */
+  dtuple_t *ref = dtuple_create(heap, 1);
+  dict_index_copy_types(ref, clust, 1);
+  byte id_buf[8];
+  mach_write_to_8(id_buf, id);
+  dfield_set_data(dtuple_get_nth_field(ref, 0), id_buf, sizeof(id_buf));
+
+  mtr_t mtr;
+  mtr_start(&mtr);
+
+  btr_pcur_t pcur;
+  pcur.open_no_init(clust, ref, PAGE_CUR_LE, BTR_SEARCH_LEAF, 0, &mtr,
+                    UT_LOCATION_HERE);
+
+  const rec_t *rec = pcur.get_rec();
+  if (!page_rec_is_user_rec(rec) ||
+      pcur.get_low_match() < dict_index_get_n_unique(clust)) {
+    /* No such label. The caller treats an empty ref as "unresolvable"
+    and skips the candidate. */
+    mtr_commit(&mtr);
+    mem_heap_free(heap);
+    return DB_RECORD_NOT_FOUND;
+  }
+
+  /* NO read view here, deliberately. This value is only an address: the
+  caller feeds it to row_search_for_mysql, which applies the reader's
+  own view to the BASE row and skips what it may not see. So visibility
+  is decided where it belongs, and reading the latest record here cannot
+  leak a row — at worst it costs one wasted base-table probe. Avoiding a
+  view also avoids a background transaction per search. */
+  ulint *offsets = nullptr;
+  offsets = rec_get_offsets(rec, clust, offsets, ULINT_UNDEFINED,
+                            UT_LOCATION_HERE, &heap);
+
+  /* Position in the clustered-index RECORD, not the user-column
+  ordinal: the record is PK first, then DB_TRX_ID/DB_ROLL_PTR, then the
+  rest. Using the ordinal directly reads DB_ROLL_PTR. */
+  const ulint pos_row_ref =
+      dict_col_get_clust_pos(aux->get_col(VEC_AUX_COL_ROW_REF), clust);
+
+  dberr_t err = DB_SUCCESS;
+  if (rec_get_deleted_flag(rec, dict_table_is_comp(aux))) {
+    /* A rolled-back insert. Its graph node is marked deleted too, so
+    search does not offer the label — being defensive. */
+    err = DB_RECORD_NOT_FOUND;
+  } else if (rec_offs_nth_extern(clust, offsets, pos_row_ref)) {
+    /* Unreachable: the SQL layer restricts vector-indexed tables to a
+    single-column BIGINT UNSIGNED PK, so a row_ref is 8 bytes and never
+    off-page. Composite PKs would have to read the LOB here. */
+    ut_d(ut_error);
+    ut_o(err = DB_RECORD_NOT_FOUND);
+  } else {
+    ulint len = 0;
+    const byte *data =
+        rec_get_nth_field(clust, rec, offsets, pos_row_ref, &len);
+    if (len == UNIV_SQL_NULL) {
+      /* Tombstone: the label has no base row any more. */
+      err = DB_RECORD_NOT_FOUND;
+    } else {
+      row_ref_out->assign(reinterpret_cast<const char *>(data), len);
+    }
+  }
+
+  mtr_commit(&mtr);
+  mem_heap_free(heap);
+  return err;
+}
+
 dberr_t vec_aux_update_row_ref(trx_t *trx, dict_table_t *aux, uint64_t id,
                                const byte *row_ref, ulint row_ref_len) {
   ut_a(row_ref != nullptr);
@@ -537,16 +617,20 @@ dberr_t vec_aux_load_rows(dict_table_t *aux, uint32_t dims,
 
     /* row_ref NULL = tombstone: not part of the graph. Committed
     neighbor lists may still reference it — loadIndex drops those
-    edges (dangling-label tolerance). */
+    edges (dangling-label tolerance). Live rows optionally emit their
+    row_ref image for the label -> base-PK map the kNN path uses. */
     {
       ulint rr_len;
-      rec_get_nth_field(clust, vrec, voffsets, pos_row_ref, &rr_len);
+      (void)rec_get_nth_field(clust, vrec, voffsets, pos_row_ref, &rr_len);
       if (rr_len == UNIV_SQL_NULL) {
         if (dead_labels != nullptr) {
           dead_labels->push_back(id);
         }
         continue;
       }
+      /* Only NULL-ness is examined. The value itself is read per
+      candidate at search time (vec_aux_lookup_row_ref) rather than
+      collected into a resident label -> base-PK map. */
     }
 
     const byte *vec_data;

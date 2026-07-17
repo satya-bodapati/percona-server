@@ -40,7 +40,9 @@ full redo/undo/locking, no global mutex. */
 #define vec0dml_h
 
 #include <cstdint>
+#include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "db0err.h"
@@ -133,6 +135,25 @@ PRIMARY KEY changed under it; the graph node is untouched).
 @return DB_SUCCESS, DB_RECORD_NOT_FOUND if no such id, or error */
 dberr_t vec_aux_update_row_ref(trx_t *trx, dict_table_t *aux, uint64_t id,
                                const byte *row_ref, ulint row_ref_len);
+
+/** Read one label's base-PK image out of the aux table: the search
+path's `label -> row` step, one clustered-index dive per candidate.
+
+Deliberately NOT cached. A resident label -> row_ref map would be one
+entry per indexed row, rebuilt by a full aux scan on every load, and it
+would carry its own liveness and rollback bookkeeping beside the aux's;
+the aux is already keyed by label, so the lookup belongs there.
+
+Takes no locks and uses no read view: the result is only an ADDRESS. The
+caller applies its own read view to the base row, so visibility is
+decided there and a stale address costs at most one wasted probe.
+@param[in]  aux          aux table (opened by the caller)
+@param[in]  id           the label
+@param[out] row_ref_out  base-PK image; emptied on any non-success
+@return DB_SUCCESS, or DB_RECORD_NOT_FOUND when the label has no row_ref
+        (no such row, delete-marked, or tombstoned) */
+dberr_t vec_aux_lookup_row_ref(dict_table_t *aux, uint64_t id,
+                               std::string *row_ref_out);
 
 /** Load every visible row of a vector aux table under a fresh read view
 (background transaction), for graph reconstruction.

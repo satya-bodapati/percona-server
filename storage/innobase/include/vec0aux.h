@@ -37,6 +37,10 @@ pars_sql/que_eval_sql, which serializes on the global pars_mutex. */
 #define vec0aux_h
 
 #include <atomic>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "data0types.h"
 #include "dict0mem.h"
@@ -254,6 +258,13 @@ struct vec_t : public Vec_runtime {
   hnswlib::HierarchicalNSW<float> *hnsw;
   /** bytes charged against the global budget (consumed by C5) */
   std::atomic<uint64_t> mem_used;
+
+  /* No label -> row_ref map. The kNN path resolves a hit's base-PK
+  image with one clustered dive on the aux, which is already keyed by
+  label (vec_aux_lookup_row_ref). Caching it would be one resident entry
+  per indexed row, rebuilt by a full aux scan on every load, plus its
+  own mutex, its own liveness convention and its own rollback inversion
+  beside the ones the aux column already gets from undo. */
 };
 
 /** Get-or-create table->vec (lazy; thread-safe via dict_sys mutex).
@@ -320,6 +331,9 @@ enum class vec_trx_op_type : uint8_t {
   ADDED,
   /** markDelete ran for this label (DELETE); rollback unmarks it */
   MARKED,
+  /* A PK-only UPDATE needs no entry here: it changes only the aux
+  row_ref column, which the undo log restores like any other column.
+  Nothing in memory holds a second copy to invert. */
 };
 
 struct vec_trx_op_t {
@@ -339,6 +353,25 @@ struct vec_trx_ops_t {
 trx->vec_ops). */
 void vec_trx_record(trx_t *trx, dict_table_t *table, uint64_t label,
                     vec_trx_op_type type, undo_no_t undo_no);
+
+/** One kNN hit: closer-first order. */
+struct vec_knn_hit_t {
+  uint64_t label;
+  float dist;
+  std::string row_ref; /*!< empty when the label has no map entry */
+};
+
+/** Approximate kNN over the in-memory graph (loads it on demand).
+Search width is max(k, ef) — hnswlib's ef floor — so `ef` is the
+per-query recall knob without touching the shared graph state.
+markDeleted nodes (tombstones, rolled-back inserts) are excluded by
+hnswlib itself. Results are graph candidates: callers that return
+rows must fetch each row_ref under their own read view and skip
+misses (uncommitted/rolled-back points).
+@return DB_SUCCESS or error (load failure, dims mismatch) */
+dberr_t vec_knn_search(dict_table_t *table, THD *thd, const float *query,
+                       uint32_t dims, size_t k, size_t ef,
+                       std::vector<vec_knn_hit_t> *hits);
 
 /** Invert the graph mutations undone by a rollback. Called from
 trx_rollback_to_savepoint_low after the undo pass; savept == nullptr

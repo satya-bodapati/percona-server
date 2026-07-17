@@ -737,8 +737,8 @@ static dberr_t vec_load_locked(vec_t *vec, THD *thd) {
   std::vector<vec_loaded_row_t> rows;
   uint64_t raw_max_id = 0;
   bool saw_invisible = false;
-  dberr_t err =
-      vec_aux_load_rows(aux, vec->dims, &rows, &raw_max_id, &saw_invisible);
+  dberr_t err = vec_aux_load_rows(aux, vec->dims, &rows, &raw_max_id,
+                                  &saw_invisible, nullptr);
   vec_aux_close_for_dml(aux, thd, &mdl);
   if (err != DB_SUCCESS) {
     return err;
@@ -991,6 +991,9 @@ dberr_t vec_refresh_row_ref(trx_t *trx, dict_table_t *table, THD *thd,
     return DB_TABLE_NOT_FOUND;
   }
 
+  /* The aux column is the only copy of this value, so the undo log is
+  the only inversion needed: nothing in memory has to be tracked or
+  restored for a rollback. */
   dberr_t err = vec_aux_update_row_ref(trx, aux, label, row_ref, row_ref_len);
 
   vec_aux_close_for_dml(aux, thd, &mdl);
@@ -1032,7 +1035,7 @@ void vec_trx_record(trx_t *trx, dict_table_t *table, uint64_t label,
     trx->vec_ops =
         ut::new_withkey<vec_trx_ops_t>(ut::make_psi_memory_key(mem_key_other));
   }
-  trx->vec_ops->ops.push_back({table, label, type, undo_no});
+  trx->vec_ops->ops.push_back(vec_trx_op_t{table, label, type, undo_no});
 }
 
 void vec_trx_rollback(trx_t *trx, const trx_savept_t *savept) {
@@ -1082,6 +1085,74 @@ void vec_trx_free(trx_t *trx) {
     ut::delete_(trx->vec_ops);
     trx->vec_ops = nullptr;
   }
+}
+
+dberr_t vec_knn_search(dict_table_t *table, THD *thd, const float *query,
+                       uint32_t dims, size_t k, size_t ef,
+                       std::vector<vec_knn_hit_t> *hits) {
+  ut_a(hits != nullptr);
+  hits->clear();
+
+  vec_t *vec = vec_hnsw(table);
+  if (vec == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+  if (dims != 0 && dims != vec->dims) {
+    return DB_CORRUPTION;
+  }
+
+  rw_lock_s_lock(&vec->latch, UT_LOCATION_HERE);
+  if (vec->stale.load() || !vec->loaded) {
+    rw_lock_s_unlock(&vec->latch);
+    dberr_t lerr = vec_load(table, thd);
+    if (lerr != DB_SUCCESS) {
+      return lerr;
+    }
+    rw_lock_s_lock(&vec->latch, UT_LOCATION_HERE);
+  }
+
+  const size_t n = vec->hnsw->cur_element_count.load();
+  if (n != 0 && k != 0) {
+    /* hnswlib floors its search width at max(ef_, k): widening k to
+    max(k, ef) makes `ef` a per-query recall knob without mutating the
+    shared graph's ef_ (which would race between sessions). */
+    const size_t kq = std::min(std::max(k, ef), n);
+    try {
+      auto found = vec->hnsw->searchKnnCloserFirst(query, kq);
+      for (const auto &cand : found) {
+        if (hits->size() >= k) {
+          break;
+        }
+        vec_knn_hit_t hit;
+        hit.label = cand.second;
+        hit.dist = cand.first;
+        hits->push_back(std::move(hit));
+      }
+    } catch (...) {
+      rw_lock_s_unlock(&vec->latch);
+      return DB_OUT_OF_MEMORY;
+    }
+  }
+  rw_lock_s_unlock(&vec->latch);
+
+  /* Resolve label -> row_ref from the aux, one dive per candidate.
+  AFTER the latch is released: this reads a B-tree, and no graph state
+  is involved, so holding the latch across it would block writers for
+  the duration of the I/O. One aux open serves the whole batch.
+  Unresolvable labels keep an empty ref and the caller skips them. */
+  if (!hits->empty()) {
+    MDL_ticket *mdl = nullptr;
+    dict_table_t *aux = vec_aux_open_for_dml(table, vec->index_id, thd, &mdl);
+    if (aux == nullptr) {
+      return DB_TABLE_NOT_FOUND;
+    }
+    for (auto &hit : *hits) {
+      (void)vec_aux_lookup_row_ref(aux, hit.label, &hit.row_ref);
+    }
+    vec_aux_close_for_dml(aux, thd, &mdl);
+  }
+
+  return DB_SUCCESS;
 }
 
 void vec_close(dict_table_t *table) {
