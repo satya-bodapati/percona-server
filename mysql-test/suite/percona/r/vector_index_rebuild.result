@@ -1,0 +1,130 @@
+call mtr.add_suppression("Index vk not found or corrupt");
+call mtr.add_suppression("Skip adjustment of root pages for index");
+call mtr.add_suppression("FLUSH TABLES on tables that have a vector index");
+#
+# PS-11300 R1: ADD VECTOR INDEX on a table that retained vec_idx_id
+# (after DROP INDEX, or after IMPORT) runs INPLACE: a clustered scan
+# builds the graph and populates the aux — no table rebuild, no COPY.
+# Labels are the rows' already-stamped ids (unique since counter
+# persistence), so the base table is not written at all.
+#
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(2),
+VECTOR KEY vk (v) TYPE hnsw WITH (M = 4, ef_construction = 32));
+INSERT INTO t1 VALUES (100, STRING_TO_VECTOR('[0,0]')),
+(101, STRING_TO_VECTOR('[1,0]')),
+(102, NULL),
+(103, STRING_TO_VECTOR('[0,3]')),
+(104, STRING_TO_VECTOR('[5,0]'));
+# Punch holes: a rolled-back statement and a DELETE.
+INSERT INTO t1 VALUES (200, STRING_TO_VECTOR('[9,9]')), (100, STRING_TO_VECTOR('[8,8]'));
+ERROR 23000: Duplicate entry '100' for key 't1.PRIMARY'
+DELETE FROM t1 WHERE id = 104;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+count=3 max_id=5 invisible=0 dead=5
+id=1 level=1 nb=2:4:5|
+id=2 level=0 nb=1:4:5
+id=4 level=0 nb=2:1:5
+
+# DROP the index (column retained), remember the table id.
+ALTER TABLE t1 DROP KEY vk;
+SELECT TABLE_ID INTO @tid_before FROM information_schema.INNODB_TABLES
+WHERE NAME = 'test/t1';
+# Re-ADD with explicit INPLACE: allowed now (was refused pre-R1).
+ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 4, ef_construction = 32), ALGORITHM=INPLACE;
+# No-rebuild proof: same TABLE_ID before and after the ADD (a COPY
+# or native rebuild would have re-minted it).
+SELECT TABLE_ID = @tid_before AS same_table_id
+FROM information_schema.INNODB_TABLES WHERE NAME = 'test/t1';
+same_table_id
+1
+# The build reused the rows' stamped ids as labels: 1, 2, 4 (id 3
+# belongs to the NULL row 102, never indexed; 5 was the deleted row
+# 104; 6,7 were consumed by the rolled-back statement).
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+count=3 max_id=4 invisible=0
+id=1 level=1 nb=2:4|
+id=2 level=0 nb=1:4
+id=4 level=0 nb=2:1
+
+# kNN over the rebuilt index is correct, NULL/deleted rows absent.
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 5;
+id
+100
+101
+103
+# Writes keep working against the rebuilt index: new labels continue
+# above everything ever consumed.
+INSERT INTO t1 VALUES (105, STRING_TO_VECTOR('[0,1]'));
+DELETE FROM t1 WHERE id = 101;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+count=3 max_id=8 invisible=0 dead=2
+id=1 level=1 nb=2:4:8|8
+id=4 level=0 nb=2:1:8
+id=8 level=1 nb=4:2:1|1
+
+# And the rebuilt index survives a restart via the normal
+# load-on-first-access path.
+# restart
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 5;
+id
+100
+105
+103
+#
+# First-ever ADD (no retained column) still refuses INPLACE and
+# falls back to COPY when the algorithm is server-picked.
+#
+CREATE TABLE t2 (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(2));
+INSERT INTO t2 VALUES (1, STRING_TO_VECTOR('[1,1]'));
+ALTER TABLE t2 ADD VECTOR KEY (v) TYPE hnsw, ALGORITHM=INPLACE;
+ERROR 0A000: ALGORITHM=INPLACE is not supported. Reason: InnoDB does not support rebuilding a table with a vector index in-place; the vector index contents cannot be carried across a native rebuild. Try ALGORITHM=COPY.
+ALTER TABLE t2 ADD VECTOR KEY (v) TYPE hnsw;
+SELECT id FROM t2 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,1]'), 'EUCLIDEAN') LIMIT 1;
+id
+1
+DROP TABLE t2;
+#
+# Post-import rebuild: IMPORT leaves an empty index; DROP/ADD now
+# rebuilds it INPLACE — the imported rows keep their stamped ids.
+#
+FLUSH TABLES t1 FOR EXPORT;
+Warnings:
+Warning	1235	InnoDB: This version of MySQL doesn't yet support 'FLUSH TABLES on tables that have a vector index. Vector auxiliary tables will not be flushed.'
+Warning	1235	InnoDB: This version of MySQL doesn't yet support 'FLUSH TABLES on tables that have a vector index. Vector auxiliary tables will not be flushed.'
+UNLOCK TABLES;
+Warnings:
+Warning	1235	InnoDB: This version of MySQL doesn't yet support 'FLUSH TABLES on tables that have a vector index. Vector auxiliary tables will not be flushed.'
+ALTER TABLE t1 DISCARD TABLESPACE;
+ALTER TABLE t1 IMPORT TABLESPACE;
+Warnings:
+Warning	1817	InnoDB: Index corrupt: Index vk not found or corrupt, you should recreate this index.
+Warning	1088	Vector index on table test/t1 is empty after IMPORT TABLESPACE: imported rows are not indexed. Rebuild it with ALTER TABLE ... DROP INDEX / ADD INDEX to index them.
+SELECT TABLE_ID INTO @tid_import FROM information_schema.INNODB_TABLES
+WHERE NAME = 'test/t1';
+ALTER TABLE t1 DROP KEY vk;
+ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 4), ALGORITHM=INPLACE;
+SELECT TABLE_ID = @tid_import AS same_table_id
+FROM information_schema.INNODB_TABLES WHERE NAME = 'test/t1';
+same_table_id
+1
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+count=3 max_id=8 invisible=0
+id=1 level=1 nb=4:8|
+id=4 level=0 nb=1:8
+id=8 level=0 nb=4:1
+
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 5;
+id
+100
+105
+103
+DROP TABLE t1;

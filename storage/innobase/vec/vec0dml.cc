@@ -492,6 +492,107 @@ dberr_t vec_base_max_idx_id(dict_table_t *base, uint64_t *max_id) {
   return DB_SUCCESS;
 }
 
+dberr_t vec_base_collect_rows(trx_t *trx, dict_table_t *base,
+                              const dict_index_t *vec_index, uint32_t dims,
+                              std::vector<vec_base_row_t> *rows) {
+  ut_a(base != nullptr);
+  ut_a(rows != nullptr);
+  ut_a(dims != 0);
+  ut_a(base->vec_idx_id_col != ULINT_UNDEFINED);
+
+  rows->clear();
+
+  dict_index_t *clust = base->first_index();
+
+  /* The vector column comes from the index definition itself — robust
+  against MySQL-field-index vs InnoDB-column-ordinal skew (virtual
+  columns). */
+  const dict_col_t *vec_col = vec_index->get_field(0)->col;
+  const ulint pos_vec = dict_col_get_clust_pos(vec_col, clust);
+  const ulint pos_id =
+      dict_col_get_clust_pos(base->get_col(base->vec_idx_id_col), clust);
+
+  mem_heap_t *offset_heap = nullptr;
+  mem_heap_t *row_heap = mem_heap_create(2048, UT_LOCATION_HERE);
+
+  dberr_t err = DB_SUCCESS;
+
+  mtr_t mtr;
+  mtr_start(&mtr);
+
+  btr_pcur_t pcur;
+  pcur.open_at_side(true /* left */, clust, BTR_SEARCH_LEAF, true, 0, &mtr);
+
+  ulint n_scanned = 0;
+
+  while (pcur.move_to_next_user_rec(&mtr) == DB_SUCCESS) {
+    const rec_t *rec = pcur.get_rec();
+
+    ulint *offsets = rec_get_offsets(rec, clust, nullptr, ULINT_UNDEFINED,
+                                     UT_LOCATION_HERE, &offset_heap);
+
+    /* Committed deletes pending purge are not rows. Uncommitted
+    changes cannot exist: the ALTER holds at least a SHARED lock and
+    waited out prior writers at MDL upgrade. */
+    if (!rec_get_deleted_flag(rec, dict_table_is_comp(base))) {
+      /* NULL vector: not indexed, like the INSERT path. */
+      ulint vec_len;
+      rec_get_nth_field(clust, rec, offsets, pos_vec, &vec_len);
+      if (vec_len != UNIV_SQL_NULL) {
+        const byte *vec_data;
+        if (!vec_aux_copy_field(trx, clust, rec, offsets, pos_vec, row_heap,
+                                &vec_data, &vec_len)) {
+          err = DB_CORRUPTION;
+          break;
+        }
+        if (vec_len != dims * sizeof(float)) {
+          err = DB_CORRUPTION;
+          break;
+        }
+
+        ulint id_len;
+        const byte *id_ptr =
+            rec_get_nth_field(clust, rec, offsets, pos_id, &id_len);
+        ut_a(id_len == 8);
+        const uint64_t id = mach_read_from_8(id_ptr);
+
+        /* Base PK image = the aux row_ref (single-column BIGINT
+        UNSIGNED PK, PS-11264: 8-byte storage form, first clust
+        field). */
+        ulint pk_len;
+        const byte *pk_ptr = rec_get_nth_field(clust, rec, offsets, 0, &pk_len);
+        ut_a(pk_len == 8);
+        std::array<byte, 8> pk;
+        memcpy(pk.data(), pk_ptr, 8);
+
+        const float *f = reinterpret_cast<const float *>(vec_data);
+        rows->emplace_back(id, std::vector<float>(f, f + dims), pk);
+
+        mem_heap_empty(row_heap);
+      }
+    }
+
+    /* Batch the mtr — see vec_aux_load_rows for the positioning
+    subtlety. */
+    if (++n_scanned % 512 == 0) {
+      pcur.store_position(&mtr);
+      mtr_commit(&mtr);
+      mtr_start(&mtr);
+      pcur.restore_position(BTR_SEARCH_LEAF, &mtr, UT_LOCATION_HERE);
+    }
+  }
+
+  pcur.close();
+  mtr_commit(&mtr);
+
+  if (offset_heap != nullptr) {
+    mem_heap_free(offset_heap);
+  }
+  mem_heap_free(row_heap);
+
+  return err;
+}
+
 dberr_t vec_aux_load_rows(
     dict_table_t *aux, uint32_t dims, std::vector<vec_loaded_row_t> *rows,
     uint64_t *raw_max_id, bool *saw_invisible,

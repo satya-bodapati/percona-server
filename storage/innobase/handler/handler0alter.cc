@@ -110,6 +110,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ut0new.h"
 #include "ut0stage.h"
 #include "vec0aux.h"
+#include "vec0vec.h"
 
 /* For supporting Native InnoDB Partitioning. */
 #include "ha_innopart.h"
@@ -1049,19 +1050,22 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
     return HA_ALTER_INPLACE_NOT_SUPPORTED;
   }
 
-  /* ADD VECTOR INDEX is never INPLACE: the native rebuild would stamp
-  vec_idx_id on every row but leave the aux table empty and no HNSW
-  graph built — an incomplete index over existing rows. Falling back
-  to ALGORITHM=COPY routes every copied row through write_row, which
-  builds the graph and populates the aux organically (PS-11300).
-  DEVIATION FROM FTS: FTS allows INPLACE ADD because it has a real
-  index-build pass (row0ft); revisit if an HNSW build-during-rebuild
-  is implemented. Rebuilds where a vector index SURVIVES are refused
-  further down (vec_aux_table_has_vector_index gate). */
+  /* ADD VECTOR INDEX runs INPLACE only when the hidden vec_idx_id
+  column already exists (retained after a DROP INDEX — Option A — or
+  present after IMPORT): the clustered-scan build pass
+  (vec_build_index, the ddl0fts analog) then populates the graph and
+  aux without touching the table, reusing each row's stamped id as its
+  label (unique per table_id since counter persistence). The FIRST
+  ever ADD must still materialize the column, which needs a row
+  rewrite — refused for INPLACE so the server falls back to
+  ALGORITHM=COPY, whose write_row path stamps and indexes organically.
+  Rebuilds where a vector index SURVIVES are refused further down
+  (vec_aux_table_has_vector_index gate). */
   for (uint i = 0; i < ha_alter_info->index_add_count; i++) {
     const KEY *key =
         &ha_alter_info->key_info_buffer[ha_alter_info->index_add_buffer[i]];
-    if (key->flags & HA_VECTOR) {
+    if (key->flags & HA_VECTOR &&
+        !DICT_TF2_FLAG_IS_SET(m_prebuilt->table, DICT_TF2_VEC_HAS_IDX_ID)) {
       ha_alter_info->unsupported_reason =
           innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR);
       return HA_ALTER_INPLACE_NOT_SUPPORTED;
@@ -6662,6 +6666,46 @@ bool ha_innobase::inplace_alter_table_impl(TABLE *altered_table,
       ut::delete_(s_templ);
 
       ctx->new_table->vc_templ = old_templ;
+    }
+
+    /* Populate an added vector index from a clustered scan — the
+    ddl0fts analog (PS-11300 R1). The aux rows ride this ALTER's
+    transaction: a later failure rolls them back with it, and the aux
+    itself is dropped by the existing error paths. The private build
+    graph is discarded inside; first access lazy-loads from the
+    committed aux. */
+    if (err == DB_SUCCESS) {
+      for (ulint i = 0; i < ctx->num_to_add_index; i++) {
+        const dict_index_t *vec_index = ctx->add_index[i];
+        if (!vec_index->is_vector()) {
+          continue;
+        }
+        for (uint k = 0; k < altered_table->s->keys; k++) {
+          const KEY &key = altered_table->key_info[k];
+          if (key.algorithm != HA_KEY_ALG_VECTOR) {
+            continue;
+          }
+          /* Field resolved by position: KEY_PART_INFO::field is a
+          key-image copy (see innobase_vec_open_from_sql_layer). */
+          auto *field_vec = static_cast<Field_vector *>(
+              altered_table->field[key.key_part[0].field->field_index()]);
+
+          storage::innobase::vec::HnswParam param;
+          if (key.vector_construction_params.str != nullptr) {
+            (void)storage::innobase::vec::parse_construction_params(
+                key.vector_construction_params, param);
+          }
+
+          err = vec_build_index(m_prebuilt->trx, ctx->new_table, vec_index,
+                                field_vec->get_max_dimensions(), param.M,
+                                param.ef_construction, m_user_thd);
+          if (err != DB_SUCCESS) {
+            m_prebuilt->trx->error_key_num = ULINT_UNDEFINED;
+          }
+          break;
+        }
+        break;
+      }
     }
 
     DEBUG_SYNC_C("inplace_after_index_build");
