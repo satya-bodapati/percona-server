@@ -41,6 +41,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "row0pread-adapter.h"
 #include "row0pread-histogram.h"
 #include "trx0trx.h"
+#include "vec0aux.h"
 
 /** "GEN_CLUST_INDEX" is the name reserved for InnoDB default
 system clustered index when there is no primary key. */
@@ -194,6 +195,22 @@ class ha_innobase : public handler {
 
   int ft_read(uchar *buf) override;
 
+  int vec_init() override;
+  int vec_read_first(Item *item, uchar *buf, ha_rows limit) override;
+  int vec_read_next(uchar *buf) override;
+
+ private:
+  /** JT_VECTOR read-path state: candidates from the last graph search
+  (closer-first), the read position, the labels already returned (for
+  the resumable re-search), the query vector, and the current search
+  width. */
+  std::vector<vec_knn_hit_t> m_vec_hits;
+  size_t m_vec_hit_pos = 0;
+  std::unordered_set<uint64_t> m_vec_returned;
+  std::string m_vec_query;
+  size_t m_vec_search_k = 0;
+
+ public:
   void position(const uchar *record) override;
 
   int info(uint) override;

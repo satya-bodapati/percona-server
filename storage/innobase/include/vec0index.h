@@ -104,6 +104,18 @@ class Vector_index {
                                                 const byte *row_ref,
                                                 ulint row_ref_len) const = 0;
 
+  /** Approximate kNN: candidates, closer-first; caller applies its own
+  read-view visibility per hit. `exclude` is the resumable-search hook.
+  See vec_knn_search. */
+  [[nodiscard]] virtual dberr_t knn(
+      dict_table_t *table, THD *thd, const float *query, uint32_t dims,
+      size_t k, size_t ef, std::vector<vec_knn_hit_t> *hits,
+      const std::unordered_set<uint64_t> *exclude = nullptr) const = 0;
+
+  /** Upper bound for the resume loop: when a search has already
+  spanned this many candidates, widening cannot find more. */
+  [[nodiscard]] virtual size_t size_hint(const dict_table_t *table) const = 0;
+
   /** Free the in-memory runtime. Safe on tables that never opened
   one. See vec_close. */
   virtual void close(dict_table_t *table) const = 0;
