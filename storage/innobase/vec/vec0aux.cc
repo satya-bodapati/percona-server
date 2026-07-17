@@ -212,15 +212,31 @@ void vec_stamp_idx_id(dict_table_t *table, dtuple_t *row, mem_heap_t *heap) {
 uint64_t vec_assign_next_idx_id(dict_table_t *table) {
   ut_a(table != nullptr);
   ut_a(DICT_TF2_FLAG_IS_SET(table, DICT_TF2_VEC_HAS_IDX_ID));
-  /* fetch_add returns the OLD value; +1 makes the first assignment 1.
-  Phase 1 (PS-11299): the counter resets to 0 on every restart, which
-  yields duplicate vec_idx_id values for inserts after a restart. This
-  is intentionally benign right now: the aux table is empty (HNSW
-  population is PS-11300) so nothing actually depends on uniqueness.
-  PS-11300 will replace this with autoinc-style dynamic-metadata
-  persistence (DD_TABLE_AUTOINC in se_private_data) so the counter
-  survives restart. */
-  return table->vec_next_id.fetch_add(1, std::memory_order_acq_rel) + 1;
+
+  /* fetch_add returns the OLD value; +1 makes the first assignment 1. */
+  const uint64_t id =
+      table->vec_next_id.fetch_add(1, std::memory_order_acq_rel) + 1;
+
+  /* Persist the advance, autoinc-style (PM_TABLE_VEC_IDX_ID dynamic
+  metadata): the redo record makes the id durable the moment it is
+  consumed, so a label can NEVER be reissued — not across restart, not
+  across crash, and regardless of whether this id ever reaches the aux
+  (NULL-vector rows and rolled-back inserts consume ids the aux-table
+  maximum cannot see). This is what makes base-row vec_idx_id values
+  unique for the lifetime of a table_id. The stamp runs outside any
+  active mini-transaction, hence a dedicated one; the watermark check
+  inside the log call keeps redo traffic to one record per NEW
+  maximum. */
+  mtr_t mtr;
+  mtr.start();
+  const bool persist = dict_table_vec_next_id_log(table, id, &mtr);
+  mtr.commit();
+
+  if (persist) {
+    dict_table_persist_to_dd_table_buffer(table);
+  }
+
+  return id;
 }
 
 namespace {
@@ -807,11 +823,16 @@ static dberr_t vec_load_locked(vec_t *vec, THD *thd) {
 
   vec_mem_charge(vec, bytes);
 
-  /* Counter restoration: ids strictly increase past everything the aux
-  has ever committed (raw_max_id includes delete-marked and invisible
-  records; vec_assign_next_idx_id returns fetch_add(1)+1). This is the
-  phase-1 restart-reset fix. */
-  table->vec_next_id.store(raw_max_id);
+  /* Counter safety net only: the authoritative restore is the
+  PM_TABLE_VEC_IDX_ID dynamic metadata applied at dict load, which
+  covers ids the aux never saw (NULL-vector rows, rolled-back
+  inserts). The aux maximum can still exceed it in one legal case —
+  metadata written by a pre-persistence build — so take the max
+  rather than overwrite. */
+  uint64_t cur = table->vec_next_id.load();
+  while (cur < raw_max_id &&
+         !table->vec_next_id.compare_exchange_weak(cur, raw_max_id)) {
+  }
 
   vec->loaded = true;
   vec->stale = false;
@@ -1212,8 +1233,13 @@ dberr_t vec_aux_recreate_after_import(dict_table_t *table, trx_t *trx) {
 
   if (err == DB_SUCCESS) {
     /* Fresh aux, fresh labels. The statement commit finalizes the
-    creation; no local commit (the trx is the session's). */
+    creation; no local commit (the trx is the session's). Reset the
+    persisted watermark too: DISCARD reassigned the table_id, so the
+    old dynamic-metadata row is orphaned — with a stale high
+    watermark, dict_table_vec_next_id_log would skip redo for the new
+    ids and a restart would regress the counter. */
     table->vec_next_id.store(0);
+    table->vec_next_id_persisted.store(0);
   }
 
   return err;
