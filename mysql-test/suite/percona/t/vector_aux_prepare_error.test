@@ -1,16 +1,10 @@
 --echo #
---echo # PS-11299 (amended by PS-11300): this test originally verified the
---echo # INPLACE prepare error path — aux created, prepare fails, cleanup
---echo # drops the aux (knob vec_prepare_fail_after_aux_create).
---echo #
---echo # Since PS-11300, ADD VECTOR INDEX never runs INPLACE: it is refused
---echo # at check_if_supported_inplace_alter because the native rebuild
---echo # cannot build the HNSW graph, and the COPY fallback populates it
---echo # row by row. The prepare-path aux creation (and its error cleanup)
---echo # is retained in the engine for a future INPLACE re-enablement but
---echo # is unreachable from SQL — which is exactly what this now guards:
---echo # with the failure knob ARMED, ADD VECTOR INDEX must still succeed,
---echo # proving the INPLACE prepare path was never entered.
+--echo # PS-11299/PS-11300: the INPLACE prepare error path — aux created at
+--echo # prepare, prepare then fails, error_handling must drop the aux
+--echo # (knob vec_prepare_fail_after_aux_create). Reachable through the
+--echo # INPLACE re-ADD (retained vec_idx_id, PS-11300 R1); the FIRST ever
+--echo # ADD still refuses INPLACE (column must materialize via COPY), so
+--echo # with the knob armed a first ADD must succeed untouched.
 --echo #
 
 --source include/have_debug.inc
@@ -18,22 +12,39 @@
 --let $MYSQLD_DATADIR = `SELECT @@datadir`
 
 CREATE TABLE tva (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(8));
+INSERT INTO tva VALUES (1, STRING_TO_VECTOR('[1,1,1,1,1,1,1,1]'));
 
---echo # Explicit INPLACE: refused up front, before any aux work.
+--echo # First-ever ADD, explicit INPLACE: refused up front, no aux work.
 --error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
 ALTER TABLE tva ADD VECTOR KEY (v) TYPE hnsw WITH (M = 6), ALGORITHM=INPLACE;
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
 
---echo # Knob armed + server-picked algorithm: COPY runs, the INPLACE
+--echo # First-ever ADD with the knob ARMED: server picks COPY, the INPLACE
 --echo # prepare path (where the knob lives) is never entered, the ALTER
---echo # succeeds and exactly one aux .ibd exists.
+--echo # succeeds.
 SET @@SESSION.debug = '+d,vec_prepare_fail_after_aux_create';
 ALTER TABLE tva ADD VECTOR KEY (v) TYPE hnsw WITH (M = 6);
 SET @@SESSION.debug = '-d,vec_prepare_fail_after_aux_create';
+--replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+\.ibd/vec_hnsw_<TID>_<IID>.ibd/
+--list_files $MYSQLD_DATADIR/test vec_*.ibd
 
+--echo # Re-ADD path (column retained after DROP): INPLACE is real now —
+--echo # the armed knob makes prepare fail AFTER the aux was created, and
+--echo # the cleanup must drop it: no vec_*.ibd leftover, and a clean
+--echo # retry succeeds with the index fully rebuilt from the base rows.
+ALTER TABLE tva DROP KEY v;
+SET @@SESSION.debug = '+d,vec_prepare_fail_after_aux_create';
+--error ER_GET_ERRNO,ER_OUT_OF_RESOURCES,ER_TOO_MANY_CONCURRENT_TRXS,1
+ALTER TABLE tva ADD VECTOR KEY v (v) TYPE hnsw WITH (M = 6), ALGORITHM=INPLACE;
+SET @@SESSION.debug = '-d,vec_prepare_fail_after_aux_create';
+--list_files $MYSQLD_DATADIR/test vec_*.ibd
+
+ALTER TABLE tva ADD VECTOR KEY v (v) TYPE hnsw WITH (M = 6), ALGORITHM=INPLACE;
 SHOW CREATE TABLE tva;
 --replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+\.ibd/vec_hnsw_<TID>_<IID>.ibd/
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
+SET SESSION innodb_interpreter = 'vec_aux_dump test/tva';
+SELECT @@session.innodb_interpreter_output;
 
 DROP TABLE tva;
 --list_files $MYSQLD_DATADIR/test vec_*.ibd

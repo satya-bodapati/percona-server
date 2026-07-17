@@ -593,8 +593,12 @@ static void vec_mem_release_all(vec_t *vec) {
 
 /** Context passed through addPoint to the persistence callbacks. */
 struct vec_addpoint_ctx_t {
-  trx_t *trx; /* the USER trx — aux DML rides it */
-  vec_t *vec;
+  trx_t *trx; /* the trx the aux DML rides (user trx on the DML
+              paths; the ALTER's trx during an index build) */
+  vec_t *vec; /* companion for memory accounting, or nullptr during
+              an index build (the build graph is private and
+              discarded, only budget-checked) */
+  uint32_t dims;
   dict_table_t *aux;   /* opened for this operation */
   const byte *row_ref; /* serialized base PK */
   ulint row_ref_len;
@@ -653,7 +657,7 @@ static void vec_insert_cb(
   vec_aux_row_t row;
   row.id = label;
   row.vec = static_cast<const float *>(data_point);
-  row.dims = ctx->vec->dims;
+  row.dims = ctx->dims;
   row.row_ref = ctx->row_ref;
   row.row_ref_len = ctx->row_ref_len;
   row.level = neighbors_by_level.empty()
@@ -664,7 +668,7 @@ static void vec_insert_cb(
 
   ctx->err = vec_aux_insert(ctx->trx, ctx->aux, row);
 
-  if (ctx->err == DB_SUCCESS && row.level > 0) {
+  if (ctx->err == DB_SUCCESS && row.level > 0 && ctx->vec != nullptr) {
     /* Upper-level link lists are allocated per node; charge them
     incrementally (the level-0 block was charged at capacity). */
     vec_mem_charge(ctx->vec,
@@ -891,6 +895,7 @@ dberr_t vec_insert_point(trx_t *trx, dict_table_t *table, THD *thd, uint64_t id,
   vec_addpoint_ctx_t ctx;
   ctx.trx = trx;
   ctx.vec = vec;
+  ctx.dims = vec->dims;
   ctx.aux = aux;
   ctx.row_ref = row_ref;
   ctx.row_ref_len = row_ref_len;
@@ -1237,6 +1242,100 @@ dberr_t vec_knn_search(dict_table_t *table, THD *thd, const float *query,
   }
   rw_lock_s_unlock(&vec->latch);
   return DB_SUCCESS;
+}
+
+dberr_t vec_build_index(trx_t *trx, dict_table_t *table,
+                        const dict_index_t *vec_index, uint32_t dims, int M,
+                        int ef_construction, THD *thd) {
+  ut_a(trx != nullptr);
+  ut_a(vec_index != nullptr);
+  ut_a(dims != 0);
+
+  std::vector<vec_base_row_t> rows;
+  dberr_t err = vec_base_collect_rows(trx, table, vec_index, dims, &rows);
+  if (err != DB_SUCCESS) {
+    return err;
+  }
+  if (rows.empty()) {
+    return DB_SUCCESS;
+  }
+
+  MDL_ticket *mdl = nullptr;
+  dict_table_t *aux = vec_aux_open_for_dml(table, vec_index->id, thd, &mdl);
+  if (aux == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  hnswlib::L2Space *space = nullptr;
+  hnswlib::HierarchicalNSW<float> *hnsw = nullptr;
+
+  const size_t max_elements = std::max<size_t>(1024, rows.size());
+
+  try {
+    space = new hnswlib::L2Space(dims);
+    hnsw = new hnswlib::HierarchicalNSW<float>(space, max_elements, M,
+                                               ef_construction);
+  } catch (...) {
+    delete hnsw;
+    delete space;
+    vec_aux_close_for_dml(aux, thd, &mdl);
+    return DB_OUT_OF_MEMORY;
+  }
+
+  /* Budget check only — no charge: the graph is private and discarded
+  below; the durable footprint is the aux rows, and the graph a later
+  first access loads is charged by vec_load as usual. */
+  if (vec_mem_would_exceed(static_cast<uint64_t>(max_elements) *
+                           hnsw->size_data_per_element_)) {
+    ib::warn() << "Vector index build for " << table->name.m_name
+               << " refused: it needs more than the remaining"
+                  " innodb_hnsw_max_memory budget.";
+    delete hnsw;
+    delete space;
+    vec_aux_close_for_dml(aux, thd, &mdl);
+    return DB_OUT_OF_MEMORY;
+  }
+
+  vec_addpoint_ctx_t ctx;
+  ctx.trx = trx;
+  ctx.vec = nullptr;
+  ctx.dims = dims;
+  ctx.aux = aux;
+  ctx.err = DB_SUCCESS;
+
+  hnsw->setAddPointInsertCallback(vec_insert_cb);
+  hnsw->setAddPointUpdateCallback(vec_update_cb);
+
+#ifdef UNIV_DEBUG
+  std::unordered_set<uint64_t> seen;
+#endif /* UNIV_DEBUG */
+
+  for (const auto &row : rows) {
+    const uint64_t label = std::get<0>(row);
+    ut_ad(seen.insert(label).second); /* base-id uniqueness invariant */
+
+    ctx.row_ref = std::get<2>(row).data();
+    ctx.row_ref_len = std::get<2>(row).size();
+
+    try {
+      hnsw->addPoint(std::get<1>(row).data(), label, false, &ctx);
+    } catch (...) {
+      err = DB_OUT_OF_MEMORY;
+      break;
+    }
+    if (ctx.err != DB_SUCCESS) {
+      /* A duplicate label surfaces here as the aux PK dup-key —
+      impossible post counter-persistence, but never silent. */
+      err = ctx.err;
+      break;
+    }
+  }
+
+  delete hnsw;
+  delete space;
+  vec_aux_close_for_dml(aux, thd, &mdl);
+
+  return err;
 }
 
 dberr_t vec_aux_recreate_after_import(dict_table_t *table, trx_t *trx) {

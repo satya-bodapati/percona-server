@@ -324,6 +324,29 @@ uint64_t vec_total_memory();
 lets hnswlib-agnostic callers (ha_innodb) size their resume loop. */
 size_t vec_graph_size(const dict_table_t *table);
 
+/** Build the vector index from a clustered scan of the base table
+(PS-11300 R1): the INPLACE ADD VECTOR INDEX build pass, the ddl0fts
+analog. Collects every committed non-NULL-vector row, addPoints it
+into a PRIVATE graph under its already-stamped vec_idx_id (unique per
+table_id since counter persistence), and lets the standard
+persistence callbacks write the aux rows on `trx` — an ALTER failure
+rolls them back with the trx, and the aux itself is dropped by the
+existing error paths. The private graph is discarded at the end;
+first access lazy-loads from the committed aux, so the commit phase
+needs nothing. Enforces innodb_hnsw_max_memory (refusal fails the
+ALTER cleanly).
+@param[in,out] trx       the ALTER's transaction (aux rows ride it)
+@param[in]     table     base table (quiesced: SHARED lock or better)
+@param[in]     vec_index the vector index being added
+@param[in]     dims      vector dimensions (from the SQL layer)
+@param[in]     M         HNSW M parameter
+@param[in]     ef_construction  HNSW build width
+@param[in]     thd       session (aux open fallback)
+@return DB_SUCCESS or error */
+dberr_t vec_build_index(trx_t *trx, dict_table_t *table,
+                        const dict_index_t *vec_index, uint32_t dims, int M,
+                        int ef_construction, THD *thd);
+
 /** After ALTER TABLE ... IMPORT TABLESPACE: the aux was dropped at
 DISCARD (its content belonged to the discarded rows), so re-mint a
 fresh EMPTY one on a dedicated DDL transaction and reset the label
