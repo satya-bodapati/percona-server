@@ -3969,6 +3969,15 @@ static dberr_t row_discard_tablespace(trx_t *trx, dict_table_t *table,
     fts_drop_tables(trx, table, aux_vec);
   }
 
+  /* Mirror for vector aux: the graph data belongs to the discarded
+  rows, so it dies with them — free the in-memory graph and drop the
+  aux table. IMPORT re-creates a fresh empty aux (the imported rows
+  are NOT indexed until DROP/ADD INDEX rebuilds; a warning says so). */
+  if (DICT_TF2_FLAG_IS_SET(table, DICT_TF2_VEC_HAS_IDX_ID)) {
+    vec_close(table);
+    (void)vec_aux_drop_all_tables(trx, table);
+  }
+
   /* Assign a new space ID to the table definition so that purge
   can ignore the changes. Update the system table on disk. */
 

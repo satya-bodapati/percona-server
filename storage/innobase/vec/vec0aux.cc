@@ -1218,6 +1218,43 @@ dberr_t vec_knn_search(dict_table_t *table, THD *thd, const float *query,
   return DB_SUCCESS;
 }
 
+dberr_t vec_aux_recreate_after_import(dict_table_t *table, trx_t *trx) {
+  const dict_index_t *vec_index = nullptr;
+  for (const dict_index_t *idx = table->first_index(); idx != nullptr;
+       idx = idx->next()) {
+    if (idx->is_vector()) {
+      vec_index = idx;
+      break;
+    }
+  }
+  if (vec_index == nullptr) {
+    return DB_SUCCESS;
+  }
+
+  /* Any graph state predates the import and is meaningless now —
+  free it. The companion is re-created lazily from the SQL layer
+  (innobase_vec_open_from_sql_layer) on the next open/insert/search —
+  the dict object may be evicted at ALTER end anyway. */
+  vec_close(table);
+
+  trx_start_if_not_started(trx, true, UT_LOCATION_HERE);
+  trx_set_dict_operation(trx, TRX_DICT_OP_TABLE);
+
+  row_mysql_lock_data_dictionary(trx, UT_LOCATION_HERE);
+  dict_sys_mutex_exit();
+  dberr_t err = vec_aux_create_one_table(trx, table, vec_index->id);
+  dict_sys_mutex_enter();
+  row_mysql_unlock_data_dictionary(trx);
+
+  if (err == DB_SUCCESS) {
+    /* Fresh aux, fresh labels. The statement commit finalizes the
+    creation; no local commit (the trx is the session's). */
+    table->vec_next_id.store(0);
+  }
+
+  return err;
+}
+
 void vec_close(dict_table_t *table) {
   vec_t *vec = vec_hnsw(table);
   if (vec == nullptr) {
