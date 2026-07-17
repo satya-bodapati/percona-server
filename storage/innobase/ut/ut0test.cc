@@ -78,6 +78,7 @@ Tester::Tester() noexcept {
   DISPATCH(vec_aux_insert_row);
   DISPATCH(vec_aux_update_row);
   DISPATCH(vec_aux_dump);
+  DISPATCH(vec_knn);
   DISPATCH(print_dblwr_has_encrypted_pages);
   DISPATCH(print_tree);
 }
@@ -653,6 +654,82 @@ Ret_t Tester::vec_aux_dump(std::vector<std::string> &tokens) noexcept {
         if (i != 0) sout << ":";
         sout << nbl[l][i];
       }
+    }
+    sout << "\n";
+  }
+  set_output(sout);
+  return RET_PASS;
+}
+
+Ret_t Tester::vec_knn(std::vector<std::string> &tokens) noexcept {
+  std::ostringstream sout;
+
+  TLOG("Tester::vec_knn()");
+  /* tokens: 0=cmd 1=db/table 2=vec_csv 3=k [4=ef] */
+  if (tokens.size() != 4 && tokens.size() != 5) {
+    XLOG("FAIL: usage: vec_knn db/table vec_csv k [ef]");
+    set_output(sout);
+    return RET_FAIL;
+  }
+
+  vec_test_tables_t tt;
+  uint32_t dims = 0;
+  if (!vec_test_open_aux(tokens[1], tt, &dims)) {
+    XLOG("FAIL: no vector aux for " << tokens[1]);
+    set_output(sout);
+    return RET_FAIL;
+  }
+  auto guard = create_scope_guard([&]() { vec_test_close_aux(tt); });
+
+  if (tt.base->vec == nullptr) {
+    /* The companion is created at SQL open; a debug command must not
+    guess dims/params. */
+    XLOG("FAIL: graph not initialized; access " << tokens[1]
+                                                << " via SQL first");
+    set_output(sout);
+    return RET_FAIL;
+  }
+
+  std::vector<float> qvec;
+  {
+    const std::string &csv = tokens[2];
+    size_t pos = 0;
+    while (pos <= csv.size()) {
+      size_t comma = csv.find(',', pos);
+      if (comma == std::string::npos) comma = csv.size();
+      qvec.push_back(std::stof(csv.substr(pos, comma - pos)));
+      if (comma == csv.size()) break;
+      pos = comma + 1;
+    }
+  }
+  if (qvec.size() != tt.base->vec->dims) {
+    XLOG("FAIL: query dims " << qvec.size() << " != index dims "
+                             << tt.base->vec->dims);
+    set_output(sout);
+    return RET_FAIL;
+  }
+
+  const size_t k = std::stoul(tokens[3]);
+  const size_t ef = tokens.size() == 5 ? std::stoul(tokens[4]) : 0;
+
+  std::vector<vec_knn_hit_t> hits;
+  const dberr_t err = vec_knn_search(tt.base, current_thd, qvec.data(),
+                                     qvec.size(), k, ef, &hits);
+  if (err != DB_SUCCESS) {
+    XLOG("FAIL: vec_knn_search err=" << static_cast<int>(err));
+    set_output(sout);
+    return RET_FAIL;
+  }
+
+  sout << "n=" << hits.size() << "\n";
+  for (const auto &h : hits) {
+    sout << "label=" << h.label << " dist=" << std::fixed
+         << std::setprecision(2) << h.dist << " ref=";
+    if (h.row_ref.size() == 8) {
+      sout << mach_read_from_8(
+          reinterpret_cast<const byte *>(h.row_ref.data()));
+    } else {
+      sout << "?";
     }
     sout << "\n";
   }

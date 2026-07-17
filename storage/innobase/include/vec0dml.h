@@ -40,7 +40,9 @@ full redo/undo/locking, no global mutex. */
 #define vec0dml_h
 
 #include <cstdint>
+#include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "db0err.h"
@@ -149,9 +151,10 @@ dberr_t vec_aux_update_row_ref(trx_t *trx, dict_table_t *aux, uint64_t id,
                            visibility (caller keeps the graph stale-marked
                            and retries later)
 @return DB_SUCCESS or error */
-dberr_t vec_aux_load_rows(dict_table_t *aux, uint32_t dims,
-                          std::vector<vec_loaded_row_t> *rows,
-                          uint64_t *raw_max_id, bool *saw_invisible,
-                          std::vector<uint64_t> *dead_labels = nullptr);
+dberr_t vec_aux_load_rows(
+    dict_table_t *aux, uint32_t dims, std::vector<vec_loaded_row_t> *rows,
+    uint64_t *raw_max_id, bool *saw_invisible,
+    std::vector<uint64_t> *dead_labels = nullptr,
+    std::vector<std::pair<uint64_t, std::string>> *row_refs = nullptr);
 
 #endif /* vec0dml_h */

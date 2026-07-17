@@ -704,8 +704,9 @@ static dberr_t vec_load_locked(vec_t *vec, THD *thd) {
   std::vector<vec_loaded_row_t> rows;
   uint64_t raw_max_id = 0;
   bool saw_invisible = false;
-  dberr_t err =
-      vec_aux_load_rows(aux, vec->dims, &rows, &raw_max_id, &saw_invisible);
+  std::vector<std::pair<uint64_t, std::string>> row_refs;
+  dberr_t err = vec_aux_load_rows(aux, vec->dims, &rows, &raw_max_id,
+                                  &saw_invisible, nullptr, &row_refs);
   vec_aux_close_for_dml(aux, thd, &mdl);
   if (err != DB_SUCCESS) {
     return err;
@@ -745,6 +746,14 @@ static dberr_t vec_load_locked(vec_t *vec, THD *thd) {
 
   vec->hnsw->setAddPointInsertCallback(vec_insert_cb);
   vec->hnsw->setAddPointUpdateCallback(vec_update_cb);
+
+  {
+    std::lock_guard<std::mutex> g(vec->row_ref_mutex);
+    vec->row_ref_map.clear();
+    for (auto &lr : row_refs) {
+      vec->row_ref_map.emplace(lr.first, std::move(lr.second));
+    }
+  }
 
   /* Level-0 block charged at capacity; upper-level lists per node. */
   uint64_t bytes =
@@ -892,6 +901,11 @@ dberr_t vec_insert_point(trx_t *trx, dict_table_t *table, THD *thd, uint64_t id,
   the statement will fail and its rollback removes the aux rows; the
   tracking entry is what marks the in-memory node deleted then. */
   if (node_added) {
+    {
+      std::lock_guard<std::mutex> g(vec->row_ref_mutex);
+      vec->row_ref_map[id] =
+          std::string(reinterpret_cast<const char *>(row_ref), row_ref_len);
+    }
     vec_trx_record(trx, table, id, vec_trx_op_type::ADDED, undo_mark);
   }
 
@@ -958,7 +972,27 @@ dberr_t vec_refresh_row_ref(trx_t *trx, dict_table_t *table, THD *thd,
     return DB_TABLE_NOT_FOUND;
   }
 
+  const undo_no_t undo_mark = trx->undo_no;
+
   dberr_t err = vec_aux_update_row_ref(trx, aux, label, row_ref, row_ref_len);
+
+  if (err == DB_SUCCESS) {
+    /* Repoint the in-memory map entry. The undo log restores the aux
+    column on rollback; the REFRESHED tracking entry restores the map
+    (only when an entry existed — an unloaded graph has no map, and
+    the next load rebuilds it undo-consistently from the aux). */
+    std::lock_guard<std::mutex> g(vec->row_ref_mutex);
+    auto it = vec->row_ref_map.find(label);
+    if (it != vec->row_ref_map.end()) {
+      byte old_ref[8];
+      const ulint old_len =
+          std::min<size_t>(it->second.size(), sizeof(old_ref));
+      memcpy(old_ref, it->second.data(), old_len);
+      it->second.assign(reinterpret_cast<const char *>(row_ref), row_ref_len);
+      vec_trx_record(trx, table, label, vec_trx_op_type::REFRESHED, undo_mark,
+                     old_ref, old_len);
+    }
+  }
 
   vec_aux_close_for_dml(aux, thd, &mdl);
   return err;
@@ -992,14 +1026,20 @@ uint64_t vec_get_idx_id_from_rec(const dict_table_t *table, const rec_t *rec,
 }
 
 void vec_trx_record(trx_t *trx, dict_table_t *table, uint64_t label,
-                    vec_trx_op_type type, undo_no_t undo_no) {
+                    vec_trx_op_type type, undo_no_t undo_no,
+                    const byte *old_ref, ulint old_ref_len) {
   ut_a(trx != nullptr);
+  ut_a(old_ref_len <= sizeof(vec_trx_op_t::old_ref));
 
   if (trx->vec_ops == nullptr) {
     trx->vec_ops =
         ut::new_withkey<vec_trx_ops_t>(ut::make_psi_memory_key(mem_key_other));
   }
-  trx->vec_ops->ops.push_back({table, label, type, undo_no});
+  vec_trx_op_t op{table, label, type, undo_no, {}, old_ref_len};
+  if (old_ref_len != 0) {
+    memcpy(op.old_ref, old_ref, old_ref_len);
+  }
+  trx->vec_ops->ops.push_back(op);
 }
 
 void vec_trx_rollback(trx_t *trx, const trx_savept_t *savept) {
@@ -1018,6 +1058,18 @@ void vec_trx_rollback(trx_t *trx, const trx_savept_t *savept) {
 
     vec_t *vec = op.table->vec;
     if (vec == nullptr) {
+      continue;
+    }
+
+    if (op.type == vec_trx_op_type::REFRESHED) {
+      /* Map-only inversion; the aux column is restored by the undo
+      log. No latch: the map has its own mutex. */
+      std::lock_guard<std::mutex> g(vec->row_ref_mutex);
+      auto it = vec->row_ref_map.find(op.label);
+      if (it != vec->row_ref_map.end()) {
+        it->second.assign(reinterpret_cast<const char *>(op.old_ref),
+                          op.old_ref_len);
+      }
       continue;
     }
 
@@ -1049,6 +1101,61 @@ void vec_trx_free(trx_t *trx) {
     ut::delete_(trx->vec_ops);
     trx->vec_ops = nullptr;
   }
+}
+
+dberr_t vec_knn_search(dict_table_t *table, THD *thd, const float *query,
+                       uint32_t dims, size_t k, size_t ef,
+                       std::vector<vec_knn_hit_t> *hits) {
+  ut_a(hits != nullptr);
+  hits->clear();
+
+  vec_t *vec = table->vec;
+  if (vec == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+  if (dims != 0 && dims != vec->dims) {
+    return DB_CORRUPTION;
+  }
+
+  rw_lock_s_lock(&vec->latch, UT_LOCATION_HERE);
+  if (vec->stale.load() || !vec->loaded) {
+    rw_lock_s_unlock(&vec->latch);
+    dberr_t lerr = vec_load(table, thd);
+    if (lerr != DB_SUCCESS) {
+      return lerr;
+    }
+    rw_lock_s_lock(&vec->latch, UT_LOCATION_HERE);
+  }
+
+  const size_t n = vec->hnsw->cur_element_count.load();
+  if (n != 0 && k != 0) {
+    /* hnswlib floors its search width at max(ef_, k): widening k to
+    max(k, ef) makes `ef` a per-query recall knob without mutating the
+    shared graph's ef_ (which would race between sessions). */
+    const size_t kq = std::min(std::max(k, ef), n);
+    try {
+      auto found = vec->hnsw->searchKnnCloserFirst(query, kq);
+      std::lock_guard<std::mutex> g(vec->row_ref_mutex);
+      for (const auto &cand : found) {
+        if (hits->size() >= k) {
+          break;
+        }
+        vec_knn_hit_t hit;
+        hit.label = cand.second;
+        hit.dist = cand.first;
+        auto it = vec->row_ref_map.find(hit.label);
+        if (it != vec->row_ref_map.end()) {
+          hit.row_ref = it->second;
+        }
+        hits->push_back(std::move(hit));
+      }
+    } catch (...) {
+      rw_lock_s_unlock(&vec->latch);
+      return DB_OUT_OF_MEMORY;
+    }
+  }
+  rw_lock_s_unlock(&vec->latch);
+  return DB_SUCCESS;
 }
 
 void vec_close(dict_table_t *table) {
