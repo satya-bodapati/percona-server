@@ -74,6 +74,17 @@ class Vec_hnsw_index final : public Vector_index {
     return vec_refresh_row_ref(trx, table, thd, label, row_ref, row_ref_len);
   }
 
+  [[nodiscard]] dberr_t knn(
+      dict_table_t *table, THD *thd, const float *query, uint32_t dims,
+      size_t k, size_t ef, std::vector<vec_knn_hit_t> *hits,
+      const std::unordered_set<uint64_t> *exclude) const override {
+    return vec_knn_search(table, thd, query, dims, k, ef, hits, exclude);
+  }
+
+  [[nodiscard]] size_t size_hint(const dict_table_t *table) const override {
+    return vec_graph_size(table);
+  }
+
   void close(dict_table_t *table) const override { vec_close(table); }
 };
 

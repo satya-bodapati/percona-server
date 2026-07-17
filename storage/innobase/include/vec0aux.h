@@ -317,6 +317,10 @@ void vec_close(dict_table_t *table);
 /** Total bytes currently charged by all in-memory vector graphs. */
 uint64_t vec_total_memory();
 
+/** @return the graph's element count (0 if no graph is loaded) —
+lets hnswlib-agnostic callers (ha_innodb) size their resume loop. */
+size_t vec_graph_size(const dict_table_t *table);
+
 /* ------------------------------------------------------------------
 Per-transaction graph-mutation tracking (rollback support).
 
@@ -368,10 +372,14 @@ markDeleted nodes (tombstones, rolled-back inserts) are excluded by
 hnswlib itself. Results are graph candidates: callers that return
 rows must fetch each row_ref under their own read view and skip
 misses (uncommitted/rolled-back points).
+`exclude` (may be nullptr) drops those labels from the result — the
+resumable-search hook: the handler re-searches with a grown k,
+excluding what it already returned.
 @return DB_SUCCESS or error (load failure, dims mismatch) */
 dberr_t vec_knn_search(dict_table_t *table, THD *thd, const float *query,
                        uint32_t dims, size_t k, size_t ef,
-                       std::vector<vec_knn_hit_t> *hits);
+                       std::vector<vec_knn_hit_t> *hits,
+                       const std::unordered_set<uint64_t> *exclude = nullptr);
 
 /** Invert the graph mutations undone by a rollback. Called from
 trx_rollback_to_savepoint_low after the undo pass; savept == nullptr
