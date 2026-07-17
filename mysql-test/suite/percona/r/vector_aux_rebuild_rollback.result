@@ -5,7 +5,9 @@
 # prepare, and error_handling/error_handled had to drop the aux on
 # the thrown-away ctx->new_table.
 #
-# Since PS-11300, ADD VECTOR INDEX never runs INPLACE (refused at
+# Since PS-11300, the FIRST ever ADD VECTOR INDEX never runs INPLACE
+# (the retained-column re-ADD does — see vector_aux_prepare_error /
+# vector_index_rebuild; refusal below is
 # check_if_supported_inplace_alter; COPY builds the graph row by
 # row), so that rollback path is unreachable from SQL. The engine
 # cleanup code is retained for a future INPLACE re-enablement; what

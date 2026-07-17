@@ -39,6 +39,7 @@ full redo/undo/locking, no global mutex. */
 #ifndef vec0dml_h
 #define vec0dml_h
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <tuple>
@@ -186,5 +187,26 @@ PS-11300 counter persistence).
 @param[out] max_id  max stamped id, 0 for an empty table
 @return DB_SUCCESS or error */
 dberr_t vec_base_max_idx_id(dict_table_t *base, uint64_t *max_id);
+
+/** One base row collected for the index build:
+(stamped vec_idx_id, vector floats, 8-byte base-PK image). */
+using vec_base_row_t =
+    std::tuple<std::uint64_t, std::vector<float>, std::array<byte, 8>>;
+
+/** Collect every index-relevant base row from the clustered index:
+skips delete-marked records and NULL vectors; rejects width-mismatched
+vectors with DB_CORRUPTION. Caller context must be quiesced against
+writers (ADD INDEX runs with at least a SHARED lock), so the latest
+record version is authoritative.
+@param[in]  trx        transaction (for off-page vector reads)
+@param[in]  base       base table
+@param[in]  vec_index  the vector index being built (its field ->
+                       vector column)
+@param[in]  dims       vector dimensions
+@param[out] rows       collected rows
+@return DB_SUCCESS or error */
+dberr_t vec_base_collect_rows(trx_t *trx, dict_table_t *base,
+                              const dict_index_t *vec_index, uint32_t dims,
+                              std::vector<vec_base_row_t> *rows);
 
 #endif /* vec0dml_h */

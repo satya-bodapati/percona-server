@@ -85,6 +85,14 @@ class Vec_hnsw_index final : public Vector_index {
     return vec_graph_size(table);
   }
 
+  [[nodiscard]] dberr_t build(trx_t *trx, dict_table_t *table,
+                              const dict_index_t *vec_index, uint32_t dims,
+                              int M, int ef_construction,
+                              THD *thd) const override {
+    return vec_build_index(trx, table, vec_index, dims, M, ef_construction,
+                           thd);
+  }
+
   void close(dict_table_t *table) const override { vec_close(table); }
 
   [[nodiscard]] dberr_t recreate_after_import(dict_table_t *table,

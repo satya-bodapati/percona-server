@@ -1,0 +1,103 @@
+--source include/have_debug.inc
+
+call mtr.add_suppression("Index vk not found or corrupt");
+call mtr.add_suppression("Skip adjustment of root pages for index");
+call mtr.add_suppression("FLUSH TABLES on tables that have a vector index");
+
+--echo #
+--echo # PS-11300 R1: ADD VECTOR INDEX on a table that retained vec_idx_id
+--echo # (after DROP INDEX, or after IMPORT) runs INPLACE: a clustered scan
+--echo # builds the graph and populates the aux — no table rebuild, no COPY.
+--echo # Labels are the rows' already-stamped ids (unique since counter
+--echo # persistence), so the base table is not written at all.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(2),
+                 VECTOR KEY vk (v) TYPE hnsw WITH (M = 4, ef_construction = 32));
+
+INSERT INTO t1 VALUES (100, STRING_TO_VECTOR('[0,0]')),
+                      (101, STRING_TO_VECTOR('[1,0]')),
+                      (102, NULL),
+                      (103, STRING_TO_VECTOR('[0,3]')),
+                      (104, STRING_TO_VECTOR('[5,0]'));
+--echo # Punch holes: a rolled-back statement and a DELETE.
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (200, STRING_TO_VECTOR('[9,9]')), (100, STRING_TO_VECTOR('[8,8]'));
+DELETE FROM t1 WHERE id = 104;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # DROP the index (column retained), remember the table id.
+ALTER TABLE t1 DROP KEY vk;
+SELECT TABLE_ID INTO @tid_before FROM information_schema.INNODB_TABLES
+  WHERE NAME = 'test/t1';
+
+--echo # Re-ADD with explicit INPLACE: allowed now (was refused pre-R1).
+ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 4, ef_construction = 32), ALGORITHM=INPLACE;
+
+--echo # No-rebuild proof: same TABLE_ID before and after the ADD (a COPY
+--echo # or native rebuild would have re-minted it).
+SELECT TABLE_ID = @tid_before AS same_table_id
+  FROM information_schema.INNODB_TABLES WHERE NAME = 'test/t1';
+
+--echo # The build reused the rows' stamped ids as labels: 1, 2, 4 (id 3
+--echo # belongs to the NULL row 102, never indexed; 5 was the deleted row
+--echo # 104; 6,7 were consumed by the rolled-back statement).
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # kNN over the rebuilt index is correct, NULL/deleted rows absent.
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 5;
+
+--echo # Writes keep working against the rebuilt index: new labels continue
+--echo # above everything ever consumed.
+INSERT INTO t1 VALUES (105, STRING_TO_VECTOR('[0,1]'));
+DELETE FROM t1 WHERE id = 101;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # And the rebuilt index survives a restart via the normal
+--echo # load-on-first-access path.
+--source include/restart_mysqld.inc
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 5;
+
+--echo #
+--echo # First-ever ADD (no retained column) still refuses INPLACE and
+--echo # falls back to COPY when the algorithm is server-picked.
+--echo #
+CREATE TABLE t2 (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(2));
+INSERT INTO t2 VALUES (1, STRING_TO_VECTOR('[1,1]'));
+--error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
+ALTER TABLE t2 ADD VECTOR KEY (v) TYPE hnsw, ALGORITHM=INPLACE;
+ALTER TABLE t2 ADD VECTOR KEY (v) TYPE hnsw;
+SELECT id FROM t2 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,1]'), 'EUCLIDEAN') LIMIT 1;
+DROP TABLE t2;
+
+--echo #
+--echo # Post-import rebuild: IMPORT leaves an empty index; DROP/ADD now
+--echo # rebuilds it INPLACE — the imported rows keep their stamped ids.
+--echo #
+--let $MYSQLD_DATADIR = `SELECT @@datadir`
+FLUSH TABLES t1 FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/t1.ibd $MYSQLTEST_VARDIR/tmp/t1r.ibd
+--copy_file $MYSQLD_DATADIR/test/t1.cfg $MYSQLTEST_VARDIR/tmp/t1r.cfg
+UNLOCK TABLES;
+ALTER TABLE t1 DISCARD TABLESPACE;
+--copy_file $MYSQLTEST_VARDIR/tmp/t1r.ibd $MYSQLD_DATADIR/test/t1.ibd
+--copy_file $MYSQLTEST_VARDIR/tmp/t1r.cfg $MYSQLD_DATADIR/test/t1.cfg
+ALTER TABLE t1 IMPORT TABLESPACE;
+
+SELECT TABLE_ID INTO @tid_import FROM information_schema.INNODB_TABLES
+  WHERE NAME = 'test/t1';
+ALTER TABLE t1 DROP KEY vk;
+ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 4), ALGORITHM=INPLACE;
+SELECT TABLE_ID = @tid_import AS same_table_id
+  FROM information_schema.INNODB_TABLES WHERE NAME = 'test/t1';
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 5;
+
+DROP TABLE t1;
+--remove_file $MYSQLTEST_VARDIR/tmp/t1r.ibd
+--remove_file $MYSQLTEST_VARDIR/tmp/t1r.cfg

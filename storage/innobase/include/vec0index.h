@@ -116,6 +116,13 @@ class Vector_index {
   spanned this many candidates, widening cannot find more. */
   [[nodiscard]] virtual size_t size_hint(const dict_table_t *table) const = 0;
 
+  /** Populate the index from a clustered scan of the base table (the
+  INPLACE re-ADD build pass). See vec_build_index. */
+  [[nodiscard]] virtual dberr_t build(trx_t *trx, dict_table_t *table,
+                                      const dict_index_t *vec_index,
+                                      uint32_t dims, int M, int ef_construction,
+                                      THD *thd) const = 0;
+
   /** Free the in-memory runtime. Safe on tables that never opened
   one. See vec_close. */
   virtual void close(dict_table_t *table) const = 0;
