@@ -37,6 +37,10 @@ pars_sql/que_eval_sql, which serializes on the global pars_mutex. */
 #define vec0aux_h
 
 #include <atomic>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "data0types.h"
 #include "dict0mem.h"
@@ -254,6 +258,16 @@ struct vec_t : public Vec_runtime {
   hnswlib::HierarchicalNSW<float> *hnsw;
   /** bytes charged against the global budget (consumed by C5) */
   std::atomic<uint64_t> mem_used;
+
+  /** label -> serialized base-PK image (row_ref), the kNN path's link
+  from a graph hit back to the base row. Rebuilt at vec_load from the
+  aux, maintained by insert / PK-refresh (with REFRESHED rollback
+  tracking). Entries for tombstoned or rolled-back labels are left in
+  place: such nodes are never returned by search, and a DELETE
+  rollback revalidates the entry. Guarded by row_ref_mutex (NOT the
+  rw-latch: concurrent inserters both hold the latch in S). */
+  std::mutex row_ref_mutex;
+  std::unordered_map<uint64_t, std::string> row_ref_map;
 };
 
 /** Get-or-create table->vec (lazy; thread-safe via dict_sys mutex).
@@ -320,6 +334,10 @@ enum class vec_trx_op_type : uint8_t {
   ADDED,
   /** markDelete ran for this label (DELETE); rollback unmarks it */
   MARKED,
+  /** the label's row_ref map entry was repointed (PK-only UPDATE);
+  rollback restores the old image (the aux row itself is restored by
+  the undo log) */
+  REFRESHED,
 };
 
 struct vec_trx_op_t {
@@ -329,6 +347,10 @@ struct vec_trx_op_t {
   undo_no_t undo_no; /*!< trx->undo_no BEFORE the mutation's aux DML;
                      the op is inverted iff the rollback target is at
                      or below this number */
+  /** REFRESHED only: previous row_ref image to restore (the base PK
+  is a single BIGINT UNSIGNED, PS-11264 — 8-byte storage image) */
+  byte old_ref[8]{};
+  ulint old_ref_len{0};
 };
 
 struct vec_trx_ops_t {
@@ -336,9 +358,29 @@ struct vec_trx_ops_t {
 };
 
 /** Record one graph mutation on the transaction (lazily allocates
-trx->vec_ops). */
+trx->vec_ops). old_ref/old_ref_len are REFRESHED-only. */
 void vec_trx_record(trx_t *trx, dict_table_t *table, uint64_t label,
-                    vec_trx_op_type type, undo_no_t undo_no);
+                    vec_trx_op_type type, undo_no_t undo_no,
+                    const byte *old_ref = nullptr, ulint old_ref_len = 0);
+
+/** One kNN hit: closer-first order. */
+struct vec_knn_hit_t {
+  uint64_t label;
+  float dist;
+  std::string row_ref; /*!< empty when the label has no map entry */
+};
+
+/** Approximate kNN over the in-memory graph (loads it on demand).
+Search width is max(k, ef) — hnswlib's ef floor — so `ef` is the
+per-query recall knob without touching the shared graph state.
+markDeleted nodes (tombstones, rolled-back inserts) are excluded by
+hnswlib itself. Results are graph candidates: callers that return
+rows must fetch each row_ref under their own read view and skip
+misses (uncommitted/rolled-back points).
+@return DB_SUCCESS or error (load failure, dims mismatch) */
+dberr_t vec_knn_search(dict_table_t *table, THD *thd, const float *query,
+                       uint32_t dims, size_t k, size_t ef,
+                       std::vector<vec_knn_hit_t> *hits);
 
 /** Invert the graph mutations undone by a rollback. Called from
 trx_rollback_to_savepoint_low after the undo pass; savept == nullptr

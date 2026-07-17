@@ -262,6 +262,14 @@ struct Tester {
   @return RET_PASS on success, or the error code. */
   [[nodiscard]] Ret_t vec_aux_dump(std::vector<std::string> &tokens) noexcept;
 
+  /** Approximate kNN over a table's in-memory HNSW graph (storage
+  level: returns labels + distances + decoded row_refs; no base-row
+  fetch, no visibility filtering).
+  Usage: vec_knn db/table f1,f2,.. k [ef]
+  @param[in] tokens tokenized command
+  @return RET_PASS on success */
+  [[nodiscard]] Ret_t vec_knn(std::vector<std::string> &tokens) noexcept;
+
   /** A macro to declare a dispatch function or a command function.  They all
   have the same signature.
   @param[in]   func_  the function that is being declared. */

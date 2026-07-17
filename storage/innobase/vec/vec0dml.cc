@@ -437,10 +437,11 @@ static bool vec_aux_copy_field(trx_t *trx, const dict_index_t *clust,
   return *len != UNIV_SQL_NULL;
 }
 
-dberr_t vec_aux_load_rows(dict_table_t *aux, uint32_t dims,
-                          std::vector<vec_loaded_row_t> *rows,
-                          uint64_t *raw_max_id, bool *saw_invisible,
-                          std::vector<uint64_t> *dead_labels) {
+dberr_t vec_aux_load_rows(
+    dict_table_t *aux, uint32_t dims, std::vector<vec_loaded_row_t> *rows,
+    uint64_t *raw_max_id, bool *saw_invisible,
+    std::vector<uint64_t> *dead_labels,
+    std::vector<std::pair<uint64_t, std::string>> *row_refs) {
   ut_a(aux != nullptr);
   ut_a(rows != nullptr);
   ut_a(raw_max_id != nullptr);
@@ -537,15 +538,33 @@ dberr_t vec_aux_load_rows(dict_table_t *aux, uint32_t dims,
 
     /* row_ref NULL = tombstone: not part of the graph. Committed
     neighbor lists may still reference it — loadIndex drops those
-    edges (dangling-label tolerance). */
+    edges (dangling-label tolerance). Live rows optionally emit their
+    row_ref image for the label -> base-PK map the kNN path uses. */
     {
       ulint rr_len;
-      rec_get_nth_field(clust, vrec, voffsets, pos_row_ref, &rr_len);
+      const byte *rr =
+          rec_get_nth_field(clust, vrec, voffsets, pos_row_ref, &rr_len);
       if (rr_len == UNIV_SQL_NULL) {
         if (dead_labels != nullptr) {
           dead_labels->push_back(id);
         }
         continue;
+      }
+      if (row_refs != nullptr) {
+        if (rec_offs_nth_extern(clust, voffsets, pos_row_ref)) {
+          const byte *data;
+          ulint len;
+          if (!vec_aux_copy_field(trx, clust, vrec, voffsets, pos_row_ref,
+                                  row_heap, &data, &len)) {
+            err = DB_CORRUPTION;
+            break;
+          }
+          row_refs->emplace_back(
+              id, std::string(reinterpret_cast<const char *>(data), len));
+        } else {
+          row_refs->emplace_back(
+              id, std::string(reinterpret_cast<const char *>(rr), rr_len));
+        }
       }
     }
 

@@ -1,0 +1,115 @@
+#
+# PS-11300 S2: storage-level approximate kNN over the in-memory HNSW
+# graph (debug interpreter vec_knn), and the label -> row_ref map
+# that links graph hits back to base-PK images. No visibility
+# filtering here — that is the handler layer's job (S3).
+#
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(2),
+VECTOR KEY (v) TYPE hnsw WITH (M = 4, ef_construction = 32));
+INSERT INTO t1 VALUES (100, STRING_TO_VECTOR('[0,0]')),
+(101, STRING_TO_VECTOR('[1,0]')),
+(102, STRING_TO_VECTOR('[0,1]')),
+(103, STRING_TO_VECTOR('[2,2]')),
+(104, STRING_TO_VECTOR('[5,5]'));
+# kNN from the origin: closer-first, exact L2^2 distances, refs are
+# the base PKs.
+SET SESSION innodb_interpreter = 'vec_knn test/t1 0,0 3';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+n=3
+label=1 dist=0.00 ref=100
+label=2 dist=1.00 ref=101
+label=3 dist=1.00 ref=102
+
+# k larger than the point count returns everything.
+SET SESSION innodb_interpreter = 'vec_knn test/t1 0,0 10';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+n=5
+label=1 dist=0.00 ref=100
+label=2 dist=1.00 ref=101
+label=3 dist=1.00 ref=102
+label=4 dist=8.00 ref=103
+label=5 dist=50.00 ref=104
+
+# Explicit ef only widens the search; results identical here.
+SET SESSION innodb_interpreter = 'vec_knn test/t1 0,0 3 100';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+n=3
+label=1 dist=0.00 ref=100
+label=2 dist=1.00 ref=101
+label=3 dist=1.00 ref=102
+
+# DELETE: the tombstoned point disappears from search results
+# (hnswlib skips markDeleted nodes).
+DELETE FROM t1 WHERE id = 101;
+SET SESSION innodb_interpreter = 'vec_knn test/t1 0,0 10';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+n=4
+label=1 dist=0.00 ref=100
+label=3 dist=1.00 ref=102
+label=4 dist=8.00 ref=103
+label=5 dist=50.00 ref=104
+
+# Rollback of a DELETE revives the point.
+BEGIN;
+DELETE FROM t1 WHERE id = 100;
+SET SESSION innodb_interpreter = 'vec_knn test/t1 0,0 10';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+n=3
+label=3 dist=1.00 ref=102
+label=4 dist=8.00 ref=103
+label=5 dist=50.00 ref=104
+
+ROLLBACK;
+SET SESSION innodb_interpreter = 'vec_knn test/t1 0,0 10';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+n=4
+label=1 dist=0.00 ref=100
+label=3 dist=1.00 ref=102
+label=4 dist=8.00 ref=103
+label=5 dist=50.00 ref=104
+
+# PK-only UPDATE repoints the map: label keeps its identity, ref
+# follows the new PK.
+UPDATE t1 SET id = 90 WHERE id = 102;
+SET SESSION innodb_interpreter = 'vec_knn test/t1 0,1 1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+n=1
+label=3 dist=0.00 ref=90
+
+# ... and its rollback restores the old ref (REFRESHED tracking).
+BEGIN;
+UPDATE t1 SET id = 91 WHERE id = 90;
+ROLLBACK;
+SET SESSION innodb_interpreter = 'vec_knn test/t1 0,1 1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+n=1
+label=3 dist=0.00 ref=90
+
+# Restart: map and graph rebuild from the aux on first access;
+# tombstones stay gone, refs intact.
+# restart
+SELECT id FROM t1 ORDER BY id;
+id
+90
+100
+103
+104
+SET SESSION innodb_interpreter = 'vec_knn test/t1 0,0 10';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+n=4
+label=1 dist=0.00 ref=100
+label=3 dist=1.00 ref=90
+label=4 dist=8.00 ref=103
+label=5 dist=50.00 ref=104
+
+DROP TABLE t1;
