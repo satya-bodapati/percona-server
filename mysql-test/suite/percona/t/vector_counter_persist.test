@@ -1,0 +1,55 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # PS-11300: the hidden vec_idx_id counter is persisted autoinc-style
+--echo # (PM_TABLE_VEC_IDX_ID dynamic metadata, redo-logged at assignment).
+--echo # Labels are NEVER reissued — not across restart, not across crash —
+--echo # even for ids the aux table never saw (NULL-vector rows, rolled-back
+--echo # inserts). Base-row vec_idx_id values are therefore unique for the
+--echo # lifetime of a table_id.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(2),
+                 VECTOR KEY (v) TYPE hnsw WITH (M = 4));
+
+--echo # id 1 -> aux; id 2 consumed by the NULL row, invisible to the aux.
+INSERT INTO t1 VALUES (100, STRING_TO_VECTOR('[1,0]'));
+INSERT INTO t1 VALUES (101, NULL);
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # Restart: the counter must remember id 2 although max(aux) is 1 —
+--echo # the next insert gets id 3, closing the NULL-row hole.
+--source include/restart_mysqld.inc
+INSERT INTO t1 VALUES (102, STRING_TO_VECTOR('[0,1]'));
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # Rolled-back inserts consume ids 4 and 5; rollback removes their aux
+--echo # rows, but the ids stay consumed even across a restart.
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES (103, STRING_TO_VECTOR('[1,1]')), (100, STRING_TO_VECTOR('[2,2]'));
+--source include/restart_mysqld.inc
+INSERT INTO t1 VALUES (104, STRING_TO_VECTOR('[2,0]'));
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # Crash durability: ids 7 and 8 go to NULL rows (nothing in the aux,
+--echo # nothing flushed), then the server is killed. The redo record
+--echo # written at assignment must carry the counter through recovery.
+INSERT INTO t1 VALUES (105, NULL);
+INSERT INTO t1 VALUES (106, NULL);
+--source include/kill_and_restart_mysqld.inc
+INSERT INTO t1 VALUES (107, STRING_TO_VECTOR('[0,2]'));
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # TRUNCATE reassigns the table_id: metadata is orphaned with it and
+--echo # the counter legitimately restarts at 1.
+TRUNCATE TABLE t1;
+INSERT INTO t1 VALUES (200, STRING_TO_VECTOR('[3,3]'));
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+DROP TABLE t1;

@@ -78,21 +78,20 @@ id
 104
 include/assert_grep.inc [graph loaded from aux on first table access]
 SET GLOBAL debug = '-d,vec_load_log';
-# Counter proof: the restored counter continues from the committed
-# maximum (rollback of an insert removes its records physically, so
-# an id consumed only by a rolled-back statement may be reused —
-# only COMMITTED-id reuse must be impossible). The new point links
-# into the reloaded graph.
+# Counter proof: the counter is persisted at ASSIGNMENT (dynamic
+# metadata, PS-11300), so even ids consumed only by the rolled-back
+# statement above (6 and 7) are never reissued — the new point gets
+# id 8 and links into the reloaded graph.
 INSERT INTO t1 VALUES (105, STRING_TO_VECTOR('[1,1,0,0]'));
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=5 max_id=6 invisible=0
-id=1 level=1 nb=3:4:5:6|6
-id=3 level=0 nb=1:4:5:6
+count=5 max_id=8 invisible=0
+id=1 level=1 nb=3:4:5:8|8
+id=3 level=0 nb=1:4:5:8
 id=4 level=0 nb=1:3:5
 id=5 level=0 nb=1:3:4
-id=6 level=1 nb=3:1|1
+id=8 level=1 nb=3:1|1
 
 DROP TABLE t1;
 #

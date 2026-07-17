@@ -79,7 +79,8 @@ SELECT @@session.innodb_interpreter_output;
 
 --echo #
 --echo # Restart: tombstones stay out of the graph, live rows load, the
---echo # counter continues past everything ever committed.
+--echo # counter continues past everything ever CONSUMED (persisted at
+--echo # assignment — rolled-back labels are never reissued).
 --echo #
 --source include/restart_mysqld.inc
 SELECT id FROM t1 ORDER BY id;
@@ -90,10 +91,11 @@ SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 
 --echo #
---echo # Regression: NULL-vector row before a restart, insert after it
---echo # (which may take the same numeric id the NULL row consumed),
---echo # then NULL -> value on the old row. The fresh-label rule keeps
---echo # the aux collision-free.
+--echo # NULL-vector row before a restart, insert after it, then
+--echo # NULL -> value on the old row. Counter persistence keeps the
+--echo # NULL row's id reserved across the restart (base-row ids stay
+--echo # unique), and the fresh-label rule gives the NULL -> value
+--echo # update its own new label on top.
 --echo #
 INSERT INTO t1 VALUES (105, NULL, 0);
 --source include/restart_mysqld.inc
