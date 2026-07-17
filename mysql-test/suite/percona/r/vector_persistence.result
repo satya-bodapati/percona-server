@@ -133,10 +133,10 @@ ALTER TABLE t_rt ADD COLUMN vec_idx_id BIGINT UNSIGNED;
 ERROR 42000: Incorrect column name 'vec_idx_id'
 DROP TABLE t_rt;
 #
-# DISCARD / IMPORT TABLESPACE on a table with a vector index is
-# rejected in phase 1 — per-aux tablespace import is not yet
-# designed. The block lives at the very entry of
-# ha_innobase::discard_or_import_tablespace.
+# DISCARD TABLESPACE is supported since PS-11300: the aux table is
+# dropped with the tablespace (its content belongs to the discarded
+# rows) and IMPORT re-mints an empty one. Full coverage lives in
+# vector_import; here only the aux .ibd disappearance is checked.
 #
 CREATE TABLE t_disc (
 id BIGINT UNSIGNED PRIMARY KEY,
@@ -144,6 +144,5 @@ v1 VECTOR(8),
 VECTOR KEY (v1) TYPE hnsw
 );
 ALTER TABLE t_disc DISCARD TABLESPACE;
-ERROR 42000: InnoDB: Cannot discard table `test/t_disc` because it has a vector index. DISCARD/IMPORT TABLESPACE is not yet supported for tables with vector indexes.
 DROP TABLE t_disc;
 # After DROP TABLE the aux .ibd files must be gone too — no orphans.

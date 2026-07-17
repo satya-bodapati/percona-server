@@ -1,0 +1,67 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # PS-11300: DISCARD/IMPORT TABLESPACE on a vector-indexed table.
+--echo # The aux table's content belongs to the discarded rows, so DISCARD
+--echo # drops the aux (and the in-memory graph) alongside the tablespace;
+--echo # IMPORT re-mints a fresh EMPTY aux and warns that pre-import rows
+--echo # are not indexed until DROP INDEX + ADD INDEX rebuilds.
+--echo #
+
+call mtr.add_suppression("Index vk not found or corrupt");
+call mtr.add_suppression("Skip adjustment of root pages for index");
+call mtr.add_suppression("FLUSH TABLES on tables that have a vector index");
+
+--let $MYSQLD_DATADIR = `SELECT @@datadir`
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(4),
+                 VECTOR KEY vk (v) TYPE hnsw WITH (M = 4));
+
+INSERT INTO t1 VALUES (100, STRING_TO_VECTOR('[1,0,0,0]')),
+                      (101, STRING_TO_VECTOR('[0,1,0,0]')),
+                      (102, STRING_TO_VECTOR('[0,0,1,0]'));
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+
+--echo # Export: base .ibd/.cfg only — the aux is warned unflushed.
+FLUSH TABLES t1 FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/t1.ibd $MYSQLTEST_VARDIR/tmp/t1.ibd
+--copy_file $MYSQLD_DATADIR/test/t1.cfg $MYSQLTEST_VARDIR/tmp/t1.cfg
+UNLOCK TABLES;
+
+--echo # DISCARD removes the base tablespace AND the aux .ibd.
+ALTER TABLE t1 DISCARD TABLESPACE;
+--list_files $MYSQLD_DATADIR/test vec_*.ibd
+
+--copy_file $MYSQLTEST_VARDIR/tmp/t1.ibd $MYSQLD_DATADIR/test/t1.ibd
+--copy_file $MYSQLTEST_VARDIR/tmp/t1.cfg $MYSQLD_DATADIR/test/t1.cfg
+
+--echo # IMPORT succeeds without any vector aux files, warns, and a fresh
+--echo # empty aux .ibd exists afterwards.
+ALTER TABLE t1 IMPORT TABLESPACE;
+--replace_regex /vec_[0-9a-f]+_[0-9a-f]+\.ibd/vec_<TID>_<IID>.ibd/
+--list_files $MYSQLD_DATADIR/test vec_*.ibd
+
+--echo # Base rows are back; the vector index is EMPTY (documented): kNN
+--echo # finds nothing pre-rebuild.
+SELECT id FROM t1 ORDER BY id;
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 3;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # New inserts index normally, labels start fresh at 1.
+INSERT INTO t1 VALUES (103, STRING_TO_VECTOR('[0,0,0,1]'));
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,0,1]'), 'EUCLIDEAN') LIMIT 1;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # Full rebuild via DROP/ADD (COPY) indexes everything.
+ALTER TABLE t1 DROP KEY vk;
+ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 4);
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+DROP TABLE t1;
+--remove_file $MYSQLTEST_VARDIR/tmp/t1.ibd
+--remove_file $MYSQLTEST_VARDIR/tmp/t1.cfg

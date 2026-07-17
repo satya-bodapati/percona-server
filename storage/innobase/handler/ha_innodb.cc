@@ -7921,6 +7921,52 @@ void ha_innobase::innobase_initialize_autoinc() {
 @param[in]      table_def       dd::Table object describing table to be opened
 @retval 1 if error
 @retval 0 if success */
+/** Create the vec_t companion for a vector-indexed table and load the
+graph, taking dims and WITH() parameters from the SQL layer (they are
+not recoverable from the dict alone: the vector column's dict len is
+blob metadata). Idempotent — returns immediately when the companion
+exists. Called from open() (the load-on-first-access point;
+DEVIATION FROM FTS: FTS warms its cache lazily per query, an HNSW
+graph must be complete before the first addPoint) and lazily from the
+write/search paths to self-heal when the companion was lost while
+handlers survive (IMPORT TABLESPACE re-mints the aux). A load failure
+is not fatal: the graph stays unloaded and the next insert retries,
+surfacing the error there. */
+static void innobase_vec_open_from_sql_layer(TABLE *table,
+                                             dict_table_t *ib_table,
+                                             THD *thd) {
+  if (ib_table->vec != nullptr) {
+    return;
+  }
+
+  for (uint i = 0; i < table->s->keys; i++) {
+    if (table->key_info[i].algorithm == HA_KEY_ALG_VECTOR) {
+      /* Resolve the REAL table field: KEY_PART_INFO::field is a
+      key-image copy whose field_length is the key-part length, not
+      the column width — get_max_dimensions on it is garbage. */
+      auto *field_vec = static_cast<Field_vector *>(
+          table->field[table->key_info[i].key_part[0].field->field_index()]);
+
+      storage::innobase::vec::HnswParam param;
+      if (table->key_info[i].vector_construction_params.str != nullptr) {
+        (void)storage::innobase::vec::parse_construction_params(
+            table->key_info[i].vector_construction_params, param);
+      }
+
+      vec_open(ib_table, field_vec->field_index(),
+               field_vec->get_max_dimensions(), param.M,
+               param.ef_construction);
+
+      const dberr_t verr = vec_load(ib_table, thd);
+      if (verr != DB_SUCCESS) {
+        ib::warn() << "Failed to load vector index graph for table "
+                   << ib_table->name.m_name << ": " << ut_strerr(verr)
+                   << ". Will retry on first insert.";
+      }
+    }
+  }
+}
+
 int ha_innobase::open(const char *name, int, uint open_flags,
                       const dd::Table *table_def) {
   dict_table_t *ib_table;
@@ -8374,39 +8420,12 @@ int ha_innobase::open(const char *name, int, uint open_flags,
     }
   }
 
-  /* Vector index: create the vec_t companion (lazily, first open only)
-  and build the in-memory HNSW graph from the aux table — this is the
-  load-on-first-access point after a restart or cache eviction.
-  DEVIATION FROM FTS: FTS warms its cache lazily per query; an HNSW
-  graph must be complete before the first addPoint, so it loads here.
-  A load failure is not fatal to open(): the graph stays unloaded and
-  the first INSERT retries the load, surfacing the error there. */
-  for (uint i = 0; i < table->s->keys; i++) {
-    if (table->key_info[i].algorithm == HA_KEY_ALG_VECTOR) {
-      /* Resolve the REAL table field: KEY_PART_INFO::field is a
-      key-image copy whose field_length is the key-part length, not
-      the column width — get_max_dimensions on it is garbage. */
-      auto *field_vec = static_cast<Field_vector *>(
-          table->field[table->key_info[i].key_part[0].field->field_index()]);
-
-      storage::innobase::vec::HnswParam param;
-      if (table->key_info[i].vector_construction_params.str != nullptr) {
-        (void)storage::innobase::vec::parse_construction_params(
-            table->key_info[i].vector_construction_params, param);
-      }
-
-      vec_open(ib_table, field_vec->field_index(),
-               field_vec->get_max_dimensions(), param.M,
-               param.ef_construction);
-
-      const dberr_t verr = vec_load(ib_table, thd);
-      if (verr != DB_SUCCESS) {
-        ib::warn() << "Failed to load vector index graph for table "
-                   << ib_table->name.m_name << ": " << ut_strerr(verr)
-                   << ". Will retry on first insert.";
-      }
-    }
-  }
+  /* Vector index: create the vec_t companion and load the graph —
+  the load-on-first-access point (see innobase_vec_open_from_sql_layer;
+  also called lazily from write_row/vec_read_first to self-heal paths
+  where the companion is lost while handlers survive, e.g. after
+  IMPORT TABLESPACE re-mints the aux). */
+  innobase_vec_open_from_sql_layer(table, ib_table, thd);
 
   info(HA_STATUS_NO_LOCK | HA_STATUS_VARIABLE | HA_STATUS_CONST);
 
@@ -9949,6 +9968,9 @@ int ha_innobase::write_row(uchar *record) /*!< in: a row in MySQL format */
   point to the in-memory HNSW graph; the graph's persistence callbacks
   write every affected aux row on THIS transaction, so base row and
   graph rows commit or roll back together (PS-11300-design.md par 6). */
+  if (error == DB_SUCCESS && m_prebuilt->table->vec == nullptr) {
+    innobase_vec_open_from_sql_layer(table, m_prebuilt->table, m_user_thd);
+  }
   if (error == DB_SUCCESS && m_prebuilt->table->vec != nullptr &&
       m_prebuilt->ins_node != nullptr) {
     Field *vfield = table->field[m_prebuilt->table->vec->field_no];
@@ -12328,7 +12350,14 @@ static void innobase_vec_build_pk_tuple(dtuple_t *tuple,
 int ha_innobase::vec_read_first(Item *item, uchar *buf, ha_rows limit) {
   DBUG_TRACE;
 
-  ut_a(m_prebuilt->table->vec != nullptr);
+  /* Self-heal a lost companion (e.g. after IMPORT re-minted the aux);
+  if it still cannot be built, serve nothing rather than crash. */
+  if (m_prebuilt->table->vec == nullptr) {
+    innobase_vec_open_from_sql_layer(table, m_prebuilt->table, m_user_thd);
+    if (m_prebuilt->table->vec == nullptr) {
+      return HA_ERR_END_OF_FILE;
+    }
+  }
 
   String buff_vec;
   String *vec = item->val_str(&buff_vec);
@@ -16583,21 +16612,12 @@ int ha_innobase::discard_or_import_tablespace(bool discard,
     return HA_ERR_NOT_ALLOWED_COMMAND;
   }
 
-  /* DEVIATION FROM FTS: FTS supports DISCARD/IMPORT — fts_drop_orphaned
-  _tables + the FTS aux rebuild inside innobase_import_tablespace roll
-  the aux .ibd files with the parent. Vec has no serialize/restore
-  path for HNSW graph state across .ibd swap yet, so we hard-block
-  DISCARD/IMPORT on any vec-flagged table. Phase 2 (PS-11300) will
-  lift the block once HNSW aux can round-trip through IMPORT. */
-  if (DICT_TF2_FLAG_IS_SET(dict_table, DICT_TF2_VEC_HAS_IDX_ID)) {
-    my_printf_error(ER_NOT_ALLOWED_COMMAND,
-                    "InnoDB: Cannot %s table `%s` because it has a vector"
-                    " index. DISCARD/IMPORT TABLESPACE is not yet supported"
-                    " for tables with vector indexes.",
-                    MYF(0), discard ? "discard" : "import",
-                    dict_table->name.m_name);
-    return HA_ERR_NOT_ALLOWED_COMMAND;
-  }
+  /* DISCARD/IMPORT with a vector index (PS-11300, lifts the phase-1
+  block): the aux table's content belongs to the discarded rows, so
+  DISCARD drops the aux and the in-memory graph with the tablespace
+  (row_discard_tablespace); IMPORT re-mints a fresh empty aux below.
+  The imported rows are not indexed until DROP/ADD INDEX rebuilds —
+  IMPORT pushes a warning saying exactly that. */
 
   TrxInInnoDB trx_in_innodb(m_prebuilt->trx);
 
@@ -16655,6 +16675,28 @@ int ha_innobase::discard_or_import_tablespace(bool discard,
     return HA_ERR_TABLE_EXIST;
   } else {
     err = row_import_for_mysql(dict_table, table_def, m_prebuilt);
+
+    /* The vector aux table was dropped at DISCARD; re-mint an empty
+    one so the table is fully operational (inserts index normally).
+    Pre-import rows are NOT in the vector index until DROP INDEX +
+    ADD INDEX rebuilds it — warn so the incompleteness is explicit. */
+    if (err == DB_SUCCESS &&
+        DICT_TF2_FLAG_IS_SET(dict_table, DICT_TF2_VEC_HAS_IDX_ID) &&
+        vec_aux_table_has_vector_index(dict_table)) {
+      THD *ithd = m_prebuilt->trx->mysql_thd;
+      const dberr_t verr =
+          vec_aux_recreate_after_import(dict_table, m_prebuilt->trx);
+      if (verr != DB_SUCCESS) {
+        err = verr;
+      } else {
+        push_warning_printf(
+            ithd, Sql_condition::SL_WARNING, ER_ALTER_INFO,
+            "Vector index on table %s is empty after IMPORT TABLESPACE:"
+            " imported rows are not indexed. Rebuild it with"
+            " ALTER TABLE ... DROP INDEX / ADD INDEX to index them.",
+            dict_table->name.m_name);
+      }
+    }
 
     if (err == DB_SUCCESS) {
       info(HA_STATUS_TIME | HA_STATUS_CONST | HA_STATUS_VARIABLE |
