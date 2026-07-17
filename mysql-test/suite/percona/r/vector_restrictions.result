@@ -1,0 +1,78 @@
+#
+# PS-11300: fence-posts. Vector indexes cannot coexist with (a)
+# partitioned tables — ha_innopart has no vector maintenance wiring —
+# or (b) CASCADE referential actions on the indexed table — cascaded
+# DML runs inside the engine, bypassing the handler hooks that keep
+# the graph and aux in sync. Non-mutating FK actions stay allowed.
+#
+# (a) CREATE of a partitioned table with a vector index.
+CREATE TABLE tp (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+VECTOR KEY (v) TYPE hnsw)
+PARTITION BY HASH(id) PARTITIONS 2;
+ERROR HY000: Vector indexes are not supported on partitioned tables.
+# ADD VECTOR INDEX on an existing partitioned table.
+CREATE TABLE tp (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4))
+PARTITION BY HASH(id) PARTITIONS 2;
+ALTER TABLE tp ADD VECTOR KEY (v) TYPE hnsw;
+ERROR HY000: Vector indexes are not supported on partitioned tables.
+DROP TABLE tp;
+# PARTITION BY on an existing vector-indexed table.
+CREATE TABLE tv (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+VECTOR KEY (v) TYPE hnsw);
+ALTER TABLE tv PARTITION BY HASH(id) PARTITIONS 2;
+ERROR HY000: Vector indexes are not supported on partitioned tables.
+DROP TABLE tv;
+#
+# (b) CASCADE actions on a vector-indexed child table.
+#
+CREATE TABLE parent (id BIGINT UNSIGNED PRIMARY KEY);
+# CREATE with ON DELETE CASCADE.
+CREATE TABLE child (id BIGINT UNSIGNED PRIMARY KEY,
+pid BIGINT UNSIGNED, v VECTOR(4),
+VECTOR KEY (v) TYPE hnsw,
+FOREIGN KEY (pid) REFERENCES parent(id)
+ON DELETE CASCADE);
+ERROR HY000: A table with a vector index cannot have a foreign key with a CASCADE referential action.
+# CREATE with ON UPDATE CASCADE.
+CREATE TABLE child (id BIGINT UNSIGNED PRIMARY KEY,
+pid BIGINT UNSIGNED, v VECTOR(4),
+VECTOR KEY (v) TYPE hnsw,
+FOREIGN KEY (pid) REFERENCES parent(id)
+ON UPDATE CASCADE);
+ERROR HY000: A table with a vector index cannot have a foreign key with a CASCADE referential action.
+# ADD a cascading FK to a vector-indexed table.
+CREATE TABLE child (id BIGINT UNSIGNED PRIMARY KEY,
+pid BIGINT UNSIGNED, v VECTOR(4),
+VECTOR KEY (v) TYPE hnsw);
+ALTER TABLE child ADD FOREIGN KEY (pid) REFERENCES parent(id)
+ON DELETE CASCADE;
+ERROR HY000: A table with a vector index cannot have a foreign key with a CASCADE referential action.
+# ADD VECTOR INDEX to a table that already has a cascading FK.
+DROP TABLE child;
+CREATE TABLE child (id BIGINT UNSIGNED PRIMARY KEY,
+pid BIGINT UNSIGNED, v VECTOR(4),
+FOREIGN KEY (pid) REFERENCES parent(id)
+ON DELETE CASCADE);
+ALTER TABLE child ADD VECTOR KEY (v) TYPE hnsw;
+ERROR HY000: A table with a vector index cannot have a foreign key with a CASCADE referential action.
+DROP TABLE child;
+# Non-mutating actions remain allowed: RESTRICT refuses the parent
+# DELETE (no cascaded child DML), SET NULL only nulls the FK column
+# (a non-PK, non-vector update — no index maintenance needed).
+CREATE TABLE child (id BIGINT UNSIGNED PRIMARY KEY,
+pid BIGINT UNSIGNED, v VECTOR(4),
+VECTOR KEY (v) TYPE hnsw,
+FOREIGN KEY (pid) REFERENCES parent(id)
+ON DELETE SET NULL ON UPDATE RESTRICT);
+INSERT INTO parent VALUES (1);
+INSERT INTO child VALUES (10, 1, STRING_TO_VECTOR('[1,0,0,0]'));
+UPDATE parent SET id = 2 WHERE id = 1;
+ERROR 23000: Cannot delete or update a parent row: a foreign key constraint fails (`test`.`child`, CONSTRAINT `child_ibfk_1` FOREIGN KEY (`pid`) REFERENCES `parent` (`id`) ON DELETE SET NULL ON UPDATE RESTRICT)
+DELETE FROM parent WHERE id = 1;
+SELECT id, pid FROM child;
+id	pid
+10	NULL
+SELECT id FROM child ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 1;
+id
+10
+DROP TABLE child, parent;
