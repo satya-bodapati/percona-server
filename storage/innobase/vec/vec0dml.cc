@@ -437,6 +437,61 @@ static bool vec_aux_copy_field(trx_t *trx, const dict_index_t *clust,
   return *len != UNIV_SQL_NULL;
 }
 
+dberr_t vec_base_max_idx_id(dict_table_t *base, uint64_t *max_id) {
+  ut_a(base != nullptr);
+  ut_a(max_id != nullptr);
+  ut_a(base->vec_idx_id_col != ULINT_UNDEFINED);
+
+  *max_id = 0;
+
+  dict_index_t *clust = base->first_index();
+  const ulint pos_id =
+      dict_col_get_clust_pos(base->get_col(base->vec_idx_id_col), clust);
+
+  mem_heap_t *offset_heap = nullptr;
+
+  mtr_t mtr;
+  mtr_start(&mtr);
+
+  btr_pcur_t pcur;
+  pcur.open_at_side(true /* left */, clust, BTR_SEARCH_LEAF, true, 0, &mtr);
+
+  ulint n_scanned = 0;
+
+  while (pcur.move_to_next_user_rec(&mtr) == DB_SUCCESS) {
+    const rec_t *rec = pcur.get_rec();
+
+    ulint *offsets = rec_get_offsets(rec, clust, nullptr, ULINT_UNDEFINED,
+                                     UT_LOCATION_HERE, &offset_heap);
+
+    /* Every record counts, delete-marked included: a purge-pending id
+    is still an id that must never be reissued. No version-building —
+    the callers run in quiesced (exclusive-MDL) contexts and the
+    hidden column of any record version carries a consumed id. */
+    ulint len;
+    const byte *data = rec_get_nth_field(clust, rec, offsets, pos_id, &len);
+    if (len == 8) {
+      *max_id = std::max(*max_id, mach_read_from_8(data));
+    }
+
+    if (++n_scanned % 512 == 0) {
+      pcur.store_position(&mtr);
+      mtr_commit(&mtr);
+      mtr_start(&mtr);
+      pcur.restore_position(BTR_SEARCH_LEAF, &mtr, UT_LOCATION_HERE);
+    }
+  }
+
+  pcur.close();
+  mtr_commit(&mtr);
+
+  if (offset_heap != nullptr) {
+    mem_heap_free(offset_heap);
+  }
+
+  return DB_SUCCESS;
+}
+
 dberr_t vec_aux_load_rows(
     dict_table_t *aux, uint32_t dims, std::vector<vec_loaded_row_t> *rows,
     uint64_t *raw_max_id, bool *saw_invisible,

@@ -49,7 +49,9 @@ SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 
---echo # New inserts index normally, labels start fresh at 1.
+--echo # New inserts index normally. The counter was re-seeded from the
+--echo # imported rows' stamped ids (max 3) — the new row gets label 4,
+--echo # never a duplicate of an imported base id.
 INSERT INTO t1 VALUES (103, STRING_TO_VECTOR('[0,0,0,1]'));
 SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,0,1]'), 'EUCLIDEAN') LIMIT 1;
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
