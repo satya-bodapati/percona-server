@@ -59,12 +59,12 @@ RENAME TABLE test.t3 TO vec_target.t3;
 DROP DATABASE vec_target;
 
 --echo #
---echo # === D. Partitioned tables reject VECTOR KEY (phase 1) ===
---echo # Mirrors FTS: HA_CAN_VECTOR is masked out via
---echo # HA_INNOPART_DISABLED_TABLE_FLAGS, same mechanism that blocks
---echo # HA_CAN_FULLTEXT on partitioned tables.
+--echo # === D. Partitioned tables reject VECTOR KEY ===
+--echo # Since PS-11300 this is a dedicated server-layer fence-post with
+--echo # its own error (previously the engine-flag mask produced the
+--echo # generic ER_UNKNOWN_ERROR). Full coverage: vector_restrictions.
 --echo #
---error ER_UNKNOWN_ERROR
+--error ER_VECTOR_INDEX_WITH_PARTITIONED_TABLE
 CREATE TABLE t_part (id BIGINT UNSIGNED PRIMARY KEY,
                      v VECTOR(8),
                      VECTOR KEY (v) TYPE hnsw WITH (M = 6))

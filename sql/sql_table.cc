@@ -8689,6 +8689,51 @@ bool mysql_prepare_create_table(
   bool primary_key = false;
   uint vector_key_number = 0;
 
+  /* Vector-index fence-posts (PS-11300), checked before any key is
+  prepared so they win over less specific downstream failures:
+  - No partitioned tables: ha_innopart has none of the vector index
+    maintenance wiring, so the index would silently not be maintained.
+    Covers CREATE, ALTER ... ADD VECTOR INDEX on a partitioned table,
+    and ALTER ... PARTITION BY on a vector-indexed table.
+  - No CASCADE referential actions on a vector-indexed child table:
+    cascaded DML runs inside the engine (row0ins FK cascade nodes),
+    bypassing the handler hooks that maintain the vector index — a
+    cascaded DELETE would leave live ghost points and a cascaded PK
+    UPDATE would detach rows from their graph entries. (FTS handles
+    cascades engine-side at row0ins.cc:1263; the vector analog is
+    future work.) Both ALTER directions funnel through here via
+    key_list/existing_fks. */
+  {
+    bool any_vector_key = false;
+    bool any_cascading_fk = false;
+    for (size_t i = 0; i < alter_info->key_list.size(); i++) {
+      const Key_spec *key = alter_info->key_list[i];
+      if (key->type == KEYTYPE_VECTOR) {
+        any_vector_key = true;
+      } else if (key->type == KEYTYPE_FOREIGN) {
+        const Foreign_key_spec *fk = down_cast<const Foreign_key_spec *>(key);
+        if (fk->delete_opt == FK_OPTION_CASCADE ||
+            fk->update_opt == FK_OPTION_CASCADE) {
+          any_cascading_fk = true;
+        }
+      }
+    }
+    for (uint i = 0; i < existing_fks_count && !any_cascading_fk; i++) {
+      if (existing_fks[i].delete_opt == FK_OPTION_CASCADE ||
+          existing_fks[i].update_opt == FK_OPTION_CASCADE) {
+        any_cascading_fk = true;
+      }
+    }
+    if (any_vector_key && is_partitioned) {
+      my_error(ER_VECTOR_INDEX_WITH_PARTITIONED_TABLE, MYF(0));
+      return true;
+    }
+    if (any_vector_key && any_cascading_fk) {
+      my_error(ER_VECTOR_INDEX_WITH_CASCADING_FK, MYF(0));
+      return true;
+    }
+  }
+
   // First prepare non-foreign keys so that they are ready when
   // we prepare foreign keys.
   for (size_t i = 0; i < alter_info->key_list.size(); i++) {
