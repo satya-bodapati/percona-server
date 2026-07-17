@@ -67,11 +67,10 @@ SELECT id FROM t1 ORDER BY id;
 --source include/assert_grep.inc
 SET GLOBAL debug = '-d,vec_load_log';
 
---echo # Counter proof: the restored counter continues from the committed
---echo # maximum (rollback of an insert removes its records physically, so
---echo # an id consumed only by a rolled-back statement may be reused —
---echo # only COMMITTED-id reuse must be impossible). The new point links
---echo # into the reloaded graph.
+--echo # Counter proof: the counter is persisted at ASSIGNMENT (dynamic
+--echo # metadata, PS-11300), so even ids consumed only by the rolled-back
+--echo # statement above (6 and 7) are never reissued — the new point gets
+--echo # id 8 and links into the reloaded graph.
 INSERT INTO t1 VALUES (105, STRING_TO_VECTOR('[1,1,0,0]'));
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;

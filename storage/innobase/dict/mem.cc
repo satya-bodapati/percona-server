@@ -260,6 +260,7 @@ dict_table_t *dict_mem_table_create(const char *name, space_id_t space,
   ran on this field). Mirrors the ULINT_UNDEFINED init above for
   vec_idx_id_col. Value 0 is fine — first stamp fetches then adds. */
   new (&table->vec_next_id) std::atomic<uint64_t>(0);
+  new (&table->vec_next_id_persisted) std::atomic<uint64_t>(0);
   table->sess_row_id = 0;
   table->sess_trx_id = 0;
 
