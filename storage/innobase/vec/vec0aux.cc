@@ -1268,14 +1268,28 @@ dberr_t vec_aux_recreate_after_import(dict_table_t *table, trx_t *trx) {
   row_mysql_unlock_data_dictionary(trx);
 
   if (err == DB_SUCCESS) {
-    /* Fresh aux, fresh labels. The statement commit finalizes the
-    creation; no local commit (the trx is the session's). Reset the
-    persisted watermark too: DISCARD reassigned the table_id, so the
-    old dynamic-metadata row is orphaned — with a stale high
-    watermark, dict_table_vec_next_id_log would skip redo for the new
-    ids and a restart would regress the counter. */
-    table->vec_next_id.store(0);
-    table->vec_next_id_persisted.store(0);
+    /* Fresh aux — but NOT fresh labels: the imported base rows carry
+    their source-stamped ids in the hidden column (it travels inside
+    the .ibd), and base-id uniqueness (the counter-persistence
+    invariant) requires new assignments to stay above every one of
+    them. Re-seed from a clustered scan; the DISCARD-reassigned
+    table_id orphaned the old dynamic-metadata row, so reset the
+    watermark first and re-log the seed so it survives restart. */
+    uint64_t max_id = 0;
+    err = vec_base_max_idx_id(table, &max_id);
+    if (err == DB_SUCCESS) {
+      table->vec_next_id.store(max_id);
+      table->vec_next_id_persisted.store(0);
+      if (max_id != 0) {
+        mtr_t mtr;
+        mtr.start();
+        const bool persist = dict_table_vec_next_id_log(table, max_id, &mtr);
+        mtr.commit();
+        if (persist) {
+          dict_table_persist_to_dd_table_buffer(table);
+        }
+      }
+    }
   }
 
   return err;
