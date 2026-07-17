@@ -56,13 +56,13 @@ RENAME TABLE test.t3 TO vec_target.t3;
 vec_hnsw_<TID>_<IID>.ibd
 DROP DATABASE vec_target;
 #
-# === D. Partitioned tables reject VECTOR KEY (phase 1) ===
-# Mirrors FTS: HA_CAN_VECTOR is masked out via
-# HA_INNOPART_DISABLED_TABLE_FLAGS, same mechanism that blocks
-# HA_CAN_FULLTEXT on partitioned tables.
+# === D. Partitioned tables reject VECTOR KEY ===
+# Since PS-11300 this is a dedicated server-layer fence-post with
+# its own error (previously the engine-flag mask produced the
+# generic ER_UNKNOWN_ERROR). Full coverage: vector_restrictions.
 #
 CREATE TABLE t_part (id BIGINT UNSIGNED PRIMARY KEY,
 v VECTOR(8),
 VECTOR KEY (v) TYPE hnsw WITH (M = 6))
 PARTITION BY HASH(id) PARTITIONS 4;
-ERROR HY000: Unknown error
+ERROR HY000: Vector indexes are not supported on partitioned tables.

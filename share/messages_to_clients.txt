@@ -11211,6 +11211,12 @@ ER_CANT_DROP_CF
 ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR
   eng "InnoDB does not support rebuilding a table with a vector index in-place; the vector index contents cannot be carried across a native rebuild"
 
+ER_VECTOR_INDEX_WITH_PARTITIONED_TABLE
+  eng "Vector indexes are not supported on partitioned tables."
+
+ER_VECTOR_INDEX_WITH_CASCADING_FK
+  eng "A table with a vector index cannot have a foreign key with a CASCADE referential action."
+
 
 ################################################################################
 # DO NOT add messages for the error-log to this file;
