@@ -86,6 +86,11 @@ class Vec_hnsw_index final : public Vector_index {
   }
 
   void close(dict_table_t *table) const override { vec_close(table); }
+
+  [[nodiscard]] dberr_t recreate_after_import(dict_table_t *table,
+                                              trx_t *trx) const override {
+    return vec_aux_recreate_after_import(table, trx);
+  }
 };
 
 const Vec_hnsw_index vec_hnsw_singleton;

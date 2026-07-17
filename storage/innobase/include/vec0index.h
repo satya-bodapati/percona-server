@@ -119,6 +119,11 @@ class Vector_index {
   /** Free the in-memory runtime. Safe on tables that never opened
   one. See vec_close. */
   virtual void close(dict_table_t *table) const = 0;
+
+  /** Re-mint empty aux state after IMPORT TABLESPACE. See
+  vec_aux_recreate_after_import. */
+  [[nodiscard]] virtual dberr_t recreate_after_import(dict_table_t *table,
+                                                      trx_t *trx) const = 0;
 };
 
 /** Look up the implementation registered under a TYPE token, e.g. the
