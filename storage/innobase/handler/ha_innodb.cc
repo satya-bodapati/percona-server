@@ -1201,6 +1201,12 @@ static MYSQL_THDVAR_STR(tmpdir,
 
 /* Default value is updated later in innodb_init_params due to the dependency on
 --container_aware startup option */
+static MYSQL_THDVAR_ULONG(
+    hnsw_ef_search, PLUGIN_VAR_RQCMDARG,
+    "Minimum candidate-list width for HNSW vector index searches (kNN"
+    " recall/latency knob; the effective width is max(ef, LIMIT))",
+    nullptr, nullptr, 40, 1, 100000, 0);
+
 static MYSQL_THDVAR_ULONG(parallel_read_threads, PLUGIN_VAR_RQCMDARG,
                           "Number of threads to do parallel read.", nullptr,
                           nullptr, 4,                   /* Default. */
@@ -7099,6 +7105,15 @@ ulong ha_innobase::index_flags(uint key, uint, bool) const {
     return (0);
   }
 
+  /* The vector index is a stub at the B-tree level (data lives in the
+  aux table + in-memory graph): it can never serve ordered reads,
+  ranges or index-only scans. Without this, find_shortest_key picks it
+  for COUNT(*) and index scans return no rows (phase-1 bug). Access is
+  exclusively via the JT_VECTOR kNN path. */
+  if (table_share->key_info[key].algorithm == HA_KEY_ALG_VECTOR) {
+    return (0);
+  }
+
   ulong flags = HA_READ_NEXT | HA_READ_PREV | HA_READ_ORDER | HA_READ_RANGE |
                 HA_KEYREAD_ONLY | HA_DO_INDEX_COND_PUSHDOWN;
 
@@ -12281,6 +12296,142 @@ next_record:
   }
 
   return (HA_ERR_END_OF_FILE);
+}
+
+int ha_innobase::vec_init() {
+  DBUG_TRACE;
+
+  /* The kNN candidates are fetched from the base table by PRIMARY KEY
+  (row_ref is the PK image); rnd_init sets up the clustered-index
+  positioning the per-candidate row_search_for_mysql below relies on. */
+  return rnd_init(false);
+}
+
+/** Build the PK search tuple for a kNN candidate's row_ref image.
+The base PK of a vector-indexed table is a single BIGINT UNSIGNED
+(PS-11264), so the image is its 8-byte storage form — usable as the
+dfield verbatim. */
+static void innobase_vec_build_pk_tuple(dtuple_t *tuple,
+                                        const dict_index_t *clust_index,
+                                        const std::string &row_ref) {
+  ut_a(row_ref.size() == 8);
+  ut_a(dict_index_get_n_unique(clust_index) == 1);
+
+  dtuple_set_n_fields(tuple, 1);
+  dict_index_copy_types(tuple, clust_index, 1);
+
+  dfield_t *dfield = dtuple_get_nth_field(tuple, 0);
+  dfield_set_data(dfield, row_ref.data(), row_ref.size());
+  dtuple_set_n_fields_cmp(tuple, 1);
+}
+
+int ha_innobase::vec_read_first(Item *item, uchar *buf, ha_rows limit) {
+  DBUG_TRACE;
+
+  ut_a(m_prebuilt->table->vec != nullptr);
+
+  String buff_vec;
+  String *vec = item->val_str(&buff_vec);
+  if (vec == nullptr || vec->ptr() == nullptr) {
+    /* NULL query vector: no rows are "near" it. */
+    return HA_ERR_END_OF_FILE;
+  }
+
+  const uint32 vec_dims =
+      get_dimensions(vec->length(), Field_vector::precision);
+  if (vec_dims == UINT32_MAX ||
+      vec_dims != m_prebuilt->table->vec->dims) {
+    return HA_ERR_END_OF_FILE;
+  }
+
+  m_vec_query.assign(vec->ptr(), vec->length());
+  m_vec_returned.clear();
+  m_vec_hits.clear();
+  m_vec_hit_pos = 0;
+  m_vec_search_k = std::max<size_t>(limit, 1);
+
+  const dberr_t err = vec_knn_search(
+      m_prebuilt->table, m_user_thd,
+      reinterpret_cast<const float *>(m_vec_query.data()), vec_dims,
+      m_vec_search_k, THDVAR(m_user_thd, hnsw_ef_search), &m_vec_hits);
+  if (err != DB_SUCCESS) {
+    return convert_error_code_to_mysql(err, m_prebuilt->table->flags,
+                                       m_user_thd);
+  }
+
+  return vec_read_next(buf);
+}
+
+int ha_innobase::vec_read_next(uchar *buf) {
+  DBUG_TRACE;
+
+  dict_table_t *table = m_prebuilt->table;
+
+  for (;;) {
+    if (m_vec_hit_pos >= m_vec_hits.size()) {
+      /* Batch exhausted. If the last search already spanned the whole
+      graph there is nothing more; otherwise widen and re-search,
+      excluding what we returned — filters above the iterator may
+      consume any number of rows, so `limit` is only the initial batch
+      size (PS-11300-search-design.md par 4). */
+      if (m_vec_search_k >= vec_graph_size(table)) {
+        return HA_ERR_END_OF_FILE;
+      }
+
+      for (const auto &hit : m_vec_hits) {
+        m_vec_returned.insert(hit.label);
+      }
+      m_vec_search_k *= 2;
+
+      const dberr_t err = vec_knn_search(
+          table, m_user_thd,
+          reinterpret_cast<const float *>(m_vec_query.data()),
+          table->vec->dims, m_vec_search_k,
+          THDVAR(m_user_thd, hnsw_ef_search), &m_vec_hits, &m_vec_returned);
+      if (err != DB_SUCCESS) {
+        return convert_error_code_to_mysql(err, table->flags, m_user_thd);
+      }
+      m_vec_hit_pos = 0;
+      if (m_vec_hits.empty()) {
+        return HA_ERR_END_OF_FILE;
+      }
+    }
+
+    const vec_knn_hit_t &hit = m_vec_hits[m_vec_hit_pos++];
+
+    /* No row_ref: the label had no map entry (concurrent reload edge);
+    nothing to fetch. */
+    if (hit.row_ref.size() != 8) {
+      continue;
+    }
+
+    dict_index_t *clust_index = table->first_index();
+    m_prebuilt->index = clust_index;
+    dtuple_t *tuple = m_prebuilt->search_tuple;
+    innobase_vec_build_pk_tuple(tuple, clust_index, hit.row_ref);
+
+    auto ret = innobase_srv_conc_enter_innodb(m_prebuilt);
+    if (ret == DB_SUCCESS) {
+      ret = row_search_for_mysql(buf, PAGE_CUR_GE, m_prebuilt, ROW_SEL_EXACT,
+                                 0);
+      innobase_srv_conc_exit_innodb(m_prebuilt);
+    }
+
+    if (ret == DB_SUCCESS) {
+      return 0;
+    }
+
+    /* Not found / not visible under this reader's read view: an
+    uncommitted point from another transaction, a point whose base row
+    was deleted after the graph snapshot, or a rolled-back point not
+    yet inverted. Skip to the next candidate — returning EOF here (the
+    prototype's behavior) truncates results under concurrency. */
+    if (ret == DB_RECORD_NOT_FOUND || ret == DB_END_OF_INDEX) {
+      continue;
+    }
+
+    return convert_error_code_to_mysql(ret, table->flags, m_user_thd);
+  }
 }
 
 /*************************************************************************
@@ -24956,6 +25107,7 @@ static SYS_VAR *innobase_system_variables[] = {
     MYSQL_SYSVAR(ft_cache_size),
     MYSQL_SYSVAR(ft_total_cache_size),
     MYSQL_SYSVAR(hnsw_max_memory),
+    MYSQL_SYSVAR(hnsw_ef_search),
     MYSQL_SYSVAR(ft_result_cache_limit),
     MYSQL_SYSVAR(ft_enable_stopword),
     MYSQL_SYSVAR(ft_max_token_size),

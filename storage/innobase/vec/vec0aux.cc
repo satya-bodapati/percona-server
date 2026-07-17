@@ -524,6 +524,13 @@ unsigned long long vec_hnsw_max_memory;
 
 uint64_t vec_total_memory() { return vec_mem_total.load(); }
 
+size_t vec_graph_size(const dict_table_t *table) {
+  const vec_t *vec = table->vec;
+  return (vec != nullptr && vec->hnsw != nullptr)
+             ? vec->hnsw->cur_element_count.load()
+             : 0;
+}
+
 /** @return true if charging `extra` bytes would cross the budget */
 static bool vec_mem_would_exceed(uint64_t extra) {
   return vec_mem_total.load() + extra > vec_hnsw_max_memory;
@@ -1103,9 +1110,25 @@ void vec_trx_free(trx_t *trx) {
   }
 }
 
+namespace {
+/** hnswlib filter dropping already-returned labels (resume). */
+class Vec_exclude_filter : public hnswlib::BaseFilterFunctor {
+ public:
+  explicit Vec_exclude_filter(const std::unordered_set<uint64_t> &excluded)
+      : m_excluded(excluded) {}
+  bool operator()(hnswlib::labeltype label) override {
+    return m_excluded.find(label) == m_excluded.end();
+  }
+
+ private:
+  const std::unordered_set<uint64_t> &m_excluded;
+};
+}  // namespace
+
 dberr_t vec_knn_search(dict_table_t *table, THD *thd, const float *query,
                        uint32_t dims, size_t k, size_t ef,
-                       std::vector<vec_knn_hit_t> *hits) {
+                       std::vector<vec_knn_hit_t> *hits,
+                       const std::unordered_set<uint64_t> *exclude) {
   ut_a(hits != nullptr);
   hits->clear();
 
@@ -1134,7 +1157,11 @@ dberr_t vec_knn_search(dict_table_t *table, THD *thd, const float *query,
     shared graph's ef_ (which would race between sessions). */
     const size_t kq = std::min(std::max(k, ef), n);
     try {
-      auto found = vec->hnsw->searchKnnCloserFirst(query, kq);
+      static const std::unordered_set<uint64_t> s_no_excluded;
+      Vec_exclude_filter filter(exclude != nullptr ? *exclude : s_no_excluded);
+      auto found = vec->hnsw->searchKnnCloserFirst(
+          query, kq,
+          exclude != nullptr && !exclude->empty() ? &filter : nullptr);
       std::lock_guard<std::mutex> g(vec->row_ref_mutex);
       for (const auto &cand : found) {
         if (hits->size() >= k) {
