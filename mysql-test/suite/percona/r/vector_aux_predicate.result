@@ -33,7 +33,7 @@ SELECT NAME FROM INFORMATION_SCHEMA.INNODB_TABLES
 WHERE NAME LIKE 'test/vec\_%' ESCAPE '\\';
 NAME
 test/vec_hnsw_<TID>_<IID>
-# Restart server. On reload, dd_open_table_one detects the vec_hnsw_<id>_<id>
+# Restart server. On reload, dd_open_table_one detects the vec_<id>_<id>
 # name pattern and re-sets DICT_TF2_VEC_AUX + parent_id. Without that
 # reconstruction the aux would lose its "aux" identity entirely.
 # restart

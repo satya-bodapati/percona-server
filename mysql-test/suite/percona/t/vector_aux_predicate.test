@@ -39,7 +39,7 @@ SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
 SELECT NAME FROM INFORMATION_SCHEMA.INNODB_TABLES
  WHERE NAME LIKE 'test/vec\_%' ESCAPE '\\';
 
---echo # Restart server. On reload, dd_open_table_one detects the vec_hnsw_<id>_<id>
+--echo # Restart server. On reload, dd_open_table_one detects the vec_<id>_<id>
 --echo # name pattern and re-sets DICT_TF2_VEC_AUX + parent_id. Without that
 --echo # reconstruction the aux would lose its "aux" identity entirely.
 --source include/restart_mysqld.inc
@@ -54,5 +54,6 @@ SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
  WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE 'vec\_%' ESCAPE '\\';
 
 DROP TABLE tva;
+
 --echo # All aux .ibd gone.
 --list_files $MYSQLD_DATADIR/test vec_*.ibd

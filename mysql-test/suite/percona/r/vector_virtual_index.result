@@ -1,0 +1,61 @@
+#
+# PS-11300: virtual (generated) columns and their secondary indexes
+# coexisting with a vector index. ADD INDEX on a virtual column is a
+# non-rebuild INPLACE ALTER (add_v / v_templ machinery) and must not
+# disturb the hidden vec_idx_id column or the graph; DML afterwards
+# maintains both indexes independently.
+#
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(2), c1 INT,
+c2 INT AS (c1 + 1) VIRTUAL,
+VECTOR KEY vk (v) TYPE hnsw WITH (M = 4));
+INSERT INTO t1 (id, v, c1) VALUES (100, STRING_TO_VECTOR('[0,0]'), 1),
+(101, STRING_TO_VECTOR('[1,0]'), 2);
+# ADD INDEX on the virtual column with the vector index present.
+ALTER TABLE t1 ADD INDEX i_c2 (c2), ALGORITHM=INPLACE;
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` bigint unsigned NOT NULL,
+  `v` vector(2) DEFAULT NULL,
+  `c1` int DEFAULT NULL,
+  `c2` int GENERATED ALWAYS AS ((`c1` + 1)) VIRTUAL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `vk` (`v`) TYPE `hnsw` WITH (`M`=4),
+  KEY `i_c2` (`c2`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+# Writes after: virtual index + vector index both maintained.
+INSERT INTO t1 (id, v, c1) VALUES (102, STRING_TO_VECTOR('[0,2]'), 3);
+UPDATE t1 SET c1 = 10 WHERE id = 100;
+DELETE FROM t1 WHERE id = 101;
+SELECT id, c2 FROM t1 FORCE INDEX (i_c2) WHERE c2 > 0 ORDER BY c2;
+id	c2
+102	4
+100	11
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3;
+id
+100
+102
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+count=2 max_id=3 invisible=0 dead=2
+id=1 level=1 nb=2:3|
+id=3 level=0 nb=2:1
+
+# Virtual column + its index added in ONE alter on a vector table.
+ALTER TABLE t1 ADD COLUMN c3 INT AS (c1 * 2) VIRTUAL, ADD INDEX i_c3 (c3);
+SELECT id FROM t1 FORCE INDEX (i_c3) WHERE c3 = 20;
+id
+100
+# Restart: everything reloads.
+# restart
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3;
+id
+100
+102
+SELECT id, c2, c3 FROM t1 ORDER BY id;
+id	c2	c3
+100	11	20
+102	4	6
+DROP TABLE t1;
