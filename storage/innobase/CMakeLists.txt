@@ -163,7 +163,6 @@ SET(INNOBASE_SOURCES
   handler/vec0vec.cc
   handler/xtradb_i_s.cc
   vec/vec0aux.cc
-  vec/vec0aux.cc
   vec/vec0index.cc
   vec/vec0dml.cc
   ibuf/ibuf0ibuf.cc
