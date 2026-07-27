@@ -723,6 +723,204 @@ dberr_t vec_spann_meta_load_heads(dict_table_t *meta, uint32_t dims,
   return err;
 }
 
+/** Resolve the version of `rec` visible under `view` (nullptr = the
+latest version, no MVCC), shared by the caller-view scans below.
+@return DB_SUCCESS and *vrec (nullptr when no version is visible) */
+static dberr_t vec_spann_visible_version(const rec_t *rec, mtr_t *mtr,
+                                         dict_index_t *clust, ulint **offsets,
+                                         ReadView *view,
+                                         mem_heap_t **offset_heap,
+                                         mem_heap_t *vers_heap,
+                                         const rec_t **vrec) {
+  *vrec = rec;
+  if (view == nullptr) {
+    return DB_SUCCESS;
+  }
+  const trx_id_t rec_trx_id = row_get_rec_trx_id(rec, clust, *offsets);
+  if (view->changes_visible(rec_trx_id, clust->table->name)) {
+    return DB_SUCCESS;
+  }
+  rec_t *old_vers = nullptr;
+  const dberr_t err = row_vers_build_for_consistent_read(
+      rec, mtr, clust, offsets, view, offset_heap, vers_heap, &old_vers,
+      nullptr, nullptr);
+  *vrec = old_vers; /* nullptr: nothing visible to this view */
+  return err;
+}
+
+dberr_t vec_spann_scan_list(trx_t *trx, dict_table_t *postings,
+                            uint64_t head_id, uint32_t dims, ReadView *view,
+                            const vec_spann_posting_fn &fn) {
+  ut_a(postings != nullptr);
+  ut_a(dims != 0);
+
+  dict_index_t *clust = postings->first_index();
+
+  const ulint pos_vec =
+      dict_col_get_clust_pos(postings->get_col(VEC_SPANN_POST_COL_VEC), clust);
+  const ulint pos_ref = dict_col_get_clust_pos(
+      postings->get_col(VEC_SPANN_POST_COL_ROW_REF), clust);
+
+  dberr_t err = DB_SUCCESS;
+  mem_heap_t *offset_heap = nullptr;
+  mem_heap_t *row_heap = mem_heap_create(2048, UT_LOCATION_HERE);
+  mem_heap_t *vers_heap = nullptr;
+
+  mtr_t mtr;
+  mtr_start(&mtr);
+
+  /* Position at the first posting of this list: PK prefix (head_id). */
+  mem_heap_t *key_heap = mem_heap_create(256, UT_LOCATION_HERE);
+  dtuple_t *key = dtuple_create(key_heap, 1);
+  dict_index_copy_types(key, clust, 1);
+  byte head_buf[8];
+  mach_write_to_8(head_buf, head_id);
+  dfield_set_data(dtuple_get_nth_field(key, 0), head_buf, sizeof(head_buf));
+
+  btr_pcur_t pcur;
+  pcur.open_no_init(clust, key, PAGE_CUR_GE, BTR_SEARCH_LEAF, 0, &mtr,
+                    UT_LOCATION_HERE);
+
+  ulint n_scanned = 0;
+
+  /* PAGE_CUR_GE may land on the page supremum; normalize to the first
+  user record at or after the key, then walk until the head_id prefix
+  changes. */
+  bool have_rec = page_rec_is_user_rec(pcur.get_rec()) ||
+                  pcur.move_to_next_user_rec(&mtr) == DB_SUCCESS;
+
+  while (have_rec) {
+    const rec_t *rec = pcur.get_rec();
+
+    ulint *offsets = rec_get_offsets(rec, clust, nullptr, ULINT_UNDEFINED,
+                                     UT_LOCATION_HERE, &offset_heap);
+
+    /* Range end: the PK prefix is the physical order. */
+    ulint len;
+    const byte *p = rec_get_nth_field(clust, rec, offsets, 0, &len);
+    ut_a(len == 8);
+    if (mach_read_from_8(p) != head_id) {
+      break;
+    }
+
+    const rec_t *vrec = nullptr;
+    err = vec_spann_visible_version(rec, &mtr, clust, &offsets, view,
+                                    &offset_heap, vers_heap, &vrec);
+    if (err != DB_SUCCESS) {
+      break;
+    }
+
+    if (vrec != nullptr &&
+        !rec_get_deleted_flag(vrec, dict_table_is_comp(postings))) {
+      p = rec_get_nth_field(clust, vrec, offsets, 1, &len);
+      ut_a(len == 8);
+      const uint64_t label = mach_read_from_8(p);
+
+      const byte *vec_data;
+      ulint vec_len;
+      const byte *ref;
+      ulint ref_len;
+      if (!vec_aux_copy_field(trx, clust, vrec, offsets, pos_vec, row_heap,
+                              &vec_data, &vec_len) ||
+          !vec_aux_copy_field(trx, clust, vrec, offsets, pos_ref, row_heap,
+                              &ref, &ref_len)) {
+        err = DB_CORRUPTION;
+        break;
+      }
+      if (vec_len != dims * sizeof(float)) {
+        err = DB_CORRUPTION;
+        break;
+      }
+
+      fn(label, reinterpret_cast<const float *>(vec_data), ref, ref_len);
+
+      mem_heap_empty(row_heap);
+    }
+
+    /* Batch the mtr — see vec_aux_load_rows for the positioning
+    subtlety. */
+    if (++n_scanned % 512 == 0) {
+      pcur.store_position(&mtr);
+      mtr_commit(&mtr);
+      mtr_start(&mtr);
+      pcur.restore_position(BTR_SEARCH_LEAF, &mtr, UT_LOCATION_HERE);
+    }
+
+    have_rec = pcur.move_to_next_user_rec(&mtr) == DB_SUCCESS;
+  }
+
+  pcur.close();
+  mtr_commit(&mtr);
+
+  mem_heap_free(key_heap);
+  if (offset_heap != nullptr) {
+    mem_heap_free(offset_heap);
+  }
+  mem_heap_free(row_heap);
+
+  return err;
+}
+
+dberr_t vec_spann_load_dead_set(dict_table_t *dead, ReadView *view,
+                                std::unordered_set<uint64_t> *labels) {
+  ut_a(dead != nullptr);
+  ut_a(labels != nullptr);
+
+  labels->clear();
+
+  dict_index_t *clust = dead->first_index();
+
+  dberr_t err = DB_SUCCESS;
+  mem_heap_t *offset_heap = nullptr;
+  mem_heap_t *vers_heap = nullptr;
+
+  mtr_t mtr;
+  mtr_start(&mtr);
+
+  btr_pcur_t pcur;
+  pcur.open_at_side(true /* left */, clust, BTR_SEARCH_LEAF, true, 0, &mtr);
+
+  ulint n_scanned = 0;
+
+  while (pcur.move_to_next_user_rec(&mtr) == DB_SUCCESS) {
+    const rec_t *rec = pcur.get_rec();
+
+    ulint *offsets = rec_get_offsets(rec, clust, nullptr, ULINT_UNDEFINED,
+                                     UT_LOCATION_HERE, &offset_heap);
+
+    const rec_t *vrec = nullptr;
+    err = vec_spann_visible_version(rec, &mtr, clust, &offsets, view,
+                                    &offset_heap, vers_heap, &vrec);
+    if (err != DB_SUCCESS) {
+      break;
+    }
+
+    if (vrec != nullptr &&
+        !rec_get_deleted_flag(vrec, dict_table_is_comp(dead))) {
+      ulint len;
+      const byte *p = rec_get_nth_field(clust, vrec, offsets, 0, &len);
+      ut_a(len == 8);
+      labels->insert(mach_read_from_8(p));
+    }
+
+    if (++n_scanned % 512 == 0) {
+      pcur.store_position(&mtr);
+      mtr_commit(&mtr);
+      mtr_start(&mtr);
+      pcur.restore_position(BTR_SEARCH_LEAF, &mtr, UT_LOCATION_HERE);
+    }
+  }
+
+  pcur.close();
+  mtr_commit(&mtr);
+
+  if (offset_heap != nullptr) {
+    mem_heap_free(offset_heap);
+  }
+
+  return err;
+}
+
 dberr_t vec_base_collect_rows(trx_t *trx, dict_table_t *base,
                               const dict_index_t *vec_index, uint32_t dims,
                               std::vector<vec_base_row_t> *rows) {

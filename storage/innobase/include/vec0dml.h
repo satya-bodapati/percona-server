@@ -41,8 +41,10 @@ full redo/undo/locking, no global mutex. */
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <tuple>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -205,6 +207,40 @@ dberr_t vec_aux_load_rows(
     uint64_t *raw_max_id, bool *saw_invisible,
     std::vector<uint64_t> *dead_labels = nullptr,
     std::vector<std::pair<uint64_t, std::string>> *row_refs = nullptr);
+
+class ReadView;
+
+/** Per-posting callback of vec_spann_scan_list: (label, vector floats,
+row_ref bytes, row_ref length). Pointers are valid only during the
+call. */
+using vec_spann_posting_fn =
+    std::function<void(uint64_t, const float *, const byte *, ulint)>;
+
+/** Range-scan ONE posting list — the clustered-index range with PK
+prefix head_id — under the CALLER's read view (SPANN S5): the reader's
+MVCC position, not a background snapshot. view == nullptr reads latest
+record versions (no version building). Emits only visible,
+non-delete-marked postings; dead-label filtering is the caller's job
+(vec_spann_load_dead_set under the same view).
+@param[in] trx      caller's trx (off-page vector reads)
+@param[in] postings postings aux table (opened by the caller)
+@param[in] head_id  the list to scan
+@param[in] dims     vector dimensions (width mismatch = DB_CORRUPTION)
+@param[in] view     caller's read view, or nullptr for latest
+@param[in] fn       per-posting callback
+@return DB_SUCCESS or error */
+dberr_t vec_spann_scan_list(trx_t *trx, dict_table_t *postings,
+                            uint64_t head_id, uint32_t dims, ReadView *view,
+                            const vec_spann_posting_fn &fn);
+
+/** Collect the dead-label set visible under `view` (nullptr = latest)
+from a spann _dead table. Per-reader delete visibility IS this scan:
+each dead row's own hidden DB_TRX_ID decides whether this reader sees
+the delete (design §3) — an old view misses young deletes and keeps
+returning the row, RYOW sees its own uncommitted delete.
+@return DB_SUCCESS or error */
+dberr_t vec_spann_load_dead_set(dict_table_t *dead, ReadView *view,
+                                std::unordered_set<uint64_t> *labels);
 
 /** Max vec_idx_id over ALL records of the BASE table's clustered index
 (visible or not, delete-marked included — conservative, like the aux
