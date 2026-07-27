@@ -1462,11 +1462,15 @@ dberr_t vec_aux_recreate_after_import(dict_table_t *table, trx_t *trx) {
     return DB_SUCCESS;
   }
 
-  /* Any graph state predates the import and is meaningless now —
-  free it. The companion is re-created lazily from the SQL layer
-  (innobase_vec_open_from_sql_layer) on the next open/insert/search —
-  the dict object may be evicted at ALTER end anyway. */
-  vec_close(table);
+  /* Any runtime state predates the import and is meaningless now —
+  free it THROUGH THE SEAM: this function serves every TYPE
+  (Vec_hnsw_index and Vec_spann_index both dispatch their
+  recreate_after_import here), so a direct vec_close would interpret
+  a spann runtime as vec_t. The companion is re-created lazily from
+  the SQL layer (innobase_vec_open_from_sql_layer) on the next
+  open/insert/search — the dict object may be evicted at ALTER end
+  anyway. */
+  vec_index_for(table)->close(table);
 
   trx_start_if_not_started(trx, true, UT_LOCATION_HERE);
   trx_set_dict_operation(trx, TRX_DICT_OP_TABLE);

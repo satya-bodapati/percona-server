@@ -1,0 +1,88 @@
+#
+# SPANN S6: DISCARD/IMPORT TABLESPACE. The aux set's content belongs
+# to the discarded rows: DISCARD drops all THREE aux tables (and the
+# runtime) with the tablespace; IMPORT re-mints a fresh empty set,
+# re-seeds the label counter from the imported rows' stamped ids,
+# and warns that pre-import rows are unindexed until a rebuild. The
+# first post-import query self-heals the runtime (companion loss).
+#
+call mtr.add_suppression("Index vk not found or corrupt");
+call mtr.add_suppression("Skip adjustment of root pages for index");
+call mtr.add_suppression("FLUSH TABLES on tables that have a vector index");
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+VECTOR KEY vk (v) TYPE spann);
+INSERT INTO t1 VALUES (100, STRING_TO_VECTOR('[1,0,0,0]')),
+(101, STRING_TO_VECTOR('[0,1,0,0]')),
+(102, STRING_TO_VECTOR('[0,0,1,0]'));
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+id
+100
+101
+# Export: base .ibd/.cfg only — the aux set is warned unflushed.
+FLUSH TABLES t1 FOR EXPORT;
+Warnings:
+Warning	1235	InnoDB: This version of MySQL doesn't yet support 'FLUSH TABLES on tables that have a vector index. Vector auxiliary tables will not be flushed.'
+Warning	1235	InnoDB: This version of MySQL doesn't yet support 'FLUSH TABLES on tables that have a vector index. Vector auxiliary tables will not be flushed.'
+UNLOCK TABLES;
+Warnings:
+Warning	1235	InnoDB: This version of MySQL doesn't yet support 'FLUSH TABLES on tables that have a vector index. Vector auxiliary tables will not be flushed.'
+# DISCARD removes the base tablespace AND all three aux .ibd files.
+ALTER TABLE t1 DISCARD TABLESPACE;
+# IMPORT succeeds without any vector aux files, warns, and a fresh
+# empty aux set exists afterwards.
+ALTER TABLE t1 IMPORT TABLESPACE;
+Warnings:
+Warning	1817	InnoDB: Index corrupt: Index vk not found or corrupt, you should recreate this index.
+Warning	1088	Vector index on table test/t1 is empty after IMPORT TABLESPACE: imported rows are not indexed. Rebuild it with ALTER TABLE ... DROP INDEX / ADD INDEX to index them.
+vec_spann_<TID>_<IID>.ibd
+vec_spann_<TID>_<IID>_dead.ibd
+vec_spann_<TID>_<IID>_meta.ibd
+# Base rows are back; the index is EMPTY (documented): kNN finds
+# nothing pre-rebuild — this query also self-heals the runtime the
+# IMPORT closed.
+SELECT id FROM t1 ORDER BY id;
+id
+100
+101
+102
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 3;
+id
+SET SESSION innodb_interpreter = 'spann_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=0 postings=0 labels=0 dead=0
+mem heads=1
+
+# New inserts route through the fresh genesis head AND are served.
+# The counter was re-seeded from the imported rows' stamped ids
+# (max 3), so the new row gets label 4 — never a duplicate.
+INSERT INTO t1 VALUES (103, STRING_TO_VECTOR('[0,0,0,1]'));
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,0,1]'), 'EUCLIDEAN') LIMIT 1;
+id
+103
+SET SESSION innodb_interpreter = 'spann_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=1 postings=1 labels=1 label_min=4 label_max=4 dead=0
+head=0 size=1
+mem heads=1
+mem head=0 appends=1
+
+# Post-import rebuild runs INPLACE (vec_idx_id retained) and indexes
+# everything — imported rows keep their stamped labels 1..3.
+ALTER TABLE t1 DROP KEY vk;
+SET SESSION debug = '+d,spann_build_seed_42';
+ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE spann, ALGORITHM=INPLACE;
+SET SESSION debug = '-d,spann_build_seed_42';
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+id
+100
+101
+SET SESSION innodb_interpreter = 'spann_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=1 lists=1 postings=4 labels=4 label_min=1 label_max=4 dead=0
+head=1 size=4
+mem heads=1
+
+DROP TABLE t1;
