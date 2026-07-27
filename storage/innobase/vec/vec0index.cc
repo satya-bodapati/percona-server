@@ -34,11 +34,17 @@ this seam deliberately does not expose (spann needs none). */
 
 #include "vec0index.h"
 
+#include "m_string.h"
+
 namespace {
 
 /** TYPE hnsw. */
 class Vec_hnsw_index final : public Vector_index {
  public:
+  [[nodiscard]] Vec_index_type type() const override {
+    return Vec_index_type::HNSW;
+  }
+
   void open(dict_table_t *table, uint16_t field_no, uint32_t dims, int M,
             int ef_construction) const override {
     (void)vec_open(table, this, field_no, dims, M, ef_construction);
@@ -97,7 +103,41 @@ class Vec_hnsw_index final : public Vector_index {
 
 const Vec_hnsw_index vec_hnsw_singleton;
 
+/** The TYPE registry (SPANN R3), indexed by Vec_index_type. Adding an
+index TYPE = one enum value + one row here (S1 adds
+{"spann", &vec_spann_singleton}). */
+struct Vec_type_entry {
+  const char *token;
+  const Vector_index *impl;
+};
+
+const Vec_type_entry vec_type_registry[] = {
+    /* order must match Vec_index_type */
+    {"hnsw", &vec_hnsw_singleton},
+};
+
 }  // namespace
+
+const Vector_index *vec_index_by_name(const char *token, size_t len) {
+  if (token == nullptr || len == 0) {
+    return nullptr;
+  }
+  for (const Vec_type_entry &e : vec_type_registry) {
+    if (strlen(e.token) == len &&
+        native_strncasecmp(e.token, token, len) == 0) {
+      return e.impl;
+    }
+  }
+  return nullptr;
+}
+
+const Vector_index *vec_index_by_enum(Vec_index_type type) {
+  const auto i = static_cast<size_t>(type);
+  ut_a(i < UT_ARR_SIZE(vec_type_registry));
+  const Vector_index *impl = vec_type_registry[i].impl;
+  ut_ad(impl->type() == type);
+  return impl;
+}
 
 const Vector_index *vec_index_for(const dict_table_t *table) {
   /* An open runtime is self-describing (SPANN R2): dispatch on the
@@ -109,10 +149,11 @@ const Vector_index *vec_index_for(const dict_table_t *table) {
     return table->vec->impl;
   }
 
-  /* No runtime open: hnsw is the only registered TYPE. R3 replaces
-  this fallback with a registry lookup keyed by the index's TYPE
-  token; until then every vector index in existence is hnsw, and
-  calling any method on a table WITHOUT a vector runtime is as safe
-  as the free functions were. */
-  return &vec_hnsw_singleton;
+  /* No runtime open. The token-carrying paths (open, build) resolve
+  via vec_index_by_name() and never reach here; what does reach here
+  is teardown/close on runtime-less tables (a no-op for every type)
+  and IMPORT re-mint before first open. hnsw is the correct answer for
+  all of them while it is the sole registered type; S1 threads the
+  TYPE token through the IMPORT site when the second type lands. */
+  return vec_index_by_enum(Vec_index_type::HNSW);
 }

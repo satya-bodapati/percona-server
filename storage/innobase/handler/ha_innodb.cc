@@ -7954,7 +7954,17 @@ static void innobase_vec_open_from_sql_layer(TABLE *table,
             table->key_info[i].vector_construction_params, param);
       }
 
-      const Vector_index *vidx = vec_index_for(ib_table);
+      /* Resolve the implementation by the KEY's TYPE token (reloaded
+      from the DD index options; SPANN R3). CREATE/ALTER validated the
+      token against the registry, so it must resolve — the fallback is
+      pure defense for a DD written before the token existed. */
+      const Vector_index *vidx =
+          vec_index_by_name(table->key_info[i].vector_index_type.str,
+                            table->key_info[i].vector_index_type.length);
+      ut_ad(vidx != nullptr);
+      if (vidx == nullptr) {
+        vidx = vec_index_for(ib_table);
+      }
       vidx->open(ib_table, field_vec->field_index(),
                  field_vec->get_max_dimensions(), param.M,
                  param.ef_construction);

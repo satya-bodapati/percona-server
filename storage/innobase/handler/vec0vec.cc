@@ -52,6 +52,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "key_spec.h"
 #include "my_sys.h"
 #include "mysqld_error.h"
+#include "vec0index.h"
 
 using namespace std;
 
@@ -114,21 +115,29 @@ bool parse_options(const Key_spec &index_def, VectorIndexParam &vip) {
     my_error(ER_NO_INDEX_TYPE, MYF(0), "");
     return true;
   }
-  if (my_strcasecmp(system_charset_info,
-                    index_def.key_create_info.vector_index_type.str,
-                    "HNSW") == 0) {
-    vip = HnswParam();
-    auto &hnsw_param = std::get<HnswParam>(vip);
-    for (const IndexConstructionParam &p : index_def.construction_params) {
-      if (apply_hnsw_param(p.key.str, p.value.str, hnsw_param)) {
-        return true;
-      }
-    }
-    return false;
+
+  /* SPANN R3: TYPE existence is decided by the registry — rejecting an
+  unknown TYPE here at CREATE/ALTER is what lets every later engine
+  path assume vec_index_by_name() succeeds. */
+  if (vec_index_by_name(index_def.key_create_info.vector_index_type.str,
+                        index_def.key_create_info.vector_index_type.length) ==
+      nullptr) {
+    my_error(ER_INDEX_TYPE_NOT_SUPPORTED_FOR_VECTOR_INDEX, MYF(0),
+             index_def.key_create_info.vector_index_type.str);
+    return true;
   }
-  my_error(ER_INDEX_TYPE_NOT_SUPPORTED_FOR_VECTOR_INDEX, MYF(0),
-           index_def.key_create_info.vector_index_type.str);
-  return true;
+
+  /* Construction-parameter parsing is still per-TYPE by token: hnsw is
+  the sole registered type. The S-phase moves this behind the interface
+  when a second parameter shape (spann) exists. */
+  vip = HnswParam();
+  auto &hnsw_param = std::get<HnswParam>(vip);
+  for (const IndexConstructionParam &p : index_def.construction_params) {
+    if (apply_hnsw_param(p.key.str, p.value.str, hnsw_param)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool parse_construction_params(const LEX_CSTRING &params, HnswParam &out) {

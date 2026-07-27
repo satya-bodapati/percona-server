@@ -58,12 +58,25 @@ subtype (vec_t for hnsw). */
 
 #include "vec0aux.h"
 
+/** The registered vector index TYPEs. The enum value is the identity
+used everywhere the type is already known (registry indexing, runtime
+dispatch, future switch()es); the string token exists only at the
+boundaries where SQL hands us text — DDL validation and the
+KEY::vector_index_type reloaded from the DD (SPANN R3). */
+enum class Vec_index_type : uint8_t {
+  HNSW = 0,
+  /* SPANN = 1 — added by commit S1 */
+};
+
 /** Per-TYPE vector-index runtime operations. Implementations are
 STATELESS singletons — all per-index state lives in the dict_table_t
 companion (vec_t for hnsw), so there is no lifetime to manage here. */
 class Vector_index {
  public:
   virtual ~Vector_index() = default;
+
+  /** @return this implementation's registered TYPE */
+  [[nodiscard]] virtual Vec_index_type type() const = 0;
 
   /** Get-or-create the per-table companion (lazy). See vec_open. */
   virtual void open(dict_table_t *table, uint16_t field_no, uint32_t dims,
@@ -119,6 +132,21 @@ class Vector_index {
   [[nodiscard]] virtual dberr_t recreate_after_import(dict_table_t *table,
                                                       trx_t *trx) const = 0;
 };
+
+/** Look up the implementation registered under a TYPE token, e.g. the
+"hnsw" of CREATE ... VECTOR KEY (v) TYPE hnsw (case-insensitive; the
+token is not necessarily NUL-terminated). String lookup is for the
+boundaries only — DDL validation (parse_options) and the sites reading
+KEY::vector_index_type at open/build; once the type is known, use
+vec_index_by_enum(). Registering a new TYPE is one entry in
+vec_type_registry[] (vec0index.cc); rejecting unknown TYPEs at
+CREATE/ALTER is what keeps them out of every engine path.
+@return the implementation, or nullptr for an unknown TYPE */
+[[nodiscard]] const Vector_index *vec_index_by_name(const char *token,
+                                                    size_t len);
+
+/** The implementation for a known TYPE — O(1), never nullptr. */
+[[nodiscard]] const Vector_index *vec_index_by_enum(Vec_index_type type);
 
 /** Resolve the runtime for `table`'s vector index.
 

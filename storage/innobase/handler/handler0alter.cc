@@ -6697,8 +6697,15 @@ bool ha_innobase::inplace_alter_table_impl(TABLE *altered_table,
                 key.vector_construction_params, param);
           }
 
-          err = vec_index_for(ctx->new_table)
-                    ->build(m_prebuilt->trx, ctx->new_table, vec_index,
+          /* Resolve by the KEY's TYPE token (SPANN R3); validated at
+          CREATE/ALTER, so it must resolve — fallback is defensive. */
+          const Vector_index *vidx = vec_index_by_name(
+              key.vector_index_type.str, key.vector_index_type.length);
+          ut_ad(vidx != nullptr);
+          if (vidx == nullptr) {
+            vidx = vec_index_for(ctx->new_table);
+          }
+          err = vidx->build(m_prebuilt->trx, ctx->new_table, vec_index,
                             field_vec->get_max_dimensions(), param.M,
                             param.ef_construction, m_user_thd);
           if (err != DB_SUCCESS) {
