@@ -135,21 +135,20 @@ class Vec_spann_index final : public Vector_index {
                                   row_ref_len);
   }
 
-  [[nodiscard]] dberr_t remove(trx_t *, dict_table_t *, THD *,
-                               uint64_t) const override {
-    /* S3 posture: the DELETE half (a _dead insert) lands in S4. A
-    no-op leaves stale postings, which no read can reach until S5
-    lifts the optimizer gate — S4 MUST land before S5. */
-    return DB_SUCCESS;
+  [[nodiscard]] dberr_t remove(trx_t *trx, dict_table_t *table, THD *thd,
+                               uint64_t label) const override {
+    return vec_spann_remove_point(trx, table, thd, label);
   }
 
   [[nodiscard]] dberr_t refresh_row_ref(trx_t *, dict_table_t *, THD *,
                                         uint64_t, const byte *,
                                         ulint) const override {
-    /* S3 posture: a PK-only UPDATE leaves posting row_refs stale —
-    unreachable for the same reason as remove(); S4 resolves it (a
-    posting is never updated in place: dead + re-append). */
-    return DB_SUCCESS;
+    /* Unreachable for spann: a PK move on an indexed row stamps a
+    fresh label (calc_row_difference, S4), so the update hook takes
+    its value->value branch — dead(old) + append(new) — and never
+    calls refresh. A posting is never updated in place. */
+    ut_d(ut_error);
+    ut_o(return DB_SUCCESS);
   }
 
   [[nodiscard]] dberr_t knn(

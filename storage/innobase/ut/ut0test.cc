@@ -902,7 +902,12 @@ Ret_t Tester::spann_dump(std::vector<std::string> &tokens) noexcept {
   are since-load deltas (the LIRE feed, S3). */
   vec_spann_stats_t st;
   if (vec_spann_runtime_stats(base, &st)) {
-    sout << "mem heads=" << st.n_heads << "\n";
+    sout << "mem heads=" << st.n_heads;
+    /* Printed only when nonzero so pre-S4 recordings stay stable. */
+    if (st.dead_appends != 0) {
+      sout << " dead_appends=" << st.dead_appends;
+    }
+    sout << "\n";
     for (const auto &la : st.list_appends) {
       sout << "mem head=" << la.first << " appends=" << la.second << "\n";
     }

@@ -140,6 +140,15 @@ the typed payload (a head's vector bytes for mtype HEAD).
 dberr_t vec_spann_meta_insert(trx_t *trx, dict_table_t *aux, uint8_t mtype,
                               uint64_t id, const byte *mval, ulint mval_len);
 
+/** Insert one label into a spann _dead table (SPANN S4): a DELETE —
+or the delete half of an UPDATE — is exactly this one INSERT on the
+user transaction. The deleter's identity is the row's hidden DB_TRX_ID
+(engine-stamped, undo-protected), so per-reader delete visibility is
+the read-view scan itself and a rollback is pure undo. One dead row
+retires EVERY closure copy of the label at once.
+@return DB_SUCCESS or error */
+dberr_t vec_spann_dead_insert(trx_t *trx, dict_table_t *aux, uint64_t label);
+
 /** One spann head loaded from _meta: (head label, vector). */
 using vec_spann_head_t = std::pair<std::uint64_t, std::vector<float>>;
 
