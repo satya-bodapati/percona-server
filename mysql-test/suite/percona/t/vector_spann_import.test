@@ -1,0 +1,74 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # SPANN S6: DISCARD/IMPORT TABLESPACE. The aux set's content belongs
+--echo # to the discarded rows: DISCARD drops all THREE aux tables (and the
+--echo # runtime) with the tablespace; IMPORT re-mints a fresh empty set,
+--echo # re-seeds the label counter from the imported rows' stamped ids,
+--echo # and warns that pre-import rows are unindexed until a rebuild. The
+--echo # first post-import query self-heals the runtime (companion loss).
+--echo #
+
+call mtr.add_suppression("Index vk not found or corrupt");
+call mtr.add_suppression("Skip adjustment of root pages for index");
+call mtr.add_suppression("FLUSH TABLES on tables that have a vector index");
+
+--let $MYSQLD_DATADIR = `SELECT @@datadir`
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+                 VECTOR KEY vk (v) TYPE spann);
+
+INSERT INTO t1 VALUES (100, STRING_TO_VECTOR('[1,0,0,0]')),
+                      (101, STRING_TO_VECTOR('[0,1,0,0]')),
+                      (102, STRING_TO_VECTOR('[0,0,1,0]'));
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+
+--echo # Export: base .ibd/.cfg only — the aux set is warned unflushed.
+FLUSH TABLES t1 FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/t1.ibd $MYSQLTEST_VARDIR/tmp/t1.ibd
+--copy_file $MYSQLD_DATADIR/test/t1.cfg $MYSQLTEST_VARDIR/tmp/t1.cfg
+UNLOCK TABLES;
+
+--echo # DISCARD removes the base tablespace AND all three aux .ibd files.
+ALTER TABLE t1 DISCARD TABLESPACE;
+--list_files $MYSQLD_DATADIR/test vec_*.ibd
+
+--copy_file $MYSQLTEST_VARDIR/tmp/t1.ibd $MYSQLD_DATADIR/test/t1.ibd
+--copy_file $MYSQLTEST_VARDIR/tmp/t1.cfg $MYSQLD_DATADIR/test/t1.cfg
+
+--echo # IMPORT succeeds without any vector aux files, warns, and a fresh
+--echo # empty aux set exists afterwards.
+ALTER TABLE t1 IMPORT TABLESPACE;
+--replace_regex /vec_spann_[0-9a-f]+_[0-9a-f]+/vec_spann_<TID>_<IID>/
+--list_files $MYSQLD_DATADIR/test vec_*.ibd
+
+--echo # Base rows are back; the index is EMPTY (documented): kNN finds
+--echo # nothing pre-rebuild — this query also self-heals the runtime the
+--echo # IMPORT closed.
+SELECT id FROM t1 ORDER BY id;
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 3;
+SET SESSION innodb_interpreter = 'spann_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # New inserts route through the fresh genesis head AND are served.
+--echo # The counter was re-seeded from the imported rows' stamped ids
+--echo # (max 3), so the new row gets label 4 — never a duplicate.
+INSERT INTO t1 VALUES (103, STRING_TO_VECTOR('[0,0,0,1]'));
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,0,1]'), 'EUCLIDEAN') LIMIT 1;
+SET SESSION innodb_interpreter = 'spann_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # Post-import rebuild runs INPLACE (vec_idx_id retained) and indexes
+--echo # everything — imported rows keep their stamped labels 1..3.
+ALTER TABLE t1 DROP KEY vk;
+SET SESSION debug = '+d,spann_build_seed_42';
+ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE spann, ALGORITHM=INPLACE;
+SET SESSION debug = '-d,spann_build_seed_42';
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+SET SESSION innodb_interpreter = 'spann_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+DROP TABLE t1;
+--list_files $MYSQLD_DATADIR/test vec_*.ibd
+--remove_file $MYSQLTEST_VARDIR/tmp/t1.ibd
+--remove_file $MYSQLTEST_VARDIR/tmp/t1.cfg
