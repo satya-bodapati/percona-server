@@ -234,6 +234,9 @@ dict_index_t *create_index(trx_t *trx, dict_table_t *table,
 
   index->set_committed(index_def->m_rebuild);
   index->is_vector_index = index_def->m_is_vector;
+  /* The cache copy is rebuilt from this prototype;
+  dict_index_build_internal_vec carries vec_type across. */
+  index->vec_type = index_def->m_vec_type;
 
   bool has_new_v_col{};
 

@@ -2898,6 +2898,18 @@ static void innobase_create_index_def(const TABLE *altered_table,
   and Index_defn::m_is_vector (ddl0ddl.h:132). */
   index_def->m_is_vector = (key->flags & HA_VECTOR) != 0;
 
+  /* And the TYPE with it (SPANN S2): the token was registry-validated
+  at CREATE/ALTER, so it must resolve; an absent token (pre-TYPE
+  clients) means the default, hnsw — same rule as parse time. */
+  if (index_def->m_is_vector && key->vector_index_type.str != nullptr) {
+    const Vector_index *vidx = vec_index_by_name(key->vector_index_type.str,
+                                                 key->vector_index_type.length);
+    ut_ad(vidx != nullptr);
+    if (vidx != nullptr) {
+      index_def->m_vec_type = vidx->type();
+    }
+  }
+
   if (!(key->flags & HA_SPATIAL)) {
     for (i = 0; i < n_fields; i++) {
       innobase_create_index_field_def(altered_table, &key->key_part[i],

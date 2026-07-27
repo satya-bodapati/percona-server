@@ -148,45 +148,14 @@ static void vec_aux_set_field(dtuple_t *tuple, ulint col_no, const void *data,
   dfield_set_data(df, copy, len);
 }
 
-dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
-                       const vec_aux_row_t &row) {
-  ut_a(trx != nullptr);
-  ut_a(aux != nullptr);
-  ut_a(row.vec != nullptr);
-  ut_a(row.neighbors != nullptr || row.neighbors_len == 0);
-
-  /* The aux column is TINYINT; the HNSW level is geometrically
-  distributed and cannot plausibly reach 127, but never store a
-  truncated level. */
-  if (row.level < 0 || row.level > 127) {
-    return DB_CORRUPTION;
-  }
-
-  mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
-
-  /* Mirror of row_get_prebuilt_insert_row + row_insert_for_mysql's run
-  loop (row0mysql.cc), minus the prebuilt: build an INS_DIRECT node on a
-  private heap, complete a query graph for it (pars_complete_graph_for_
-  exec builds the fork/thr only — no SQL parser involved), fill the row,
-  and drive row_ins_step with the standard error handling. */
-  ins_node_t *node = ins_node_create(INS_DIRECT, aux, heap);
-
-  dtuple_t *tuple = dtuple_create(heap, aux->get_n_cols());
-  dict_table_copy_types(tuple, aux);
-  ins_node_set_new_row(node, tuple);
-
-  byte id_buf[8];
-  mach_write_to_8(id_buf, row.id);
-  vec_aux_set_field(tuple, VEC_AUX_COL_ID, id_buf, sizeof(id_buf), heap);
-  vec_aux_set_field(tuple, VEC_AUX_COL_VEC, row.vec,
-                    row.dims * sizeof(float), heap);
-  vec_aux_set_field(tuple, VEC_AUX_COL_ROW_REF, row.row_ref, row.row_ref_len,
-                    heap);
-  const byte level_byte = static_cast<byte>(row.level);
-  vec_aux_set_field(tuple, VEC_AUX_COL_LEVEL, &level_byte, 1, heap);
-  vec_aux_set_field(tuple, VEC_AUX_COL_NEIGHBORS, row.neighbors,
-                    row.neighbors_len, heap);
-
+/** Execute one filled INS_DIRECT node on `trx` — the shared run loop
+of every aux-row insert shape. Mirror of row_get_prebuilt_insert_row +
+row_insert_for_mysql's run loop (row0mysql.cc), minus the prebuilt:
+pars_complete_graph_for_exec builds the fork/thr only (no SQL parser
+involved), then row_ins_step is driven with the standard error
+handling. The caller owns `heap` on all paths. */
+static dberr_t vec_aux_insert_exec(trx_t *trx, ins_node_t *node,
+                                   mem_heap_t *heap) {
   que_thr_t *thr = pars_complete_graph_for_exec(node, trx, heap, nullptr);
 
   auto savept = trx_savept_take(trx);
@@ -216,7 +185,6 @@ dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
     thr->lock_state = QUE_THR_LOCK_NOLOCK;
 
     if (!was_lock_wait) {
-      mem_heap_free(heap);
       return err;
     }
     ut_ad(node->state == INS_NODE_INSERT_ENTRIES ||
@@ -224,8 +192,119 @@ dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
   }
 
   que_thr_stop_for_mysql_no_error(thr, trx);
-  mem_heap_free(heap);
   return DB_SUCCESS;
+}
+
+dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
+                       const vec_aux_row_t &row) {
+  ut_a(trx != nullptr);
+  ut_a(aux != nullptr);
+  ut_a(row.vec != nullptr);
+  ut_a(row.neighbors != nullptr || row.neighbors_len == 0);
+
+  /* The aux column is TINYINT; the HNSW level is geometrically
+  distributed and cannot plausibly reach 127, but never store a
+  truncated level. */
+  if (row.level < 0 || row.level > 127) {
+    return DB_CORRUPTION;
+  }
+
+  mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
+
+  ins_node_t *node = ins_node_create(INS_DIRECT, aux, heap);
+
+  dtuple_t *tuple = dtuple_create(heap, aux->get_n_cols());
+  dict_table_copy_types(tuple, aux);
+  ins_node_set_new_row(node, tuple);
+
+  byte id_buf[8];
+  mach_write_to_8(id_buf, row.id);
+  vec_aux_set_field(tuple, VEC_AUX_COL_ID, id_buf, sizeof(id_buf), heap);
+  vec_aux_set_field(tuple, VEC_AUX_COL_VEC, row.vec, row.dims * sizeof(float),
+                    heap);
+  vec_aux_set_field(tuple, VEC_AUX_COL_ROW_REF, row.row_ref, row.row_ref_len,
+                    heap);
+  const byte level_byte = static_cast<byte>(row.level);
+  vec_aux_set_field(tuple, VEC_AUX_COL_LEVEL, &level_byte, 1, heap);
+  vec_aux_set_field(tuple, VEC_AUX_COL_NEIGHBORS, row.neighbors,
+                    row.neighbors_len, heap);
+
+  const dberr_t err = vec_aux_insert_exec(trx, node, heap);
+  mem_heap_free(heap);
+  return err;
+}
+
+/* Spann posting-table user-column ordinals, fixed by vec_spann_defs
+(vec0aux.cc): head_id, label, vec, row_ref. */
+constexpr ulint VEC_SPANN_POST_COL_HEAD_ID = 0;
+constexpr ulint VEC_SPANN_POST_COL_LABEL = 1;
+constexpr ulint VEC_SPANN_POST_COL_VEC = 2;
+constexpr ulint VEC_SPANN_POST_COL_ROW_REF = 3;
+
+/* Spann meta-table user-column ordinals: mtype, id, mval. */
+constexpr ulint VEC_SPANN_META_COL_MTYPE = 0;
+constexpr ulint VEC_SPANN_META_COL_ID = 1;
+constexpr ulint VEC_SPANN_META_COL_MVAL = 2;
+
+dberr_t vec_spann_posting_insert(trx_t *trx, dict_table_t *aux,
+                                 uint64_t head_id, uint64_t label,
+                                 const float *vec, uint32_t dims,
+                                 const byte *row_ref, ulint row_ref_len) {
+  ut_a(trx != nullptr);
+  ut_a(aux != nullptr);
+  ut_a(vec != nullptr);
+  ut_a(row_ref != nullptr);
+
+  mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
+
+  ins_node_t *node = ins_node_create(INS_DIRECT, aux, heap);
+
+  dtuple_t *tuple = dtuple_create(heap, aux->get_n_cols());
+  dict_table_copy_types(tuple, aux);
+  ins_node_set_new_row(node, tuple);
+
+  byte head_buf[8];
+  mach_write_to_8(head_buf, head_id);
+  vec_aux_set_field(tuple, VEC_SPANN_POST_COL_HEAD_ID, head_buf,
+                    sizeof(head_buf), heap);
+  byte label_buf[8];
+  mach_write_to_8(label_buf, label);
+  vec_aux_set_field(tuple, VEC_SPANN_POST_COL_LABEL, label_buf,
+                    sizeof(label_buf), heap);
+  vec_aux_set_field(tuple, VEC_SPANN_POST_COL_VEC, vec, dims * sizeof(float),
+                    heap);
+  vec_aux_set_field(tuple, VEC_SPANN_POST_COL_ROW_REF, row_ref, row_ref_len,
+                    heap);
+
+  const dberr_t err = vec_aux_insert_exec(trx, node, heap);
+  mem_heap_free(heap);
+  return err;
+}
+
+dberr_t vec_spann_meta_insert(trx_t *trx, dict_table_t *aux, uint8_t mtype,
+                              uint64_t id, const byte *mval, ulint mval_len) {
+  ut_a(trx != nullptr);
+  ut_a(aux != nullptr);
+  ut_a(mval != nullptr || mval_len == 0);
+
+  mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
+
+  ins_node_t *node = ins_node_create(INS_DIRECT, aux, heap);
+
+  dtuple_t *tuple = dtuple_create(heap, aux->get_n_cols());
+  dict_table_copy_types(tuple, aux);
+  ins_node_set_new_row(node, tuple);
+
+  const byte mtype_byte = static_cast<byte>(mtype);
+  vec_aux_set_field(tuple, VEC_SPANN_META_COL_MTYPE, &mtype_byte, 1, heap);
+  byte id_buf[8];
+  mach_write_to_8(id_buf, id);
+  vec_aux_set_field(tuple, VEC_SPANN_META_COL_ID, id_buf, sizeof(id_buf), heap);
+  vec_aux_set_field(tuple, VEC_SPANN_META_COL_MVAL, mval, mval_len, heap);
+
+  const dberr_t err = vec_aux_insert_exec(trx, node, heap);
+  mem_heap_free(heap);
+  return err;
 }
 
 /** Shared body for the three targeted aux-row updates (neighbors,
@@ -429,8 +508,8 @@ static bool vec_aux_copy_field(trx_t *trx, const dict_index_t *clust,
   if (rec_offs_nth_extern(clust, offsets, clust_pos)) {
     size_t ver;
     *data = lob::btr_rec_copy_externally_stored_field(
-        trx, clust, rec, offsets, dict_table_page_size(clust->table),
-        clust_pos, len, &ver, false, heap);
+        trx, clust, rec, offsets, dict_table_page_size(clust->table), clust_pos,
+        len, &ver, false, heap);
     return *data != nullptr;
   }
   *data = rec_get_nth_field(clust, rec, offsets, clust_pos, len);
@@ -730,8 +809,8 @@ dberr_t vec_aux_load_rows(
     ulint nb_len;
     if (!vec_aux_copy_field(trx, clust, vrec, voffsets, pos_vec, row_heap,
                             &vec_data, &vec_len) ||
-        !vec_aux_copy_field(trx, clust, vrec, voffsets, pos_neighbors,
-                            row_heap, &nb_data, &nb_len)) {
+        !vec_aux_copy_field(trx, clust, vrec, voffsets, pos_neighbors, row_heap,
+                            &nb_data, &nb_len)) {
       err = DB_CORRUPTION;
       break;
     }

@@ -49,6 +49,7 @@ pars_sql/que_eval_sql, which serializes on the global pars_mutex. */
 #include "univ.i"
 
 class THD;
+class MDL_ticket;
 
 /* Forward declarations so this engine-wide header never pulls in the
 hnswlib headers; only vec0aux.cc sees the library. */
@@ -160,6 +161,28 @@ void vec_aux_detach_tables(const dict_table_t *parent, bool dict_locked);
 
 /** True iff `table` has at least one vector index attached. */
 bool vec_aux_table_has_vector_index(const dict_table_t *table);
+
+/** Open one member table of a vector index's aux set for a DML
+operation. No aux MDL on the fast path: the caller holds MDL on the
+BASE table (write_row / table open / ALTER), and every DDL that can
+drop the aux takes exclusive base MDL first — same protection argument
+FTS relies on for its aux DML. Fast path is the dict cache; fall back
+to the DD (with MDL, requires `thd`) only when evicted.
+@param[in]  base      base table
+@param[in]  index_id  the vector index's id
+@param[in]  type      the index's TYPE (names the aux)
+@param[in]  suffix    member-table suffix ("" = main; spann: "_meta",
+                      "_dead")
+@param[in]  thd       session for the DD fallback (may be nullptr)
+@param[out] mdl       MDL ticket iff the DD fallback was taken; pass it
+                      back to vec_aux_close_for_dml
+@return the aux table, or nullptr */
+dict_table_t *vec_aux_open_for_dml(dict_table_t *base, space_index_t index_id,
+                                   Vec_index_type type, const char *suffix,
+                                   THD *thd, MDL_ticket **mdl);
+
+/** Close a table opened by vec_aux_open_for_dml. */
+void vec_aux_close_for_dml(dict_table_t *aux, THD *thd, MDL_ticket **mdl);
 
 /** Rename every vector aux table belonging to `parent` after the parent
 itself has been renamed to `new_parent_name`. Mirrors fts_rename_aux_tables.
