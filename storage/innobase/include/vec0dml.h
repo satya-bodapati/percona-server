@@ -140,6 +140,20 @@ the typed payload (a head's vector bytes for mtype HEAD).
 dberr_t vec_spann_meta_insert(trx_t *trx, dict_table_t *aux, uint8_t mtype,
                               uint64_t id, const byte *mval, ulint mval_len);
 
+/** One spann head loaded from _meta: (head label, vector). */
+using vec_spann_head_t = std::pair<std::uint64_t, std::vector<float>>;
+
+/** Load every visible HEAD row of a spann _meta table under a fresh
+read view (background transaction) — the runtime head-graph source.
+A zero-length mval decodes as the zero vector of `dims` (reserved for
+bootstrap shapes); any other width mismatch is DB_CORRUPTION.
+@param[in]  meta   _meta aux table (opened by the caller)
+@param[in]  dims   vector dimensions (from the runtime)
+@param[out] heads  visible heads (replaced)
+@return DB_SUCCESS or error */
+dberr_t vec_spann_meta_load_heads(dict_table_t *meta, uint32_t dims,
+                                  std::vector<vec_spann_head_t> *heads);
+
 /** Update the `neighbors` column of one aux row identified by id.
 Parser-free upd_node execution mirroring the FK-cascade update pattern.
 Passing row_ref_null=true additionally sets row_ref to SQL NULL (the

@@ -27,9 +27,9 @@ while ($i <= 20) {
 INSERT INTO tb VALUES (21, NULL);
 INSERT INTO tb VALUES (22, STRING_TO_VECTOR('[11.5, 0, 0, 0]'));
 
---echo # S2 posture: write hooks still skip (no runtime), so the freshly
---echo # created index is empty — the population below is the build pass
---echo # alone.
+--echo # Since S3, inserts on the freshly created (never-built) index
+--echo # route through the implicit genesis head: all rows sit in list 0.
+--echo # The build below REPLACES this layout with sampled heads.
 SET SESSION innodb_interpreter = 'spann_dump test/tb';
 SELECT @@session.innodb_interpreter_output;
 
