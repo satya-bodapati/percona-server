@@ -257,6 +257,15 @@ struct Vec_spann_runtime : public Vec_runtime {
   for deterministic dump order. */
   std::mutex counter_mutex;
   std::map<uint64_t, uint64_t> list_appends;
+  /** dead-label inserts since load — the LIRE dead-ratio feed (L2).
+  Advisory like list_appends (bumped per statement, not rewound by
+  rollback). NOT a dead-label SET: a RAM set has no correct consumer —
+  S5's per-reader delete visibility is the read-view scan of _dead
+  itself, and a non-transactional set would claim rolled-back deletes.
+  If benchmarks show the _dead scan hurting, the fix is a
+  committed-only cache keyed by a low-water trx id (S7+), not a set
+  maintained from the write path. */
+  std::atomic<uint64_t> dead_appends{0};
 };
 
 /** The spann runtime of `table`, or nullptr. This file allocated it
@@ -468,6 +477,30 @@ dberr_t vec_spann_insert_point(trx_t *trx, dict_table_t *table, THD *thd,
   return err;
 }
 
+dberr_t vec_spann_remove_point(trx_t *trx, dict_table_t *table, THD *thd,
+                               uint64_t label) {
+  Vec_spann_runtime *rt = spann_rt(table);
+  ut_a(rt != nullptr);
+
+  /* No latch, no head graph, no load: retiring a label is one row in
+  _dead on the user trx, whatever the routing state is. */
+  MDL_ticket *mdl = nullptr;
+  dict_table_t *dead = vec_aux_open_for_dml(
+      table, rt->index_id, Vec_index_type::SPANN, "_dead", thd, &mdl);
+  if (dead == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  const dberr_t err = vec_spann_dead_insert(trx, dead, label);
+
+  if (err == DB_SUCCESS) {
+    rt->dead_appends.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  vec_aux_close_for_dml(dead, thd, &mdl);
+  return err;
+}
+
 void vec_spann_close(dict_table_t *table) {
   Vec_spann_runtime *rt = spann_rt(table);
   if (rt == nullptr) {
@@ -500,6 +533,7 @@ bool vec_spann_runtime_stats(dict_table_t *table, vec_spann_stats_t *stats) {
     return false;
   }
   stats->n_heads = rt->head_vecs.size();
+  stats->dead_appends = rt->dead_appends.load(std::memory_order_relaxed);
   {
     std::lock_guard<std::mutex> g(rt->counter_mutex);
     stats->list_appends.assign(rt->list_appends.begin(),

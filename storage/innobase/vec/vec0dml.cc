@@ -282,6 +282,27 @@ dberr_t vec_spann_posting_insert(trx_t *trx, dict_table_t *aux,
   return err;
 }
 
+dberr_t vec_spann_dead_insert(trx_t *trx, dict_table_t *aux, uint64_t label) {
+  ut_a(trx != nullptr);
+  ut_a(aux != nullptr);
+
+  mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
+
+  ins_node_t *node = ins_node_create(INS_DIRECT, aux, heap);
+
+  dtuple_t *tuple = dtuple_create(heap, aux->get_n_cols());
+  dict_table_copy_types(tuple, aux);
+  ins_node_set_new_row(node, tuple);
+
+  byte label_buf[8];
+  mach_write_to_8(label_buf, label);
+  vec_aux_set_field(tuple, 0, label_buf, sizeof(label_buf), heap);
+
+  const dberr_t err = vec_aux_insert_exec(trx, node, heap);
+  mem_heap_free(heap);
+  return err;
+}
+
 dberr_t vec_spann_meta_insert(trx_t *trx, dict_table_t *aux, uint8_t mtype,
                               uint64_t id, const byte *mval, ulint mval_len) {
   ut_a(trx != nullptr);

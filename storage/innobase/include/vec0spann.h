@@ -155,6 +155,8 @@ constexpr uint64_t VEC_SPANN_GENESIS_HEAD_ID = 0;
 struct vec_spann_stats_t {
   /** heads in the RAM graph (includes the implicit genesis head) */
   size_t n_heads;
+  /** dead-label inserts since this runtime loaded (LIRE feed) */
+  uint64_t dead_appends;
   /** per-list posting appends since this runtime loaded (LIRE feed) */
   std::vector<std::pair<uint64_t, uint64_t>> list_appends;
 };
@@ -212,6 +214,13 @@ vec_insert_point's vec_trx_record machinery).
 dberr_t vec_spann_insert_point(trx_t *trx, dict_table_t *table, THD *thd,
                                uint64_t label, const float *vec_data,
                                const byte *row_ref, ulint row_ref_len);
+
+/** Retire one label (SPANN S4, the DELETE hook and the delete half of
+an UPDATE): one INSERT into _dead on the USER transaction — see
+vec_spann_dead_insert for the visibility/rollback contract. Touches
+neither the head graph nor the postings; needs no load. */
+dberr_t vec_spann_remove_point(trx_t *trx, dict_table_t *table, THD *thd,
+                               uint64_t label);
 
 /** Free the runtime (head graph, latch, counters). Safe on tables
 that never opened one — the vec_close analog. */

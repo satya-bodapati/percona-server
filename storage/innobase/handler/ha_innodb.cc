@@ -10689,7 +10689,34 @@ static dberr_t calc_row_difference(
   (max id over aux records) cannot account for them — a post-restart
   insert may have legitimately taken the same number. Fresh ids come
   from the counter, which is always past every aux id. */
-  if (vec_changed && !vec_new_null) {
+  bool vec_reindex = vec_changed && !vec_new_null;
+
+  /* SPANN S4: a PK move re-keys the row_ref stored in EVERY closure
+  copy of the row's postings. Updating those copies in place is
+  exactly the multi-row cross-list locking the all-DML-are-inserts
+  design forbids (and the copies cannot even be enumerated without
+  the vector), so a PK-only UPDATE of an indexed row is re-indexed
+  like a value update: stamp a fresh label here, and the update_row
+  hook's value->value branch turns it into dead(old) + append(new)
+  under the new PK. One _dead row retires all copies of the old
+  label at once. hnsw is untouched: it keeps the cheaper single-row
+  refresh_row_ref. */
+  if (!vec_reindex && !vec_changed && prebuilt->table->vec != nullptr &&
+      prebuilt->table->vec->impl != nullptr &&
+      prebuilt->table->vec->impl->type() == Vec_index_type::SPANN) {
+    Field *vfield = table->field[prebuilt->table->vec->field_no];
+    if (!vfield->is_null_in_record(new_row)) {
+      Field *pk_field =
+          table->key_info[table->s->primary_key].key_part[0].field;
+      const ptrdiff_t pk_off = pk_field->offset(table->record[0]);
+      if (memcmp(old_row + pk_off, new_row + pk_off,
+                 pk_field->pack_length()) != 0) {
+        vec_reindex = true;
+      }
+    }
+  }
+
+  if (vec_reindex) {
     dict_table_t *innodb_table = prebuilt->table;
     ut_a(innodb_table->vec_idx_id_col != ULINT_UNDEFINED);
 

@@ -1,0 +1,191 @@
+#
+# SPANN S4: DELETE and UPDATE. Every mutation is an INSERT:
+#   DELETE               = 1 row into _dead (label-level — one row
+#                          retires EVERY closure copy at once)
+#   UPDATE value->value  = dead(old label) + append(fresh label)
+#   UPDATE value->NULL   = dead(old label)
+#   UPDATE NULL->value   = append(fresh label)
+#   UPDATE PK-only       = reindex rule: dead(old) + append(fresh)
+#                          under the new PK (a posting is never
+#                          updated in place; hnsw keeps its cheaper
+#                          single-row refresh instead)
+# No vec_ops rollback tracking exists for this type: rollback is
+# pure undo, proven below. spann_dump reads latest committed record
+# versions, so dumps run outside open transactions.
+#
+CREATE TABLE td (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+VECTOR KEY vk (v) TYPE spann);
+INSERT INTO td VALUES (1, STRING_TO_VECTOR('[1,0,0,0]'));
+INSERT INTO td VALUES (2, STRING_TO_VECTOR('[2,0,0,0]'));
+INSERT INTO td VALUES (3, STRING_TO_VECTOR('[3,0,0,0]'));
+INSERT INTO td VALUES (4, STRING_TO_VECTOR('[4,0,0,0]'));
+SET SESSION innodb_interpreter = 'spann_dump test/td';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=1 postings=4 labels=4 label_min=1 label_max=4 dead=0
+head=0 size=4
+mem heads=1
+mem head=0 appends=4
+
+# DELETE: postings untouched, one dead label.
+DELETE FROM td WHERE id = 2;
+SET SESSION innodb_interpreter = 'spann_dump test/td';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=1 postings=4 labels=4 label_min=1 label_max=4 dead=1
+head=0 size=4
+mem heads=1 dead_appends=1
+mem head=0 appends=4
+
+# DELETE rollback: the _dead row vanishes with the trx — pure undo,
+# nothing tracked, nothing to invert. (The advisory dead_appends
+# counter keeps its bump, like the insert counters.)
+BEGIN;
+DELETE FROM td WHERE id = 3;
+ROLLBACK;
+SELECT id FROM td ORDER BY id;
+id
+1
+3
+4
+SET SESSION innodb_interpreter = 'spann_dump test/td';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=1 postings=4 labels=4 label_min=1 label_max=4 dead=1
+head=0 size=4
+mem heads=1 dead_appends=2
+mem head=0 appends=4
+
+# UPDATE value->value: old label dead, fresh label appended.
+UPDATE td SET v = STRING_TO_VECTOR('[9,0,0,0]') WHERE id = 1;
+SET SESSION innodb_interpreter = 'spann_dump test/td';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=1 postings=5 labels=5 label_min=1 label_max=5 dead=2
+head=0 size=5
+mem heads=1 dead_appends=3
+mem head=0 appends=5
+
+# UPDATE value->NULL: the point leaves the index; no new posting.
+UPDATE td SET v = NULL WHERE id = 4;
+SET SESSION innodb_interpreter = 'spann_dump test/td';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=1 postings=5 labels=5 label_min=1 label_max=5 dead=3
+head=0 size=5
+mem heads=1 dead_appends=4
+mem head=0 appends=5
+
+# UPDATE NULL->value: append only, under a fresh label (never the
+# NULL row's consumed id).
+UPDATE td SET v = STRING_TO_VECTOR('[6,0,0,0]') WHERE id = 4;
+SET SESSION innodb_interpreter = 'spann_dump test/td';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=1 postings=6 labels=6 label_min=1 label_max=6 dead=3
+head=0 size=6
+mem heads=1 dead_appends=4
+mem head=0 appends=6
+
+# PK-only UPDATE: the reindex rule. The fresh label is stamped by
+# calc_row_difference, so the hook's value->value branch runs —
+# spann's refresh_row_ref is debug-unreachable, and this statement
+# completing on a debug build proves it stayed unreached.
+UPDATE td SET id = 50 WHERE id = 1;
+SELECT id FROM td ORDER BY id;
+id
+3
+4
+50
+SET SESSION innodb_interpreter = 'spann_dump test/td';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=1 postings=7 labels=7 label_min=1 label_max=7 dead=4
+head=0 size=7
+mem heads=1 dead_appends=5
+mem head=0 appends=7
+
+# Plain DELETE of the (rollback-revived) row 3: one more dead label.
+DELETE FROM td WHERE id = 3;
+SET SESSION innodb_interpreter = 'spann_dump test/td';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=1 postings=7 labels=7 label_min=1 label_max=7 dead=5
+head=0 size=7
+mem heads=1 dead_appends=6
+mem head=0 appends=7
+
+# DELETE of a NULL-vector row: no point ever existed — postings AND
+# dead both unchanged.
+INSERT INTO td VALUES (60, NULL);
+DELETE FROM td WHERE id = 60;
+SET SESSION innodb_interpreter = 'spann_dump test/td';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=1 postings=7 labels=7 label_min=1 label_max=7 dead=5
+head=0 size=7
+mem heads=1 dead_appends=6
+mem head=0 appends=7
+
+# UPDATE rollback: dead(old) AND append(new) both undone together.
+BEGIN;
+UPDATE td SET v = STRING_TO_VECTOR('[7,0,0,0]') WHERE id = 50;
+ROLLBACK;
+SET SESSION innodb_interpreter = 'spann_dump test/td';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=1 postings=7 labels=7 label_min=1 label_max=7 dead=5
+head=0 size=7
+mem heads=1 dead_appends=7
+mem head=0 appends=8
+
+DROP TABLE td;
+# Closure-copy retirement: on a built index a boundary row carries
+# copies in TWO lists; deleting it writes ONE dead row — postings
+# stay, both copies are dead by label.
+CREATE TABLE tc (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+VECTOR KEY vk (v) TYPE spann);
+INSERT INTO tc VALUES (22, STRING_TO_VECTOR('[11.5, 0, 0, 0]'));
+ALTER TABLE tc DROP KEY vk;
+SET SESSION debug = '+d,spann_build_seed_42';
+ALTER TABLE tc ADD VECTOR KEY vk (v) TYPE spann, ALGORITHM=INPLACE;
+SET SESSION debug = '-d,spann_build_seed_42';
+SET SESSION innodb_interpreter = 'spann_dump test/tc';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=3 lists=3 postings=23 labels=21 label_min=1 label_max=21 dead=0
+head=5 size=9
+head=13 size=7
+head=15 size=7
+mem heads=3
+
+DELETE FROM tc WHERE id = 22;
+SET SESSION innodb_interpreter = 'spann_dump test/tc';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=3 lists=3 postings=23 labels=21 label_min=1 label_max=21 dead=1
+head=5 size=9
+head=13 size=7
+head=15 size=7
+mem heads=3 dead_appends=1
+
+DROP TABLE tc;
+# Counter persistence under kill -9 (the vector_counter_persist
+# scenario on a spann table): dead labels and NULL-consumed ids
+# survive; labels are never reissued.
+CREATE TABLE tp (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+VECTOR KEY vk (v) TYPE spann);
+INSERT INTO tp VALUES (100, STRING_TO_VECTOR('[1,0,0,0]'));
+INSERT INTO tp VALUES (101, NULL);
+DELETE FROM tp WHERE id = 100;
+# Kill and restart
+INSERT INTO tp VALUES (102, STRING_TO_VECTOR('[2,0,0,0]'));
+SET SESSION innodb_interpreter = 'spann_dump test/tp';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=1 postings=2 labels=2 label_min=1 label_max=3 dead=1
+head=0 size=2
+mem heads=1
+mem head=0 appends=1
+
+DROP TABLE tp;
