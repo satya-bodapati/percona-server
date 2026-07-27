@@ -86,27 +86,43 @@ constexpr ulint VEC_AUX_ROW_REF_COL_LEN = 3072; /* VARBINARY(3072) */
 constexpr ulint VEC_AUX_LEVEL_COL_LEN = 1;      /* TINYINT */
 constexpr ulint VEC_AUX_NEIGHBORS_COL_LEN = 0;  /* BLOB: 0 = variable */
 
+/** Registered index TYPEs — full definition in vec0index.h (opaque
+here: vec0index.h includes this header). */
+enum class Vec_index_type : uint8_t;
+
 /** Build the on-disk aux table name for one vector index:
-"<db>/vec_<parent_table_id>_<index_id>".
+"<db>/vec_<type>_<parent_table_id>_<index_id>", e.g.
+"test/vec_hnsw_4a_5b" (SPANN R4: the registry's type token makes the
+datadir self-describing and gives every TYPE its own namespace —
+spann's three tables become vec_spann_<t>_<i>[/_meta/_dead] without
+ambiguity).
 
 @param[in]      parent          parent table that owns the vector index
 @param[in]      index_id        id of the vector index (from dict_index_t)
+@param[in]      type            the index's registered TYPE (names the
+                                token embedded in the name)
 @param[out]     name_out        destination buffer (>= MAX_FULL_NAME_LEN)
 @param[in]      name_out_len    size of destination buffer */
 void vec_aux_get_table_name(const dict_table_t *parent, space_index_t index_id,
-                            char *name_out, size_t name_out_len);
+                            Vec_index_type type, char *name_out,
+                            size_t name_out_len);
 
-/** True if `name` matches the vec_<id>_<id> aux table pattern. Used to hide
-aux tables from INFORMATION_SCHEMA and SHOW TABLES. */
+/** True if `name` starts with the reserved "vec_" prefix (ALL types).
+Used to hide aux tables from INFORMATION_SCHEMA / SHOW TABLES and to
+reserve the namespace at CREATE. */
 bool vec_aux_is_aux_table_name(const char *name);
 
-/** Parse a "<db>/vec_<parent_id>_<index_id>" name into its components.
-Used at DD reload time (dd_open_table_one) to reconstruct
-dict_table_t::parent_id and DICT_TF2_VEC_AUX from the on-disk name.
-Either output pointer may be nullptr. Returns false if `name` does not
-match the vector aux pattern. */
+/** Parse a "<db>/vec_<type>_<parent_id>_<index_id>" name into its
+components. The type token must resolve in the registry
+(vec_index_by_name) — a vec_-prefixed name that does not parse is a
+reserved-but-invalid name, never an aux table. Used at DD reload time
+(dd_open_table_one) to reconstruct dict_table_t::parent_id and
+DICT_TF2_VEC_AUX from the on-disk name. Any output pointer may be
+nullptr. Returns false if `name` does not match the vector aux
+pattern. */
 bool vec_aux_parse_table_name(const char *name, table_id_t *parent_id_out,
-                              space_index_t *index_id_out);
+                              space_index_t *index_id_out,
+                              Vec_index_type *type_out = nullptr);
 
 /** Create one aux table for a single vector index. Uses the InnoDB C API
 only (no pars_sql).

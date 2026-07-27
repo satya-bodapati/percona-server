@@ -54,6 +54,7 @@ naming. No population — that lands in PS-11300. */
 #include "trx0trx.h"
 #include "univ.i"
 #include "ut0new.h"
+#include "vec0index.h"
 
 const char *VEC_AUX_PREFIX = "vec_";
 
@@ -82,13 +83,19 @@ size_t db_prefix_len(const char *parent_name) {
 }  // namespace
 
 void vec_aux_get_table_name(const dict_table_t *parent, space_index_t index_id,
-                            char *name_out, size_t name_out_len) {
+                            Vec_index_type type, char *name_out,
+                            size_t name_out_len) {
   ut_a(parent != nullptr);
   ut_a(name_out != nullptr);
   ut_a(name_out_len >= MAX_FULL_NAME_LEN);
 
   const char *parent_name = parent->name.m_name;
   const size_t db_len = db_prefix_len(parent_name);
+
+  const char *token = vec_index_token(type);
+  /* '_' is the field separator — a token containing it would make the
+  name unparseable (contract in vec0index.h). */
+  ut_ad(strchr(token, '_') == nullptr);
 
   char table_id_str[FTS_AUX_MIN_TABLE_ID_LENGTH];
   int n = fts_write_object_id(parent->id, table_id_str);
@@ -98,9 +105,9 @@ void vec_aux_get_table_name(const dict_table_t *parent, space_index_t index_id,
   n = fts_write_object_id(index_id, index_id_str);
   ut_a(n > 0);
 
-  const int written =
-      snprintf(name_out, name_out_len, "%.*s%s%s_%s", static_cast<int>(db_len),
-               parent_name, VEC_AUX_PREFIX, table_id_str, index_id_str);
+  const int written = snprintf(
+      name_out, name_out_len, "%.*s%s%s_%s_%s", static_cast<int>(db_len),
+      parent_name, VEC_AUX_PREFIX, token, table_id_str, index_id_str);
   ut_a(written > 0);
   ut_a(static_cast<size_t>(written) < name_out_len);
 }
@@ -124,13 +131,24 @@ bool vec_aux_is_aux_table_name(const char *name) {
 }
 
 bool vec_aux_parse_table_name(const char *name, table_id_t *parent_id_out,
-                              space_index_t *index_id_out) {
+                              space_index_t *index_id_out,
+                              Vec_index_type *type_out) {
   if (!vec_aux_is_aux_table_name(name)) return false;
   const char *slash = strchr(name, '/');
   const char *after_db = slash != nullptr ? slash + 1 : name;
-  const char *tail =
-      after_db + strlen(VEC_AUX_PREFIX);  // points at "<parent_id>_<index_id>"
+  const char *token =
+      after_db + strlen(VEC_AUX_PREFIX);  // "<type>_<parent_id>_<index_id>"
 
+  /* The type token runs to the next '_' and must resolve in the
+  registry (SPANN R4) — an unknown token means "reserved vec_ name
+  that is not an aux table". */
+  const char *token_end = strchr(token, '_');
+  if (token_end == nullptr || token_end == token) return false;
+  const Vector_index *impl =
+      vec_index_by_name(token, static_cast<size_t>(token_end - token));
+  if (impl == nullptr) return false;
+
+  const char *tail = token_end + 1;  // "<parent_id>_<index_id>"
   table_id_t pid = 0;
   if (!fts_read_object_id(&pid, tail)) return false;
   const char *sep = strchr(tail, '_');
@@ -140,6 +158,7 @@ bool vec_aux_parse_table_name(const char *name, table_id_t *parent_id_out,
 
   if (parent_id_out != nullptr) *parent_id_out = pid;
   if (index_id_out != nullptr) *index_id_out = iid;
+  if (type_out != nullptr) *type_out = impl->type();
   return true;
 }
 
@@ -280,7 +299,8 @@ dberr_t vec_aux_create_one_table(trx_t *trx, const dict_table_t *parent,
   ut_a(parent != nullptr);
 
   char aux_name[MAX_FULL_NAME_LEN];
-  vec_aux_get_table_name(parent, index_id, aux_name, sizeof(aux_name));
+  vec_aux_get_table_name(parent, index_id, Vec_index_type::HNSW, aux_name,
+                         sizeof(aux_name));
 
   mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
   dict_table_t *aux = create_in_mem_vec_aux_table(aux_name, parent, heap);
@@ -336,7 +356,8 @@ bool vec_aux_create_dd_tables(dict_table_t *parent) {
     if (!idx->is_vector()) continue;
 
     char aux_name[MAX_FULL_NAME_LEN];
-    vec_aux_get_table_name(parent, idx->id, aux_name, sizeof(aux_name));
+    vec_aux_get_table_name(parent, idx->id, Vec_index_type::HNSW, aux_name,
+                           sizeof(aux_name));
     dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, false);
     ut_a(aux != nullptr);
     const bool ok = dd_create_vec_aux_table(parent, aux);
@@ -352,7 +373,8 @@ dberr_t vec_aux_drop_one_table(trx_t *trx, const dict_table_t *parent,
   ut_a(parent != nullptr);
 
   char aux_name[MAX_FULL_NAME_LEN];
-  vec_aux_get_table_name(parent, index_id, aux_name, sizeof(aux_name));
+  vec_aux_get_table_name(parent, index_id, Vec_index_type::HNSW, aux_name,
+                         sizeof(aux_name));
 
   const bool file_per_table = dict_table_is_file_per_table(parent);
 
@@ -438,7 +460,8 @@ void vec_aux_detach_tables(const dict_table_t *parent, bool dict_locked) {
     if (!idx->is_vector()) continue;
 
     char aux_name[MAX_FULL_NAME_LEN];
-    vec_aux_get_table_name(parent, idx->id, aux_name, sizeof(aux_name));
+    vec_aux_get_table_name(parent, idx->id, Vec_index_type::HNSW, aux_name,
+                           sizeof(aux_name));
 
     dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, true);
     if (aux != nullptr) {
@@ -489,7 +512,8 @@ dberr_t vec_aux_rename_tables(trx_t *trx, dict_table_t *parent,
     if (!idx->is_vector()) continue;
 
     char old_aux_name[MAX_FULL_NAME_LEN];
-    vec_aux_get_table_name(parent, idx->id, old_aux_name, sizeof(old_aux_name));
+    vec_aux_get_table_name(parent, idx->id, Vec_index_type::HNSW, old_aux_name,
+                           sizeof(old_aux_name));
 
     char new_aux_name[MAX_FULL_NAME_LEN];
     rebuild_aux_name_with_new_db(old_aux_name, new_parent_name, new_aux_name,
@@ -590,7 +614,8 @@ static dict_table_t *vec_aux_open_for_dml(dict_table_t *base,
                                           space_index_t index_id, THD *thd,
                                           MDL_ticket **mdl) {
   char aux_name[MAX_FULL_NAME_LEN];
-  vec_aux_get_table_name(base, index_id, aux_name, sizeof(aux_name));
+  vec_aux_get_table_name(base, index_id, Vec_index_type::HNSW, aux_name,
+                         sizeof(aux_name));
 
   *mdl = nullptr;
   dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, false);

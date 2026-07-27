@@ -29,11 +29,11 @@ TABLE_NAME
 SELECT NAME FROM INFORMATION_SCHEMA.INNODB_TABLES
 WHERE NAME LIKE 'test/vec_%';
 NAME
-test/vec_<TID>_<IID>
+test/vec_hnsw_<TID>_<IID>
 # Exactly one aux .ibd per vector index must exist on disk.
 # Names are vec_<hex_table_id>_<hex_index_id>.ibd — mask the ids so the
 # result file is stable across runs.
-vec_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>.ibd
 # User cannot declare a column named vec_idx_id when the table has a
 # vector index — the name is reserved.
 CREATE TABLE t2 (
@@ -81,13 +81,13 @@ test.t1	optimize	status	OK
 vec_<POST_OPTIMIZE>.ibd
 # Same-schema rename: aux file unchanged.
 RENAME TABLE t1 TO t1_renamed;
-vec_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>.ibd
 # Cross-schema rename: aux follows the parent to the new schema dir.
 CREATE DATABASE vec_other;
 RENAME TABLE t1_renamed TO vec_other.t1;
 # No more vec_*.ibd in test/.
 # ... they now live under vec_other/.
-vec_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>.ibd
 DROP TABLE vec_other.t1;
 DROP DATABASE vec_other;
 #
@@ -102,7 +102,7 @@ v1 VECTOR(8)
 # No vec_*.ibd yet.
 CREATE VECTOR INDEX v1 ON t_alter (v1) TYPE hnsw;
 # Aux .ibd now exists.
-vec_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>.ibd
 ALTER TABLE t_alter DROP INDEX v1;
 # Aux .ibd gone after DROP INDEX.
 DROP TABLE t_alter;
@@ -127,7 +127,7 @@ ALTER TABLE t_rt DROP INDEX v1;
 # Re-add a vector index. Must succeed with no duplicate-column error,
 # aux is recreated, vec_idx_id is re-established by InnoDB.
 CREATE VECTOR INDEX v2 ON t_rt (v1) TYPE hnsw;
-vec_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>.ibd
 # And vec_idx_id is again reserved (the new vector index is back).
 ALTER TABLE t_rt ADD COLUMN vec_idx_id BIGINT UNSIGNED;
 ERROR 42000: Incorrect column name 'vec_idx_id'

@@ -23,7 +23,7 @@ CREATE TABLE tva (
 );
 
 --echo # The aux .ibd exists on disk.
---replace_regex /vec_[0-9a-f]+_[0-9a-f]+\.ibd/vec_<TID>_<IID>.ibd/
+--replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+\.ibd/vec_hnsw_<TID>_<IID>.ibd/
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
 
 --echo # INFORMATION_SCHEMA.TABLES must not surface the vec_*_* aux to users.
@@ -35,7 +35,7 @@ SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
 --echo # internal/debugging info_schema). Pull the row so we can assert the
 --echo # vec aux is present *as a row* and round-trips its identity after
 --echo # the restart below.
---replace_regex /vec_[0-9a-f]+_[0-9a-f]+/vec_<TID>_<IID>/
+--replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+/vec_hnsw_<TID>_<IID>/
 SELECT NAME FROM INFORMATION_SCHEMA.INNODB_TABLES
  WHERE NAME LIKE 'test/vec\_%' ESCAPE '\\';
 
@@ -45,7 +45,7 @@ SELECT NAME FROM INFORMATION_SCHEMA.INNODB_TABLES
 --source include/restart_mysqld.inc
 
 --echo # Aux row must still appear in INNODB_TABLES with the same identity.
---replace_regex /vec_[0-9a-f]+_[0-9a-f]+/vec_<TID>_<IID>/
+--replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+/vec_hnsw_<TID>_<IID>/
 SELECT NAME FROM INFORMATION_SCHEMA.INNODB_TABLES
  WHERE NAME LIKE 'test/vec\_%' ESCAPE '\\';
 

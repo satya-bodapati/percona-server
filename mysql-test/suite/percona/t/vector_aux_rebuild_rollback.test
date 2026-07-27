@@ -35,7 +35,7 @@ ALTER TABLE tvr ADD VECTOR KEY (v) TYPE hnsw WITH (M = 6);
 SET @@SESSION.debug = '-d,vec_prepare_fail_after_aux_create';
 
 SHOW CREATE TABLE tvr;
---replace_regex /vec_[0-9a-f]+_[0-9a-f]+\.ibd/vec_<TID>_<IID>.ibd/
+--replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+\.ibd/vec_hnsw_<TID>_<IID>.ibd/
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
 
 DROP TABLE tvr;

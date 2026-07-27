@@ -37,7 +37,7 @@ SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
 
 --echo # === Aux .ibd created and POPULATED by the COPY (one graph row
 --echo # === per copied base row, compact ids 1..5) ===
---replace_regex /vec_[0-9a-f]+_[0-9a-f]+\.ibd/vec_<TID>_<IID>.ibd/
+--replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+\.ibd/vec_hnsw_<TID>_<IID>.ibd/
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;

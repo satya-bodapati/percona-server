@@ -42,7 +42,7 @@ SHOW CREATE TABLE ta1;
 --echo # A.3 ADD COLUMN ... ALGORITHM=COPY (full rebuild — aux .ibd gets a new id)
 ALTER TABLE ta1 ADD COLUMN c3 INT, ALGORITHM=COPY;
 SHOW CREATE TABLE ta1;
---replace_regex /vec_[0-9a-f]+_[0-9a-f]+\.ibd/vec_<TID>_<IID>.ibd/
+--replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+\.ibd/vec_hnsw_<TID>_<IID>.ibd/
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
 
 --echo # A.4 Default ADD COLUMN (server picks algorithm)
@@ -116,7 +116,7 @@ ALTER TABLE td1 ADD COLUMN c2 INT, ALGORITHM=INSTANT;
 --echo # D.2 Adding the first vector index now succeeds — rebuild forced.
 CREATE VECTOR INDEX vix ON td1 (v) TYPE hnsw WITH (M = 6);
 SHOW CREATE TABLE td1;
---replace_regex /vec_[0-9a-f]+_[0-9a-f]+\.ibd/vec_<TID>_<IID>.ibd/
+--replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+\.ibd/vec_hnsw_<TID>_<IID>.ibd/
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
 
 DROP TABLE td1;
@@ -187,7 +187,7 @@ ALTER TABLE tg1 FORCE;
 --echo # G.3 OPTIMIZE TABLE: same fallback, data survives, one aux .ibd.
 OPTIMIZE TABLE tg1;
 SELECT id, VECTOR_TO_STRING(v) FROM tg1 FORCE INDEX (PRIMARY);
---replace_regex /vec_[0-9a-f]+_[0-9a-f]+\.ibd/vec_<TID>_<IID>.ibd/
+--replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+\.ibd/vec_hnsw_<TID>_<IID>.ibd/
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
 
 --echo # G.4 First ADD VECTOR INDEX: refused for INPLACE since PS-11300 —

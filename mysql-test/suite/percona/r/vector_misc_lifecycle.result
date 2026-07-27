@@ -24,8 +24,8 @@ dst	CREATE TABLE `dst` (
   PRIMARY KEY (`id`),
   VECTOR KEY `v` (`v`) TYPE `hnsw` WITH (`M`=6)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
-vec_<TID>_<IID>.ibd
-vec_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>.ibd
 DROP TABLE src, dst;
 # No vec_*.ibd left behind.
 #
@@ -39,8 +39,8 @@ VECTOR KEY (v) TYPE hnsw WITH (M = 6));
 CREATE TABLE t2 (id BIGINT UNSIGNED PRIMARY KEY,
 v VECTOR(8),
 VECTOR KEY (v) TYPE hnsw WITH (M = 4));
-vec_<TID>_<IID>.ibd
-vec_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>.ibd
 USE test;
 DROP DATABASE veclab;
 # Schema dir removed entirely — no orphan vec aux.
@@ -53,7 +53,7 @@ VECTOR KEY (v) TYPE hnsw WITH (M = 6));
 CREATE DATABASE vec_target;
 RENAME TABLE test.t3 TO vec_target.t3;
 # aux follows the parent into vec_target/.
-vec_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>.ibd
 DROP DATABASE vec_target;
 #
 # === D. Partitioned tables reject VECTOR KEY ===

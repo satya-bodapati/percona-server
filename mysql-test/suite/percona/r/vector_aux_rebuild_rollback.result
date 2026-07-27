@@ -34,5 +34,5 @@ tvr	CREATE TABLE `tvr` (
   PRIMARY KEY (`id`),
   VECTOR KEY `v` (`v`) TYPE `hnsw` WITH (`M`=6)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
-vec_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>.ibd
 DROP TABLE tvr;

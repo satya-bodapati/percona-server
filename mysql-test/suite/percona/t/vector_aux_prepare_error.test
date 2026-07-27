@@ -25,7 +25,7 @@ ALTER TABLE tva ADD VECTOR KEY (v) TYPE hnsw WITH (M = 6), ALGORITHM=INPLACE;
 SET @@SESSION.debug = '+d,vec_prepare_fail_after_aux_create';
 ALTER TABLE tva ADD VECTOR KEY (v) TYPE hnsw WITH (M = 6);
 SET @@SESSION.debug = '-d,vec_prepare_fail_after_aux_create';
---replace_regex /vec_[0-9a-f]+_[0-9a-f]+\.ibd/vec_<TID>_<IID>.ibd/
+--replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+\.ibd/vec_hnsw_<TID>_<IID>.ibd/
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
 
 --echo # Re-ADD path (column retained after DROP): INPLACE is real now —
@@ -41,7 +41,7 @@ SET @@SESSION.debug = '-d,vec_prepare_fail_after_aux_create';
 
 ALTER TABLE tva ADD VECTOR KEY v (v) TYPE hnsw WITH (M = 6), ALGORITHM=INPLACE;
 SHOW CREATE TABLE tva;
---replace_regex /vec_[0-9a-f]+_[0-9a-f]+\.ibd/vec_<TID>_<IID>.ibd/
+--replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+\.ibd/vec_hnsw_<TID>_<IID>.ibd/
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
 SET SESSION innodb_interpreter = 'vec_aux_dump test/tva';
 SELECT @@session.innodb_interpreter_output;

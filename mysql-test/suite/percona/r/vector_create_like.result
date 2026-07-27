@@ -19,8 +19,8 @@ copy_t	CREATE TABLE `copy_t` (
   VECTOR KEY `v` (`v`) TYPE `hnsw` WITH (`M`=6)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 # The copy has its own aux .ibd — distinct (TID/IID) from source's.
-vec_<TID>_<IID>.ibd
-vec_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>.ibd
 # Drop the SOURCE first, the COPY must remain functional.
 DROP TABLE src;
 SHOW CREATE TABLE copy_t;

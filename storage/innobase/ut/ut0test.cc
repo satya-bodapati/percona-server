@@ -410,7 +410,8 @@ static bool vec_test_open_aux(const std::string &base_name,
   }
 
   char aux_name[MAX_FULL_NAME_LEN];
-  vec_aux_get_table_name(t.base, vec_index->id, aux_name, sizeof(aux_name));
+  vec_aux_get_table_name(t.base, vec_index->id, Vec_index_type::HNSW, aux_name,
+                         sizeof(aux_name));
 
   t.aux = dd_table_open_on_name(current_thd, &t.aux_mdl, aux_name, false,
                                 DICT_ERR_IGNORE_NONE);

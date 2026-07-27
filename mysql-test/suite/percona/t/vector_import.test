@@ -39,7 +39,7 @@ ALTER TABLE t1 DISCARD TABLESPACE;
 --echo # IMPORT succeeds without any vector aux files, warns, and a fresh
 --echo # empty aux .ibd exists afterwards.
 ALTER TABLE t1 IMPORT TABLESPACE;
---replace_regex /vec_[0-9a-f]+_[0-9a-f]+\.ibd/vec_<TID>_<IID>.ibd/
+--replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+\.ibd/vec_hnsw_<TID>_<IID>.ibd/
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
 
 --echo # Base rows are back; the vector index is EMPTY (documented): kNN

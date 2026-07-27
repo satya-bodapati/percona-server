@@ -139,6 +139,12 @@ const Vector_index *vec_index_by_enum(Vec_index_type type) {
   return impl;
 }
 
+const char *vec_index_token(Vec_index_type type) {
+  const auto i = static_cast<size_t>(type);
+  ut_a(i < UT_ARR_SIZE(vec_type_registry));
+  return vec_type_registry[i].token;
+}
+
 const Vector_index *vec_index_for(const dict_table_t *table) {
   /* An open runtime is self-describing (SPANN R2): dispatch on the
   implementation that allocated it — this is what makes teardown
