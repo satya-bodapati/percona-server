@@ -1,0 +1,100 @@
+#
+# SPANN S2: the build pass. INPLACE re-ADD of a TYPE spann index
+# populates the aux set from one clustered scan: sampled heads land
+# in _meta as (HEAD, id) rows, every vector lands in its nearest
+# head's posting list plus closure copies (RNG-pruned). The
+# spann_build_seed_42 debug knob pins the head sample, making the
+# whole build — and the spann_dump below — deterministic.
+#
+CREATE TABLE tb (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+VECTOR KEY vk (v) TYPE spann);
+# 20 rows on a line (labels 1..20), one NULL vector (consumes
+# label 21, never indexed), and one boundary row midway between
+# two neighbors (label 22) — dense enough that some head pair
+# sits close together, giving the closure rule real work: expect
+# postings > labels in the dump below.
+INSERT INTO tb VALUES (21, NULL);
+INSERT INTO tb VALUES (22, STRING_TO_VECTOR('[11.5, 0, 0, 0]'));
+# S2 posture: write hooks still skip (no runtime), so the freshly
+# created index is empty — the population below is the build pass
+# alone.
+SET SESSION innodb_interpreter = 'spann_dump test/tb';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=0 postings=0 labels=0 dead=0
+
+# INPLACE re-ADD (allowed because vec_idx_id is retained across
+# DROP KEY — same gate as hnsw). Every label must be present:
+# labels=21 spanning 1..22 (21 skipped: NULL), postings >= 21,
+# heads = 15% of 21 rows = 3.
+ALTER TABLE tb DROP KEY vk;
+SET SESSION debug = '+d,spann_build_seed_42';
+ALTER TABLE tb ADD VECTOR KEY vk (v) TYPE spann, ALGORITHM=INPLACE;
+SET SESSION debug = '-d,spann_build_seed_42';
+SET SESSION innodb_interpreter = 'spann_dump test/tb';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=3 lists=3 postings=23 labels=21 label_min=1 label_max=22 dead=0
+head=5 size=9
+head=13 size=7
+head=15 size=7
+
+# The three aux files exist and the base table round-trips.
+SHOW CREATE TABLE tb;
+Table	Create Table
+tb	CREATE TABLE `tb` (
+  `id` bigint unsigned NOT NULL,
+  `v` vector(4) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `vk` (`v`) TYPE `spann`
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+vec_spann_<TID>_<IID>.ibd
+vec_spann_<TID>_<IID>_dead.ibd
+vec_spann_<TID>_<IID>_meta.ibd
+# Build state is plain committed rows: it survives a restart with
+# no load step (the dump reads the aux tables, not a cache).
+# restart
+SET SESSION innodb_interpreter = 'spann_dump test/tb';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=3 lists=3 postings=23 labels=21 label_min=1 label_max=22 dead=0
+head=5 size=9
+head=13 size=7
+head=15 size=7
+
+# Build atomicity: create_index_fail fires AFTER the build pass, so
+# every posting/_meta row is already on the ALTER trx when the ALTER
+# fails — the rollback must remove them all and the error path must
+# drop the aux set.
+ALTER TABLE tb DROP KEY vk;
+SET SESSION debug = '+d,create_index_fail';
+ALTER TABLE tb ADD VECTOR KEY vk (v) TYPE spann, ALGORITHM=INPLACE;
+ERROR 23000: Duplicate entry '' for key '*UNKNOWN*'
+SET SESSION debug = '-d,create_index_fail';
+# No index, no aux files left behind.
+# Same build after the failed attempt: identical rows + identical
+# seed => identical dump (nothing leaked from the rollback).
+SET SESSION debug = '+d,spann_build_seed_42';
+ALTER TABLE tb ADD VECTOR KEY vk (v) TYPE spann, ALGORITHM=INPLACE;
+SET SESSION debug = '-d,spann_build_seed_42';
+SET SESSION innodb_interpreter = 'spann_dump test/tb';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=3 lists=3 postings=23 labels=21 label_min=1 label_max=22 dead=0
+head=5 size=9
+head=13 size=7
+head=15 size=7
+
+# Empty-table build: no heads, no postings, and the DDL matrix
+# still works on the unpopulated set.
+CREATE TABLE te (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+VECTOR KEY vk (v) TYPE spann);
+ALTER TABLE te DROP KEY vk;
+ALTER TABLE te ADD VECTOR KEY vk (v) TYPE spann, ALGORITHM=INPLACE;
+SET SESSION innodb_interpreter = 'spann_dump test/te';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=0 postings=0 labels=0 dead=0
+
+DROP TABLE te;
+DROP TABLE tb;

@@ -717,17 +717,12 @@ struct vec_addpoint_ctx_t {
   dberr_t err; /* first callback/aux failure */
 };
 
-/** Open the aux table for a DML operation. No aux MDL: the caller holds
-MDL on the BASE table (write_row / table open), and every DDL that can
-drop the aux takes exclusive base MDL first — same protection argument
-FTS relies on for its aux DML. Fast path is the dict cache; fall back to
-the DD (with MDL) only when evicted. */
-static dict_table_t *vec_aux_open_for_dml(dict_table_t *base,
-                                          space_index_t index_id, THD *thd,
-                                          MDL_ticket **mdl) {
+dict_table_t *vec_aux_open_for_dml(dict_table_t *base, space_index_t index_id,
+                                   Vec_index_type type, const char *suffix,
+                                   THD *thd, MDL_ticket **mdl) {
   char aux_name[MAX_FULL_NAME_LEN];
-  vec_aux_get_table_name(base, index_id, Vec_index_type::HNSW, aux_name,
-                         sizeof(aux_name));
+  vec_aux_get_table_name(base, index_id, type, aux_name, sizeof(aux_name),
+                         suffix);
 
   *mdl = nullptr;
   dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, false);
@@ -738,8 +733,7 @@ static dict_table_t *vec_aux_open_for_dml(dict_table_t *base,
   return aux;
 }
 
-static void vec_aux_close_for_dml(dict_table_t *aux, THD *thd,
-                                  MDL_ticket **mdl) {
+void vec_aux_close_for_dml(dict_table_t *aux, THD *thd, MDL_ticket **mdl) {
   dd_table_close(aux, *mdl != nullptr ? thd : nullptr, mdl, false);
 }
 
@@ -868,7 +862,8 @@ static dberr_t vec_load_locked(vec_t *vec, THD *thd) {
   dict_table_t *table = vec->table;
 
   MDL_ticket *mdl = nullptr;
-  dict_table_t *aux = vec_aux_open_for_dml(table, vec->index_id, thd, &mdl);
+  dict_table_t *aux = vec_aux_open_for_dml(table, vec->index_id,
+                                           Vec_index_type::HNSW, "", thd, &mdl);
   if (aux == nullptr) {
     return DB_TABLE_NOT_FOUND;
   }
@@ -992,7 +987,8 @@ dberr_t vec_insert_point(trx_t *trx, dict_table_t *table, THD *thd, uint64_t id,
   ut_a(vec_data != nullptr);
 
   MDL_ticket *mdl = nullptr;
-  dict_table_t *aux = vec_aux_open_for_dml(table, vec->index_id, thd, &mdl);
+  dict_table_t *aux = vec_aux_open_for_dml(table, vec->index_id,
+                                           Vec_index_type::HNSW, "", thd, &mdl);
   if (aux == nullptr) {
     return DB_TABLE_NOT_FOUND;
   }
@@ -1096,7 +1092,8 @@ dberr_t vec_delete_point(trx_t *trx, dict_table_t *table, THD *thd,
   ut_a(vec != nullptr);
 
   MDL_ticket *mdl = nullptr;
-  dict_table_t *aux = vec_aux_open_for_dml(table, vec->index_id, thd, &mdl);
+  dict_table_t *aux = vec_aux_open_for_dml(table, vec->index_id,
+                                           Vec_index_type::HNSW, "", thd, &mdl);
   if (aux == nullptr) {
     return DB_TABLE_NOT_FOUND;
   }
@@ -1145,7 +1142,8 @@ dberr_t vec_refresh_row_ref(trx_t *trx, dict_table_t *table, THD *thd,
   ut_a(vec != nullptr);
 
   MDL_ticket *mdl = nullptr;
-  dict_table_t *aux = vec_aux_open_for_dml(table, vec->index_id, thd, &mdl);
+  dict_table_t *aux = vec_aux_open_for_dml(table, vec->index_id,
+                                           Vec_index_type::HNSW, "", thd, &mdl);
   if (aux == nullptr) {
     return DB_TABLE_NOT_FOUND;
   }
@@ -1373,7 +1371,8 @@ dberr_t vec_build_index(trx_t *trx, dict_table_t *table,
   }
 
   MDL_ticket *mdl = nullptr;
-  dict_table_t *aux = vec_aux_open_for_dml(table, vec_index->id, thd, &mdl);
+  dict_table_t *aux = vec_aux_open_for_dml(table, vec_index->id,
+                                           Vec_index_type::HNSW, "", thd, &mdl);
   if (aux == nullptr) {
     return DB_TABLE_NOT_FOUND;
   }

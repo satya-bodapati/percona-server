@@ -35,6 +35,7 @@ this seam deliberately does not expose (spann needs none). */
 #include "vec0index.h"
 
 #include "m_string.h"
+#include "vec0spann.h"
 
 namespace {
 
@@ -103,12 +104,13 @@ class Vec_hnsw_index final : public Vector_index {
 
 const Vec_hnsw_index vec_hnsw_singleton;
 
-/** TYPE spann — S1: aux lifecycle only. open() is deliberately a no-op:
-table->vec stays nullptr, so every DML hook skips (the index exists but
-is not populated — the phase-1 posture), and the optimizer's JT_VECTOR
-gate is restricted to hnsw (sql_optimizer.cc), so queries run the exact
-path with correct results. The write path lands in S3, the read path in
-S5; the runtime-op stubs below are unreachable until then and say so. */
+/** TYPE spann — S1 lifecycle + S2 build pass. open() is deliberately
+still a no-op: table->vec stays nullptr, so every DML hook skips (the
+index is populated by build() but not maintained yet), and the
+optimizer's JT_VECTOR gate is restricted to hnsw (sql_optimizer.cc),
+so queries run the exact path with correct results. The write path
+lands in S3, the read path in S5; the runtime-op stubs below are
+unreachable until then and say so. */
 class Vec_spann_index final : public Vector_index {
  public:
   [[nodiscard]] Vec_index_type type() const override {
@@ -155,9 +157,16 @@ class Vec_spann_index final : public Vector_index {
     return 0;
   }
 
-  [[nodiscard]] dberr_t build(trx_t *, dict_table_t *, const dict_index_t *,
-                              uint32_t, int, int, THD *) const override {
-    return DB_SUCCESS; /* S2: head selection + assignment; empty until then */
+  [[nodiscard]] dberr_t build(trx_t *trx, dict_table_t *table,
+                              const dict_index_t *vec_index, uint32_t dims,
+                              int M, int ef_construction,
+                              THD *thd) const override {
+    /* The INPLACE re-ADD build pass (S2): heads + closure postings on
+    the ALTER trx. M/ef_construction shape only the private head
+    graph — spann has no WITH() surface, so they are the parser
+    defaults. */
+    return vec_spann_build_index(trx, table, vec_index, dims, M,
+                                 ef_construction, thd);
   }
 
   void close(dict_table_t *) const override { /* no runtime yet */

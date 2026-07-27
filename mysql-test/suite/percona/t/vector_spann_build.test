@@ -1,0 +1,90 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # SPANN S2: the build pass. INPLACE re-ADD of a TYPE spann index
+--echo # populates the aux set from one clustered scan: sampled heads land
+--echo # in _meta as (HEAD, id) rows, every vector lands in its nearest
+--echo # head's posting list plus closure copies (RNG-pruned). The
+--echo # spann_build_seed_42 debug knob pins the head sample, making the
+--echo # whole build — and the spann_dump below — deterministic.
+--echo #
+
+CREATE TABLE tb (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+                 VECTOR KEY vk (v) TYPE spann);
+
+--echo # 20 rows on a line (labels 1..20), one NULL vector (consumes
+--echo # label 21, never indexed), and one boundary row midway between
+--echo # two neighbors (label 22) — dense enough that some head pair
+--echo # sits close together, giving the closure rule real work: expect
+--echo # postings > labels in the dump below.
+--disable_query_log
+let $i = 1;
+while ($i <= 20) {
+  eval INSERT INTO tb VALUES ($i, STRING_TO_VECTOR('[$i, 0, 0, 0]'));
+  inc $i;
+}
+--enable_query_log
+INSERT INTO tb VALUES (21, NULL);
+INSERT INTO tb VALUES (22, STRING_TO_VECTOR('[11.5, 0, 0, 0]'));
+
+--echo # S2 posture: write hooks still skip (no runtime), so the freshly
+--echo # created index is empty — the population below is the build pass
+--echo # alone.
+SET SESSION innodb_interpreter = 'spann_dump test/tb';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # INPLACE re-ADD (allowed because vec_idx_id is retained across
+--echo # DROP KEY — same gate as hnsw). Every label must be present:
+--echo # labels=21 spanning 1..22 (21 skipped: NULL), postings >= 21,
+--echo # heads = 15% of 21 rows = 3.
+ALTER TABLE tb DROP KEY vk;
+SET SESSION debug = '+d,spann_build_seed_42';
+ALTER TABLE tb ADD VECTOR KEY vk (v) TYPE spann, ALGORITHM=INPLACE;
+SET SESSION debug = '-d,spann_build_seed_42';
+
+SET SESSION innodb_interpreter = 'spann_dump test/tb';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # The three aux files exist and the base table round-trips.
+SHOW CREATE TABLE tb;
+--let $MYSQLD_DATADIR = `SELECT @@datadir`
+--replace_regex /vec_spann_[0-9a-f]+_[0-9a-f]+/vec_spann_<TID>_<IID>/
+--list_files $MYSQLD_DATADIR/test vec_*.ibd
+
+--echo # Build state is plain committed rows: it survives a restart with
+--echo # no load step (the dump reads the aux tables, not a cache).
+--source include/restart_mysqld.inc
+SET SESSION innodb_interpreter = 'spann_dump test/tb';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # Build atomicity: create_index_fail fires AFTER the build pass, so
+--echo # every posting/_meta row is already on the ALTER trx when the ALTER
+--echo # fails — the rollback must remove them all and the error path must
+--echo # drop the aux set.
+ALTER TABLE tb DROP KEY vk;
+SET SESSION debug = '+d,create_index_fail';
+--error ER_DUP_ENTRY
+ALTER TABLE tb ADD VECTOR KEY vk (v) TYPE spann, ALGORITHM=INPLACE;
+SET SESSION debug = '-d,create_index_fail';
+--echo # No index, no aux files left behind.
+--list_files $MYSQLD_DATADIR/test vec_*.ibd
+
+--echo # Same build after the failed attempt: identical rows + identical
+--echo # seed => identical dump (nothing leaked from the rollback).
+SET SESSION debug = '+d,spann_build_seed_42';
+ALTER TABLE tb ADD VECTOR KEY vk (v) TYPE spann, ALGORITHM=INPLACE;
+SET SESSION debug = '-d,spann_build_seed_42';
+SET SESSION innodb_interpreter = 'spann_dump test/tb';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # Empty-table build: no heads, no postings, and the DDL matrix
+--echo # still works on the unpopulated set.
+CREATE TABLE te (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+                 VECTOR KEY vk (v) TYPE spann);
+ALTER TABLE te DROP KEY vk;
+ALTER TABLE te ADD VECTOR KEY vk (v) TYPE spann, ALGORITHM=INPLACE;
+SET SESSION innodb_interpreter = 'spann_dump test/te';
+SELECT @@session.innodb_interpreter_output;
+
+DROP TABLE te;
+DROP TABLE tb;

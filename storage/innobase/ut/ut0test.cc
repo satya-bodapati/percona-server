@@ -27,6 +27,10 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #ifdef UNIV_DEBUG
 #include "ut0test.h"
+
+#include <map>
+#include <set>
+
 #include "btr0load.h"
 #include "btr0mtib.h"
 #include "buf0flu.h"
@@ -40,6 +44,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "vec0aux.h"
 #include "vec0dml.h"
 #include "vec0index.h"
+#include "vec0spann.h"
 
 #define CALL_MEMBER_FN(object, ptrToMember) ((object).*(ptrToMember))
 
@@ -80,6 +85,7 @@ Tester::Tester() noexcept {
   DISPATCH(vec_aux_update_row);
   DISPATCH(vec_aux_dump);
   DISPATCH(vec_knn);
+  DISPATCH(spann_dump);
   DISPATCH(print_dblwr_has_encrypted_pages);
   DISPATCH(print_tree);
 }
@@ -734,6 +740,161 @@ Ret_t Tester::vec_knn(std::vector<std::string> &tokens) noexcept {
       sout << "?";
     }
     sout << "\n";
+  }
+  set_output(sout);
+  return RET_PASS;
+}
+
+/** Scan every non-delete-marked user record of a spann aux table's
+clustered index, invoking cb(index, rec, offsets) on each. Latest
+record versions — spann_dump runs on committed state (the build
+committed with its ALTER; S3's write hooks are per-statement). */
+template <typename Rec_fn>
+static void spann_scan_table(dict_table_t *aux, Rec_fn cb) {
+  dict_index_t *clust = aux->first_index();
+
+  mem_heap_t *offset_heap = nullptr;
+
+  mtr_t mtr;
+  mtr_start(&mtr);
+
+  btr_pcur_t pcur;
+  pcur.open_at_side(true /* left */, clust, BTR_SEARCH_LEAF, true, 0, &mtr);
+
+  ulint n_scanned = 0;
+
+  while (pcur.move_to_next_user_rec(&mtr) == DB_SUCCESS) {
+    const rec_t *rec = pcur.get_rec();
+
+    ulint *offsets = rec_get_offsets(rec, clust, nullptr, ULINT_UNDEFINED,
+                                     UT_LOCATION_HERE, &offset_heap);
+
+    if (!rec_get_deleted_flag(rec, dict_table_is_comp(aux))) {
+      cb(clust, rec, offsets);
+    }
+
+    /* Batch the mtr — see vec_aux_load_rows for the positioning
+    subtlety. */
+    if (++n_scanned % 512 == 0) {
+      pcur.store_position(&mtr);
+      mtr_commit(&mtr);
+      mtr_start(&mtr);
+      pcur.restore_position(BTR_SEARCH_LEAF, &mtr, UT_LOCATION_HERE);
+    }
+  }
+
+  pcur.close();
+  mtr_commit(&mtr);
+
+  if (offset_heap != nullptr) {
+    mem_heap_free(offset_heap);
+  }
+}
+
+Ret_t Tester::spann_dump(std::vector<std::string> &tokens) noexcept {
+  TLOG("Tester::spann_dump()");
+  ut_ad(tokens[0] == "spann_dump");
+  std::ostringstream sout;
+  if (tokens.size() != 2) {
+    XLOG("FAIL: usage: spann_dump db/table");
+    set_output(sout);
+    return RET_FAIL;
+  }
+
+  MDL_ticket *base_mdl = nullptr;
+  dict_table_t *base = dd_table_open_on_name(
+      current_thd, &base_mdl, tokens[1].c_str(), false, DICT_ERR_IGNORE_NONE);
+  if (base == nullptr) {
+    XLOG("FAIL: no such table " << tokens[1]);
+    set_output(sout);
+    return RET_FAIL;
+  }
+  auto base_guard = create_scope_guard(
+      [&]() { dd_table_close(base, current_thd, &base_mdl, false); });
+
+  const dict_index_t *vec_index = nullptr;
+  for (const dict_index_t *idx = base->first_index(); idx != nullptr;
+       idx = idx->next()) {
+    if (idx->is_vector()) {
+      vec_index = idx;
+      break;
+    }
+  }
+  if (vec_index == nullptr || vec_index->vec_type != Vec_index_type::SPANN) {
+    XLOG("FAIL: no spann index on " << tokens[1]);
+    set_output(sout);
+    return RET_FAIL;
+  }
+
+  /* Open the three members of the aux set. */
+  struct {
+    const char *suffix;
+    dict_table_t *table{nullptr};
+    MDL_ticket *mdl{nullptr};
+  } aux[3] = {{"", {}, {}}, {"_meta", {}, {}}, {"_dead", {}, {}}};
+
+  auto aux_guard = create_scope_guard([&]() {
+    for (auto &a : aux) {
+      if (a.table != nullptr) {
+        vec_aux_close_for_dml(a.table, current_thd, &a.mdl);
+      }
+    }
+  });
+
+  for (auto &a : aux) {
+    a.table = vec_aux_open_for_dml(base, vec_index->id, Vec_index_type::SPANN,
+                                   a.suffix, current_thd, &a.mdl);
+    if (a.table == nullptr) {
+      XLOG("FAIL: cannot open aux (suffix '" << a.suffix << "') for "
+                                             << tokens[1]);
+      set_output(sout);
+      return RET_FAIL;
+    }
+  }
+
+  /* Postings: per-list sizes + the distinct-label set. */
+  std::map<uint64_t, ulint> list_sizes;
+  std::set<uint64_t> labels;
+  ulint n_postings = 0;
+  spann_scan_table(aux[0].table, [&](const dict_index_t *clust,
+                                     const rec_t *rec, const ulint *offsets) {
+    ulint len;
+    const byte *p = rec_get_nth_field(clust, rec, offsets, 0, &len);
+    ut_a(len == 8);
+    const uint64_t head_id = mach_read_from_8(p);
+    p = rec_get_nth_field(clust, rec, offsets, 1, &len);
+    ut_a(len == 8);
+    labels.insert(mach_read_from_8(p));
+    ++list_sizes[head_id];
+    ++n_postings;
+  });
+
+  /* _meta: head count (HEAD rows only). */
+  ulint n_heads = 0;
+  spann_scan_table(aux[1].table, [&](const dict_index_t *clust,
+                                     const rec_t *rec, const ulint *offsets) {
+    ulint len;
+    const byte *p = rec_get_nth_field(clust, rec, offsets, 0, &len);
+    ut_a(len == 1);
+    if (*p == VEC_SPANN_META_HEAD) {
+      ++n_heads;
+    }
+  });
+
+  /* _dead: row count. */
+  ulint n_dead = 0;
+  spann_scan_table(aux[2].table, [&](const dict_index_t *, const rec_t *,
+                                     const ulint *) { ++n_dead; });
+
+  sout << "heads=" << n_heads << " lists=" << list_sizes.size()
+       << " postings=" << n_postings << " labels=" << labels.size();
+  if (!labels.empty()) {
+    sout << " label_min=" << *labels.begin()
+         << " label_max=" << *labels.rbegin();
+  }
+  sout << " dead=" << n_dead << "\n";
+  for (const auto &ls : list_sizes) {
+    sout << "head=" << ls.first << " size=" << ls.second << "\n";
   }
   set_output(sout);
   return RET_PASS;

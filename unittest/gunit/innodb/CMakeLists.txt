@@ -64,6 +64,7 @@ SET(TESTS
   ut0object_cache
   ut0rbt
   ut0rnd
+  vec0spann
   vec0vec
 )
 

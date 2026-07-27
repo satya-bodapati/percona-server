@@ -270,6 +270,15 @@ struct Tester {
   @return RET_PASS on success */
   [[nodiscard]] Ret_t vec_knn(std::vector<std::string> &tokens) noexcept;
 
+  /** Dump a TYPE spann index's on-disk state (SPANN S2 observability):
+  head count from _meta, per-list posting counts, distinct labels and
+  their range, dead count. Latest record versions, delete-marked
+  skipped — run it on committed state.
+  Usage: spann_dump db/table
+  @param[in] tokens tokenized command
+  @return RET_PASS on success */
+  [[nodiscard]] Ret_t spann_dump(std::vector<std::string> &tokens) noexcept;
+
   /** A macro to declare a dispatch function or a command function.  They all
   have the same signature.
   @param[in]   func_  the function that is being declared. */

@@ -40,6 +40,10 @@ this program; if not, write to the Free Software Foundation, Inc.,
 class Flush_observer;
 class Alter_stage;
 
+/* Defined in dict0mem.h beside dict_index_t::vec_type; fixed underlying
+type, so the opaque declaration keeps this header light. */
+enum class Vec_index_type : uint8_t;
+
 namespace ddl {
 // Forward declaration
 struct Dup;
@@ -135,6 +139,17 @@ struct Index_defn {
   same reason dict_index_t::is_vector_index does (see
   dict0mem.h:1222 comment for the full rationale). */
   bool m_is_vector{};
+
+  /** The vector index's TYPE (meaningful iff m_is_vector), from the
+  KEY's registry-validated TYPE token. Propagated to
+  dict_index_t::vec_type by ddl::create_index — the ALTER-ADD leg of
+  the S1 rule that every dict_index_t construction path must stamp the
+  type (create_index / dd_find_index / dict_index_build_internal_vec):
+  without it, an INPLACE re-ADD builds a spann index whose aux set was
+  created under the default (hnsw) name and schema. Zero-initialized =
+  Vec_index_type::HNSW, the default TYPE (the opaque enum declaration
+  above keeps the enumerators out of scope here). */
+  Vec_index_type m_vec_type{};
 };
 
 /** Structure for reporting duplicate records. */

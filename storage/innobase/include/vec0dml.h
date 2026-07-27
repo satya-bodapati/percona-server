@@ -112,8 +112,33 @@ and the row is undone with the statement, like any user DML.
 @param[in]     aux  aux table (opened by the caller)
 @param[in]     row  row contents
 @return DB_SUCCESS or error */
-dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
-                       const vec_aux_row_t &row);
+dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux, const vec_aux_row_t &row);
+
+/** Insert one row into a spann postings table (SPANN S2): PK is
+(head_id, label) — closure copies share the label under different
+heads. Same parser-free ins_node execution and trx contract as
+vec_aux_insert.
+@param[in,out] trx          transaction to ride (ALTER trx at build,
+                            user trx from S3 on)
+@param[in]     aux          postings aux table (opened by the caller)
+@param[in]     head_id      owning head's label
+@param[in]     label        the row's vec_idx_id
+@param[in]     vec          vector data, dims floats
+@param[in]     dims         vector dimensions
+@param[in]     row_ref      serialized base PK (NOT NULL here — spann
+                            deletes go to _dead, never tombstones)
+@param[in]     row_ref_len  length of row_ref
+@return DB_SUCCESS or error */
+dberr_t vec_spann_posting_insert(trx_t *trx, dict_table_t *aux,
+                                 uint64_t head_id, uint64_t label,
+                                 const float *vec, uint32_t dims,
+                                 const byte *row_ref, ulint row_ref_len);
+
+/** Insert one row into a spann _meta table: PK is (mtype, id); mval is
+the typed payload (a head's vector bytes for mtype HEAD).
+@return DB_SUCCESS or error */
+dberr_t vec_spann_meta_insert(trx_t *trx, dict_table_t *aux, uint8_t mtype,
+                              uint64_t id, const byte *mval, ulint mval_len);
 
 /** Update the `neighbors` column of one aux row identified by id.
 Parser-free upd_node execution mirroring the FK-cascade update pattern.
