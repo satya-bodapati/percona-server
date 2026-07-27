@@ -25,8 +25,8 @@ UPDATE ts SET v = STRING_TO_VECTOR('[3,3,3,3]') WHERE id = 2;
 DELETE FROM ts WHERE id = 1;
 SELECT id FROM ts;
 
---echo # Vector query runs the EXACT path (no vector_knn): correct
---echo # results until the spann read path lands (S5).
+--echo # Since S5 the vector query is served by the index (vector_knn) —
+--echo # here through the genesis-routed postings of a never-built index.
 INSERT INTO ts VALUES (1, STRING_TO_VECTOR('[1,1,1,1]'));
 EXPLAIN SELECT id FROM ts
   ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,1,1,1]'), 'EUCLIDEAN') LIMIT 2;

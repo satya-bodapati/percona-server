@@ -152,15 +152,18 @@ class Vec_spann_index final : public Vector_index {
   }
 
   [[nodiscard]] dberr_t knn(
-      dict_table_t *, THD *, const float *, uint32_t, size_t, size_t,
-      std::vector<vec_knn_hit_t> *,
-      const std::unordered_set<uint64_t> *) const override {
-    ut_d(ut_error); /* unreachable: optimizer gate is hnsw-only until S5 */
-    ut_o(return DB_UNSUPPORTED);
+      dict_table_t *table, THD *thd, const float *query, uint32_t dims,
+      size_t k, size_t ef, std::vector<vec_knn_hit_t> *hits,
+      const std::unordered_set<uint64_t> *exclude) const override {
+    return vec_spann_knn(table, thd, query, dims, k, ef, hits, exclude);
   }
 
-  [[nodiscard]] size_t size_hint(const dict_table_t *) const override {
-    return 0;
+  [[nodiscard]] size_t size_hint(const dict_table_t *table) const override {
+    /* Resume-loop upper bound. Live-label counts are not tracked in
+    RAM (postings are disk-resident); the label counter is a bound
+    that can never be BELOW the live count — overshoot only costs the
+    widening loop a few empty re-searches before EOF. */
+    return static_cast<size_t>(table->vec_next_id.load());
   }
 
   [[nodiscard]] dberr_t build(trx_t *trx, dict_table_t *table,

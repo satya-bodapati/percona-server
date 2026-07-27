@@ -1,0 +1,134 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # SPANN S5: the read path. ORDER BY DISTANCE(...) LIMIT k on a TYPE
+--echo # spann index is served by JT_VECTOR: head kNN on the RAM graph,
+--echo # posting-list scans UNDER THE CALLER'S READ VIEW, dead-label skip
+--echo # under the same view, closure dedup by label, exact-distance top-k,
+--echo # then base-row fetch through the shared vec_read path. MVCC comes
+--echo # from row versioning alone — no index-private visibility machinery.
+--echo #
+
+CREATE TABLE ts (id BIGINT UNSIGNED PRIMARY KEY, flt INT, v VECTOR(2),
+                 VECTOR KEY vk (v) TYPE spann);
+--disable_query_log
+let $i = 1;
+while ($i <= 20) {
+  eval INSERT INTO ts VALUES ($i, $i % 2, STRING_TO_VECTOR('[$i, 0]'));
+  inc $i;
+}
+--enable_query_log
+
+--echo # Genesis-routed index (never built): already servable.
+--replace_column 10 # 11 #
+EXPLAIN SELECT id FROM ts ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+SELECT id FROM ts ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+--echo # Exact oracle agrees (scan + filesort path).
+SELECT id FROM ts IGNORE INDEX (vk) ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+
+--echo # Multi-list index: seeded rebuild, then a query at a LIST BOUNDARY —
+--echo # the probe loop must cross lists to match the exact oracle.
+ALTER TABLE ts DROP KEY vk;
+SET SESSION debug = '+d,spann_build_seed_42';
+ALTER TABLE ts ADD VECTOR KEY vk (v) TYPE spann, ALGORITHM=INPLACE;
+SET SESSION debug = '-d,spann_build_seed_42';
+SET SESSION innodb_interpreter = 'spann_dump test/ts';
+SELECT @@session.innodb_interpreter_output;
+SELECT id FROM ts ORDER BY DISTANCE(v, STRING_TO_VECTOR('[11.4,0]'), 'EUCLIDEAN') LIMIT 4;
+SELECT id FROM ts IGNORE INDEX (vk) ORDER BY DISTANCE(v, STRING_TO_VECTOR('[11.4,0]'), 'EUCLIDEAN') LIMIT 4;
+SELECT id FROM ts ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0.2,0]'), 'EUCLIDEAN') LIMIT 5;
+SELECT id FROM ts IGNORE INDEX (vk) ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0.2,0]'), 'EUCLIDEAN') LIMIT 5;
+
+--echo # Same-session write-then-read (RYOW inside one trx): own insert is
+--echo # visible, own delete hides the row, both before commit.
+BEGIN;
+INSERT INTO ts VALUES (30, 0, STRING_TO_VECTOR('[3.05,0]'));
+SELECT id FROM ts ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+DELETE FROM ts WHERE id = 30;
+SELECT id FROM ts ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+ROLLBACK;
+
+--echo #
+--echo # The six MVCC scenarios (design doc §5), reader on the default
+--echo # connection under REPEATABLE READ, writer on con2.
+--echo #
+connect (con2, localhost, root,,);
+
+--echo # 1. Concurrent insert: invisible to the pinned view, visible after.
+--connection default
+BEGIN;
+SELECT COUNT(*) FROM ts;
+--connection con2
+INSERT INTO ts VALUES (31, 1, STRING_TO_VECTOR('[3.02,0]'));
+--connection default
+SELECT id FROM ts ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+COMMIT;
+SELECT id FROM ts ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+
+--echo # 2. Update vs old reader: the old posting stays visible to the old
+--echo # view (its dead row is younger than the view) — the reader keeps
+--echo # seeing the OLD vector position; the new position appears only
+--echo # after the reader's trx ends.
+--connection default
+BEGIN;
+SELECT COUNT(*) FROM ts;
+--connection con2
+UPDATE ts SET v = STRING_TO_VECTOR('[100,0]') WHERE id = 31;
+--connection default
+SELECT id FROM ts ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+SELECT id FROM ts ORDER BY DISTANCE(v, STRING_TO_VECTOR('[100,0]'), 'EUCLIDEAN') LIMIT 1;
+COMMIT;
+SELECT id FROM ts ORDER BY DISTANCE(v, STRING_TO_VECTOR('[100,0]'), 'EUCLIDEAN') LIMIT 1;
+
+--echo # 3. Delete vs old reader: the row keeps appearing until the view ends.
+--connection default
+BEGIN;
+SELECT COUNT(*) FROM ts;
+--connection con2
+DELETE FROM ts WHERE id = 31;
+--connection default
+SELECT id FROM ts ORDER BY DISTANCE(v, STRING_TO_VECTOR('[100,0]'), 'EUCLIDEAN') LIMIT 1;
+COMMIT;
+SELECT id FROM ts ORDER BY DISTANCE(v, STRING_TO_VECTOR('[100,0]'), 'EUCLIDEAN') LIMIT 1;
+
+--echo # 4. Uncommitted writer: invisible to other readers while open.
+--connection con2
+BEGIN;
+INSERT INTO ts VALUES (32, 0, STRING_TO_VECTOR('[3.03,0]'));
+--connection default
+SELECT id FROM ts ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+
+--echo # 5. Rollback: still invisible after the writer rolls back.
+--connection con2
+ROLLBACK;
+--connection default
+SELECT id FROM ts ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+disconnect con2;
+
+--echo # 6. Restart: committed state serves identically from a cold start.
+--source include/restart_mysqld.inc
+SELECT id FROM ts ORDER BY DISTANCE(v, STRING_TO_VECTOR('[11.4,0]'), 'EUCLIDEAN') LIMIT 4;
+
+--echo # WHERE + LIMIT: filters consume candidates above the iterator, the
+--echo # handler widens with the exclude set — probing more lists — until
+--echo # the LIMIT is filled. Oracle comparison on the filtered shape.
+SELECT id FROM ts WHERE flt = 0 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[11.4,0]'), 'EUCLIDEAN') LIMIT 5;
+SELECT id FROM ts IGNORE INDEX (vk) WHERE flt = 0 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[11.4,0]'), 'EUCLIDEAN') LIMIT 5;
+
+--echo # LIMIT past the matching rows: the widening loop must terminate at
+--echo # the size_hint bound (the label counter) and return every match.
+SELECT COUNT(*) AS matches FROM (SELECT id FROM ts WHERE flt = 0
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[11.4,0]'), 'EUCLIDEAN') LIMIT 100) sub;
+
+--echo # Deleted rows never resurface after their reader views are gone;
+--echo # a fresh query at the deleted position finds the true neighbors.
+DELETE FROM ts WHERE id IN (19, 20);
+SELECT id FROM ts ORDER BY DISTANCE(v, STRING_TO_VECTOR('[20,0]'), 'EUCLIDEAN') LIMIT 2;
+
+--echo # Non-servable shapes keep the exact path (same rules as hnsw).
+--replace_column 10 # 11 #
+EXPLAIN SELECT id FROM ts ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') DESC LIMIT 3;
+--replace_column 10 # 11 #
+EXPLAIN SELECT id FROM ts ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN');
+
+DROP TABLE ts;

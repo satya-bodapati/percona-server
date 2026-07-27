@@ -40,11 +40,14 @@ point below it uses forward declarations only. */
 
 #include <cstddef>
 #include <cstdint>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "db0err.h"
 #include "univ.i"
+
+struct vec_knn_hit_t; /* vec0aux.h */
 
 /* --------------------------------------------------------------------
 Meta-table row types: the `mtype` half of the _meta PK (mtype, id).
@@ -75,6 +78,23 @@ within (1 + eps) of the nearest head's. Applied to the space's RAW
 distance (squared L2 for L2Space), so as a true-distance ratio this is
 sqrt(1 + eps) — the constant is tuned in that knowledge. */
 constexpr float VEC_SPANN_CLOSURE_EPS = 0.25f;
+
+/** Query-time probe tolerance (S5): after enough candidates are
+collected, keep probing lists whose head distance is within
+(1 + eps) of the nearest head's — deliberately wider than the closure
+eps (a query near a list boundary needs neighbors the closure did not
+replicate). Same raw-distance semantics as VEC_SPANN_CLOSURE_EPS.
+INTERNAL until benchmarks; the natural user knob for recall/latency
+(S7). */
+constexpr float VEC_SPANN_PROBE_EPS = 1.0f;
+
+/** Minimum lists probed per query (capped by the head count). The
+multiplicative eps above collapses when the query lands almost ON a
+head (d1 -> 0 shrinks the tolerance to nothing, yet the true neighbors
+straddle the adjacent lists), so a floor of nearest lists is always
+scanned. Like every probe constant this trades latency for recall —
+the search is approximate by construction. */
+constexpr size_t VEC_SPANN_PROBE_MIN = 2;
 
 /** One head candidate for closure selection: the space's raw distance
 from the vector being assigned to this head. */
@@ -221,6 +241,22 @@ vec_spann_dead_insert for the visibility/rollback contract. Touches
 neither the head graph nor the postings; needs no load. */
 dberr_t vec_spann_remove_point(trx_t *trx, dict_table_t *table, THD *thd,
                                uint64_t label);
+
+/** Approximate kNN (SPANN S5, the read path): rank heads on the RAM
+graph, scan the nearest posting lists UNDER THE CALLER'S READ VIEW
+(widening per VEC_SPANN_PROBE_EPS until k candidates exist), drop
+labels dead under the same view, dedup closure copies by label, and
+return the exact-distance top-k closer-first. `hits` carry the
+posting's row_ref; the caller fetches base rows through its own
+read machinery, so a hit it cannot see resolves to a skip there.
+`exclude` is the resume hook (labels already returned). `ef` is
+accepted for seam compatibility and unused — probe width is the
+spann recall knob, not ef.
+@return DB_SUCCESS or error */
+dberr_t vec_spann_knn(dict_table_t *table, THD *thd, const float *query,
+                      uint32_t dims, size_t k, size_t ef,
+                      std::vector<vec_knn_hit_t> *hits,
+                      const std::unordered_set<uint64_t> *exclude);
 
 /** Free the runtime (head graph, latch, counters). Safe on tables
 that never opened one — the vec_close analog. */

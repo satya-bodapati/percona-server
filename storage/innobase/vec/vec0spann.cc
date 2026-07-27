@@ -49,12 +49,16 @@ A never-built index has no HEAD rows: the implicit genesis head
 #include <mutex>
 #include <numeric>
 #include <random>
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "extra/hnswlib/hnswlib.h"
 
 #include "dict0dict.h"
+#include "ha_innodb.h" /* thd_to_trx */
 #include "my_dbug.h"
 #include "sync0rw.h"
 #include "sync0sync.h"
@@ -498,6 +502,138 @@ dberr_t vec_spann_remove_point(trx_t *trx, dict_table_t *table, THD *thd,
   }
 
   vec_aux_close_for_dml(dead, thd, &mdl);
+  return err;
+}
+
+dberr_t vec_spann_knn(dict_table_t *table, THD *thd, const float *query,
+                      uint32_t dims, size_t k, size_t ef [[maybe_unused]],
+                      std::vector<vec_knn_hit_t> *hits,
+                      const std::unordered_set<uint64_t> *exclude) {
+  ut_a(hits != nullptr);
+  hits->clear();
+
+  Vec_spann_runtime *rt = spann_rt(table);
+  if (rt == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+  if (dims != 0 && dims != rt->dims) {
+    return DB_CORRUPTION;
+  }
+  if (k == 0) {
+    return DB_SUCCESS;
+  }
+
+  /* The CALLER's transaction and read view: the posting scan must sit
+  at the reader's MVCC position — that is the whole MVCC story of this
+  index (design §5). The view is opened here if the statement has not
+  read anything yet (exactly what row_search_mvcc would do first);
+  under READ UNCOMMITTED / SERIALIZABLE this gives candidate discovery
+  snapshot semantics, while the per-hit base fetch above us still
+  applies the session's real isolation. */
+  trx_t *trx = thd_to_trx(thd);
+  ut_a(trx != nullptr);
+  trx_start_if_not_started(trx, false, UT_LOCATION_HERE);
+  ReadView *view = trx_assign_read_view(trx);
+
+  MDL_ticket *post_mdl = nullptr;
+  dict_table_t *postings = vec_aux_open_for_dml(
+      table, rt->index_id, Vec_index_type::SPANN, "", thd, &post_mdl);
+  if (postings == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+  MDL_ticket *dead_mdl = nullptr;
+  dict_table_t *dead = vec_aux_open_for_dml(
+      table, rt->index_id, Vec_index_type::SPANN, "_dead", thd, &dead_mdl);
+  if (dead == nullptr) {
+    vec_aux_close_for_dml(postings, thd, &post_mdl);
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  std::unordered_set<uint64_t> dead_set;
+  dberr_t err = vec_spann_load_dead_set(dead, view, &dead_set);
+
+  rw_lock_s_lock(&rt->latch, UT_LOCATION_HERE);
+  if (err == DB_SUCCESS && !rt->loaded) {
+    rw_lock_s_unlock(&rt->latch);
+    err = vec_spann_load(table, thd);
+    rw_lock_s_lock(&rt->latch, UT_LOCATION_HERE);
+  }
+
+  if (err == DB_SUCCESS) {
+    const hnswlib::DISTFUNC<float> dist_func = rt->space->get_dist_func();
+    void *dist_param = rt->space->get_dist_func_param();
+
+    /* All heads, closer-first: the probe ORDER. How FAR down the list
+    we go is decided per query below. */
+    std::vector<std::pair<float, uint64_t>> head_order;
+    try {
+      const auto found =
+          rt->heads->searchKnnCloserFirst(query, rt->head_vecs.size());
+      head_order.reserve(found.size());
+      for (const auto &h : found) {
+        head_order.emplace_back(h.first, static_cast<uint64_t>(h.second));
+      }
+    } catch (...) {
+      err = DB_OUT_OF_MEMORY;
+    }
+
+    /* Candidates: label -> (exact distance, row_ref). Closure copies
+    dedup here — copies carry identical payloads, first hit wins. */
+    std::unordered_map<uint64_t, std::pair<float, std::string>> cands;
+
+    for (size_t i = 0; err == DB_SUCCESS && i < head_order.size(); ++i) {
+      /* Stop when the probe floor is met, k candidates exist AND the
+      next list's head is beyond the probe tolerance — nearer lists
+      were all scanned. */
+      if (i >= VEC_SPANN_PROBE_MIN && cands.size() >= k &&
+          head_order[i].first >
+              (1.0f + VEC_SPANN_PROBE_EPS) * head_order[0].first) {
+        break;
+      }
+
+      err = vec_spann_scan_list(
+          trx, postings, head_order[i].second, rt->dims, view,
+          [&](uint64_t label, const float *vec, const byte *ref,
+              ulint ref_len) {
+            if (dead_set.count(label) != 0 ||
+                (exclude != nullptr && exclude->count(label) != 0) ||
+                cands.count(label) != 0) {
+              return;
+            }
+            const float d = dist_func(query, vec, dist_param);
+            cands.emplace(
+                label, std::make_pair(
+                           d, std::string(reinterpret_cast<const char *>(ref),
+                                          ref_len)));
+          });
+    }
+
+    if (err == DB_SUCCESS) {
+      /* Exact-distance top-k, closer-first. */
+      std::vector<std::pair<float, uint64_t>> order;
+      order.reserve(cands.size());
+      for (const auto &c : cands) {
+        order.emplace_back(c.second.first, c.first);
+      }
+      std::sort(order.begin(), order.end());
+      if (order.size() > k) {
+        order.resize(k);
+      }
+      hits->reserve(order.size());
+      for (const auto &o : order) {
+        vec_knn_hit_t hit;
+        hit.label = o.second;
+        hit.dist = o.first;
+        hit.row_ref = std::move(cands.at(o.second).second);
+        hits->push_back(std::move(hit));
+      }
+    }
+  }
+
+  rw_lock_s_unlock(&rt->latch);
+  vec_aux_close_for_dml(dead, thd, &dead_mdl);
+  vec_aux_close_for_dml(postings, thd, &post_mdl);
+
   return err;
 }
 
