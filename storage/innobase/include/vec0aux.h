@@ -186,24 +186,44 @@ the INSERT path (mirrors fts_create_doc_id). */
 void vec_stamp_idx_id(dict_table_t *table, dtuple_t *row, mem_heap_t *heap);
 
 /* ------------------------------------------------------------------
-In-memory HNSW graph state (PS-11300 phase 2a). */
+In-memory vector runtime state (PS-11300 phase 2a; genericized by
+SPANN R2). */
 
-/** Per-table in-memory vector index state — the analog of fts_t.
+class Vector_index;
+
+/** What EVERY vector-index runtime shares: the SQL-facing identity of
+the index it serves, plus the type implementation that owns it. One
+instance hangs off dict_table_t::vec while a runtime is open; ONLY the
+implementation that allocated it may interpret the subtype (vec_t for
+TYPE hnsw). Everything type-specific — structure pointers, locking
+discipline, state machine, side maps, memory accounting — lives in the
+subtype, invisible to the rest of the engine. */
+struct Vec_runtime {
+  /** back pointer */
+  dict_table_t *table{nullptr};
+  /** the type implementation that allocated this runtime; set before
+  publication under dict_sys mutex, so teardown can always dispatch
+  table->vec->impl->close() without resolving the TYPE again */
+  const Vector_index *impl{nullptr};
+  /** the (single, PS-11264) vector index this runtime serves */
+  space_index_t index_id{0};
+  /** MySQL field ordinal of the vector column (write_row extraction) */
+  uint16_t field_no{0};
+  /** vector dimensions (floats) */
+  uint32_t dims{0};
+
+  virtual ~Vec_runtime() = default;
+};
+
+/** The TYPE hnsw runtime — the analog of fts_t.
 
 DEVIATION FROM FTS: fts_t carries background-thread state, a token
 cache, an indexes vector and its own allocation heap; vec_t is only the
 graph handle plus parameters, created LAZILY at first table open (FTS
-creates fts_t eagerly in dict_mem_table_create). Promote fields here —
-not a new global — if phase 3 grows state. */
-struct vec_t {
-  /** back pointer */
-  dict_table_t *table;
-  /** the (single, PS-11264) vector index this graph serves */
-  space_index_t index_id;
-  /** MySQL field ordinal of the vector column (write_row extraction) */
-  uint16_t field_no;
-  /** vector dimensions (floats) */
-  uint32_t dims;
+creates fts_t eagerly in dict_mem_table_create). Promote fields to
+Vec_runtime — not a new global — only if they are provably
+type-independent. */
+struct vec_t : public Vec_runtime {
   /** HNSW construction parameters, from the WITH() options */
   int M;
   int ef_construction;
@@ -235,9 +255,11 @@ struct vec_t {
 };
 
 /** Get-or-create table->vec (lazy; thread-safe via dict_sys mutex).
-Parameters are only applied on creation. */
-vec_t *vec_open(dict_table_t *table, uint16_t field_no, uint32_t dims, int M,
-                int ef_construction);
+Parameters are only applied on creation. `impl` is the Vector_index
+that owns the runtime (stored in Vec_runtime::impl before
+publication). */
+vec_t *vec_open(dict_table_t *table, const Vector_index *impl,
+                uint16_t field_no, uint32_t dims, int M, int ef_construction);
 
 /** Build (or rebuild, if stale) the in-memory graph from the aux table
 under the X latch, install the persistence callbacks, and restore

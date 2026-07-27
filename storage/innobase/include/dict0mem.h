@@ -2509,13 +2509,17 @@ detect this and will eventually quit sooner. */
   table has no hidden vec_idx_id column. Set by vec_add_idx_id_column. */
   ulint vec_idx_id_col;
 
-  /** In-memory HNSW graph state, or nullptr. Analog of `fts` above.
-  DEVIATION FROM FTS: created LAZILY by vec_open at first table open
-  (fts_t is created eagerly in dict_mem_table_create) — a table that is
-  never opened never pays for a graph. Freed beside fts_free in
+  /** In-memory vector-index runtime, or nullptr. Analog of `fts`
+  above. The base type carries only the index's SQL-facing identity
+  (index_id, field_no, dims) plus the owning type implementation;
+  the concrete subtype (vec_t for TYPE hnsw) is interpreted ONLY by
+  the Vector_index implementation that allocated it (SPANN R2).
+  DEVIATION FROM FTS: created LAZILY at first table open (fts_t is
+  created eagerly in dict_mem_table_create) — a table that is never
+  opened never pays for a runtime. Freed beside fts_free in
   dict_mem_table_free, and explicitly before the aux drop on DROP
   TABLE / ALTER DROP VECTOR INDEX. */
-  struct vec_t *vec;
+  struct Vec_runtime *vec;
 
   /** The transaction that currently holds the the AUTOINC lock on this table.
   Protected by lock_sys table shard latch. To "peek" the current value one

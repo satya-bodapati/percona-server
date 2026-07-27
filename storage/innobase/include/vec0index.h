@@ -45,11 +45,13 @@ What deliberately STAYS OUTSIDE (type-independent machinery):
   memory budget. Aux-table DDL lifecycle (create/drop/rename/detach)
   also stays direct until commit S1 introduces the second aux schema.
 
-Known remaining direct couplings at the call sites, to be generalized
-in the S-phase: the `table->vec != nullptr` companion gates and the
-`table->vec->field_no` / `->dims` state peeks (ha_innodb.cc,
-ut0test.cc). They are HNSW-companion reads, harmless while hnsw is the
-only registered type. */
+The R1 couplings are retired by R2: dict_table_t::vec is the generic
+Vec_runtime base (identity fields only — the gates and field_no/dims
+peeks at the call sites are type-agnostic reads of it), and each
+runtime carries a back-pointer to the Vector_index implementation that
+allocated it, so dispatch never re-resolves the TYPE while a runtime
+is open. Only the allocating implementation may interpret the
+subtype (vec_t for hnsw). */
 
 #ifndef vec0index_h
 #define vec0index_h

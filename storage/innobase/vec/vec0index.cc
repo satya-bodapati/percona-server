@@ -41,7 +41,7 @@ class Vec_hnsw_index final : public Vector_index {
  public:
   void open(dict_table_t *table, uint16_t field_no, uint32_t dims, int M,
             int ef_construction) const override {
-    (void)vec_open(table, field_no, dims, M, ef_construction);
+    (void)vec_open(table, this, field_no, dims, M, ef_construction);
   }
 
   [[nodiscard]] dberr_t load(dict_table_t *table, THD *thd) const override {
@@ -99,10 +99,20 @@ const Vec_hnsw_index vec_hnsw_singleton;
 
 }  // namespace
 
-const Vector_index *vec_index_for(const dict_table_t *table [[maybe_unused]]) {
-  /* R1: hnsw is the only registered TYPE. R2 replaces this with a
-  registry lookup keyed by the index's TYPE token; until then every
-  vector index in existence is hnsw, and calling any method on a table
-  WITHOUT a vector runtime is as safe as the free functions were. */
+const Vector_index *vec_index_for(const dict_table_t *table) {
+  /* An open runtime is self-describing (SPANN R2): dispatch on the
+  implementation that allocated it — this is what makes teardown
+  (dict_mem_table_free) correct once several TYPEs coexist, without
+  re-resolving the TYPE from the DD. */
+  if (table != nullptr && table->vec != nullptr &&
+      table->vec->impl != nullptr) {
+    return table->vec->impl;
+  }
+
+  /* No runtime open: hnsw is the only registered TYPE. R3 replaces
+  this fallback with a registry lookup keyed by the index's TYPE
+  token; until then every vector index in existence is hnsw, and
+  calling any method on a table WITHOUT a vector runtime is as safe
+  as the free functions were. */
   return &vec_hnsw_singleton;
 }

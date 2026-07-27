@@ -540,8 +540,14 @@ unsigned long long vec_hnsw_max_memory;
 
 uint64_t vec_total_memory() { return vec_mem_total.load(); }
 
+/** The hnsw runtime of `table`, or nullptr. This file allocated it
+(vec_open), so this file alone may interpret the subtype (SPANN R2). */
+static inline vec_t *vec_hnsw(const dict_table_t *table) {
+  return static_cast<vec_t *>(table->vec);
+}
+
 size_t vec_graph_size(const dict_table_t *table) {
-  const vec_t *vec = table->vec;
+  const vec_t *vec = vec_hnsw(table);
   return (vec != nullptr && vec->hnsw != nullptr)
              ? vec->hnsw->cur_element_count.load()
              : 0;
@@ -677,12 +683,13 @@ static void vec_update_cb(
   }
 }
 
-vec_t *vec_open(dict_table_t *table, uint16_t field_no, uint32_t dims, int M,
-                int ef_construction) {
+vec_t *vec_open(dict_table_t *table, const Vector_index *impl,
+                uint16_t field_no, uint32_t dims, int M, int ef_construction) {
   ut_a(table != nullptr);
+  ut_a(impl != nullptr);
 
   if (table->vec != nullptr) {
-    return table->vec;
+    return vec_hnsw(table);
   }
 
   dict_sys_mutex_enter();
@@ -699,6 +706,7 @@ vec_t *vec_open(dict_table_t *table, uint16_t field_no, uint32_t dims, int M,
 
     auto *vec = ut::new_withkey<vec_t>(ut::make_psi_memory_key(mem_key_other));
     vec->table = table;
+    vec->impl = impl;
     vec->index_id = vec_index->id;
     vec->field_no = field_no;
     vec->dims = dims;
@@ -713,7 +721,7 @@ vec_t *vec_open(dict_table_t *table, uint16_t field_no, uint32_t dims, int M,
     table->vec = vec;
   }
   dict_sys_mutex_exit();
-  return table->vec;
+  return vec_hnsw(table);
 }
 
 /** Build the graph from the aux table. Caller holds vec->latch in X. */
@@ -827,7 +835,7 @@ static dberr_t vec_load_locked(vec_t *vec, THD *thd) {
 }
 
 dberr_t vec_load(dict_table_t *table, THD *thd) {
-  vec_t *vec = table->vec;
+  vec_t *vec = vec_hnsw(table);
   ut_a(vec != nullptr);
 
   rw_lock_x_lock(&vec->latch, UT_LOCATION_HERE);
@@ -842,7 +850,7 @@ dberr_t vec_load(dict_table_t *table, THD *thd) {
 dberr_t vec_insert_point(trx_t *trx, dict_table_t *table, THD *thd, uint64_t id,
                          const float *vec_data, const byte *row_ref,
                          ulint row_ref_len) {
-  vec_t *vec = table->vec;
+  vec_t *vec = vec_hnsw(table);
   ut_a(vec != nullptr);
   ut_a(vec_data != nullptr);
 
@@ -947,7 +955,7 @@ dberr_t vec_insert_point(trx_t *trx, dict_table_t *table, THD *thd, uint64_t id,
 
 dberr_t vec_delete_point(trx_t *trx, dict_table_t *table, THD *thd,
                          uint64_t label) {
-  vec_t *vec = table->vec;
+  vec_t *vec = vec_hnsw(table);
   ut_a(vec != nullptr);
 
   MDL_ticket *mdl = nullptr;
@@ -996,7 +1004,7 @@ dberr_t vec_delete_point(trx_t *trx, dict_table_t *table, THD *thd,
 dberr_t vec_refresh_row_ref(trx_t *trx, dict_table_t *table, THD *thd,
                             uint64_t label, const byte *row_ref,
                             ulint row_ref_len) {
-  vec_t *vec = table->vec;
+  vec_t *vec = vec_hnsw(table);
   ut_a(vec != nullptr);
 
   MDL_ticket *mdl = nullptr;
@@ -1089,7 +1097,7 @@ void vec_trx_rollback(trx_t *trx, const trx_savept_t *savept) {
     const vec_trx_op_t op = ops.back();
     ops.pop_back();
 
-    vec_t *vec = op.table->vec;
+    vec_t *vec = vec_hnsw(op.table);
     if (vec == nullptr) {
       continue;
     }
@@ -1158,7 +1166,7 @@ dberr_t vec_knn_search(dict_table_t *table, THD *thd, const float *query,
   ut_a(hits != nullptr);
   hits->clear();
 
-  vec_t *vec = table->vec;
+  vec_t *vec = vec_hnsw(table);
   if (vec == nullptr) {
     return DB_TABLE_NOT_FOUND;
   }
@@ -1362,7 +1370,7 @@ dberr_t vec_aux_recreate_after_import(dict_table_t *table, trx_t *trx) {
 }
 
 void vec_close(dict_table_t *table) {
-  vec_t *vec = table->vec;
+  vec_t *vec = vec_hnsw(table);
   if (vec == nullptr) {
     return;
   }
