@@ -1,0 +1,85 @@
+#
+# SPANN S7: observability. Global monotone counters live in
+# I_S.INNODB_METRICS under module_vec (searches, probes = lists
+# scanned, posting appends incl. build and closure copies, dead
+# appends); per-index health gauges — dead ratio and list balance,
+# the LIRE trigger inputs — come from the spann_stats interpreter
+# command.
+#
+SET GLOBAL innodb_monitor_enable = 'module_vec';
+CREATE TABLE tm (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+VECTOR KEY vk (v) TYPE spann);
+INSERT INTO tm VALUES (22, STRING_TO_VECTOR('[11.5, 0, 0, 0]'));
+# 21 genesis-routed posting appends so far, no searches yet.
+SELECT NAME, COUNT FROM INFORMATION_SCHEMA.INNODB_METRICS
+WHERE NAME LIKE 'vec_spann%' ORDER BY NAME;
+NAME	COUNT
+vec_spann_dead_appends	0
+vec_spann_posting_appends	21
+vec_spann_probes	0
+vec_spann_searches	0
+# Seeded rebuild: the build's 23 posting appends (closure included)
+# are counted too.
+ALTER TABLE tm DROP KEY vk;
+SET SESSION debug = '+d,spann_build_seed_42';
+ALTER TABLE tm ADD VECTOR KEY vk (v) TYPE spann, ALGORITHM=INPLACE;
+SET SESSION debug = '-d,spann_build_seed_42';
+SELECT NAME, COUNT FROM INFORMATION_SCHEMA.INNODB_METRICS
+WHERE NAME LIKE 'vec_spann%' ORDER BY NAME;
+NAME	COUNT
+vec_spann_dead_appends	0
+vec_spann_posting_appends	44
+vec_spann_probes	0
+vec_spann_searches	0
+# Two searches: a mid-cluster query probes the floor (2 lists), a
+# far-out query still respects the floor — probes advance by 4.
+SELECT id FROM tm ORDER BY DISTANCE(v, STRING_TO_VECTOR('[2.1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+id
+2
+3
+SELECT id FROM tm ORDER BY DISTANCE(v, STRING_TO_VECTOR('[19.9,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+id
+20
+19
+SELECT NAME, COUNT FROM INFORMATION_SCHEMA.INNODB_METRICS
+WHERE NAME LIKE 'vec_spann%' ORDER BY NAME;
+NAME	COUNT
+vec_spann_dead_appends	0
+vec_spann_posting_appends	44
+vec_spann_probes	4
+vec_spann_searches	2
+# DELETE and vector UPDATE: dead appends move; the UPDATE also adds
+# a posting under its fresh label.
+DELETE FROM tm WHERE id = 3;
+UPDATE tm SET v = STRING_TO_VECTOR('[7.5,0,0,0]') WHERE id = 7;
+SELECT NAME, COUNT FROM INFORMATION_SCHEMA.INNODB_METRICS
+WHERE NAME LIKE 'vec_spann%' ORDER BY NAME;
+NAME	COUNT
+vec_spann_dead_appends	2
+vec_spann_posting_appends	45
+vec_spann_probes	4
+vec_spann_searches	2
+# Health gauges: dead ratio against the labels still in postings,
+# and list balance (min/max/avg posting-list size).
+SET SESSION innodb_interpreter = 'spann_stats test/tm';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=3 lists=3 postings=24 labels=22 dead=2 dead_ratio_pct=9 list_min=7 list_max=10 list_avg=8
+
+# The raw dump remains available and unchanged in shape.
+SET SESSION innodb_interpreter = 'spann_dump test/tm';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=3 lists=3 postings=24 labels=22 label_min=1 label_max=22 dead=2
+head=5 size=10
+head=13 size=7
+head=15 size=7
+mem heads=3 dead_appends=2
+mem head=5 appends=1
+
+DROP TABLE tm;
+SET GLOBAL innodb_monitor_disable = 'module_vec';
+SET GLOBAL innodb_monitor_reset_all = 'module_vec';
+SET GLOBAL innodb_monitor_enable = default;
+SET GLOBAL innodb_monitor_disable = default;
+SET GLOBAL innodb_monitor_reset_all = default;

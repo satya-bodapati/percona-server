@@ -45,6 +45,7 @@ DEVIATION FROM FTS rationale (no fts_parse_sql / pars_mutex). */
 #include "row0mysql.h"
 #include "row0upd.h"
 #include "row0vers.h"
+#include "srv0mon.h"
 #include "trx0roll.h"
 #include "vec0aux.h"
 #include "vec0spann.h"
@@ -279,6 +280,9 @@ dberr_t vec_spann_posting_insert(trx_t *trx, dict_table_t *aux,
 
   const dberr_t err = vec_aux_insert_exec(trx, node, heap);
   mem_heap_free(heap);
+  if (err == DB_SUCCESS) {
+    MONITOR_INC(MONITOR_VEC_SPANN_POSTING_APPENDS);
+  }
   return err;
 }
 
@@ -300,6 +304,9 @@ dberr_t vec_spann_dead_insert(trx_t *trx, dict_table_t *aux, uint64_t label) {
 
   const dberr_t err = vec_aux_insert_exec(trx, node, heap);
   mem_heap_free(heap);
+  if (err == DB_SUCCESS) {
+    MONITOR_INC(MONITOR_VEC_SPANN_DEAD_APPENDS);
+  }
   return err;
 }
 
