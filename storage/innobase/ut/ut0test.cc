@@ -86,6 +86,7 @@ Tester::Tester() noexcept {
   DISPATCH(vec_aux_dump);
   DISPATCH(vec_knn);
   DISPATCH(spann_dump);
+  DISPATCH(spann_stats);
   DISPATCH(print_dblwr_has_encrypted_pages);
   DISPATCH(print_tree);
 }
@@ -791,23 +792,29 @@ static void spann_scan_table(dict_table_t *aux, Rec_fn cb) {
   }
 }
 
-Ret_t Tester::spann_dump(std::vector<std::string> &tokens) noexcept {
-  TLOG("Tester::spann_dump()");
-  ut_ad(tokens[0] == "spann_dump");
-  std::ostringstream sout;
-  if (tokens.size() != 2) {
-    XLOG("FAIL: usage: spann_dump db/table");
-    set_output(sout);
-    return RET_FAIL;
-  }
+/** Everything spann_dump / spann_stats report about one index: the
+on-disk truth from scans of the three aux tables, plus the runtime
+view when one is open. */
+struct spann_observed_t {
+  std::map<uint64_t, ulint> list_sizes;
+  std::set<uint64_t> labels;
+  ulint n_postings{0};
+  ulint n_heads{0};
+  ulint n_dead{0};
+  bool has_rt{false};
+  vec_spann_stats_t rt;
+};
 
+/** Collect spann_observed_t for `base_name`; on failure writes the
+FAIL message to `sout` and returns false. */
+static bool spann_observe(const std::string &base_name,
+                          std::ostringstream &sout, spann_observed_t &obs) {
   MDL_ticket *base_mdl = nullptr;
   dict_table_t *base = dd_table_open_on_name(
-      current_thd, &base_mdl, tokens[1].c_str(), false, DICT_ERR_IGNORE_NONE);
+      current_thd, &base_mdl, base_name.c_str(), false, DICT_ERR_IGNORE_NONE);
   if (base == nullptr) {
-    XLOG("FAIL: no such table " << tokens[1]);
-    set_output(sout);
-    return RET_FAIL;
+    XLOG("FAIL: no such table " << base_name);
+    return false;
   }
   auto base_guard = create_scope_guard(
       [&]() { dd_table_close(base, current_thd, &base_mdl, false); });
@@ -821,9 +828,8 @@ Ret_t Tester::spann_dump(std::vector<std::string> &tokens) noexcept {
     }
   }
   if (vec_index == nullptr || vec_index->vec_type != Vec_index_type::SPANN) {
-    XLOG("FAIL: no spann index on " << tokens[1]);
-    set_output(sout);
-    return RET_FAIL;
+    XLOG("FAIL: no spann index on " << base_name);
+    return false;
   }
 
   /* Open the three members of the aux set. */
@@ -846,16 +852,12 @@ Ret_t Tester::spann_dump(std::vector<std::string> &tokens) noexcept {
                                    a.suffix, current_thd, &a.mdl);
     if (a.table == nullptr) {
       XLOG("FAIL: cannot open aux (suffix '" << a.suffix << "') for "
-                                             << tokens[1]);
-      set_output(sout);
-      return RET_FAIL;
+                                             << base_name);
+      return false;
     }
   }
 
   /* Postings: per-list sizes + the distinct-label set. */
-  std::map<uint64_t, ulint> list_sizes;
-  std::set<uint64_t> labels;
-  ulint n_postings = 0;
   spann_scan_table(aux[0].table, [&](const dict_index_t *clust,
                                      const rec_t *rec, const ulint *offsets) {
     ulint len;
@@ -864,54 +866,113 @@ Ret_t Tester::spann_dump(std::vector<std::string> &tokens) noexcept {
     const uint64_t head_id = mach_read_from_8(p);
     p = rec_get_nth_field(clust, rec, offsets, 1, &len);
     ut_a(len == 8);
-    labels.insert(mach_read_from_8(p));
-    ++list_sizes[head_id];
-    ++n_postings;
+    obs.labels.insert(mach_read_from_8(p));
+    ++obs.list_sizes[head_id];
+    ++obs.n_postings;
   });
 
   /* _meta: head count (HEAD rows only). */
-  ulint n_heads = 0;
   spann_scan_table(aux[1].table, [&](const dict_index_t *clust,
                                      const rec_t *rec, const ulint *offsets) {
     ulint len;
     const byte *p = rec_get_nth_field(clust, rec, offsets, 0, &len);
     ut_a(len == 1);
     if (*p == VEC_SPANN_META_HEAD) {
-      ++n_heads;
+      ++obs.n_heads;
     }
   });
 
   /* _dead: row count. */
-  ulint n_dead = 0;
   spann_scan_table(aux[2].table, [&](const dict_index_t *, const rec_t *,
-                                     const ulint *) { ++n_dead; });
+                                     const ulint *) { ++obs.n_dead; });
 
-  sout << "heads=" << n_heads << " lists=" << list_sizes.size()
-       << " postings=" << n_postings << " labels=" << labels.size();
-  if (!labels.empty()) {
-    sout << " label_min=" << *labels.begin()
-         << " label_max=" << *labels.rbegin();
+  obs.has_rt = vec_spann_runtime_stats(base, &obs.rt);
+
+  return true;
+}
+
+Ret_t Tester::spann_dump(std::vector<std::string> &tokens) noexcept {
+  TLOG("Tester::spann_dump()");
+  ut_ad(tokens[0] == "spann_dump");
+  std::ostringstream sout;
+  if (tokens.size() != 2) {
+    XLOG("FAIL: usage: spann_dump db/table");
+    set_output(sout);
+    return RET_FAIL;
   }
-  sout << " dead=" << n_dead << "\n";
-  for (const auto &ls : list_sizes) {
+
+  spann_observed_t obs;
+  if (!spann_observe(tokens[1], sout, obs)) {
+    set_output(sout);
+    return RET_FAIL;
+  }
+
+  sout << "heads=" << obs.n_heads << " lists=" << obs.list_sizes.size()
+       << " postings=" << obs.n_postings << " labels=" << obs.labels.size();
+  if (!obs.labels.empty()) {
+    sout << " label_min=" << *obs.labels.begin()
+         << " label_max=" << *obs.labels.rbegin();
+  }
+  sout << " dead=" << obs.n_dead << "\n";
+  for (const auto &ls : obs.list_sizes) {
     sout << "head=" << ls.first << " size=" << ls.second << "\n";
   }
 
   /* Runtime (RAM) view, when a loaded spann runtime is open: head
   count includes the implicit genesis head; per-list append counters
   are since-load deltas (the LIRE feed, S3). */
-  vec_spann_stats_t st;
-  if (vec_spann_runtime_stats(base, &st)) {
-    sout << "mem heads=" << st.n_heads;
+  if (obs.has_rt) {
+    sout << "mem heads=" << obs.rt.n_heads;
     /* Printed only when nonzero so pre-S4 recordings stay stable. */
-    if (st.dead_appends != 0) {
-      sout << " dead_appends=" << st.dead_appends;
+    if (obs.rt.dead_appends != 0) {
+      sout << " dead_appends=" << obs.rt.dead_appends;
     }
     sout << "\n";
-    for (const auto &la : st.list_appends) {
+    for (const auto &la : obs.rt.list_appends) {
       sout << "mem head=" << la.first << " appends=" << la.second << "\n";
     }
   }
+
+  set_output(sout);
+  return RET_PASS;
+}
+
+Ret_t Tester::spann_stats(std::vector<std::string> &tokens) noexcept {
+  TLOG("Tester::spann_stats()");
+  ut_ad(tokens[0] == "spann_stats");
+  std::ostringstream sout;
+  if (tokens.size() != 2) {
+    XLOG("FAIL: usage: spann_stats db/table");
+    set_output(sout);
+    return RET_FAIL;
+  }
+
+  spann_observed_t obs;
+  if (!spann_observe(tokens[1], sout, obs)) {
+    set_output(sout);
+    return RET_FAIL;
+  }
+
+  /* Derived health gauges (S7): dead ratio = retired labels against
+  the labels still present in postings (L2's GC trigger input); list
+  balance = min/max/avg posting-list size (L1's split trigger input).
+  Integer arithmetic — the output is for recorded tests. */
+  ulint list_min = 0;
+  ulint list_max = 0;
+  for (const auto &ls : obs.list_sizes) {
+    list_min = list_min == 0 ? ls.second : std::min(list_min, ls.second);
+    list_max = std::max(list_max, ls.second);
+  }
+  const ulint list_avg =
+      obs.list_sizes.empty() ? 0 : obs.n_postings / obs.list_sizes.size();
+  const ulint dead_ratio_pct =
+      obs.labels.empty() ? 0 : obs.n_dead * 100 / obs.labels.size();
+
+  sout << "heads=" << obs.n_heads << " lists=" << obs.list_sizes.size()
+       << " postings=" << obs.n_postings << " labels=" << obs.labels.size()
+       << " dead=" << obs.n_dead << " dead_ratio_pct=" << dead_ratio_pct
+       << " list_min=" << list_min << " list_max=" << list_max
+       << " list_avg=" << list_avg << "\n";
 
   set_output(sout);
   return RET_PASS;

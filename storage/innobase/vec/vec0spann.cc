@@ -60,6 +60,7 @@ A never-built index has no HEAD rows: the implicit genesis head
 #include "dict0dict.h"
 #include "ha_innodb.h" /* thd_to_trx */
 #include "my_dbug.h"
+#include "srv0mon.h"
 #include "sync0rw.h"
 #include "sync0sync.h"
 #include "trx0trx.h"
@@ -549,6 +550,8 @@ dberr_t vec_spann_knn(dict_table_t *table, THD *thd, const float *query,
     return DB_TABLE_NOT_FOUND;
   }
 
+  MONITOR_INC(MONITOR_VEC_SPANN_SEARCHES);
+
   std::unordered_set<uint64_t> dead_set;
   dberr_t err = vec_spann_load_dead_set(dead, view, &dead_set);
 
@@ -591,6 +594,7 @@ dberr_t vec_spann_knn(dict_table_t *table, THD *thd, const float *query,
         break;
       }
 
+      MONITOR_INC(MONITOR_VEC_SPANN_PROBES);
       err = vec_spann_scan_list(
           trx, postings, head_order[i].second, rt->dims, view,
           [&](uint64_t label, const float *vec, const byte *ref,

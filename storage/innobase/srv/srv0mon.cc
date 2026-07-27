@@ -1146,6 +1146,29 @@ static monitor_info_t innodb_counter_info[] = {
      "Number of Adaptive Hash Index rows updated", MONITOR_NONE,
      MONITOR_DEFAULT_START, MONITOR_ADAPTIVE_HASH_ROW_UPDATED},
 
+    /* ========== Counters for vector indexes (SPANN S7) ========== */
+    {"module_vec", "vector_index", "Vector Index", MONITOR_MODULE,
+     MONITOR_DEFAULT_START, MONITOR_MODULE_VEC},
+
+    {"vec_spann_searches", "vector_index",
+     "Number of kNN searches served by TYPE spann vector indexes", MONITOR_NONE,
+     MONITOR_DEFAULT_START, MONITOR_VEC_SPANN_SEARCHES},
+
+    {"vec_spann_probes", "vector_index",
+     "Number of posting lists scanned by TYPE spann kNN searches"
+     " (probes per query = vec_spann_probes / vec_spann_searches)",
+     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_VEC_SPANN_PROBES},
+
+    {"vec_spann_posting_appends", "vector_index",
+     "Number of posting rows inserted into TYPE spann vector indexes"
+     " (build, INSERT and UPDATE paths; includes closure copies)",
+     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_VEC_SPANN_POSTING_APPENDS},
+
+    {"vec_spann_dead_appends", "vector_index",
+     "Number of dead-label rows inserted into TYPE spann vector indexes"
+     " (DELETE and UPDATE paths)",
+     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_VEC_SPANN_DEAD_APPENDS},
+
     /* ========== Counters for tablespace ========== */
     {"module_file", "file_system", "Tablespace and File System Manager",
      MONITOR_MODULE, MONITOR_DEFAULT_START, MONITOR_MODULE_FIL_SYSTEM},

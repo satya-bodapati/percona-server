@@ -279,6 +279,14 @@ struct Tester {
   @return RET_PASS on success */
   [[nodiscard]] Ret_t spann_dump(std::vector<std::string> &tokens) noexcept;
 
+  /** Derived health gauges of a TYPE spann index (SPANN S7): dead
+  ratio and list balance — the LIRE split/GC trigger inputs, computed
+  from the same scans spann_dump uses.
+  Usage: spann_stats db/table
+  @param[in] tokens tokenized command
+  @return RET_PASS on success */
+  [[nodiscard]] Ret_t spann_stats(std::vector<std::string> &tokens) noexcept;
+
   /** A macro to declare a dispatch function or a command function.  They all
   have the same signature.
   @param[in]   func_  the function that is being declared. */
