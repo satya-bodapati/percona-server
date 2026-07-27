@@ -896,6 +896,18 @@ Ret_t Tester::spann_dump(std::vector<std::string> &tokens) noexcept {
   for (const auto &ls : list_sizes) {
     sout << "head=" << ls.first << " size=" << ls.second << "\n";
   }
+
+  /* Runtime (RAM) view, when a loaded spann runtime is open: head
+  count includes the implicit genesis head; per-list append counters
+  are since-load deltas (the LIRE feed, S3). */
+  vec_spann_stats_t st;
+  if (vec_spann_runtime_stats(base, &st)) {
+    sout << "mem heads=" << st.n_heads << "\n";
+    for (const auto &la : st.list_appends) {
+      sout << "mem head=" << la.first << " appends=" << la.second << "\n";
+    }
+  }
+
   set_output(sout);
   return RET_PASS;
 }

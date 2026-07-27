@@ -104,45 +104,52 @@ class Vec_hnsw_index final : public Vector_index {
 
 const Vec_hnsw_index vec_hnsw_singleton;
 
-/** TYPE spann — S1 lifecycle + S2 build pass. open() is deliberately
-still a no-op: table->vec stays nullptr, so every DML hook skips (the
-index is populated by build() but not maintained yet), and the
-optimizer's JT_VECTOR gate is restricted to hnsw (sql_optimizer.cc),
-so queries run the exact path with correct results. The write path
-lands in S3, the read path in S5; the runtime-op stubs below are
-unreachable until then and say so. */
+/** TYPE spann — S1 lifecycle, S2 build pass, S3 write path. open()
+creates the Vec_spann_runtime (head graph over the _meta HEAD range),
+so the generic DML hooks fire; insert() routes to nearest heads and
+appends posting rows on the user trx. remove()/refresh_row_ref() are
+documented no-ops until S4 (_dead inserts): correct today because the
+optimizer's JT_VECTOR gate is still hnsw-only (sql_optimizer.cc), so
+every read runs the exact path — a stale posting is unreachable. The
+read path lands in S5. */
 class Vec_spann_index final : public Vector_index {
  public:
   [[nodiscard]] Vec_index_type type() const override {
     return Vec_index_type::SPANN;
   }
 
-  void open(dict_table_t *, uint16_t, uint32_t, int, int) const override {
-    /* S3 creates Vec_spann_runtime here. */
+  void open(dict_table_t *table, uint16_t field_no, uint32_t dims, int M,
+            int ef_construction) const override {
+    vec_spann_open(table, this, field_no, dims, M, ef_construction);
   }
 
-  [[nodiscard]] dberr_t load(dict_table_t *, THD *) const override {
-    return DB_SUCCESS; /* nothing to load until S5/S6 */
+  [[nodiscard]] dberr_t load(dict_table_t *table, THD *thd) const override {
+    return vec_spann_load(table, thd);
   }
 
-  [[nodiscard]] dberr_t insert(trx_t *, dict_table_t *, THD *, uint64_t,
-                               const float *, const byte *,
-                               ulint) const override {
-    ut_d(ut_error); /* unreachable: no runtime => hooks skip (S3) */
-    ut_o(return DB_UNSUPPORTED);
+  [[nodiscard]] dberr_t insert(trx_t *trx, dict_table_t *table, THD *thd,
+                               uint64_t label, const float *vec_data,
+                               const byte *row_ref,
+                               ulint row_ref_len) const override {
+    return vec_spann_insert_point(trx, table, thd, label, vec_data, row_ref,
+                                  row_ref_len);
   }
 
   [[nodiscard]] dberr_t remove(trx_t *, dict_table_t *, THD *,
                                uint64_t) const override {
-    ut_d(ut_error); /* unreachable until S4 */
-    ut_o(return DB_UNSUPPORTED);
+    /* S3 posture: the DELETE half (a _dead insert) lands in S4. A
+    no-op leaves stale postings, which no read can reach until S5
+    lifts the optimizer gate — S4 MUST land before S5. */
+    return DB_SUCCESS;
   }
 
   [[nodiscard]] dberr_t refresh_row_ref(trx_t *, dict_table_t *, THD *,
                                         uint64_t, const byte *,
                                         ulint) const override {
-    ut_d(ut_error); /* unreachable until S4 */
-    ut_o(return DB_UNSUPPORTED);
+    /* S3 posture: a PK-only UPDATE leaves posting row_refs stale —
+    unreachable for the same reason as remove(); S4 resolves it (a
+    posting is never updated in place: dead + re-append). */
+    return DB_SUCCESS;
   }
 
   [[nodiscard]] dberr_t knn(
@@ -169,8 +176,7 @@ class Vec_spann_index final : public Vector_index {
                                  ef_construction, thd);
   }
 
-  void close(dict_table_t *) const override { /* no runtime yet */
-  }
+  void close(dict_table_t *table) const override { vec_spann_close(table); }
 
   [[nodiscard]] dberr_t recreate_after_import(dict_table_t *table,
                                               trx_t *trx) const override {

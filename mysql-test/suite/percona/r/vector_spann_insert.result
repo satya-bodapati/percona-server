@@ -1,0 +1,150 @@
+#
+# SPANN S3: the INSERT path. write_row routes each vector through
+# the RAM head graph (loaded from the _meta HEAD range) and appends
+# 1..closure posting rows on the USER transaction — inserts only,
+# no aux updates, no rollback tracking (pure undo). A fresh table
+# has no heads: the implicit genesis head (head_id 0, zero vector)
+# exists exactly while _meta has no HEAD rows, so the head set is
+# never empty. spann_dump's "mem" lines show the runtime view:
+# head count (genesis included) and per-list appends since load.
+#
+CREATE TABLE ti (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+VECTOR KEY vk (v) TYPE spann);
+# Fresh table: every insert routes to the genesis list (head 0).
+# The NULL vector consumes a label but is not indexed.
+INSERT INTO ti VALUES (1, STRING_TO_VECTOR('[1,0,0,0]'));
+INSERT INTO ti VALUES (2, STRING_TO_VECTOR('[2,0,0,0]'));
+INSERT INTO ti VALUES (3, STRING_TO_VECTOR('[3,0,0,0]'));
+INSERT INTO ti VALUES (4, NULL);
+SET SESSION innodb_interpreter = 'spann_dump test/ti';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=1 postings=3 labels=3 label_min=1 label_max=3 dead=0
+head=0 size=3
+mem heads=1
+mem head=0 appends=3
+
+# Rollback is pure undo: the posting rows vanish with the trx.
+# The RAM append counter is a since-load delta, not transactional
+# (it feeds LIRE's split heuristic, nothing else) — it keeps the
+# bump; the disk state does not.
+BEGIN;
+INSERT INTO ti VALUES (5, STRING_TO_VECTOR('[4,0,0,0]'));
+ROLLBACK;
+SET SESSION innodb_interpreter = 'spann_dump test/ti';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=1 postings=3 labels=3 label_min=1 label_max=3 dead=0
+head=0 size=3
+mem heads=1
+mem head=0 appends=4
+
+# Populate to 21 indexed rows (same data as the S2 build test) and
+# rebuild with the fixed seed: real heads replace the genesis head.
+INSERT INTO ti VALUES (22, STRING_TO_VECTOR('[11.5, 0, 0, 0]'));
+ALTER TABLE ti DROP KEY vk;
+SET SESSION debug = '+d,spann_build_seed_42';
+ALTER TABLE ti ADD VECTOR KEY vk (v) TYPE spann, ALGORITHM=INPLACE;
+SET SESSION debug = '-d,spann_build_seed_42';
+# Post-build insert routes to the nearest REAL head. The runtime
+# was re-opened after the ALTER, so the append counters restart.
+INSERT INTO ti VALUES (23, STRING_TO_VECTOR('[4.9, 0, 0, 0]'));
+SET SESSION innodb_interpreter = 'spann_dump test/ti';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=3 lists=3 postings=22 labels=21 label_min=1 label_max=23 dead=0
+head=2 size=7
+head=13 size=7
+head=14 size=8
+mem heads=3
+mem head=2 appends=1
+
+# Cold start: the first insert after a restart lazy-loads the head
+# graph from _meta and routes normally.
+# restart
+INSERT INTO ti VALUES (24, STRING_TO_VECTOR('[14.9, 0, 0, 0]'));
+SET SESSION innodb_interpreter = 'spann_dump test/ti';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=3 lists=3 postings=23 labels=22 label_min=1 label_max=24 dead=0
+head=2 size=7
+head=13 size=7
+head=14 size=9
+mem heads=3
+mem head=14 appends=1
+
+# Crash BEFORE the commit: recovery has neither the base row nor
+# its postings (they rode the same trx).
+SET SESSION debug = '+d,crash_commit_before';
+INSERT INTO ti VALUES (25, STRING_TO_VECTOR('[13.1, 0, 0, 0]'));
+ERROR HY000: Lost connection to MySQL server during query
+SELECT id FROM ti WHERE id >= 23 ORDER BY id;
+id
+23
+24
+SET SESSION innodb_interpreter = 'spann_dump test/ti';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=3 lists=3 postings=23 labels=22 label_min=1 label_max=24 dead=0
+head=2 size=7
+head=13 size=7
+head=14 size=9
+mem heads=3
+
+# Crash AFTER the commit: both sides recover to present.
+SET SESSION debug = '+d,crash_commit_after';
+INSERT INTO ti VALUES (26, STRING_TO_VECTOR('[13.1, 0, 0, 0]'));
+ERROR HY000: Lost connection to MySQL server during query
+SELECT id FROM ti WHERE id >= 23 ORDER BY id;
+id
+23
+24
+26
+# label_max is masked: whether the crashed statement's consumed
+# label was redo-synced before the kill is timing-dependent (same
+# masking rationale as vector_populate_crash — committed-label
+# uniqueness is the invariant, exact hole positions are not).
+SET SESSION innodb_interpreter = 'spann_dump test/ti';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=3 lists=3 postings=24 labels=23 label_min=1 label_max=<M> dead=0
+head=2 size=7
+head=13 size=7
+head=14 size=10
+mem heads=3
+
+# Concurrency: two sessions appending to the SAME list do not
+# block each other — distinct labels are distinct (head_id, label)
+# PKs at the list's right edge; insert-intention locks are
+# compatible. Contrast HNSW, where concurrent inserts UPDATE each
+# other's neighbor rows and can wait or deadlock. The 1-second
+# lock_wait_timeout turns any accidental wait into a test failure.
+BEGIN;
+INSERT INTO ti VALUES (30, STRING_TO_VECTOR('[5.1, 0, 0, 0]'));
+SET SESSION innodb_lock_wait_timeout = 1;
+INSERT INTO ti VALUES (31, STRING_TO_VECTOR('[5.2, 0, 0, 0]'));
+COMMIT;
+SET SESSION innodb_interpreter = 'spann_dump test/ti';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=3 lists=3 postings=26 labels=25 label_min=1 label_max=<M> dead=0
+head=2 size=9
+head=13 size=7
+head=14 size=10
+mem heads=3
+mem head=2 appends=2
+
+# TRUNCATE closes the runtime and re-mints an empty aux set: the
+# next insert reopens, finds no HEAD rows, and routes through a
+# fresh genesis head.
+TRUNCATE TABLE ti;
+INSERT INTO ti VALUES (1, STRING_TO_VECTOR('[1,0,0,0]'));
+SET SESSION innodb_interpreter = 'spann_dump test/ti';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=1 postings=1 labels=1 label_min=1 label_max=1 dead=0
+head=0 size=1
+mem heads=1
+mem head=0 appends=1
+
+DROP TABLE ti;

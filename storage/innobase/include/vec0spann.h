@@ -40,9 +40,11 @@ point below it uses forward declarations only. */
 
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "db0err.h"
+#include "univ.i"
 
 /* --------------------------------------------------------------------
 Meta-table row types: the `mtype` half of the _meta PK (mtype, id).
@@ -135,6 +137,27 @@ struct dict_table_t;
 struct dict_index_t;
 struct trx_t;
 class THD;
+class Vector_index;
+
+/** head_id 0 is reserved — labels start at 1 (vec_assign_next_idx_id),
+so no head that is a sampled/promoted data point can be 0. It denotes
+the IMPLICIT bootstrap head: a zero-vector head that exists exactly
+when _meta has no HEAD rows (a fresh CREATE-then-INSERT table before
+any build). RAM-only — no _meta row, so nothing to keep undo-consistent
+with user transactions — and deterministic across restarts because the
+rule is a pure function of the (empty) HEAD range. Every insert routes
+to it while it is the only head; the first build pass replaces the aux
+set wholesale, and LIRE later splits skewed lists, so it retires
+naturally. */
+constexpr uint64_t VEC_SPANN_GENESIS_HEAD_ID = 0;
+
+/** Runtime stats for observability (spann_dump). */
+struct vec_spann_stats_t {
+  /** heads in the RAM graph (includes the implicit genesis head) */
+  size_t n_heads;
+  /** per-list posting appends since this runtime loaded (LIRE feed) */
+  std::vector<std::pair<uint64_t, uint64_t>> list_appends;
+};
 
 /** Build a TYPE spann index from a clustered scan of the base table —
 the INPLACE re-ADD build pass (Vector_index::build for spann, S2).
@@ -162,5 +185,40 @@ the existing error paths — exactly the hnsw vec_build_index contract.
 dberr_t vec_spann_build_index(trx_t *trx, dict_table_t *table,
                               const dict_index_t *vec_index, uint32_t dims,
                               int M, int ef_construction, THD *thd);
+
+/** Get-or-create the spann runtime companion on table->vec (lazy;
+thread-safe via dict_sys mutex — the vec_open analog). Parameters are
+only applied on creation; the head graph is loaded separately
+(vec_spann_load). `impl` is stored in Vec_runtime::impl before
+publication (SPANN R2). */
+void vec_spann_open(dict_table_t *table, const Vector_index *impl,
+                    uint16_t field_no, uint32_t dims, int M,
+                    int ef_construction);
+
+/** Build (or rebuild) the RAM head graph from the _meta HEAD range
+under the runtime's X latch; no-op when already loaded. Zero HEAD rows
+=> the implicit genesis head (see VEC_SPANN_GENESIS_HEAD_ID). Called
+at table open and lazily from the insert path.
+@return DB_SUCCESS or error */
+dberr_t vec_spann_load(dict_table_t *table, THD *thd);
+
+/** Index one new point (SPANN S3, the write_row hook): head kNN on
+the RAM graph, closure selection (vec_spann_select_heads), then one
+posting-row INSERT per selected head on the USER transaction. Inserts
+only — no aux updates, no graph mutation, no rollback tracking: a
+rollback is pure undo (the all-DML-are-inserts posture; contrast
+vec_insert_point's vec_trx_record machinery).
+@return DB_SUCCESS or error */
+dberr_t vec_spann_insert_point(trx_t *trx, dict_table_t *table, THD *thd,
+                               uint64_t label, const float *vec_data,
+                               const byte *row_ref, ulint row_ref_len);
+
+/** Free the runtime (head graph, latch, counters). Safe on tables
+that never opened one — the vec_close analog. */
+void vec_spann_close(dict_table_t *table);
+
+/** Snapshot the runtime's observability stats into `stats`.
+@return false if `table` has no loaded spann runtime */
+bool vec_spann_runtime_stats(dict_table_t *table, vec_spann_stats_t *stats);
 
 #endif /* vec0spann_h */

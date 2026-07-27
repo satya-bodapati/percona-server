@@ -47,6 +47,7 @@ DEVIATION FROM FTS rationale (no fts_parse_sql / pars_mutex). */
 #include "row0vers.h"
 #include "trx0roll.h"
 #include "vec0aux.h"
+#include "vec0spann.h"
 
 /* Aux table user-column ordinals, fixed by create_in_mem_vec_aux_table
 (vec0aux.cc): id, vec, row_ref, level, neighbors. */
@@ -55,6 +56,18 @@ constexpr ulint VEC_AUX_COL_VEC = 1;
 constexpr ulint VEC_AUX_COL_ROW_REF = 2;
 constexpr ulint VEC_AUX_COL_LEVEL = 3;
 constexpr ulint VEC_AUX_COL_NEIGHBORS = 4;
+
+/* Spann posting-table user-column ordinals, fixed by vec_spann_defs
+(vec0aux.cc): head_id, label, vec, row_ref. */
+constexpr ulint VEC_SPANN_POST_COL_HEAD_ID = 0;
+constexpr ulint VEC_SPANN_POST_COL_LABEL = 1;
+constexpr ulint VEC_SPANN_POST_COL_VEC = 2;
+constexpr ulint VEC_SPANN_POST_COL_ROW_REF = 3;
+
+/* Spann meta-table user-column ordinals: mtype, id, mval. */
+constexpr ulint VEC_SPANN_META_COL_MTYPE = 0;
+constexpr ulint VEC_SPANN_META_COL_ID = 1;
+constexpr ulint VEC_SPANN_META_COL_MVAL = 2;
 
 void vec_aux_serialize_neighbors(
     const std::vector<std::vector<std::size_t>> &neighbors_by_level,
@@ -233,18 +246,6 @@ dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
   mem_heap_free(heap);
   return err;
 }
-
-/* Spann posting-table user-column ordinals, fixed by vec_spann_defs
-(vec0aux.cc): head_id, label, vec, row_ref. */
-constexpr ulint VEC_SPANN_POST_COL_HEAD_ID = 0;
-constexpr ulint VEC_SPANN_POST_COL_LABEL = 1;
-constexpr ulint VEC_SPANN_POST_COL_VEC = 2;
-constexpr ulint VEC_SPANN_POST_COL_ROW_REF = 3;
-
-/* Spann meta-table user-column ordinals: mtype, id, mval. */
-constexpr ulint VEC_SPANN_META_COL_MTYPE = 0;
-constexpr ulint VEC_SPANN_META_COL_ID = 1;
-constexpr ulint VEC_SPANN_META_COL_MVAL = 2;
 
 dberr_t vec_spann_posting_insert(trx_t *trx, dict_table_t *aux,
                                  uint64_t head_id, uint64_t label,
@@ -569,6 +570,136 @@ dberr_t vec_base_max_idx_id(dict_table_t *base, uint64_t *max_id) {
   }
 
   return DB_SUCCESS;
+}
+
+dberr_t vec_spann_meta_load_heads(dict_table_t *meta, uint32_t dims,
+                                  std::vector<vec_spann_head_t> *heads) {
+  ut_a(meta != nullptr);
+  ut_a(heads != nullptr);
+  ut_a(dims != 0);
+
+  heads->clear();
+
+  dict_index_t *clust = meta->first_index();
+
+  /* _meta clustered record layout: PK (mtype, id), DB_TRX_ID,
+  DB_ROLL_PTR, mval. */
+  const ulint pos_mval =
+      dict_col_get_clust_pos(meta->get_col(VEC_SPANN_META_COL_MVAL), clust);
+
+  /* Same consistent-snapshot shape as vec_aux_load_rows: a background
+  read view so the load never blocks on (or sees half of) an open
+  build/LIRE transaction. Head DML is DDL-trx-only until LIRE, so this
+  is defensive today and required tomorrow. */
+  trx_t *trx = trx_allocate_for_background();
+  trx_start_internal_read_only(trx, UT_LOCATION_HERE);
+  ReadView *view = trx_assign_read_view(trx);
+  if (view == nullptr) {
+    trx_commit_for_mysql(trx);
+    trx_free_for_background(trx);
+    return DB_OUT_OF_RESOURCES;
+  }
+
+  dberr_t err = DB_SUCCESS;
+  mem_heap_t *offset_heap = nullptr;
+  mem_heap_t *row_heap = mem_heap_create(2048, UT_LOCATION_HERE);
+  mem_heap_t *vers_heap = nullptr;
+
+  mtr_t mtr;
+  mtr_start(&mtr);
+
+  btr_pcur_t pcur;
+  pcur.open_at_side(true /* left */, clust, BTR_SEARCH_LEAF, true, 0, &mtr);
+
+  ulint n_scanned = 0;
+
+  while (pcur.move_to_next_user_rec(&mtr) == DB_SUCCESS) {
+    const rec_t *rec = pcur.get_rec();
+
+    ulint *offsets = rec_get_offsets(rec, clust, nullptr, ULINT_UNDEFINED,
+                                     UT_LOCATION_HERE, &offset_heap);
+
+    const rec_t *vrec = rec;
+    ulint *voffsets = offsets;
+
+    const trx_id_t rec_trx_id = row_get_rec_trx_id(rec, clust, offsets);
+    if (!view->changes_visible(rec_trx_id, meta->name)) {
+      rec_t *old_vers = nullptr;
+      err = row_vers_build_for_consistent_read(rec, &mtr, clust, &voffsets,
+                                               view, &offset_heap, vers_heap,
+                                               &old_vers, nullptr, nullptr);
+      if (err != DB_SUCCESS) {
+        break;
+      }
+      if (old_vers == nullptr) {
+        continue;
+      }
+      vrec = old_vers;
+    }
+
+    if (rec_get_deleted_flag(vrec, dict_table_is_comp(meta))) {
+      continue;
+    }
+
+    /* mtype: only HEAD rows carry vectors. The (mtype, id) PK makes
+    the HEAD range contiguous, but a full scan is equally correct and
+    this table is small — range positioning is an S6/L-phase
+    optimization if it ever matters. */
+    ulint len;
+    const byte *p = rec_get_nth_field(clust, vrec, voffsets, 0, &len);
+    ut_a(len == 1);
+    if (*p != VEC_SPANN_META_HEAD) {
+      continue;
+    }
+
+    p = rec_get_nth_field(clust, vrec, voffsets, 1, &len);
+    ut_a(len == 8);
+    const uint64_t id = mach_read_from_8(p);
+
+    const byte *mval;
+    ulint mval_len;
+    if (!vec_aux_copy_field(trx, clust, vrec, voffsets, pos_mval, row_heap,
+                            &mval, &mval_len)) {
+      err = DB_CORRUPTION;
+      break;
+    }
+
+    std::vector<float> v(dims, 0.0f);
+    if (mval_len == dims * sizeof(float)) {
+      memcpy(v.data(), mval, mval_len);
+    } else if (mval_len != 0) {
+      /* Zero-length mval = a zero vector (reserved for bootstrap
+      shapes); anything else is width corruption. */
+      err = DB_CORRUPTION;
+      break;
+    }
+
+    heads->emplace_back(id, std::move(v));
+
+    mem_heap_empty(row_heap);
+
+    /* Batch the mtr — see vec_aux_load_rows for the positioning
+    subtlety. */
+    if (++n_scanned % 512 == 0) {
+      pcur.store_position(&mtr);
+      mtr_commit(&mtr);
+      mtr_start(&mtr);
+      pcur.restore_position(BTR_SEARCH_LEAF, &mtr, UT_LOCATION_HERE);
+    }
+  }
+
+  pcur.close();
+  mtr_commit(&mtr);
+
+  if (offset_heap != nullptr) {
+    mem_heap_free(offset_heap);
+  }
+  mem_heap_free(row_heap);
+
+  trx_commit_for_mysql(trx);
+  trx_free_for_background(trx);
+
+  return err;
 }
 
 dberr_t vec_base_collect_rows(trx_t *trx, dict_table_t *base,

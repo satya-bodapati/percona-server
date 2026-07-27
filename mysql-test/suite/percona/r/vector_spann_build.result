@@ -15,13 +15,16 @@ VECTOR KEY vk (v) TYPE spann);
 # postings > labels in the dump below.
 INSERT INTO tb VALUES (21, NULL);
 INSERT INTO tb VALUES (22, STRING_TO_VECTOR('[11.5, 0, 0, 0]'));
-# S2 posture: write hooks still skip (no runtime), so the freshly
-# created index is empty — the population below is the build pass
-# alone.
+# Since S3, inserts on the freshly created (never-built) index
+# route through the implicit genesis head: all rows sit in list 0.
+# The build below REPLACES this layout with sampled heads.
 SET SESSION innodb_interpreter = 'spann_dump test/tb';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-heads=0 lists=0 postings=0 labels=0 dead=0
+heads=0 lists=1 postings=21 labels=21 label_min=1 label_max=22 dead=0
+head=0 size=21
+mem heads=1
+mem head=0 appends=21
 
 # INPLACE re-ADD (allowed because vec_idx_id is retained across
 # DROP KEY — same gate as hnsw). Every label must be present:
@@ -38,6 +41,7 @@ heads=3 lists=3 postings=23 labels=21 label_min=1 label_max=22 dead=0
 head=5 size=9
 head=13 size=7
 head=15 size=7
+mem heads=3
 
 # The three aux files exist and the base table round-trips.
 SHOW CREATE TABLE tb;
@@ -84,6 +88,7 @@ heads=3 lists=3 postings=23 labels=21 label_min=1 label_max=22 dead=0
 head=5 size=9
 head=13 size=7
 head=15 size=7
+mem heads=3
 
 # Empty-table build: no heads, no postings, and the DDL matrix
 # still works on the unpopulated set.
@@ -95,6 +100,7 @@ SET SESSION innodb_interpreter = 'spann_dump test/te';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 heads=0 lists=0 postings=0 labels=0 dead=0
+mem heads=1
 
 DROP TABLE te;
 DROP TABLE tb;
