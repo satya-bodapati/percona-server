@@ -43,6 +43,7 @@ external tools. */
 #ifndef UNIV_LIBRARY
 #include "lock0lock.h"
 #include "vec0aux.h"
+#include "vec0index.h"
 #endif /* !UNIV_LIBRARY */
 #endif /* !UNIV_HOTBACKUP */
 
@@ -108,10 +109,10 @@ void dict_mem_table_free(dict_table_t *table) /*!< in: table */
     }
   }
 
-  /* Free the in-memory HNSW graph, if this table built one — the vec
-  analog of fts_free above (dict-cache eviction and shutdown both land
-  here). */
-  vec_close(table);
+  /* Free the in-memory vector runtime, if this table built one — the
+  vec analog of fts_free above (dict-cache eviction and shutdown both
+  land here). Runs for EVERY table; close() no-ops without a runtime. */
+  vec_index_for(table)->close(table);
 
   dict_table_mutex_destroy(table);
 

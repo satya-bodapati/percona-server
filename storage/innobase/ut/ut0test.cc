@@ -39,6 +39,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "trx0trx.h"
 #include "vec0aux.h"
 #include "vec0dml.h"
+#include "vec0index.h"
 
 #define CALL_MEMBER_FN(object, ptrToMember) ((object).*(ptrToMember))
 
@@ -713,8 +714,8 @@ Ret_t Tester::vec_knn(std::vector<std::string> &tokens) noexcept {
   const size_t ef = tokens.size() == 5 ? std::stoul(tokens[4]) : 0;
 
   std::vector<vec_knn_hit_t> hits;
-  const dberr_t err = vec_knn_search(tt.base, current_thd, qvec.data(),
-                                     qvec.size(), k, ef, &hits);
+  const dberr_t err = vec_index_for(tt.base)->knn(
+      tt.base, current_thd, qvec.data(), qvec.size(), k, ef, &hits);
   if (err != DB_SUCCESS) {
     XLOG("FAIL: vec_knn_search err=" << static_cast<int>(err));
     set_output(sout);

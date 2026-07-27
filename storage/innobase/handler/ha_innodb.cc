@@ -214,6 +214,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "sql-common/json_dom.h"
 
 #include "vec0aux.h"
+#include "vec0index.h"
 #include "vec0dml.h"
 #include "vec0vec.h"
 
@@ -7953,11 +7954,12 @@ static void innobase_vec_open_from_sql_layer(TABLE *table,
             table->key_info[i].vector_construction_params, param);
       }
 
-      vec_open(ib_table, field_vec->field_index(),
-               field_vec->get_max_dimensions(), param.M,
-               param.ef_construction);
+      const Vector_index *vidx = vec_index_for(ib_table);
+      vidx->open(ib_table, field_vec->field_index(),
+                 field_vec->get_max_dimensions(), param.M,
+                 param.ef_construction);
 
-      const dberr_t verr = vec_load(ib_table, thd);
+      const dberr_t verr = vidx->load(ib_table, thd);
       if (verr != DB_SUCCESS) {
         ib::warn() << "Failed to load vector index graph for table "
                    << ib_table->name.m_name << ": " << ut_strerr(verr)
@@ -9998,10 +10000,12 @@ int ha_innobase::write_row(uchar *record) /*!< in: a row in MySQL format */
       const ulint ref_len = vec_row_ref_serialize(
           m_prebuilt->ins_node->row, m_prebuilt->table, row_ref);
 
-      const dberr_t verr = vec_insert_point(
-          trx, m_prebuilt->table, m_user_thd, vec_id,
-          reinterpret_cast<const float *>(field_vec->get_blob_data()),
-          row_ref, ref_len);
+      const dberr_t verr = vec_index_for(m_prebuilt->table)
+                               ->insert(trx, m_prebuilt->table, m_user_thd,
+                                        vec_id,
+                                        reinterpret_cast<const float *>(
+                                            field_vec->get_blob_data()),
+                                        row_ref, ref_len);
       if (verr != DB_SUCCESS) {
         error = verr;
       }
@@ -10823,6 +10827,7 @@ int ha_innobase::update_row(const uchar *old_row, uchar *new_row) {
     mach_write_to_8(new_pk_ref, uint8korr(new_row + pk_off));
 
     dberr_t verr = DB_SUCCESS;
+    const Vector_index *vidx = vec_index_for(ib_table);
 
     /* Only full-width vectors are indexable (same gate as write_row). */
     if (!new_null && static_cast<Field_vector *>(vfield)->get_length() !=
@@ -10830,31 +10835,31 @@ int ha_innobase::update_row(const uchar *old_row, uchar *new_row) {
       verr = DB_UNSUPPORTED;
     } else if (!old_null && !new_null && m_prebuilt->vec_new_idx_id != 0) {
       /* value -> value: delete + insert under the fresh label. */
-      verr = vec_delete_point(trx, ib_table, m_user_thd, old_id);
+      verr = vidx->remove(trx, ib_table, m_user_thd, old_id);
       if (verr == DB_SUCCESS) {
         auto *field_vec = static_cast<Field_vector *>(vfield);
-        verr = vec_insert_point(
+        verr = vidx->insert(
             trx, ib_table, m_user_thd, m_prebuilt->vec_new_idx_id,
             reinterpret_cast<const float *>(field_vec->get_blob_data()),
             new_pk_ref, sizeof(new_pk_ref));
       }
     } else if (!old_null && new_null) {
       /* value -> NULL: the point leaves the index. */
-      verr = vec_delete_point(trx, ib_table, m_user_thd, old_id);
+      verr = vidx->remove(trx, ib_table, m_user_thd, old_id);
     } else if (old_null && !new_null) {
       /* NULL -> value: insert under the fresh label (never the row's
       old id — see calc_row_difference; it may be duplicated by a
       post-restart insert). */
       ut_a(m_prebuilt->vec_new_idx_id != 0);
       auto *field_vec = static_cast<Field_vector *>(vfield);
-      verr = vec_insert_point(
+      verr = vidx->insert(
           trx, ib_table, m_user_thd, m_prebuilt->vec_new_idx_id,
           reinterpret_cast<const float *>(field_vec->get_blob_data()),
           new_pk_ref, sizeof(new_pk_ref));
     } else if (!old_null && pk_changed) {
       /* Vector unchanged but the PK moved: repoint row_ref. */
-      verr = vec_refresh_row_ref(trx, ib_table, m_user_thd, old_id,
-                                 new_pk_ref, sizeof(new_pk_ref));
+      verr = vidx->refresh_row_ref(trx, ib_table, m_user_thd, old_id,
+                                   new_pk_ref, sizeof(new_pk_ref));
     }
 
     if (verr != DB_SUCCESS) {
@@ -10997,8 +11002,9 @@ int ha_innobase::delete_row(
   if (error == DB_SUCCESS && m_prebuilt->table->vec != nullptr) {
     Field *vfield = table->field[m_prebuilt->table->vec->field_no];
     if (!vfield->is_null_in_record(record)) {
-      error = vec_delete_point(trx, m_prebuilt->table, m_user_thd,
-                               m_prebuilt->vec_idx_id);
+      error = vec_index_for(m_prebuilt->table)
+                  ->remove(trx, m_prebuilt->table, m_user_thd,
+                           m_prebuilt->vec_idx_id);
     }
   }
 
@@ -12379,10 +12385,13 @@ int ha_innobase::vec_read_first(Item *item, uchar *buf, ha_rows limit) {
   m_vec_hit_pos = 0;
   m_vec_search_k = std::max<size_t>(limit, 1);
 
-  const dberr_t err = vec_knn_search(
-      m_prebuilt->table, m_user_thd,
-      reinterpret_cast<const float *>(m_vec_query.data()), vec_dims,
-      m_vec_search_k, THDVAR(m_user_thd, hnsw_ef_search), &m_vec_hits);
+  const dberr_t err = vec_index_for(m_prebuilt->table)
+                          ->knn(m_prebuilt->table, m_user_thd,
+                                reinterpret_cast<const float *>(
+                                    m_vec_query.data()),
+                                vec_dims, m_vec_search_k,
+                                THDVAR(m_user_thd, hnsw_ef_search),
+                                &m_vec_hits);
   if (err != DB_SUCCESS) {
     return convert_error_code_to_mysql(err, m_prebuilt->table->flags,
                                        m_user_thd);
@@ -12403,7 +12412,8 @@ int ha_innobase::vec_read_next(uchar *buf) {
       excluding what we returned — filters above the iterator may
       consume any number of rows, so `limit` is only the initial batch
       size (PS-11300-search-design.md par 4). */
-      if (m_vec_search_k >= vec_graph_size(table)) {
+      const Vector_index *vidx = vec_index_for(table);
+      if (m_vec_search_k >= vidx->size_hint(table)) {
         return HA_ERR_END_OF_FILE;
       }
 
@@ -12412,7 +12422,7 @@ int ha_innobase::vec_read_next(uchar *buf) {
       }
       m_vec_search_k *= 2;
 
-      const dberr_t err = vec_knn_search(
+      const dberr_t err = vidx->knn(
           table, m_user_thd,
           reinterpret_cast<const float *>(m_vec_query.data()),
           table->vec->dims, m_vec_search_k,
@@ -16684,8 +16694,9 @@ int ha_innobase::discard_or_import_tablespace(bool discard,
         DICT_TF2_FLAG_IS_SET(dict_table, DICT_TF2_VEC_HAS_IDX_ID) &&
         vec_aux_table_has_vector_index(dict_table)) {
       THD *ithd = m_prebuilt->trx->mysql_thd;
-      const dberr_t verr =
-          vec_aux_recreate_after_import(dict_table, m_prebuilt->trx);
+      const dberr_t verr = vec_index_for(dict_table)
+                               ->recreate_after_import(dict_table,
+                                                       m_prebuilt->trx);
       if (verr != DB_SUCCESS) {
         err = verr;
       } else {

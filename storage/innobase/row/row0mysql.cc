@@ -81,6 +81,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ut0cpu_cache.h"
 #include "ut0new.h"
 #include "vec0aux.h"
+#include "vec0index.h"
 #include "zlib.h"
 
 #include "current_thd.h"
@@ -3974,7 +3975,7 @@ static dberr_t row_discard_tablespace(trx_t *trx, dict_table_t *table,
   aux table. IMPORT re-creates a fresh empty aux (the imported rows
   are NOT indexed until DROP/ADD INDEX rebuilds; a warning says so). */
   if (DICT_TF2_FLAG_IS_SET(table, DICT_TF2_VEC_HAS_IDX_ID)) {
-    vec_close(table);
+    vec_index_for(table)->close(table);
     (void)vec_aux_drop_all_tables(trx, table);
   }
 

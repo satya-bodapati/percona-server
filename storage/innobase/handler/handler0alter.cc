@@ -110,6 +110,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ut0new.h"
 #include "ut0stage.h"
 #include "vec0aux.h"
+#include "vec0index.h"
 #include "vec0vec.h"
 
 /* For supporting Native InnoDB Partitioning. */
@@ -6696,9 +6697,10 @@ bool ha_innobase::inplace_alter_table_impl(TABLE *altered_table,
                 key.vector_construction_params, param);
           }
 
-          err = vec_build_index(m_prebuilt->trx, ctx->new_table, vec_index,
-                                field_vec->get_max_dimensions(), param.M,
-                                param.ef_construction, m_user_thd);
+          err = vec_index_for(ctx->new_table)
+                    ->build(m_prebuilt->trx, ctx->new_table, vec_index,
+                            field_vec->get_max_dimensions(), param.M,
+                            param.ef_construction, m_user_thd);
           if (err != DB_SUCCESS) {
             m_prebuilt->trx->error_key_num = ULINT_UNDEFINED;
           }
@@ -7721,7 +7723,7 @@ after a successful commit_try_norebuild() call.
         exclusive MDL, so no writer is inside the graph). Rebuild and
         DROP TABLE paths need no call: their dict_table_t is freed and
         dict_mem_table_free closes the graph. */
-        vec_close(index->table);
+        vec_index_for(index->table)->close(index->table);
         (void)vec_aux_drop_one_table(trx, index->table, index->id);
       }
 
