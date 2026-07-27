@@ -58,15 +58,8 @@ subtype (vec_t for hnsw). */
 
 #include "vec0aux.h"
 
-/** The registered vector index TYPEs. The enum value is the identity
-used everywhere the type is already known (registry indexing, runtime
-dispatch, future switch()es); the string token exists only at the
-boundaries where SQL hands us text — DDL validation and the
-KEY::vector_index_type reloaded from the DD (SPANN R3). */
-enum class Vec_index_type : uint8_t {
-  HNSW = 0,
-  /* SPANN = 1 — added by commit S1 */
-};
+/* Vec_index_type (the TYPE identity) is defined in dict0mem.h beside
+dict_index_t::vec_type, its primary consumer. */
 
 /** Per-TYPE vector-index runtime operations. Implementations are
 STATELESS singletons — all per-index state lives in the dict_table_t

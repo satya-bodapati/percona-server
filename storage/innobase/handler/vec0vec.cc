@@ -119,17 +119,28 @@ bool parse_options(const Key_spec &index_def, VectorIndexParam &vip) {
   /* SPANN R3: TYPE existence is decided by the registry — rejecting an
   unknown TYPE here at CREATE/ALTER is what lets every later engine
   path assume vec_index_by_name() succeeds. */
-  if (vec_index_by_name(index_def.key_create_info.vector_index_type.str,
-                        index_def.key_create_info.vector_index_type.length) ==
-      nullptr) {
+  const Vector_index *impl =
+      vec_index_by_name(index_def.key_create_info.vector_index_type.str,
+                        index_def.key_create_info.vector_index_type.length);
+  if (impl == nullptr) {
     my_error(ER_INDEX_TYPE_NOT_SUPPORTED_FOR_VECTOR_INDEX, MYF(0),
              index_def.key_create_info.vector_index_type.str);
     return true;
   }
 
-  /* Construction-parameter parsing is still per-TYPE by token: hnsw is
-  the sole registered type. The S-phase moves this behind the interface
-  when a second parameter shape (spann) exists. */
+  if (impl->type() == Vec_index_type::SPANN) {
+    /* S1: spann accepts no construction parameters yet (S2 adds
+    heads_pct, closure, list_bound). */
+    if (index_def.construction_params.size() != 0) {
+      my_error(ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER, MYF(0),
+               index_def.construction_params[0].key.str);
+      return true;
+    }
+    vip = SpannParam();
+    return false;
+  }
+
+  /* hnsw construction parameters. */
   vip = HnswParam();
   auto &hnsw_param = std::get<HnswParam>(vip);
   for (const IndexConstructionParam &p : index_def.construction_params) {

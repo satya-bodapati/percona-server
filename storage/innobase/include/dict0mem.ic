@@ -77,6 +77,7 @@ static inline void dict_mem_fill_index_struct(
   index->nulls_equal = false;
   index->disable_ahi = false;
   index->is_vector_index = false;
+  index->vec_type = Vec_index_type::HNSW;
   index->last_ins_cur = nullptr;
   index->last_sel_cur = nullptr;
 #ifndef UNIV_HOTBACKUP

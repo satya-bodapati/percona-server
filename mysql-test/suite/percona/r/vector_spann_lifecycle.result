@@ -1,0 +1,70 @@
+#
+# SPANN S1: TYPE spann aux lifecycle — three tables
+# (vec_spann_<t>_<i>, _meta, _dead), full DDL matrix. The index is
+# NOT populated in S1: write hooks skip (no runtime) and the
+# optimizer serves vector queries from the exact path.
+#
+CREATE TABLE ts (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+VECTOR KEY vk (v) TYPE spann);
+SHOW CREATE TABLE ts;
+Table	Create Table
+ts	CREATE TABLE `ts` (
+  `id` bigint unsigned NOT NULL,
+  `v` vector(4) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `vk` (`v`) TYPE `spann`
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+vec_spann_<TID>_<IID>.ibd
+vec_spann_<TID>_<IID>_dead.ibd
+vec_spann_<TID>_<IID>_meta.ibd
+# WITH() params are rejected for spann in S1.
+CREATE TABLE ts2 (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+VECTOR KEY (v) TYPE spann WITH (M = 4));
+ERROR HY000: Illegal index construction parameter: M.
+# DML works; the index is simply not populated (S1 posture).
+INSERT INTO ts VALUES (1, STRING_TO_VECTOR('[1,1,1,1]')),
+(2, STRING_TO_VECTOR('[2,2,2,2]'));
+UPDATE ts SET v = STRING_TO_VECTOR('[3,3,3,3]') WHERE id = 2;
+DELETE FROM ts WHERE id = 1;
+SELECT id FROM ts;
+id
+2
+# Vector query runs the EXACT path (no vector_knn): correct
+# results until the spann read path lands (S5).
+INSERT INTO ts VALUES (1, STRING_TO_VECTOR('[1,1,1,1]'));
+EXPLAIN SELECT id FROM ts
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,1,1,1]'), 'EUCLIDEAN') LIMIT 2;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	ts	NULL	ALL	NULL	NULL	NULL	NULL	2	100.00	Using filesort
+Warnings:
+Note	1003	/* select#1 */ select `test`.`ts`.`id` AS `id` from `test`.`ts` order by distance(`test`.`ts`.`v`,to_vector('[1,1,1,1]'),'EUCLIDEAN') limit 2
+SELECT id FROM ts
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,1,1,1]'), 'EUCLIDEAN') LIMIT 2;
+id
+1
+2
+# TRUNCATE recycles all three aux tables.
+TRUNCATE TABLE ts;
+vec_spann_<TID>_<IID>.ibd
+vec_spann_<TID>_<IID>_dead.ibd
+vec_spann_<TID>_<IID>_meta.ibd
+# Cross-schema RENAME moves the set.
+CREATE DATABASE spanndb;
+RENAME TABLE ts TO spanndb.ts;
+vec_spann_<TID>_<IID>.ibd
+vec_spann_<TID>_<IID>_dead.ibd
+vec_spann_<TID>_<IID>_meta.ibd
+# DROP DATABASE sweeps the set.
+DROP DATABASE spanndb;
+# DROP TABLE drops all three.
+CREATE TABLE ts3 (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+VECTOR KEY (v) TYPE spann);
+DROP TABLE ts3;
+# hnsw unaffected; unknown TYPE still rejected.
+CREATE TABLE tbad (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+VECTOR KEY (v) TYPE nosuch);
+ERROR HY000: The index type nosuch is not supported for vector indexes.
+CREATE TABLE th (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+VECTOR KEY (v) TYPE hnsw WITH (M = 4));
+vec_hnsw_<TID>_<IID>.ibd
+DROP TABLE th;

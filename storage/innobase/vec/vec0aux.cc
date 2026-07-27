@@ -84,7 +84,7 @@ size_t db_prefix_len(const char *parent_name) {
 
 void vec_aux_get_table_name(const dict_table_t *parent, space_index_t index_id,
                             Vec_index_type type, char *name_out,
-                            size_t name_out_len) {
+                            size_t name_out_len, const char *suffix) {
   ut_a(parent != nullptr);
   ut_a(name_out != nullptr);
   ut_a(name_out_len >= MAX_FULL_NAME_LEN);
@@ -106,8 +106,8 @@ void vec_aux_get_table_name(const dict_table_t *parent, space_index_t index_id,
   ut_a(n > 0);
 
   const int written = snprintf(
-      name_out, name_out_len, "%.*s%s%s_%s_%s", static_cast<int>(db_len),
-      parent_name, VEC_AUX_PREFIX, token, table_id_str, index_id_str);
+      name_out, name_out_len, "%.*s%s%s_%s_%s%s", static_cast<int>(db_len),
+      parent_name, VEC_AUX_PREFIX, token, table_id_str, index_id_str, suffix);
   ut_a(written > 0);
   ut_a(static_cast<size_t>(written) < name_out_len);
 }
@@ -241,19 +241,101 @@ uint64_t vec_assign_next_idx_id(dict_table_t *table) {
 
 namespace {
 
-/** Allocate and fully populate the in-memory dict_table_t for one vector
-aux table. Schema is fixed:
-  id        BIGINT UNSIGNED NOT NULL PRIMARY KEY,
-  vec       BLOB NOT NULL,
-  row_ref   VARBINARY(3072),         -- NULLable; no index
-  level     TINYINT NOT NULL,
-  neighbors BLOB NOT NULL */
+/* --------------------------------------------------------------------
+Per-TYPE aux table sets (SPANN S1). One index owns a SET of aux tables,
+each described by a suffix + fixed schema; the PK is always the leading
+n_pk columns. hnsw's set is the single 5-column node table it has had
+since phase 1 (byte-identical schema and name). */
+
+struct Vec_aux_col_def {
+  const char *name;
+  ulint mtype;
+  ulint prtype;
+  ulint len;
+};
+
+struct Vec_aux_table_def {
+  const char *suffix; /* "" = the main table */
+  ulint n_cols;
+  const Vec_aux_col_def *cols;
+  ulint n_pk; /* the PK = the first n_pk columns */
+};
+
+constexpr ulint VEC_AUX_BLOB_PRTYPE =
+    (DATA_MTYPE_MAX << 16) | DATA_BINARY_TYPE | DATA_NOT_NULL;
+
+const Vec_aux_col_def vec_hnsw_node_cols[] = {
+    {"id", DATA_INT, DATA_NOT_NULL | DATA_UNSIGNED, VEC_AUX_ID_COL_LEN},
+    {"vec", DATA_BLOB, VEC_AUX_BLOB_PRTYPE, VEC_AUX_VEC_COL_LEN},
+    /* row_ref is NULLable: NULL == tombstone */
+    {"row_ref", DATA_BINARY, DATA_BINARY_TYPE, VEC_AUX_ROW_REF_COL_LEN},
+    {"level", DATA_INT, DATA_NOT_NULL, VEC_AUX_LEVEL_COL_LEN},
+    {"neighbors", DATA_BLOB, VEC_AUX_BLOB_PRTYPE, VEC_AUX_NEIGHBORS_COL_LEN},
+};
+
+const Vec_aux_table_def vec_hnsw_defs[] = {
+    {"", UT_ARR_SIZE(vec_hnsw_node_cols), vec_hnsw_node_cols, 1},
+};
+
+/* spann (design doc spann-percona-design.html §2):
+   postings — PK(head_id, label): labels are monotonic per table, so
+   appends land at the right edge of their list's key range; closure
+   copies share the label under different heads, keeping the PK unique.
+   _meta    — PK(mtype, id): typed composite key; heads are
+   (HEAD, head_id) rows — numeric point ops and a contiguous load
+   range; CONFIG/SNAPSHOT rows share the table (NOT a string-KV like
+   FTS_CONFIG: heads number 10-20% of N).
+   _dead    — PK(label): DELETE = one INSERT here; the deleter's
+   identity is the row's hidden DB_TRX_ID system column, so per-reader
+   delete visibility is the read-view scan itself. */
+const Vec_aux_col_def vec_spann_posting_cols[] = {
+    {"head_id", DATA_INT, DATA_NOT_NULL | DATA_UNSIGNED, 8},
+    {"label", DATA_INT, DATA_NOT_NULL | DATA_UNSIGNED, 8},
+    {"vec", DATA_BLOB, VEC_AUX_BLOB_PRTYPE, 0},
+    {"row_ref", DATA_BINARY, DATA_BINARY_TYPE | DATA_NOT_NULL,
+     VEC_AUX_ROW_REF_COL_LEN},
+};
+
+const Vec_aux_col_def vec_spann_meta_cols[] = {
+    {"mtype", DATA_INT, DATA_NOT_NULL | DATA_UNSIGNED, 1},
+    {"id", DATA_INT, DATA_NOT_NULL | DATA_UNSIGNED, 8},
+    {"mval", DATA_BLOB, VEC_AUX_BLOB_PRTYPE, 0},
+};
+
+const Vec_aux_col_def vec_spann_dead_cols[] = {
+    {"label", DATA_INT, DATA_NOT_NULL | DATA_UNSIGNED, 8},
+};
+
+const Vec_aux_table_def vec_spann_defs[] = {
+    {"", UT_ARR_SIZE(vec_spann_posting_cols), vec_spann_posting_cols, 2},
+    {"_meta", UT_ARR_SIZE(vec_spann_meta_cols), vec_spann_meta_cols, 2},
+    {"_dead", UT_ARR_SIZE(vec_spann_dead_cols), vec_spann_dead_cols, 1},
+};
+
+/** The aux table set for one index TYPE. */
+void vec_aux_table_set(Vec_index_type type, const Vec_aux_table_def **defs,
+                       ulint *n_defs) {
+  switch (type) {
+    case Vec_index_type::SPANN:
+      *defs = vec_spann_defs;
+      *n_defs = UT_ARR_SIZE(vec_spann_defs);
+      return;
+    case Vec_index_type::HNSW:
+      break;
+  }
+  *defs = vec_hnsw_defs;
+  *n_defs = UT_ARR_SIZE(vec_hnsw_defs);
+}
+
+/** Allocate and fully populate the in-memory dict_table_t for one
+member table of a vector index's aux set, from its schema def. */
 dict_table_t *create_in_mem_vec_aux_table(const char *aux_name,
                                           const dict_table_t *parent,
-                                          mem_heap_t *heap) {
+                                          mem_heap_t *heap,
+                                          const Vec_aux_table_def &def) {
   dict_table_t *t =
-      dict_mem_table_create(aux_name, parent->space, VEC_AUX_TABLE_NUM_COLS, 0,
-                            0, parent->flags, aux_flags2_from_parent(parent));
+      dict_mem_table_create(aux_name, parent->space, def.n_cols, 0, 0,
+                            parent->flags, aux_flags2_from_parent(parent));
 
   if (DICT_TF_HAS_SHARED_SPACE(parent->flags)) {
     ut_ad(parent->space == fil_space_get_id_by_name(parent->tablespace()));
@@ -264,29 +346,10 @@ dict_table_t *create_in_mem_vec_aux_table(const char *aux_name,
     t->data_dir_path = mem_heap_strdup(t->heap, parent->data_dir_path);
   }
 
-  /* id BIGINT UNSIGNED NOT NULL */
-  dict_mem_table_add_col(t, heap, "id", DATA_INT, DATA_NOT_NULL | DATA_UNSIGNED,
-                         VEC_AUX_ID_COL_LEN, true);
-
-  /* vec BLOB NOT NULL */
-  dict_mem_table_add_col(
-      t, heap, "vec", DATA_BLOB,
-      (DATA_MTYPE_MAX << 16) | DATA_BINARY_TYPE | DATA_NOT_NULL,
-      VEC_AUX_VEC_COL_LEN, true);
-
-  /* row_ref VARBINARY(3072) — nullable, NULL means tombstone */
-  dict_mem_table_add_col(t, heap, "row_ref", DATA_BINARY, DATA_BINARY_TYPE,
-                         VEC_AUX_ROW_REF_COL_LEN, true);
-
-  /* level TINYINT NOT NULL — stored as 1-byte INT */
-  dict_mem_table_add_col(t, heap, "level", DATA_INT, DATA_NOT_NULL,
-                         VEC_AUX_LEVEL_COL_LEN, true);
-
-  /* neighbors BLOB NOT NULL */
-  dict_mem_table_add_col(
-      t, heap, "neighbors", DATA_BLOB,
-      (DATA_MTYPE_MAX << 16) | DATA_BINARY_TYPE | DATA_NOT_NULL,
-      VEC_AUX_NEIGHBORS_COL_LEN, true);
+  for (ulint i = 0; i < def.n_cols; ++i) {
+    const Vec_aux_col_def &c = def.cols[i];
+    dict_mem_table_add_col(t, heap, c.name, c.mtype, c.prtype, c.len, true);
+  }
 
   return t;
 }
@@ -294,37 +357,54 @@ dict_table_t *create_in_mem_vec_aux_table(const char *aux_name,
 }  // namespace
 
 dberr_t vec_aux_create_one_table(trx_t *trx, const dict_table_t *parent,
-                                 space_index_t index_id) {
+                                 space_index_t index_id, Vec_index_type type) {
   ut_a(trx != nullptr);
   ut_a(parent != nullptr);
 
-  char aux_name[MAX_FULL_NAME_LEN];
-  vec_aux_get_table_name(parent, index_id, Vec_index_type::HNSW, aux_name,
-                         sizeof(aux_name));
+  const Vec_aux_table_def *defs = nullptr;
+  ulint n_defs = 0;
+  vec_aux_table_set(type, &defs, &n_defs);
 
-  mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
-  dict_table_t *aux = create_in_mem_vec_aux_table(aux_name, parent, heap);
+  for (ulint d = 0; d < n_defs; ++d) {
+    const Vec_aux_table_def &def = defs[d];
 
-  dberr_t err = row_create_table_for_mysql(aux, nullptr, nullptr, trx, nullptr);
+    char aux_name[MAX_FULL_NAME_LEN];
+    vec_aux_get_table_name(parent, index_id, type, aux_name, sizeof(aux_name),
+                           def.suffix);
 
-  if (err == DB_SUCCESS) {
-    dict_index_t *cidx =
-        dict_mem_index_create(aux_name, "VEC_AUX_TABLE_PK", aux->space,
-                              DICT_UNIQUE | DICT_CLUSTERED, 1);
-    cidx->add_field("id", 0, true);
+    mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
+    dict_table_t *aux =
+        create_in_mem_vec_aux_table(aux_name, parent, heap, def);
 
-    const trx_dict_op_t saved_op = trx_get_dict_operation(trx);
-    err = row_create_index_for_mysql(cidx, trx, nullptr, nullptr);
-    trx->dict_operation = saved_op;
+    dberr_t err =
+        row_create_table_for_mysql(aux, nullptr, nullptr, trx, nullptr);
+
+    if (err == DB_SUCCESS) {
+      dict_index_t *cidx =
+          dict_mem_index_create(aux_name, "VEC_AUX_TABLE_PK", aux->space,
+                                DICT_UNIQUE | DICT_CLUSTERED, def.n_pk);
+      for (ulint f = 0; f < def.n_pk; ++f) {
+        cidx->add_field(def.cols[f].name, 0, true);
+      }
+
+      const trx_dict_op_t saved_op = trx_get_dict_operation(trx);
+      err = row_create_index_for_mysql(cidx, trx, nullptr, nullptr);
+      trx->dict_operation = saved_op;
+    }
+
+    mem_heap_free(heap);
+
+    if (err != DB_SUCCESS) {
+      /* A failure mid-set leaves earlier members behind on this trx;
+      the caller's error paths drop the whole set (drop tolerates
+      NOT_FOUND), and a rollback removes the creations with the trx. */
+      trx->error_state = err;
+      ib::warn(ER_IB_MSG_465)
+          << "Failed to create vector aux table " << aux_name;
+      return err;
+    }
   }
-
-  mem_heap_free(heap);
-
-  if (err != DB_SUCCESS) {
-    trx->error_state = err;
-    ib::warn(ER_IB_MSG_465) << "Failed to create vector aux table " << aux_name;
-  }
-  return err;
+  return DB_SUCCESS;
 }
 
 dberr_t vec_aux_create_all_tables(trx_t *trx, const dict_table_t *parent) {
@@ -334,7 +414,7 @@ dberr_t vec_aux_create_all_tables(trx_t *trx, const dict_table_t *parent) {
   for (const dict_index_t *idx = UT_LIST_GET_FIRST(parent->indexes);
        idx != nullptr; idx = UT_LIST_GET_NEXT(indexes, idx)) {
     if (!idx->is_vector()) continue;
-    dberr_t err = vec_aux_create_one_table(trx, parent, idx->id);
+    dberr_t err = vec_aux_create_one_table(trx, parent, idx->id, idx->vec_type);
     if (err != DB_SUCCESS) return err;
   }
   return DB_SUCCESS;
@@ -355,29 +435,28 @@ bool vec_aux_create_dd_tables(dict_table_t *parent) {
        idx != nullptr; idx = UT_LIST_GET_NEXT(indexes, idx)) {
     if (!idx->is_vector()) continue;
 
-    char aux_name[MAX_FULL_NAME_LEN];
-    vec_aux_get_table_name(parent, idx->id, Vec_index_type::HNSW, aux_name,
-                           sizeof(aux_name));
-    dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, false);
-    ut_a(aux != nullptr);
-    const bool ok = dd_create_vec_aux_table(parent, aux);
-    dd_table_close(aux, nullptr, nullptr, false);
-    if (!ok) return false;
+    const Vec_aux_table_def *defs = nullptr;
+    ulint n_defs = 0;
+    vec_aux_table_set(idx->vec_type, &defs, &n_defs);
+    for (ulint d = 0; d < n_defs; ++d) {
+      char aux_name[MAX_FULL_NAME_LEN];
+      vec_aux_get_table_name(parent, idx->id, idx->vec_type, aux_name,
+                             sizeof(aux_name), defs[d].suffix);
+      dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, false);
+      ut_a(aux != nullptr);
+      const bool ok = dd_create_vec_aux_table(parent, aux);
+      dd_table_close(aux, nullptr, nullptr, false);
+      if (!ok) return false;
+    }
   }
   return true;
 }
 
-dberr_t vec_aux_drop_one_table(trx_t *trx, const dict_table_t *parent,
-                               space_index_t index_id) {
-  ut_a(trx != nullptr);
-  ut_a(parent != nullptr);
-
-  char aux_name[MAX_FULL_NAME_LEN];
-  vec_aux_get_table_name(parent, index_id, Vec_index_type::HNSW, aux_name,
-                         sizeof(aux_name));
-
-  const bool file_per_table = dict_table_is_file_per_table(parent);
-
+/** Drop ONE member table of an aux set by full name. Factored from the
+pre-S1 single-table body; see the comments below for the MDL and DD
+choreography. */
+static dberr_t vec_aux_drop_named(trx_t *trx, const char *aux_name,
+                                  bool file_per_table) {
   /* Open the aux with MDL before row_drop_table_for_mysql. Without
   this, row_drop_table_for_mysql's call into dd_table_open_on_name
   trips dictionary_client.cc:734 because the SQL layer never
@@ -435,6 +514,29 @@ dberr_t vec_aux_drop_one_table(trx_t *trx, const dict_table_t *parent,
   return err == DB_TABLE_NOT_FOUND ? DB_SUCCESS : err;
 }
 
+dberr_t vec_aux_drop_one_table(trx_t *trx, const dict_table_t *parent,
+                               space_index_t index_id, Vec_index_type type) {
+  ut_a(trx != nullptr);
+  ut_a(parent != nullptr);
+
+  const bool file_per_table = dict_table_is_file_per_table(parent);
+
+  const Vec_aux_table_def *defs = nullptr;
+  ulint n_defs = 0;
+  vec_aux_table_set(type, &defs, &n_defs);
+
+  for (ulint d = 0; d < n_defs; ++d) {
+    char aux_name[MAX_FULL_NAME_LEN];
+    vec_aux_get_table_name(parent, index_id, type, aux_name, sizeof(aux_name),
+                           defs[d].suffix);
+    dberr_t err = vec_aux_drop_named(trx, aux_name, file_per_table);
+    if (err != DB_SUCCESS) {
+      return err;
+    }
+  }
+  return DB_SUCCESS;
+}
+
 dberr_t vec_aux_drop_all_tables(trx_t *trx, dict_table_t *parent) {
   ut_a(trx != nullptr);
   ut_a(parent != nullptr);
@@ -442,7 +544,7 @@ dberr_t vec_aux_drop_all_tables(trx_t *trx, dict_table_t *parent) {
   for (const dict_index_t *idx = UT_LIST_GET_FIRST(parent->indexes);
        idx != nullptr; idx = UT_LIST_GET_NEXT(indexes, idx)) {
     if (!idx->is_vector()) continue;
-    dberr_t err = vec_aux_drop_one_table(trx, parent, idx->id);
+    dberr_t err = vec_aux_drop_one_table(trx, parent, idx->id, idx->vec_type);
     if (err != DB_SUCCESS) return err;
   }
   return DB_SUCCESS;
@@ -459,16 +561,21 @@ void vec_aux_detach_tables(const dict_table_t *parent, bool dict_locked) {
        idx != nullptr; idx = UT_LIST_GET_NEXT(indexes, idx)) {
     if (!idx->is_vector()) continue;
 
-    char aux_name[MAX_FULL_NAME_LEN];
-    vec_aux_get_table_name(parent, idx->id, Vec_index_type::HNSW, aux_name,
-                           sizeof(aux_name));
+    const Vec_aux_table_def *defs = nullptr;
+    ulint n_defs = 0;
+    vec_aux_table_set(idx->vec_type, &defs, &n_defs);
+    for (ulint d = 0; d < n_defs; ++d) {
+      char aux_name[MAX_FULL_NAME_LEN];
+      vec_aux_get_table_name(parent, idx->id, idx->vec_type, aux_name,
+                             sizeof(aux_name), defs[d].suffix);
 
-    dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, true);
-    if (aux != nullptr) {
-      if (!aux->can_be_evicted) {
-        dict_table_allow_eviction(aux);
+      dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, true);
+      if (aux != nullptr) {
+        if (!aux->can_be_evicted) {
+          dict_table_allow_eviction(aux);
+        }
+        dd_table_close(aux, nullptr, nullptr, true);
       }
-      dd_table_close(aux, nullptr, nullptr, true);
     }
   }
 
@@ -511,40 +618,45 @@ dberr_t vec_aux_rename_tables(trx_t *trx, dict_table_t *parent,
        idx != nullptr; idx = UT_LIST_GET_NEXT(indexes, idx)) {
     if (!idx->is_vector()) continue;
 
-    char old_aux_name[MAX_FULL_NAME_LEN];
-    vec_aux_get_table_name(parent, idx->id, Vec_index_type::HNSW, old_aux_name,
-                           sizeof(old_aux_name));
+    const Vec_aux_table_def *defs = nullptr;
+    ulint n_defs = 0;
+    vec_aux_table_set(idx->vec_type, &defs, &n_defs);
+    for (ulint d = 0; d < n_defs; ++d) {
+      char old_aux_name[MAX_FULL_NAME_LEN];
+      vec_aux_get_table_name(parent, idx->id, idx->vec_type, old_aux_name,
+                             sizeof(old_aux_name), defs[d].suffix);
 
-    char new_aux_name[MAX_FULL_NAME_LEN];
-    rebuild_aux_name_with_new_db(old_aux_name, new_parent_name, new_aux_name,
-                                 sizeof(new_aux_name));
+      char new_aux_name[MAX_FULL_NAME_LEN];
+      rebuild_aux_name_with_new_db(old_aux_name, new_parent_name, new_aux_name,
+                                   sizeof(new_aux_name));
 
-    dberr_t err = row_rename_table_for_mysql(old_aux_name, new_aux_name,
-                                             nullptr, trx, replay);
-    if (err != DB_SUCCESS) {
-      ib::warn(ER_IB_MSG_466)
-          << "Failed to rename vector aux table " << old_aux_name << " -> "
-          << new_aux_name << " err=" << static_cast<int>(err);
-      return err;
-    }
+      dberr_t err = row_rename_table_for_mysql(old_aux_name, new_aux_name,
+                                               nullptr, trx, replay);
+      if (err != DB_SUCCESS) {
+        ib::warn(ER_IB_MSG_466)
+            << "Failed to rename vector aux table " << old_aux_name << " -> "
+            << new_aux_name << " err=" << static_cast<int>(err);
+        return err;
+      }
 
-    /* Update the DD entry (dd::Table parent schema_id + dd::Tablespace
-    file_name) — reuses dd_rename_fts_table since aux tables are
-    DD-registered with the same shape. dict_sys mutex must be released
-    around the DD client call. */
-    if (!replay) {
-      dict_table_t *aux = dict_table_check_if_in_cache_low(new_aux_name);
-      ut_ad(aux != nullptr);
-      if (aux != nullptr) {
-        aux->acquire();
-        dict_sys_mutex_exit();
-        const bool ok = dd_rename_fts_table(aux, old_aux_name);
-        dict_sys_mutex_enter();
-        aux->release();
-        if (!ok) {
-          ib::warn(ER_IB_MSG_466)
-              << "Failed to rename DD entry for vector aux " << old_aux_name;
-          return DB_ERROR;
+      /* Update the DD entry (dd::Table parent schema_id + dd::Tablespace
+      file_name) — reuses dd_rename_fts_table since aux tables are
+      DD-registered with the same shape. dict_sys mutex must be released
+      around the DD client call. */
+      if (!replay) {
+        dict_table_t *aux = dict_table_check_if_in_cache_low(new_aux_name);
+        ut_ad(aux != nullptr);
+        if (aux != nullptr) {
+          aux->acquire();
+          dict_sys_mutex_exit();
+          const bool ok = dd_rename_fts_table(aux, old_aux_name);
+          dict_sys_mutex_enter();
+          aux->release();
+          if (!ok) {
+            ib::warn(ER_IB_MSG_466)
+                << "Failed to rename DD entry for vector aux " << old_aux_name;
+            return DB_ERROR;
+          }
         }
       }
     }
@@ -1362,7 +1474,8 @@ dberr_t vec_aux_recreate_after_import(dict_table_t *table, trx_t *trx) {
 
   row_mysql_lock_data_dictionary(trx, UT_LOCATION_HERE);
   dict_sys_mutex_exit();
-  dberr_t err = vec_aux_create_one_table(trx, table, vec_index->id);
+  dberr_t err =
+      vec_aux_create_one_table(trx, table, vec_index->id, vec_index->vec_type);
   dict_sys_mutex_enter();
   row_mysql_unlock_data_dictionary(trx);
 

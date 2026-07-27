@@ -33,6 +33,8 @@
 */
 
 #include "sql/sql_optimizer.h"
+
+#include "m_string.h"
 #include "my_base.h"
 #include "sql/sql_optimizer_internal.h"
 
@@ -11123,7 +11125,14 @@ bool JOIN::optimize_vector_query() {
     /* Compare by position, not Field pointer: KEY_PART_INFO::field is
     a key-image copy of the table field, not the same object the
     Item_field resolved to. */
-    if (index.flags & HA_VECTOR && table->keys_in_use_for_query.is_set(idx) &&
+    /* SPANN S1..S4: only TYPE hnsw has a serving read path; other
+    registered types stay on the exact path (correct results, no
+    index) until their runtime lands (S5 removes this). */
+    const LEX_CSTRING &vtype = index.vector_index_type;
+    const bool is_hnsw = vtype.str != nullptr && vtype.length == 4 &&
+                         native_strncasecmp(vtype.str, "hnsw", 4) == 0;
+    if (index.flags & HA_VECTOR && is_hnsw &&
+        table->keys_in_use_for_query.is_set(idx) &&
         index.key_part[0].field->field_index() ==
             vector_column->field_index()) {
       tab->set_type(JT_VECTOR);

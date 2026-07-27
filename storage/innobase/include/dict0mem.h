@@ -1094,6 +1094,19 @@ constexpr uint32_t MAX_KEY_LENGTH_BITS = 12;
 
 /** Data structure for an index.  Most fields will be
 initialized to 0, NULL or false in dict_mem_index_create(). */
+/** Registered vector index TYPEs (the TYPE keyword of
+CREATE ... VECTOR KEY). The enum value is the identity used everywhere
+the type is already known; the string token ("hnsw", "spann") exists
+only at the SQL boundaries (DDL validation, KEY reload from the DD).
+Registry: vec_type_registry[] in vec0index.cc — order must match. */
+enum class Vec_index_type : uint8_t {
+  HNSW = 0,
+  /** SPANN/SPFresh (S-phase): head-routed posting lists; three aux
+  tables (postings, _meta, _dead). Lifecycle lands in S1, the
+  runtime in S2..S5. */
+  SPANN = 1,
+};
+
 struct dict_index_t {
   /** id of the index */
   space_index_t id;
@@ -1254,6 +1267,13 @@ struct dict_index_t {
   The parallel field Index_defn::m_is_vector at ddl0ddl.h:132
   carries the same rationale — see comment there. */
   bool is_vector_index;
+
+  /** The registered TYPE of this vector index — meaningful only when
+  is_vector_index (SPANN S1). Set beside is_vector_index at both
+  creation (create_index, ha_innodb.cc) and DD reload (dd_find_index,
+  dict0dd.cc), so every engine path — aux lifecycle, IMPORT re-mint,
+  runtime resolution — can dispatch without reaching the SQL layer. */
+  Vec_index_type vec_type;
 #endif /* !UNIV_HOTBACKUP */
 
   /** list of indexes of the table */
