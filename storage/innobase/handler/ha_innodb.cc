@@ -13341,6 +13341,14 @@ inline int create_index(
   index = dict_mem_index_create(table_name, key->name, 0, ind_type,
                                 key->user_defined_key_parts);
   index->is_vector_index = (key->flags & HA_VECTOR);
+  if (index->is_vector_index) {
+    /* Resolve the registered TYPE from the KEY token (SPANN S1);
+    validated at CREATE/ALTER, so it must resolve. */
+    const Vector_index *impl = vec_index_by_name(
+        key->vector_index_type.str, key->vector_index_type.length);
+    ut_ad(impl != nullptr);
+    index->vec_type = impl != nullptr ? impl->type() : Vec_index_type::HNSW;
+  }
 
   innodb_session_t *&priv = thd_to_innodb_session(trx->mysql_thd);
   dict_table_t *handler = priv->lookup_table_handler(table_name);

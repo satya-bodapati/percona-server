@@ -43,7 +43,11 @@ struct HnswParam {
   std::string_view metric{"euclidean"};
 };
 
-using VectorIndexParam = std::variant<std::monostate, HnswParam>;
+/** TYPE spann construction parameters — none accepted yet (S2 adds
+heads_pct etc.); the empty struct keys the variant. */
+struct SpannParam {};
+
+using VectorIndexParam = std::variant<std::monostate, HnswParam, SpannParam>;
 
 bool parse_options(const Key_spec &index_def, VectorIndexParam &vip);
 

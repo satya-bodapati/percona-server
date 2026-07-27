@@ -3340,6 +3340,7 @@ static dict_index_t *dict_index_build_internal_vec(
       dict_mem_index_create(table->name.m_name, index->name, index->space,
                             index->type, index->n_fields);
   new_index->is_vector_index = index->is_vector_index;
+  new_index->vec_type = index->vec_type;
 
   /* Copy other relevant data from the old index struct to the new
   struct: it inherits the values */

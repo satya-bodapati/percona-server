@@ -1440,8 +1440,8 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
     THAT would be a deliberate improvement beyond FTS (which never got
     it) and must be justified as a deviation then. PS-11300+. */
     if (vec_aux_table_has_vector_index(m_prebuilt->table)) {
-      ha_alter_info->unsupported_reason = innobase_get_err_msg(
-          ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR);
+      ha_alter_info->unsupported_reason =
+          innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR);
       return HA_ALTER_INPLACE_NOT_SUPPORTED;
     }
 
@@ -1449,8 +1449,8 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
       ha_alter_info->unsupported_reason =
           innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_GIS);
     } else if (innobase_vector_exist(altered_table)) {
-      ha_alter_info->unsupported_reason = innobase_get_err_msg(
-          ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR);
+      ha_alter_info->unsupported_reason =
+          innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR);
     } else {
       ha_alter_info->unsupported_reason =
           innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_FTS);
@@ -4519,8 +4519,7 @@ static void dd_commit_inplace_alter_table(
     if (old_info.m_vec_idx_id &&
         !dd_find_column(&new_dd_tab->table(), VEC_IDX_ID_COL_NAME)) {
       dd_add_hidden_column(&new_dd_tab->table(), VEC_IDX_ID_COL_NAME,
-                           sizeof(uint64_t),
-                           dd::enum_column_types::LONGLONG);
+                           sizeof(uint64_t), dd::enum_column_types::LONGLONG);
     }
 
     /* This can happen only with expanded fast index creation. On the
@@ -5349,8 +5348,8 @@ template <typename Table>
     ut_ad(dict_sys_mutex_own());
 
     dict_sys_mutex_exit();
-    dberr_t verr =
-        vec_aux_create_one_table(ctx->trx, ctx->new_table, vec_index->id);
+    dberr_t verr = vec_aux_create_one_table(ctx->trx, ctx->new_table,
+                                            vec_index->id, vec_index->vec_type);
     dict_sys_mutex_enter();
 
     /* Test hook: simulate "aux created, then prepare fails later" so
@@ -7731,7 +7730,8 @@ after a successful commit_try_norebuild() call.
         DROP TABLE paths need no call: their dict_table_t is freed and
         dict_mem_table_free closes the graph. */
         vec_index_for(index->table)->close(index->table);
-        (void)vec_aux_drop_one_table(trx, index->table, index->id);
+        (void)vec_aux_drop_one_table(trx, index->table, index->id,
+                                     index->vec_type);
       }
 
       /* It is a single table tablespace and the .ibd file is

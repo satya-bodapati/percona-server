@@ -79,7 +79,8 @@ Data dictionary interface */
 #include "sql_table.h"
 #include "univ.i"  // Using OS_PATH_SEPARATOR
 #include "vec0aux.h"
-#endif             /* !UNIV_HOTBACKUP */
+#include "vec0index.h"
+#endif /* !UNIV_HOTBACKUP */
 
 const char *DD_instant_col_val_coder::encode(const byte *stream, size_t in_len,
                                              size_t *out_len) {
@@ -2991,6 +2992,18 @@ template const dict_index_t *dd_find_index<dd::Partition_index>(
       dict_mem_index_create(table->name.m_name, key.name, 0, type, n_fields);
 
   index->is_vector_index = is_vector;
+
+  if (is_vector) {
+    /* The KEY carries the TYPE token reloaded from the DD index
+    options (dd_table_share.cc); resolve the registered type so every
+    engine path — aux lifecycle, IMPORT, runtime resolution — can
+    dispatch without the SQL layer (SPANN S1). CREATE validated the
+    token, so it must resolve. */
+    const Vector_index *impl = vec_index_by_name(key.vector_index_type.str,
+                                                 key.vector_index_type.length);
+    ut_ad(impl != nullptr);
+    index->vec_type = impl != nullptr ? impl->type() : Vec_index_type::HNSW;
+  }
 
   index->n_uniq = n_uniq;
 

@@ -86,10 +86,6 @@ constexpr ulint VEC_AUX_ROW_REF_COL_LEN = 3072; /* VARBINARY(3072) */
 constexpr ulint VEC_AUX_LEVEL_COL_LEN = 1;      /* TINYINT */
 constexpr ulint VEC_AUX_NEIGHBORS_COL_LEN = 0;  /* BLOB: 0 = variable */
 
-/** Registered index TYPEs — full definition in vec0index.h (opaque
-here: vec0index.h includes this header). */
-enum class Vec_index_type : uint8_t;
-
 /** Build the on-disk aux table name for one vector index:
 "<db>/vec_<type>_<parent_table_id>_<index_id>", e.g.
 "test/vec_hnsw_4a_5b" (SPANN R4: the registry's type token makes the
@@ -102,10 +98,12 @@ ambiguity).
 @param[in]      type            the index's registered TYPE (names the
                                 token embedded in the name)
 @param[out]     name_out        destination buffer (>= MAX_FULL_NAME_LEN)
-@param[in]      name_out_len    size of destination buffer */
+@param[in]      name_out_len    size of destination buffer
+@param[in]      suffix          per-type member-table suffix ("" = the
+                                main table; spann adds "_meta"/"_dead")*/
 void vec_aux_get_table_name(const dict_table_t *parent, space_index_t index_id,
                             Vec_index_type type, char *name_out,
-                            size_t name_out_len);
+                            size_t name_out_len, const char *suffix = "");
 
 /** True if `name` starts with the reserved "vec_" prefix (ALL types).
 Used to hide aux tables from INFORMATION_SCHEMA / SHOW TABLES and to
@@ -132,7 +130,7 @@ only (no pars_sql).
 @param[in]     index_id   id of the vector index this aux belongs to
 @return DB_SUCCESS on success */
 dberr_t vec_aux_create_one_table(trx_t *trx, const dict_table_t *parent,
-                                 space_index_t index_id);
+                                 space_index_t index_id, Vec_index_type type);
 
 /** Create aux tables for every vector index already attached to `parent`. */
 dberr_t vec_aux_create_all_tables(trx_t *trx, const dict_table_t *parent);
@@ -145,7 +143,7 @@ bool vec_aux_create_dd_tables(dict_table_t *parent);
 
 /** Drop the aux table for a single vector index. */
 dberr_t vec_aux_drop_one_table(trx_t *trx, const dict_table_t *parent,
-                               space_index_t index_id);
+                               space_index_t index_id, Vec_index_type type);
 
 /** Drop every vector aux table belonging to `parent`. */
 dberr_t vec_aux_drop_all_tables(trx_t *trx, dict_table_t *parent);

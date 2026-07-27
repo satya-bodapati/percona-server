@@ -427,7 +427,7 @@ static void mark_secondary_indexes(trx_t *trx, dict_table_t *table) noexcept {
           auto prev = UT_LIST_GET_PREV(indexes, index);
           ut_ad(prev != nullptr);
 
-          (void)vec_aux_drop_one_table(trx, table, index->id);
+          (void)vec_aux_drop_one_table(trx, table, index->id, index->vec_type);
 
           dict_index_remove_from_cache(table, index);
 
@@ -502,7 +502,7 @@ static void drop_secondary_indexes(trx_t *trx, dict_table_t *table) noexcept {
       below without this call would orphan the aux .ibd in dict_sys
       and on disk. */
       if (index->is_vector()) {
-        (void)vec_aux_drop_one_table(trx, table, index->id);
+        (void)vec_aux_drop_one_table(trx, table, index->id, index->vec_type);
       }
 
       switch (dict_index_get_online_status(index)) {

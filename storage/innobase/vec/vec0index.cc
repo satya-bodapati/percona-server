@@ -103,6 +103,76 @@ class Vec_hnsw_index final : public Vector_index {
 
 const Vec_hnsw_index vec_hnsw_singleton;
 
+/** TYPE spann — S1: aux lifecycle only. open() is deliberately a no-op:
+table->vec stays nullptr, so every DML hook skips (the index exists but
+is not populated — the phase-1 posture), and the optimizer's JT_VECTOR
+gate is restricted to hnsw (sql_optimizer.cc), so queries run the exact
+path with correct results. The write path lands in S3, the read path in
+S5; the runtime-op stubs below are unreachable until then and say so. */
+class Vec_spann_index final : public Vector_index {
+ public:
+  [[nodiscard]] Vec_index_type type() const override {
+    return Vec_index_type::SPANN;
+  }
+
+  void open(dict_table_t *, uint16_t, uint32_t, int, int) const override {
+    /* S3 creates Vec_spann_runtime here. */
+  }
+
+  [[nodiscard]] dberr_t load(dict_table_t *, THD *) const override {
+    return DB_SUCCESS; /* nothing to load until S5/S6 */
+  }
+
+  [[nodiscard]] dberr_t insert(trx_t *, dict_table_t *, THD *, uint64_t,
+                               const float *, const byte *,
+                               ulint) const override {
+    ut_d(ut_error); /* unreachable: no runtime => hooks skip (S3) */
+    ut_o(return DB_UNSUPPORTED);
+  }
+
+  [[nodiscard]] dberr_t remove(trx_t *, dict_table_t *, THD *,
+                               uint64_t) const override {
+    ut_d(ut_error); /* unreachable until S4 */
+    ut_o(return DB_UNSUPPORTED);
+  }
+
+  [[nodiscard]] dberr_t refresh_row_ref(trx_t *, dict_table_t *, THD *,
+                                        uint64_t, const byte *,
+                                        ulint) const override {
+    ut_d(ut_error); /* unreachable until S4 */
+    ut_o(return DB_UNSUPPORTED);
+  }
+
+  [[nodiscard]] dberr_t knn(
+      dict_table_t *, THD *, const float *, uint32_t, size_t, size_t,
+      std::vector<vec_knn_hit_t> *,
+      const std::unordered_set<uint64_t> *) const override {
+    ut_d(ut_error); /* unreachable: optimizer gate is hnsw-only until S5 */
+    ut_o(return DB_UNSUPPORTED);
+  }
+
+  [[nodiscard]] size_t size_hint(const dict_table_t *) const override {
+    return 0;
+  }
+
+  [[nodiscard]] dberr_t build(trx_t *, dict_table_t *, const dict_index_t *,
+                              uint32_t, int, int, THD *) const override {
+    return DB_SUCCESS; /* S2: head selection + assignment; empty until then */
+  }
+
+  void close(dict_table_t *) const override { /* no runtime yet */
+  }
+
+  [[nodiscard]] dberr_t recreate_after_import(dict_table_t *table,
+                                              trx_t *trx) const override {
+    /* Generic: re-mints THIS index's aux set (the create path is
+    table-set-driven by dict_index_t::vec_type) + re-seeds the counter. */
+    return vec_aux_recreate_after_import(table, trx);
+  }
+};
+
+const Vec_spann_index vec_spann_singleton;
+
 /** The TYPE registry (SPANN R3), indexed by Vec_index_type. Adding an
 index TYPE = one enum value + one row here (S1 adds
 {"spann", &vec_spann_singleton}). */
@@ -114,6 +184,7 @@ struct Vec_type_entry {
 const Vec_type_entry vec_type_registry[] = {
     /* order must match Vec_index_type */
     {"hnsw", &vec_hnsw_singleton},
+    {"spann", &vec_spann_singleton},
 };
 
 }  // namespace
@@ -155,11 +226,20 @@ const Vector_index *vec_index_for(const dict_table_t *table) {
     return table->vec->impl;
   }
 
-  /* No runtime open. The token-carrying paths (open, build) resolve
-  via vec_index_by_name() and never reach here; what does reach here
-  is teardown/close on runtime-less tables (a no-op for every type)
-  and IMPORT re-mint before first open. hnsw is the correct answer for
-  all of them while it is the sole registered type; S1 threads the
-  TYPE token through the IMPORT site when the second type lands. */
+  /* No runtime open: resolve from the index's registered type —
+  dict_index_t::vec_type, set at creation and DD reload (S1). Covers
+  the runtime-less dispatch sites: teardown/close and IMPORT re-mint
+  before first open. */
+  if (table != nullptr) {
+    for (const dict_index_t *idx = table->first_index(); idx != nullptr;
+         idx = idx->next()) {
+      if (idx->is_vector()) {
+        return vec_index_by_enum(idx->vec_type);
+      }
+    }
+  }
+
+  /* No vector index at all: any implementation's close() is a no-op;
+  keep the historical answer. */
   return vec_index_by_enum(Vec_index_type::HNSW);
 }
