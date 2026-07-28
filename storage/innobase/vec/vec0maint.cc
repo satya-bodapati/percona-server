@@ -110,6 +110,12 @@ dberr_t vec_maint_run_job(const vec_maint_msg_t *msg, THD *thd) {
     case Vec_maint_op::SPLIT:
       err = vec_spann_split(table, thd, msg->head_id);
       break;
+    case Vec_maint_op::MERGE:
+      err = vec_spann_merge(table, thd);
+      break;
+    case Vec_maint_op::GC:
+      err = vec_spann_gc(table, thd);
+      break;
     case Vec_maint_op::STOP:
       ut_d(ut_error);
       break;

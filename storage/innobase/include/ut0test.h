@@ -289,7 +289,7 @@ struct Tester {
 
   /** Enqueue a maintenance job for a spann index on the background
   maintenance thread (phase L) and, by default, wait for it.
-  Usage: spann_maint db/table resample [nowait]
+  Usage: spann_maint db/table resample|merge|gc [nowait]
   @param[in] tokens tokenized command
   @return RET_PASS on success */
   [[nodiscard]] Ret_t spann_maint(std::vector<std::string> &tokens) noexcept;

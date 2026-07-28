@@ -994,7 +994,14 @@ Ret_t Tester::spann_maint(std::vector<std::string> &tokens) noexcept {
     set_output(sout);
     return RET_FAIL;
   }
-  if (tokens[2] != "resample") {
+  Vec_maint_op op;
+  if (tokens[2] == "resample") {
+    op = Vec_maint_op::RESAMPLE;
+  } else if (tokens[2] == "merge") {
+    op = Vec_maint_op::MERGE;
+  } else if (tokens[2] == "gc") {
+    op = Vec_maint_op::GC;
+  } else {
     XLOG("FAIL: unknown op " << tokens[2]);
     set_output(sout);
     return RET_FAIL;
@@ -1013,7 +1020,7 @@ Ret_t Tester::spann_maint(std::vector<std::string> &tokens) noexcept {
   dd_table_close(base, current_thd, &base_mdl, false);
 
   if (nowait) {
-    vec_maint_enqueue(Vec_maint_op::RESAMPLE, table_id, 0, nullptr, nullptr);
+    vec_maint_enqueue(op, table_id, 0, nullptr, nullptr);
     XLOG("PASS: enqueued");
     set_output(sout);
     return RET_PASS;
@@ -1021,7 +1028,7 @@ Ret_t Tester::spann_maint(std::vector<std::string> &tokens) noexcept {
 
   os_event_t done = os_event_create();
   dberr_t result = DB_ERROR;
-  vec_maint_enqueue(Vec_maint_op::RESAMPLE, table_id, 0, done, &result);
+  vec_maint_enqueue(op, table_id, 0, done, &result);
   os_event_wait(done);
   os_event_destroy(done);
 
@@ -1030,7 +1037,7 @@ Ret_t Tester::spann_maint(std::vector<std::string> &tokens) noexcept {
     set_output(sout);
     return RET_FAIL;
   }
-  XLOG("PASS: resample done");
+  XLOG("PASS: " << tokens[2] << " done");
   set_output(sout);
   return RET_PASS;
 }

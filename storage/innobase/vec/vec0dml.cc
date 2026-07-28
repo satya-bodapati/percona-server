@@ -527,27 +527,27 @@ dberr_t vec_aux_update_row_ref(trx_t *trx, dict_table_t *aux, uint64_t id,
                                 false /* row_ref_null */, row_ref, row_ref_len);
 }
 
-dberr_t vec_spann_meta_delete(trx_t *trx, dict_table_t *meta, uint8_t mtype,
-                              uint64_t id) {
+/** DELETE one aux row by a filled PK search tuple — the shared body
+of the three delete shapes (meta, posting, dead). Same positioned-
+upd_node machinery as vec_aux_update_row_low — see the locking
+commentary there — but node->is_delete instead of an update vector:
+a plain row DELETE, so retirement/GC is MVCC + purge (design §2),
+never a status flag. `fill_key` writes the n_key PK fields; the data
+it points at must outlive this call. */
+static dberr_t vec_spann_delete_by_pk(
+    trx_t *trx, dict_table_t *aux, ulint n_key,
+    const std::function<void(dtuple_t *)> &fill_key) {
   ut_a(trx != nullptr);
-  ut_a(meta != nullptr);
+  ut_a(aux != nullptr);
 
   mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
-  dict_index_t *clust = meta->first_index();
+  dict_index_t *clust = aux->first_index();
 
-  /* Same positioned-upd_node machinery as vec_aux_update_row_low —
-  see the locking commentary there — but a two-field PK (mtype, id)
-  and node->is_delete instead of an update vector: a row DELETE, so
-  head retirement is MVCC + purge (design §2), never a status flag. */
-  upd_node_t *node = row_create_update_node_for_mysql(meta, heap);
+  upd_node_t *node = row_create_update_node_for_mysql(aux, heap);
 
-  dtuple_t *ref = dtuple_create(heap, 2);
-  dict_index_copy_types(ref, clust, 2);
-  const byte mtype_byte = static_cast<byte>(mtype);
-  dfield_set_data(dtuple_get_nth_field(ref, 0), &mtype_byte, 1);
-  byte id_buf[8];
-  mach_write_to_8(id_buf, id);
-  dfield_set_data(dtuple_get_nth_field(ref, 1), id_buf, sizeof(id_buf));
+  dtuple_t *ref = dtuple_create(heap, n_key);
+  dict_index_copy_types(ref, clust, n_key);
+  fill_key(ref);
 
   que_thr_t *thr = pars_complete_graph_for_exec(node, trx, heap, nullptr);
 
@@ -573,7 +573,7 @@ dberr_t vec_spann_meta_delete(trx_t *trx, dict_table_t *meta, uint8_t mtype,
       return DB_RECORD_NOT_FOUND;
     }
 
-    dberr_t lerr = lock_table(0, meta, LOCK_IX, thr);
+    dberr_t lerr = lock_table(0, aux, LOCK_IX, thr);
     if (lerr == DB_SUCCESS) {
       ulint *offsets = rec_get_offsets(rec, clust, nullptr, ULINT_UNDEFINED,
                                        UT_LOCATION_HERE, &offset_heap);
@@ -611,7 +611,7 @@ dberr_t vec_spann_meta_delete(trx_t *trx, dict_table_t *meta, uint8_t mtype,
   }
 
   upd_t *update = upd_create(1, heap);
-  update->table = meta;
+  update->table = aux;
   update->n_fields = 0;
   node->update = update;
   node->update_n_fields = 0;
@@ -644,6 +644,87 @@ dberr_t vec_spann_meta_delete(trx_t *trx, dict_table_t *meta, uint8_t mtype,
 
   que_thr_stop_for_mysql_no_error(thr, trx);
   mem_heap_free(heap);
+  return DB_SUCCESS;
+}
+
+dberr_t vec_spann_meta_delete(trx_t *trx, dict_table_t *meta, uint8_t mtype,
+                              uint64_t id) {
+  const byte mtype_byte = static_cast<byte>(mtype);
+  byte id_buf[8];
+  mach_write_to_8(id_buf, id);
+  return vec_spann_delete_by_pk(trx, meta, 2, [&](dtuple_t *ref) {
+    dfield_set_data(dtuple_get_nth_field(ref, 0), &mtype_byte, 1);
+    dfield_set_data(dtuple_get_nth_field(ref, 1), id_buf, sizeof(id_buf));
+  });
+}
+
+dberr_t vec_spann_posting_delete(trx_t *trx, dict_table_t *postings,
+                                 uint64_t head_id, uint64_t label) {
+  byte head_buf[8];
+  mach_write_to_8(head_buf, head_id);
+  byte label_buf[8];
+  mach_write_to_8(label_buf, label);
+  return vec_spann_delete_by_pk(trx, postings, 2, [&](dtuple_t *ref) {
+    dfield_set_data(dtuple_get_nth_field(ref, 0), head_buf, sizeof(head_buf));
+    dfield_set_data(dtuple_get_nth_field(ref, 1), label_buf, sizeof(label_buf));
+  });
+}
+
+dberr_t vec_spann_dead_delete(trx_t *trx, dict_table_t *dead, uint64_t label) {
+  byte label_buf[8];
+  mach_write_to_8(label_buf, label);
+  return vec_spann_delete_by_pk(trx, dead, 1, [&](dtuple_t *ref) {
+    dfield_set_data(dtuple_get_nth_field(ref, 0), label_buf, sizeof(label_buf));
+  });
+}
+
+dberr_t vec_spann_scan_all_postings(
+    dict_table_t *postings, const std::function<void(uint64_t, uint64_t)> &fn) {
+  ut_a(postings != nullptr);
+
+  dict_index_t *clust = postings->first_index();
+
+  mem_heap_t *offset_heap = nullptr;
+
+  mtr_t mtr;
+  mtr_start(&mtr);
+
+  btr_pcur_t pcur;
+  pcur.open_at_side(true /* left */, clust, BTR_SEARCH_LEAF, true, 0, &mtr);
+
+  ulint n_scanned = 0;
+
+  while (pcur.move_to_next_user_rec(&mtr) == DB_SUCCESS) {
+    const rec_t *rec = pcur.get_rec();
+
+    ulint *offsets = rec_get_offsets(rec, clust, nullptr, ULINT_UNDEFINED,
+                                     UT_LOCATION_HERE, &offset_heap);
+
+    if (!rec_get_deleted_flag(rec, dict_table_is_comp(postings))) {
+      ulint len;
+      const byte *p = rec_get_nth_field(clust, rec, offsets, 0, &len);
+      ut_a(len == 8);
+      const uint64_t head_id = mach_read_from_8(p);
+      p = rec_get_nth_field(clust, rec, offsets, 1, &len);
+      ut_a(len == 8);
+      fn(head_id, mach_read_from_8(p));
+    }
+
+    if (++n_scanned % 512 == 0) {
+      pcur.store_position(&mtr);
+      mtr_commit(&mtr);
+      mtr_start(&mtr);
+      pcur.restore_position(BTR_SEARCH_LEAF, &mtr, UT_LOCATION_HERE);
+    }
+  }
+
+  pcur.close();
+  mtr_commit(&mtr);
+
+  if (offset_heap != nullptr) {
+    mem_heap_free(offset_heap);
+  }
+
   return DB_SUCCESS;
 }
 

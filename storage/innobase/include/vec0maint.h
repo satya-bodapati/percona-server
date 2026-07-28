@@ -60,6 +60,10 @@ enum class Vec_maint_op : uint8_t {
   RESAMPLE,
   /** L1: split ONE oversized list into two k-means halves. */
   SPLIT,
+  /** L2: fold undersized lists into one merged head. */
+  MERGE,
+  /** L2: sweep garbage-list and drained-dead posting rows. */
+  GC,
   /** thread shutdown sentinel */
   STOP,
 };
