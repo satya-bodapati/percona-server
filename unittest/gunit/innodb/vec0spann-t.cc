@@ -195,4 +195,76 @@ TEST(VecSpannSelectHeads, L2GeometryClosure) {
   EXPECT_EQ(out[0], 1u);
 }
 
+/* ------------------------------------------------------------------
+vec_spann_kmeans2 (L1 split): deterministic farthest-point init +
+Lloyd's rounds, on the same L2 kernel the split job uses. */
+
+static float l2sq(const float *a, const float *b, uint32_t dims) {
+  float s = 0.0f;
+  for (uint32_t d = 0; d < dims; ++d) {
+    const float t = a[d] - b[d];
+    s += t * t;
+  }
+  return s;
+}
+
+TEST(VecSpannKmeans2, SeparatesTwoClusters) {
+  /* Two tight clusters on a line: centroids must land near 1 and 11,
+  and every point must be closer to its own centroid. */
+  const std::vector<std::vector<float>> data = {{0, 0},  {1, 0},  {2, 0},
+                                                {10, 0}, {11, 0}, {12, 0}};
+  std::vector<const float *> pts;
+  for (const auto &v : data) pts.push_back(v.data());
+
+  const auto dist = [](const float *a, const float *b) {
+    return l2sq(a, b, 2);
+  };
+
+  std::vector<float> c1, c2;
+  ASSERT_TRUE(vec_spann_kmeans2(pts, 2, dist, &c1, &c2));
+
+  /* One centroid per cluster (order unspecified). */
+  const float lo = std::min(c1[0], c2[0]);
+  const float hi = std::max(c1[0], c2[0]);
+  EXPECT_NEAR(lo, 1.0f, 0.001f);
+  EXPECT_NEAR(hi, 11.0f, 0.001f);
+
+  for (const auto &v : data) {
+    const bool left = dist(v.data(), c1.data()) < dist(v.data(), c2.data())
+                          ? c1[0] < c2[0]
+                          : c2[0] < c1[0];
+    EXPECT_EQ(left, v[0] < 5.0f);
+  }
+}
+
+TEST(VecSpannKmeans2, DeterministicAcrossCalls) {
+  const std::vector<std::vector<float>> data = {{3, 1}, {0, 0}, {9, 4}, {1, 1},
+                                                {8, 5}, {2, 0}, {10, 5}};
+  std::vector<const float *> pts;
+  for (const auto &v : data) pts.push_back(v.data());
+  const auto dist = [](const float *a, const float *b) {
+    return l2sq(a, b, 2);
+  };
+
+  std::vector<float> a1, a2, b1, b2;
+  ASSERT_TRUE(vec_spann_kmeans2(pts, 2, dist, &a1, &a2));
+  ASSERT_TRUE(vec_spann_kmeans2(pts, 2, dist, &b1, &b2));
+  EXPECT_EQ(a1, b1);
+  EXPECT_EQ(a2, b2);
+}
+
+TEST(VecSpannKmeans2, RefusesDegenerateInputs) {
+  const std::vector<float> p = {1, 2};
+  const auto dist = [](const float *a, const float *b) {
+    return l2sq(a, b, 2);
+  };
+  std::vector<float> c1, c2;
+
+  /* One point. */
+  EXPECT_FALSE(vec_spann_kmeans2({p.data()}, 2, dist, &c1, &c2));
+  /* All identical: the halves would coincide and split nothing. */
+  EXPECT_FALSE(
+      vec_spann_kmeans2({p.data(), p.data(), p.data()}, 2, dist, &c1, &c2));
+}
+
 }  // namespace innodb_vec0spann_unittest

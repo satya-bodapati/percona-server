@@ -510,15 +510,28 @@ dberr_t vec_spann_insert_point(trx_t *trx, dict_table_t *table, THD *thd,
     }
   }
 
+  std::vector<uint64_t> to_split;
   if (err == DB_SUCCESS) {
+    /* The L1 split trigger: crossing a threshold multiple enqueues a
+    split of that list (multiples, not one edge, so an aborted or
+    no-op split re-arms as the list keeps growing). */
+    uint64_t threshold = VEC_SPANN_SPLIT_THRESHOLD;
+    DBUG_EXECUTE_IF("spann_split_threshold_low", threshold = 8;);
     std::lock_guard<std::mutex> g(rt->counter_mutex);
     for (const uint64_t head_id : selected) {
-      ++rt->list_appends[head_id];
+      if (++rt->list_appends[head_id] % threshold == 0) {
+        to_split.push_back(head_id);
+      }
     }
   }
 
   rw_lock_s_unlock(&rt->latch);
   vec_aux_close_for_dml(postings, thd, &mdl);
+
+  for (const uint64_t head_id : to_split) {
+    vec_maint_enqueue(Vec_maint_op::SPLIT, table->id, head_id, nullptr,
+                      nullptr);
+  }
 
   return err;
 }
@@ -674,9 +687,19 @@ dberr_t vec_spann_resample(dict_table_t *table, THD *thd) {
     err = vec_spann_load_dead_set(dead, view, &dead_set);
   }
 
-  /* Snapshot: every live (visible, not dead) label with its vector
-  and row_ref, deduped across closure copies, straight from the old
-  posting lists — the base table is never touched. */
+  /* Snapshot: every label with its vector and row_ref, deduped across
+  closure copies, straight from the old posting lists — the base table
+  is never touched. LATEST-read on purpose: a label stamped at or
+  below snap_next whose inserting trx has not committed yet is
+  invisible to any read view AND outside the catch-up suffix — a
+  view-based snapshot would lose it (found by the first split test:
+  the very insert that triggers a job is still uncommitted when the
+  job starts). Uncommitted rows' copies commit with our trx; if theirs
+  rolls back the copy is a fetch-miss orphan until L2 trims it.
+  Dead pruning stays VIEW-based: pruning on an uncommitted DELETE
+  would lose the row if that DELETE rolled back — an extra copy of a
+  dead row is harmless (readers filter per view), a lost live row is
+  not. */
   std::vector<vec_spann_snap_row_t> rows;
   {
     std::unordered_set<uint64_t> seen;
@@ -689,7 +712,7 @@ dberr_t vec_spann_resample(dict_table_t *table, THD *thd) {
         break;
       }
       err = vec_spann_scan_list(
-          trx, postings, h, dims, view,
+          trx, postings, h, dims, nullptr /* latest */,
           [&](uint64_t label, const float *vec, const byte *ref,
               ulint ref_len) {
             if (dead_set.count(label) != 0 || !seen.insert(label).second) {
@@ -931,6 +954,247 @@ dberr_t vec_spann_resample(dict_table_t *table, THD *thd) {
   vec_aux_close_for_dml(postings, thd, &post_mdl);
 
   if (err == DB_SUCCESS) {
+    MONITOR_INC(MONITOR_VEC_SPANN_RESAMPLES);
+    vec_spann_gc_retired(table);
+  }
+
+  return err;
+}
+
+dberr_t vec_spann_split(dict_table_t *table, THD *thd, uint64_t head_id) {
+  Vec_spann_runtime *rt = spann_rt(table);
+  if (rt == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  rw_lock_s_lock(&rt->latch, UT_LOCATION_HERE);
+  if (!rt->loaded) {
+    rw_lock_s_unlock(&rt->latch);
+    dberr_t lerr = vec_spann_load(table, thd);
+    if (lerr != DB_SUCCESS) {
+      return lerr;
+    }
+    rw_lock_s_lock(&rt->latch, UT_LOCATION_HERE);
+  }
+  /* A stale job (the generation moved on under it — re-sample, an
+  earlier split, a reload) is a clean no-op. */
+  if (rt->head_vecs.count(head_id) == 0 || rt->retired.count(head_id) != 0) {
+    rw_lock_s_unlock(&rt->latch);
+    return DB_SUCCESS;
+  }
+  const uint32_t dims = rt->dims;
+  rw_lock_s_unlock(&rt->latch);
+
+  const uint64_t snap_next = table->vec_next_id.load();
+
+  MDL_ticket *post_mdl = nullptr;
+  dict_table_t *postings = vec_aux_open_for_dml(
+      table, rt->index_id, Vec_index_type::SPANN, "", thd, &post_mdl);
+  if (postings == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+  MDL_ticket *meta_mdl = nullptr;
+  dict_table_t *meta = vec_aux_open_for_dml(
+      table, rt->index_id, Vec_index_type::SPANN, "_meta", thd, &meta_mdl);
+  MDL_ticket *dead_mdl = nullptr;
+  dict_table_t *dead =
+      meta == nullptr
+          ? nullptr
+          : vec_aux_open_for_dml(table, rt->index_id, Vec_index_type::SPANN,
+                                 "_dead", thd, &dead_mdl);
+  if (meta == nullptr || dead == nullptr) {
+    if (meta != nullptr) {
+      vec_aux_close_for_dml(meta, thd, &meta_mdl);
+    }
+    vec_aux_close_for_dml(postings, thd, &post_mdl);
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  trx_t *trx = trx_allocate_for_background();
+  trx_start_internal(trx, UT_LOCATION_HERE);
+  ReadView *view = trx_assign_read_view(trx);
+
+  dberr_t err = view == nullptr ? DB_OUT_OF_RESOURCES : DB_SUCCESS;
+
+  std::unordered_set<uint64_t> dead_set;
+  if (err == DB_SUCCESS) {
+    err = vec_spann_load_dead_set(dead, view, &dead_set);
+  }
+
+  /* Snapshot the ONE list — LATEST-read, view only for dead pruning
+  (see the resample snapshot comment: a view-based snapshot loses the
+  still-uncommitted insert that triggered this very job). Dead labels
+  visible to the view are pruned — a split is also a compaction: the
+  halves are born clean, the dead copies stay behind in the retired
+  list until L2 sweeps it. */
+  std::vector<vec_spann_snap_row_t> rows;
+  if (err == DB_SUCCESS) {
+    err = vec_spann_scan_list(
+        trx, postings, head_id, dims, nullptr /* latest */,
+        [&](uint64_t label, const float *vec, const byte *ref, ulint ref_len) {
+          if (dead_set.count(label) != 0) {
+            return;
+          }
+          vec_spann_snap_row_t r;
+          r.label = label;
+          r.vec.assign(vec, vec + dims);
+          r.ref.assign(reinterpret_cast<const char *>(ref), ref_len);
+          rows.push_back(std::move(r));
+        });
+  }
+
+  hnswlib::L2Space kernel_space(dims);
+  const hnswlib::DISTFUNC<float> dist_func = kernel_space.get_dist_func();
+  void *dist_param = kernel_space.get_dist_func_param();
+  const auto dist = [&](const float *x, const float *y) {
+    return dist_func(x, y, dist_param);
+  };
+
+  std::vector<float> c1, c2;
+  bool splittable = false;
+  if (err == DB_SUCCESS && rows.size() >= 2) {
+    std::vector<const float *> pts;
+    pts.reserve(rows.size());
+    for (const auto &r : rows) {
+      pts.push_back(r.vec.data());
+    }
+    splittable = vec_spann_kmeans2(pts, dims, dist, &c1, &c2);
+  }
+
+  if (err == DB_SUCCESS && !splittable) {
+    /* Under two live points, or all identical: nothing to split. */
+    trx_rollback_to_savepoint(trx, nullptr);
+    trx_free_for_background(trx);
+    vec_aux_close_for_dml(dead, thd, &dead_mdl);
+    vec_aux_close_for_dml(meta, thd, &meta_mdl);
+    vec_aux_close_for_dml(postings, thd, &post_mdl);
+    return DB_SUCCESS;
+  }
+
+  /* Two centroid heads under fresh counter ids (a centroid is not a
+  data point — unlike the sampled builds, split heads are synthetic;
+  the shared counter still guarantees identity uniqueness). */
+  std::vector<vec_spann_head_t> new_heads;
+  if (err == DB_SUCCESS) {
+    for (const std::vector<float> &c : {c1, c2}) {
+      const uint64_t hid = vec_assign_next_idx_id(table);
+      err = vec_spann_meta_insert(trx, meta, VEC_SPANN_META_HEAD, hid,
+                                  reinterpret_cast<const byte *>(c.data()),
+                                  dims * sizeof(float));
+      if (err != DB_SUCCESS) {
+        break;
+      }
+      new_heads.emplace_back(hid, c);
+    }
+  }
+
+  /* Assign to the nearer half, closure (eps + RNG) between the two. */
+  const auto assign_one = [&](uint64_t label, const float *vec, const byte *ref,
+                              ulint ref_len) -> dberr_t {
+    std::vector<vec_spann_head_cand_t> cands = {
+        {dist(vec, new_heads[0].second.data()), new_heads[0].first},
+        {dist(vec, new_heads[1].second.data()), new_heads[1].first}};
+    if (cands[1].dist < cands[0].dist) {
+      std::swap(cands[0], cands[1]);
+    }
+    std::vector<uint64_t> selected;
+    vec_spann_select_heads(
+        cands, VEC_SPANN_CLOSURE_EPS, VEC_SPANN_CLOSURE_MAX,
+        [&](uint64_t, uint64_t) {
+          return dist(new_heads[0].second.data(), new_heads[1].second.data());
+        },
+        &selected);
+    ut_a(!selected.empty());
+    for (const uint64_t h : selected) {
+      const dberr_t ierr = vec_spann_posting_insert(trx, postings, h, label,
+                                                    vec, dims, ref, ref_len);
+      if (ierr != DB_SUCCESS) {
+        return ierr;
+      }
+    }
+    return DB_SUCCESS;
+  };
+
+  if (err == DB_SUCCESS) {
+    size_t n_done = 0;
+    for (const auto &r : rows) {
+      err = assign_one(r.label, r.vec.data(),
+                       reinterpret_cast<const byte *>(r.ref.data()),
+                       r.ref.size());
+      if (err != DB_SUCCESS) {
+        break;
+      }
+      if (++n_done % 256 == 0 && vec_maint_is_canceled(table->id)) {
+        err = DB_INTERRUPTED;
+        break;
+      }
+    }
+  }
+
+  if (err == DB_SUCCESS && head_id != VEC_SPANN_GENESIS_HEAD_ID) {
+    const dberr_t derr =
+        vec_spann_meta_delete(trx, meta, VEC_SPANN_META_HEAD, head_id);
+    if (derr != DB_SUCCESS && derr != DB_RECORD_NOT_FOUND) {
+      err = derr;
+    }
+  }
+
+  DBUG_EXECUTE_IF("spann_split_pause", {
+    const char act[] = "now SIGNAL spann_split_paused WAIT_FOR spann_split_go";
+    ut_a(!debug_sync_set_action(current_thd, STRING_WITH_LEN(act)));
+  });
+
+  DBUG_EXECUTE_IF("spann_split_crash_before_commit", DBUG_SUICIDE(););
+
+  if (err == DB_SUCCESS && vec_maint_is_canceled(table->id)) {
+    err = DB_INTERRUPTED;
+  }
+
+  if (err == DB_SUCCESS) {
+    /* Fence, catch-up (this one list's suffix), commit, publish —
+    the resample's protocol, one-list-sized. */
+    rw_lock_x_lock(&rt->latch, UT_LOCATION_HERE);
+
+    std::vector<vec_spann_snap_row_t> catchup;
+    err = vec_spann_scan_list(
+        trx, postings, head_id, dims, nullptr /* latest */,
+        [&](uint64_t label, const float *vec, const byte *ref, ulint ref_len) {
+          vec_spann_snap_row_t r;
+          r.label = label;
+          r.vec.assign(vec, vec + dims);
+          r.ref.assign(reinterpret_cast<const char *>(ref), ref_len);
+          catchup.push_back(std::move(r));
+        },
+        snap_next /* label_gt */);
+    for (const auto &r : catchup) {
+      if (err != DB_SUCCESS) {
+        break;
+      }
+      err = assign_one(r.label, r.vec.data(),
+                       reinterpret_cast<const byte *>(r.ref.data()),
+                       r.ref.size());
+    }
+
+    if (err == DB_SUCCESS) {
+      const trx_id_t retire_id = trx->id;
+      trx_commit_for_mysql(trx);
+      vec_spann_publish_locked(rt, new_heads, {head_id}, retire_id);
+      rw_lock_x_unlock(&rt->latch);
+    } else {
+      rw_lock_x_unlock(&rt->latch);
+      trx_rollback_to_savepoint(trx, nullptr);
+    }
+  } else {
+    trx_rollback_to_savepoint(trx, nullptr);
+  }
+
+  trx_free_for_background(trx);
+  vec_aux_close_for_dml(dead, thd, &dead_mdl);
+  vec_aux_close_for_dml(meta, thd, &meta_mdl);
+  vec_aux_close_for_dml(postings, thd, &post_mdl);
+
+  if (err == DB_SUCCESS) {
+    MONITOR_INC(MONITOR_VEC_SPANN_SPLITS);
     vec_spann_gc_retired(table);
   }
 

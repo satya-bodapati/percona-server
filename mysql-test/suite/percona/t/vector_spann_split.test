@@ -1,0 +1,140 @@
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/not_valgrind.inc
+
+--echo #
+--echo # SPANN L1: incremental SPLIT on the maintenance thread. When a
+--echo # list's append counter crosses the split threshold, the insert path
+--echo # enqueues a split of that list: snapshot under the job's read view
+--echo # (dead labels pruned), deterministic k-means(2), two fresh-counter-
+--echo # id centroid heads, old head retired through the same fence/publish
+--echo # protocol as L0. The threshold is dropped to 8 by the
+--echo # spann_split_threshold_low knob.
+--echo #
+
+SET GLOBAL innodb_monitor_enable = 'module_vec';
+
+CREATE TABLE tp (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(2),
+                 VECTOR KEY vk (v) TYPE spann);
+
+--echo # Two clusters, 8 rows: the 8th insert crosses the threshold and the
+--echo # genesis list splits into the two natural halves.
+SET SESSION debug = '+d,spann_split_threshold_low';
+INSERT INTO tp VALUES (1, STRING_TO_VECTOR('[1,0]'));
+INSERT INTO tp VALUES (2, STRING_TO_VECTOR('[2,0]'));
+INSERT INTO tp VALUES (3, STRING_TO_VECTOR('[3,0]'));
+INSERT INTO tp VALUES (4, STRING_TO_VECTOR('[4,0]'));
+INSERT INTO tp VALUES (5, STRING_TO_VECTOR('[101,0]'));
+INSERT INTO tp VALUES (6, STRING_TO_VECTOR('[102,0]'));
+INSERT INTO tp VALUES (7, STRING_TO_VECTOR('[103,0]'));
+INSERT INTO tp VALUES (8, STRING_TO_VECTOR('[104,0]'));
+SET SESSION debug = '-d,spann_split_threshold_low';
+
+--let $wait_condition = SELECT COUNT = 1 FROM INFORMATION_SCHEMA.INNODB_METRICS WHERE NAME = 'vec_spann_splits'
+--source include/wait_condition.inc
+
+--echo # Genesis (head 0) is retired and GC'd (no old readers); the two
+--echo # halves carry 4 rows each under fresh head ids 9 and 10.
+SET SESSION innodb_interpreter = 'spann_dump test/tp';
+SELECT @@session.innodb_interpreter_output;
+SELECT id FROM tp ORDER BY DISTANCE(v, STRING_TO_VECTOR('[2.1,0]'), 'EUCLIDEAN') LIMIT 3;
+SELECT id FROM tp ORDER BY DISTANCE(v, STRING_TO_VECTOR('[102.9,0]'), 'EUCLIDEAN') LIMIT 3;
+
+--echo #
+--echo # Reader pinned across a split + inserts during the split. The job
+--echo # pauses staged-but-uncommitted; a pinned view and fresh inserts run
+--echo # against the old world; after resume the catch-up carries the
+--echo # inserts and the pinned reader keeps old-world results until COMMIT.
+--echo #
+connect (con2, localhost, root,,);
+--connection default
+BEGIN;
+SELECT COUNT(*) FROM tp;
+--connection con2
+SET GLOBAL debug = '+d,spann_split_pause';
+SET SESSION debug = '+d,spann_split_threshold_low';
+--echo # 8 appends into the right-cluster list (labels 11..18) cross the
+--echo # threshold and enqueue a split of that list.
+--disable_query_log
+let $i = 11;
+while ($i <= 18) {
+  eval INSERT INTO tp VALUES ($i, STRING_TO_VECTOR('[10$i,0]'));
+  inc $i;
+}
+--enable_query_log
+SET SESSION debug = '-d,spann_split_threshold_low';
+SET DEBUG_SYNC = 'now WAIT_FOR spann_split_paused';
+--echo # Not blocked by the paused split: completes immediately, and the
+--echo # fence catch-up will carry it into the new halves.
+INSERT INTO tp VALUES (30, STRING_TO_VECTOR('[105.5,0]'));
+SET DEBUG_SYNC = 'now SIGNAL spann_split_go';
+SET GLOBAL debug = '-d,spann_split_pause';
+--let $wait_condition = SELECT COUNT = 2 FROM INFORMATION_SCHEMA.INNODB_METRICS WHERE NAME = 'vec_spann_splits'
+--source include/wait_condition.inc
+--connection default
+--echo # The pinned reader: none of con2's rows exist in its world.
+SELECT id FROM tp ORDER BY DISTANCE(v, STRING_TO_VECTOR('[104.9,0]'), 'EUCLIDEAN') LIMIT 3;
+COMMIT;
+--echo # After the view ends: the split world, catch-up row 30 included.
+SELECT id FROM tp ORDER BY DISTANCE(v, STRING_TO_VECTOR('[104.9,0]'), 'EUCLIDEAN') LIMIT 3;
+--echo # The pinned view held GC back: the retired head is still probed.
+SET SESSION innodb_interpreter = 'spann_stats test/tp';
+SELECT @@session.innodb_interpreter_output;
+disconnect con2;
+
+--echo #
+--echo # Crash mid-split (before the job trx commits): recovery has the old
+--echo # world — the half-built generation rolled back with the job trx.
+--echo #
+--echo # Deterministic choreography: the job pauses first (all trigger
+--echo # inserts commit), then the resume signal drives it into the crash
+--echo # point just before its commit.
+--exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+SET GLOBAL debug = '+d,spann_split_pause,spann_split_crash_before_commit';
+SET SESSION debug = '+d,spann_split_threshold_low';
+--disable_query_log
+let $i = 40;
+while ($i <= 47) {
+  eval INSERT INTO tp VALUES ($i, STRING_TO_VECTOR('[$i,3]'));
+  inc $i;
+}
+--enable_query_log
+SET SESSION debug = '-d,spann_split_threshold_low';
+SET DEBUG_SYNC = 'now WAIT_FOR spann_split_paused';
+SET DEBUG_SYNC = 'now SIGNAL spann_split_go';
+--source include/wait_until_disconnected.inc
+--source include/wait_until_connected_again.inc
+
+--echo # All committed rows present; the head set is the pre-crash one
+--echo # (the crashed split left no trace); queries are correct.
+SELECT COUNT(*) FROM tp;
+SET SESSION innodb_interpreter = 'spann_dump test/tp';
+SELECT @@session.innodb_interpreter_output;
+SELECT id FROM tp ORDER BY DISTANCE(v, STRING_TO_VECTOR('[44.1,3]'), 'EUCLIDEAN') LIMIT 3;
+
+--echo # The interrupted split re-arms: the next threshold crossing on the
+--echo # same list splits it cleanly.
+SET GLOBAL innodb_monitor_enable = 'module_vec';
+SET SESSION debug = '+d,spann_split_threshold_low';
+--disable_query_log
+let $i = 50;
+while ($i <= 57) {
+  eval INSERT INTO tp VALUES ($i, STRING_TO_VECTOR('[$i,3]'));
+  inc $i;
+}
+--enable_query_log
+SET SESSION debug = '-d,spann_split_threshold_low';
+--let $wait_condition = SELECT COUNT = 1 FROM INFORMATION_SCHEMA.INNODB_METRICS WHERE NAME = 'vec_spann_splits'
+--source include/wait_condition.inc
+SET SESSION innodb_interpreter = 'spann_stats test/tp';
+SELECT @@session.innodb_interpreter_output;
+SELECT id FROM tp ORDER BY DISTANCE(v, STRING_TO_VECTOR('[44.1,3]'), 'EUCLIDEAN') LIMIT 3;
+
+DROP TABLE tp;
+SET GLOBAL innodb_monitor_disable = 'module_vec';
+SET GLOBAL innodb_monitor_reset_all = 'module_vec';
+--disable_warnings
+SET GLOBAL innodb_monitor_enable = default;
+SET GLOBAL innodb_monitor_disable = default;
+SET GLOBAL innodb_monitor_reset_all = default;
+--enable_warnings
