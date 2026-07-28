@@ -1,0 +1,130 @@
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+
+--echo #
+--echo # SPANN L0: background global re-sample on the vector-maintenance
+--echo # thread. A never-built (genesis one-list) or drifted index is
+--echo # regenerated from a snapshot of its own postings: fresh-counter-id
+--echo # heads, new-generation postings and old-head retirement all on ONE
+--echo # internal transaction; concurrent inserts are caught up from the
+--echo # (head, label > snapshot) suffix under a brief runtime-latch fence;
+--echo # old readers keep their world through retired-in-RAM heads until
+--echo # no active view needs them (GC).
+--echo #
+
+CREATE TABLE tr (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(2),
+                 VECTOR KEY vk (v) TYPE spann);
+--disable_query_log
+let $i = 1;
+while ($i <= 20) {
+  eval INSERT INTO tr VALUES ($i, STRING_TO_VECTOR('[$i, 0]'));
+  inc $i;
+}
+--enable_query_log
+
+--echo # The MySQL-contract wart L0 fixes: CREATE-then-INSERT degenerated
+--echo # to one genesis list.
+SET SESSION innodb_interpreter = 'spann_stats test/tr';
+SELECT @@session.innodb_interpreter_output;
+SELECT id FROM tr ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+
+--echo # Re-sample (seeded, synchronous): balanced lists replace the one
+--echo # genesis list; the old head is retired in RAM (retired=1) until GC.
+SET GLOBAL debug = '+d,spann_build_seed_42';
+SET SESSION innodb_interpreter = 'spann_maint test/tr resample';
+SELECT @@session.innodb_interpreter_output;
+SET GLOBAL debug = '-d,spann_build_seed_42';
+SET SESSION innodb_interpreter = 'spann_stats test/tr';
+SELECT @@session.innodb_interpreter_output;
+SET SESSION innodb_interpreter = 'spann_dump test/tr';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # Same result set as before the swap, and inserts route to the new
+--echo # generation.
+SELECT id FROM tr ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+INSERT INTO tr VALUES (30, STRING_TO_VECTOR('[3.05,0]'));
+SELECT id FROM tr ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+
+--echo #
+--echo # Concurrent DML during a re-sample: pause the job with the new
+--echo # generation staged but uncommitted, run inserts/deletes/queries
+--echo # against the old world, resume — the fence catch-up carries the
+--echo # concurrent rows into the new generation.
+--echo #
+connect (con2, localhost, root,,);
+--connection con2
+SET GLOBAL debug = '+d,spann_build_seed_42,spann_resample_pause';
+SET SESSION innodb_interpreter = 'spann_maint test/tr resample nowait';
+SELECT @@session.innodb_interpreter_output;
+--connection default
+SET DEBUG_SYNC = 'now WAIT_FOR spann_resample_paused';
+INSERT INTO tr VALUES (31, STRING_TO_VECTOR('[7.5,0]'));
+DELETE FROM tr WHERE id = 5;
+SELECT id FROM tr ORDER BY DISTANCE(v, STRING_TO_VECTOR('[7.4,0]'), 'EUCLIDEAN') LIMIT 3;
+SET DEBUG_SYNC = 'now SIGNAL spann_resample_go';
+--echo # Drop the pause knob BEFORE the barrier job below, or it would
+--echo # pause too — on a signal nobody will send again.
+SET GLOBAL debug = '-d,spann_resample_pause';
+--echo # A second synchronous job drains the queue: the paused job is done
+--echo # when this returns (single-threaded queue = completion barrier).
+SET SESSION innodb_interpreter = 'spann_maint test/tr resample';
+SELECT @@session.innodb_interpreter_output;
+SET GLOBAL debug = '-d,spann_build_seed_42';
+
+--echo # The concurrent insert (31) is in the new generation via catch-up;
+--echo # the concurrent delete (5) stays dead by label — same results.
+SELECT id FROM tr ORDER BY DISTANCE(v, STRING_TO_VECTOR('[7.4,0]'), 'EUCLIDEAN') LIMIT 3;
+SELECT id FROM tr ORDER BY DISTANCE(v, STRING_TO_VECTOR('[4.9,0]'), 'EUCLIDEAN') LIMIT 3;
+
+--echo #
+--echo # Old reader across the swap: a view pinned before a re-sample keeps
+--echo # reading the OLD world through the retired heads.
+--echo #
+--connection default
+BEGIN;
+SELECT COUNT(*) FROM tr;
+--connection con2
+INSERT INTO tr VALUES (40, STRING_TO_VECTOR('[3.01,0]'));
+SET GLOBAL debug = '+d,spann_build_seed_42';
+SET SESSION innodb_interpreter = 'spann_maint test/tr resample';
+SELECT @@session.innodb_interpreter_output;
+SET GLOBAL debug = '-d,spann_build_seed_42';
+--connection default
+--echo # The pinned reader: no row 40, old-world neighbors intact.
+SELECT id FROM tr ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+COMMIT;
+--echo # After the view ends: the new world, row 40 included.
+SELECT id FROM tr ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+
+--echo #
+--echo # DDL cancels a running job: pause a re-sample, TRUNCATE bans the
+--echo # table and waits, the job aborts at its post-pause check and rolls
+--echo # back, TRUNCATE re-mints — the table is empty and healthy.
+--echo #
+--connection con2
+SET GLOBAL debug = '+d,spann_resample_pause';
+SET SESSION innodb_interpreter = 'spann_maint test/tr resample nowait';
+SELECT @@session.innodb_interpreter_output;
+--connection default
+SET DEBUG_SYNC = 'now WAIT_FOR spann_resample_paused';
+--connection con2
+--send TRUNCATE TABLE tr
+--connection default
+SET DEBUG_SYNC = 'now SIGNAL spann_resample_go';
+--connection con2
+--reap
+SET GLOBAL debug = '-d,spann_resample_pause';
+--connection default
+disconnect con2;
+INSERT INTO tr VALUES (1, STRING_TO_VECTOR('[1,0]'));
+SET SESSION innodb_interpreter = 'spann_stats test/tr';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # Restart: the committed generation is the only one — clean reload,
+--echo # no retired heads.
+--source include/restart_mysqld.inc
+SELECT id FROM tr ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0]'), 'EUCLIDEAN') LIMIT 1;
+SET SESSION innodb_interpreter = 'spann_stats test/tr';
+SELECT @@session.innodb_interpreter_output;
+
+DROP TABLE tr;

@@ -82,6 +82,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ut0new.h"
 #include "vec0aux.h"
 #include "vec0index.h"
+#include "vec0maint.h"
 #include "zlib.h"
 
 #include "current_thd.h"
@@ -3973,8 +3974,11 @@ static dberr_t row_discard_tablespace(trx_t *trx, dict_table_t *table,
   /* Mirror for vector aux: the graph data belongs to the discarded
   rows, so it dies with them — free the in-memory graph and drop the
   aux table. IMPORT re-creates a fresh empty aux (the imported rows
-  are NOT indexed until DROP/ADD INDEX rebuilds; a warning says so). */
+  are NOT indexed until DROP/ADD INDEX rebuilds; a warning says so).
+  Ban maintenance first (phase L): a background job mid-flight on this
+  aux set must abort and drain before the set goes away. */
   if (DICT_TF2_FLAG_IS_SET(table, DICT_TF2_VEC_HAS_IDX_ID)) {
+    vec_maint_cancel_and_wait(table->id);
     vec_index_for(table)->close(table);
     (void)vec_aux_drop_all_tables(trx, table);
   }
@@ -4577,9 +4581,11 @@ dberr_t row_drop_table_for_mysql(const char *name, trx_t *trx, bool nonatomic,
   }
 
   /* Drop the per-vector-index auxiliary tables. Symmetric with the FTS
-  ancillary drop above — same flag-style gate. See PS-11299. */
+  ancillary drop above — same flag-style gate. See PS-11299. Ban
+  maintenance first (phase L). */
   if (DICT_TF2_FLAG_IS_SET(table, DICT_TF2_VEC_HAS_IDX_ID)) {
     ut_ad(!is_temp);
+    vec_maint_cancel_and_wait(table->id);
     err = vec_aux_drop_all_tables(trx, table);
     if (err != DB_SUCCESS) {
       ib::error(ER_IB_MSG_988)

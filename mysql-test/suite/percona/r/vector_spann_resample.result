@@ -1,0 +1,162 @@
+#
+# SPANN L0: background global re-sample on the vector-maintenance
+# thread. A never-built (genesis one-list) or drifted index is
+# regenerated from a snapshot of its own postings: fresh-counter-id
+# heads, new-generation postings and old-head retirement all on ONE
+# internal transaction; concurrent inserts are caught up from the
+# (head, label > snapshot) suffix under a brief runtime-latch fence;
+# old readers keep their world through retired-in-RAM heads until
+# no active view needs them (GC).
+#
+CREATE TABLE tr (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(2),
+VECTOR KEY vk (v) TYPE spann);
+# The MySQL-contract wart L0 fixes: CREATE-then-INSERT degenerated
+# to one genesis list.
+SET SESSION innodb_interpreter = 'spann_stats test/tr';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=1 postings=20 labels=20 dead=0 dead_ratio_pct=0 list_min=20 list_max=20 list_avg=20 retired=0
+
+SELECT id FROM tr ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+id
+3
+4
+2
+# Re-sample (seeded, synchronous): balanced lists replace the one
+# genesis list; the old head is retired in RAM (retired=1) until GC.
+SET GLOBAL debug = '+d,spann_build_seed_42';
+SET SESSION innodb_interpreter = 'spann_maint test/tr resample';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+PASS: resample done
+SET GLOBAL debug = '-d,spann_build_seed_42';
+SET SESSION innodb_interpreter = 'spann_stats test/tr';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=3 lists=4 postings=40 labels=20 dead=0 dead_ratio_pct=0 list_min=5 list_max=20 list_avg=10 retired=0
+
+SET SESSION innodb_interpreter = 'spann_dump test/tr';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=3 lists=4 postings=40 labels=20 label_min=1 label_max=20 dead=0
+head=0 size=20
+head=21 size=6
+head=22 size=5
+head=23 size=9
+mem heads=3
+
+# Same result set as before the swap, and inserts route to the new
+# generation.
+SELECT id FROM tr ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+id
+3
+4
+2
+INSERT INTO tr VALUES (30, STRING_TO_VECTOR('[3.05,0]'));
+SELECT id FROM tr ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+id
+30
+3
+4
+#
+# Concurrent DML during a re-sample: pause the job with the new
+# generation staged but uncommitted, run inserts/deletes/queries
+# against the old world, resume — the fence catch-up carries the
+# concurrent rows into the new generation.
+#
+SET GLOBAL debug = '+d,spann_build_seed_42,spann_resample_pause';
+SET SESSION innodb_interpreter = 'spann_maint test/tr resample nowait';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+PASS: enqueued
+SET DEBUG_SYNC = 'now WAIT_FOR spann_resample_paused';
+INSERT INTO tr VALUES (31, STRING_TO_VECTOR('[7.5,0]'));
+DELETE FROM tr WHERE id = 5;
+SELECT id FROM tr ORDER BY DISTANCE(v, STRING_TO_VECTOR('[7.4,0]'), 'EUCLIDEAN') LIMIT 3;
+id
+31
+7
+8
+SET DEBUG_SYNC = 'now SIGNAL spann_resample_go';
+# Drop the pause knob BEFORE the barrier job below, or it would
+# pause too — on a signal nobody will send again.
+SET GLOBAL debug = '-d,spann_resample_pause';
+# A second synchronous job drains the queue: the paused job is done
+# when this returns (single-threaded queue = completion barrier).
+SET SESSION innodb_interpreter = 'spann_maint test/tr resample';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+PASS: resample done
+SET GLOBAL debug = '-d,spann_build_seed_42';
+# The concurrent insert (31) is in the new generation via catch-up;
+# the concurrent delete (5) stays dead by label — same results.
+SELECT id FROM tr ORDER BY DISTANCE(v, STRING_TO_VECTOR('[7.4,0]'), 'EUCLIDEAN') LIMIT 3;
+id
+31
+7
+8
+SELECT id FROM tr ORDER BY DISTANCE(v, STRING_TO_VECTOR('[4.9,0]'), 'EUCLIDEAN') LIMIT 3;
+id
+4
+6
+30
+#
+# Old reader across the swap: a view pinned before a re-sample keeps
+# reading the OLD world through the retired heads.
+#
+BEGIN;
+SELECT COUNT(*) FROM tr;
+COUNT(*)
+21
+INSERT INTO tr VALUES (40, STRING_TO_VECTOR('[3.01,0]'));
+SET GLOBAL debug = '+d,spann_build_seed_42';
+SET SESSION innodb_interpreter = 'spann_maint test/tr resample';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+PASS: resample done
+SET GLOBAL debug = '-d,spann_build_seed_42';
+# The pinned reader: no row 40, old-world neighbors intact.
+SELECT id FROM tr ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+id
+30
+3
+4
+COMMIT;
+# After the view ends: the new world, row 40 included.
+SELECT id FROM tr ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3.1,0]'), 'EUCLIDEAN') LIMIT 3;
+id
+30
+40
+3
+#
+# DDL cancels a running job: pause a re-sample, TRUNCATE bans the
+# table and waits, the job aborts at its post-pause check and rolls
+# back, TRUNCATE re-mints — the table is empty and healthy.
+#
+SET GLOBAL debug = '+d,spann_resample_pause';
+SET SESSION innodb_interpreter = 'spann_maint test/tr resample nowait';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+PASS: enqueued
+SET DEBUG_SYNC = 'now WAIT_FOR spann_resample_paused';
+TRUNCATE TABLE tr;
+SET DEBUG_SYNC = 'now SIGNAL spann_resample_go';
+SET GLOBAL debug = '-d,spann_resample_pause';
+INSERT INTO tr VALUES (1, STRING_TO_VECTOR('[1,0]'));
+SET SESSION innodb_interpreter = 'spann_stats test/tr';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=1 postings=1 labels=1 dead=0 dead_ratio_pct=0 list_min=1 list_max=1 list_avg=1 retired=0
+
+# Restart: the committed generation is the only one — clean reload,
+# no retired heads.
+# restart
+SELECT id FROM tr ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0]'), 'EUCLIDEAN') LIMIT 1;
+id
+1
+SET SESSION innodb_interpreter = 'spann_stats test/tr';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=0 lists=1 postings=1 labels=1 dead=0 dead_ratio_pct=0 list_min=1 list_max=1 list_avg=1 retired=0
+
+DROP TABLE tr;

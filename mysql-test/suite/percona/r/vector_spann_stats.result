@@ -64,7 +64,7 @@ vec_spann_searches	2
 SET SESSION innodb_interpreter = 'spann_stats test/tm';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-heads=3 lists=3 postings=24 labels=22 dead=2 dead_ratio_pct=9 list_min=7 list_max=10 list_avg=8
+heads=3 lists=3 postings=24 labels=22 dead=2 dead_ratio_pct=9 list_min=7 list_max=10 list_avg=8 retired=0
 
 # The raw dump remains available and unchanged in shape.
 SET SESSION innodb_interpreter = 'spann_dump test/tm';

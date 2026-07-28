@@ -527,6 +527,126 @@ dberr_t vec_aux_update_row_ref(trx_t *trx, dict_table_t *aux, uint64_t id,
                                 false /* row_ref_null */, row_ref, row_ref_len);
 }
 
+dberr_t vec_spann_meta_delete(trx_t *trx, dict_table_t *meta, uint8_t mtype,
+                              uint64_t id) {
+  ut_a(trx != nullptr);
+  ut_a(meta != nullptr);
+
+  mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
+  dict_index_t *clust = meta->first_index();
+
+  /* Same positioned-upd_node machinery as vec_aux_update_row_low —
+  see the locking commentary there — but a two-field PK (mtype, id)
+  and node->is_delete instead of an update vector: a row DELETE, so
+  head retirement is MVCC + purge (design §2), never a status flag. */
+  upd_node_t *node = row_create_update_node_for_mysql(meta, heap);
+
+  dtuple_t *ref = dtuple_create(heap, 2);
+  dict_index_copy_types(ref, clust, 2);
+  const byte mtype_byte = static_cast<byte>(mtype);
+  dfield_set_data(dtuple_get_nth_field(ref, 0), &mtype_byte, 1);
+  byte id_buf[8];
+  mach_write_to_8(id_buf, id);
+  dfield_set_data(dtuple_get_nth_field(ref, 1), id_buf, sizeof(id_buf));
+
+  que_thr_t *thr = pars_complete_graph_for_exec(node, trx, heap, nullptr);
+
+  auto savept = trx_savept_take(trx);
+
+  que_thr_move_to_run_state_for_mysql(thr, trx);
+
+  mtr_t mtr;
+  mem_heap_t *offset_heap = nullptr;
+  for (;;) {
+    mtr_start(&mtr);
+    node->pcur->open_no_init(clust, ref, PAGE_CUR_LE, BTR_SEARCH_LEAF, 0, &mtr,
+                             UT_LOCATION_HERE);
+    const rec_t *rec = node->pcur->get_rec();
+    if (!page_rec_is_user_rec(rec) ||
+        node->pcur->get_low_match() < dict_index_get_n_unique(clust)) {
+      mtr_commit(&mtr);
+      que_thr_stop_for_mysql_no_error(thr, trx);
+      if (offset_heap != nullptr) {
+        mem_heap_free(offset_heap);
+      }
+      mem_heap_free(heap);
+      return DB_RECORD_NOT_FOUND;
+    }
+
+    dberr_t lerr = lock_table(0, meta, LOCK_IX, thr);
+    if (lerr == DB_SUCCESS) {
+      ulint *offsets = rec_get_offsets(rec, clust, nullptr, ULINT_UNDEFINED,
+                                       UT_LOCATION_HERE, &offset_heap);
+      lerr = lock_clust_rec_read_check_and_lock(
+          lock_duration_t::REGULAR, node->pcur->get_block(), rec, clust,
+          offsets, SELECT_ORDINARY, LOCK_X, LOCK_REC_NOT_GAP, thr);
+      if (lerr == DB_SUCCESS_LOCKED_REC) {
+        lerr = DB_SUCCESS;
+      }
+    }
+
+    if (lerr == DB_SUCCESS) {
+      node->pcur->store_position(&mtr);
+      mtr_commit(&mtr);
+      break;
+    }
+
+    mtr_commit(&mtr);
+    trx->error_state = lerr;
+    que_thr_stop_for_mysql(thr);
+    thr->lock_state = QUE_THR_LOCK_ROW;
+    const bool was_lock_wait =
+        row_mysql_handle_errors(&lerr, trx, thr, &savept);
+    thr->lock_state = QUE_THR_LOCK_NOLOCK;
+    if (!was_lock_wait) {
+      if (offset_heap != nullptr) {
+        mem_heap_free(offset_heap);
+      }
+      mem_heap_free(heap);
+      return lerr;
+    }
+  }
+  if (offset_heap != nullptr) {
+    mem_heap_free(offset_heap);
+  }
+
+  upd_t *update = upd_create(1, heap);
+  update->table = meta;
+  update->n_fields = 0;
+  node->update = update;
+  node->update_n_fields = 0;
+  node->cmpl_info = 0;
+  node->is_delete = true;
+  node->state = UPD_NODE_UPDATE_CLUSTERED;
+
+  dberr_t err;
+  for (;;) {
+    thr->run_node = node;
+    thr->prev_node = node;
+
+    row_upd_step(thr);
+
+    err = trx->error_state;
+    if (err == DB_SUCCESS) {
+      break;
+    }
+
+    que_thr_stop_for_mysql(thr);
+    thr->lock_state = QUE_THR_LOCK_ROW;
+    const bool was_lock_wait = row_mysql_handle_errors(&err, trx, thr, &savept);
+    thr->lock_state = QUE_THR_LOCK_NOLOCK;
+
+    if (!was_lock_wait) {
+      mem_heap_free(heap);
+      return err;
+    }
+  }
+
+  que_thr_stop_for_mysql_no_error(thr, trx);
+  mem_heap_free(heap);
+  return DB_SUCCESS;
+}
+
 /** Copy one (possibly externally stored) field of an aux clustered-index
 record into a byte vector.
 @return true on success */
@@ -757,7 +877,7 @@ static dberr_t vec_spann_visible_version(const rec_t *rec, mtr_t *mtr,
 
 dberr_t vec_spann_scan_list(trx_t *trx, dict_table_t *postings,
                             uint64_t head_id, uint32_t dims, ReadView *view,
-                            const vec_spann_posting_fn &fn) {
+                            const vec_spann_posting_fn &fn, uint64_t label_gt) {
   ut_a(postings != nullptr);
   ut_a(dims != 0);
 
@@ -776,17 +896,24 @@ dberr_t vec_spann_scan_list(trx_t *trx, dict_table_t *postings,
   mtr_t mtr;
   mtr_start(&mtr);
 
-  /* Position at the first posting of this list: PK prefix (head_id). */
+  /* Position at the first posting of this list: PK prefix (head_id) —
+  or, for a catch-up suffix scan (label_gt != 0), strictly after
+  (head_id, label_gt). */
   mem_heap_t *key_heap = mem_heap_create(256, UT_LOCATION_HERE);
-  dtuple_t *key = dtuple_create(key_heap, 1);
-  dict_index_copy_types(key, clust, 1);
+  dtuple_t *key = dtuple_create(key_heap, label_gt != 0 ? 2 : 1);
+  dict_index_copy_types(key, clust, label_gt != 0 ? 2 : 1);
   byte head_buf[8];
   mach_write_to_8(head_buf, head_id);
   dfield_set_data(dtuple_get_nth_field(key, 0), head_buf, sizeof(head_buf));
+  byte label_buf[8];
+  if (label_gt != 0) {
+    mach_write_to_8(label_buf, label_gt);
+    dfield_set_data(dtuple_get_nth_field(key, 1), label_buf, sizeof(label_buf));
+  }
 
   btr_pcur_t pcur;
-  pcur.open_no_init(clust, key, PAGE_CUR_GE, BTR_SEARCH_LEAF, 0, &mtr,
-                    UT_LOCATION_HERE);
+  pcur.open_no_init(clust, key, label_gt != 0 ? PAGE_CUR_G : PAGE_CUR_GE,
+                    BTR_SEARCH_LEAF, 0, &mtr, UT_LOCATION_HERE);
 
   ulint n_scanned = 0;
 

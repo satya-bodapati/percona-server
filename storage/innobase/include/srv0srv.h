@@ -263,6 +263,9 @@ struct Srv_threads {
   /** Thread doing optimization for FTS index. */
   IB_thread m_fts_optimize;
 
+  /** Vector-index maintenance thread (SPANN phase L). */
+  IB_thread m_vec_maint;
+
   /** Thread for GTID persistence */
   IB_thread m_gtid_persister;
 
@@ -884,6 +887,7 @@ extern mysql_pfs_key_t clone_gtid_thread_key;
 extern mysql_pfs_key_t ddl_thread_key;
 extern mysql_pfs_key_t dict_stats_thread_key;
 extern mysql_pfs_key_t fts_optimize_thread_key;
+extern mysql_pfs_key_t vec_maint_thread_key;
 extern mysql_pfs_key_t fts_parallel_merge_thread_key;
 extern mysql_pfs_key_t fts_parallel_tokenization_thread_key;
 extern mysql_pfs_key_t io_ibuf_thread_key;
@@ -1225,8 +1229,7 @@ void srv_master_thread_disabled_debug_update(THD *thd, SYS_VAR *var,
 innodb_temp_tablespace_encrypt is TRUE
 @param[in]	enable	true to enable encryption, false to disable
 @return DB_SUCCESS on success, DB_ERROR on failure */
-[[nodiscard]]
-dberr_t srv_temp_encryption_update(bool enable);
+[[nodiscard]] dberr_t srv_temp_encryption_update(bool enable);
 
 /** Status variables to be passed to MySQL */
 struct export_var_t {
