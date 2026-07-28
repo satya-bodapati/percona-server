@@ -116,6 +116,9 @@ dberr_t vec_maint_run_job(const vec_maint_msg_t *msg, THD *thd) {
     case Vec_maint_op::GC:
       err = vec_spann_gc(table, thd);
       break;
+    case Vec_maint_op::REASSIGN:
+      err = vec_spann_reassign(table, thd);
+      break;
     case Vec_maint_op::STOP:
       ut_d(ut_error);
       break;

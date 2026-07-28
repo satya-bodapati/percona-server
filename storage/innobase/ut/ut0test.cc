@@ -89,6 +89,7 @@ Tester::Tester() noexcept {
   DISPATCH(spann_dump);
   DISPATCH(spann_stats);
   DISPATCH(spann_maint);
+  DISPATCH(spann_npa);
   DISPATCH(print_dblwr_has_encrypted_pages);
   DISPATCH(print_tree);
 }
@@ -984,6 +985,39 @@ Ret_t Tester::spann_stats(std::vector<std::string> &tokens) noexcept {
   return RET_PASS;
 }
 
+Ret_t Tester::spann_npa(std::vector<std::string> &tokens) noexcept {
+  TLOG("Tester::spann_npa()");
+  ut_ad(tokens[0] == "spann_npa");
+  std::ostringstream sout;
+  if (tokens.size() != 2) {
+    XLOG("FAIL: usage: spann_npa db/table");
+    set_output(sout);
+    return RET_FAIL;
+  }
+
+  MDL_ticket *base_mdl = nullptr;
+  dict_table_t *base = dd_table_open_on_name(
+      current_thd, &base_mdl, tokens[1].c_str(), false, DICT_ERR_IGNORE_NONE);
+  if (base == nullptr) {
+    XLOG("FAIL: no such table " << tokens[1]);
+    set_output(sout);
+    return RET_FAIL;
+  }
+  auto guard = create_scope_guard(
+      [&]() { dd_table_close(base, current_thd, &base_mdl, false); });
+
+  uint64_t count = 0;
+  const dberr_t err = vec_spann_npa_violations(base, current_thd, &count);
+  if (err != DB_SUCCESS) {
+    XLOG("FAIL: err=" << static_cast<int>(err));
+    set_output(sout);
+    return RET_FAIL;
+  }
+  sout << "npa_violations=" << count << "\n";
+  set_output(sout);
+  return RET_PASS;
+}
+
 Ret_t Tester::spann_maint(std::vector<std::string> &tokens) noexcept {
   TLOG("Tester::spann_maint()");
   ut_ad(tokens[0] == "spann_maint");
@@ -1001,6 +1035,8 @@ Ret_t Tester::spann_maint(std::vector<std::string> &tokens) noexcept {
     op = Vec_maint_op::MERGE;
   } else if (tokens[2] == "gc") {
     op = Vec_maint_op::GC;
+  } else if (tokens[2] == "reassign") {
+    op = Vec_maint_op::REASSIGN;
   } else {
     XLOG("FAIL: unknown op " << tokens[2]);
     set_output(sout);

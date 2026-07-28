@@ -289,10 +289,17 @@ struct Tester {
 
   /** Enqueue a maintenance job for a spann index on the background
   maintenance thread (phase L) and, by default, wait for it.
-  Usage: spann_maint db/table resample|merge|gc [nowait]
+  Usage: spann_maint db/table resample|merge|gc|reassign [nowait]
   @param[in] tokens tokenized command
   @return RET_PASS on success */
   [[nodiscard]] Ret_t spann_maint(std::vector<std::string> &tokens) noexcept;
+
+  /** Count the NPA (nearest-posting-assignment) violations of a TYPE
+  spann index (SPANN L3 observability).
+  Usage: spann_npa db/table
+  @param[in] tokens tokenized command
+  @return RET_PASS on success */
+  [[nodiscard]] Ret_t spann_npa(std::vector<std::string> &tokens) noexcept;
 
   /** A macro to declare a dispatch function or a command function.  They all
   have the same signature.

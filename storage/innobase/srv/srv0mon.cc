@@ -1189,6 +1189,11 @@ static monitor_info_t innodb_counter_info[] = {
      " maintenance thread (SPANN L2)",
      MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_VEC_SPANN_GCS},
 
+    {"vec_spann_reassigns", "vector_index",
+     "Number of NPA-repair passes completed by the vector maintenance"
+     " thread (SPANN L3)",
+     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_VEC_SPANN_REASSIGNS},
+
     /* ========== Counters for tablespace ========== */
     {"module_file", "file_system", "Tablespace and File System Manager",
      MONITOR_MODULE, MONITOR_DEFAULT_START, MONITOR_MODULE_FIL_SYSTEM},

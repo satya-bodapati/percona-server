@@ -64,6 +64,8 @@ enum class Vec_maint_op : uint8_t {
   MERGE,
   /** L2: sweep garbage-list and drained-dead posting rows. */
   GC,
+  /** L3: repair the nearest-posting-assignment invariant. */
+  REASSIGN,
   /** thread shutdown sentinel */
   STOP,
 };
