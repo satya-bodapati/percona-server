@@ -1577,6 +1577,212 @@ dberr_t vec_spann_gc(dict_table_t *table, THD *thd) {
   return err;
 }
 
+/** One NPA violation: a live label with no posting in its nearest
+live head's list. */
+struct vec_spann_npa_violation_t {
+  uint64_t label;
+  uint64_t nearest_head;
+  std::vector<float> vec;
+  std::string ref;
+};
+
+/** Collect the NPA (nearest-posting-assignment) violations: for every
+live label across the LIVE lists, its nearest live head must hold a
+copy. The write path routes every insert to its nearest live head and
+splits re-assign their list optimally, so violations come from MERGES
+— a centroid between two distant folded lists can leave their rows
+nearer to some third head — and that is why the invariant needs a
+repair job at all. Latest-read like every maintenance scan; dead
+labels (visible to a fresh view) excluded. */
+static dberr_t vec_spann_collect_npa(
+    dict_table_t *table, THD *thd,
+    std::vector<vec_spann_npa_violation_t> *out) {
+  out->clear();
+
+  Vec_spann_runtime *rt = spann_rt(table);
+  if (rt == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  rw_lock_s_lock(&rt->latch, UT_LOCATION_HERE);
+  if (!rt->loaded) {
+    rw_lock_s_unlock(&rt->latch);
+    dberr_t lerr = vec_spann_load(table, thd);
+    if (lerr != DB_SUCCESS) {
+      return lerr;
+    }
+    rw_lock_s_lock(&rt->latch, UT_LOCATION_HERE);
+  }
+  std::vector<uint64_t> live;
+  for (const auto &hv : rt->head_vecs) {
+    if (rt->retired.count(hv.first) == 0) {
+      live.push_back(hv.first);
+    }
+  }
+  const uint32_t dims = rt->dims;
+  rw_lock_s_unlock(&rt->latch);
+
+  MDL_ticket *post_mdl = nullptr;
+  dict_table_t *postings = vec_aux_open_for_dml(
+      table, rt->index_id, Vec_index_type::SPANN, "", thd, &post_mdl);
+  if (postings == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+  MDL_ticket *dead_mdl = nullptr;
+  dict_table_t *dead = vec_aux_open_for_dml(
+      table, rt->index_id, Vec_index_type::SPANN, "_dead", thd, &dead_mdl);
+  if (dead == nullptr) {
+    vec_aux_close_for_dml(postings, thd, &post_mdl);
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  /* One read-only trx spans the dead-set load and the list scans (the
+  latter may need it for off-page vector reads). */
+  trx_t *dtrx = trx_allocate_for_background();
+  trx_start_internal_read_only(dtrx, UT_LOCATION_HERE);
+  ReadView *view = trx_assign_read_view(dtrx);
+
+  dberr_t err = view == nullptr ? DB_OUT_OF_RESOURCES : DB_SUCCESS;
+  std::unordered_set<uint64_t> dead_set;
+  if (err == DB_SUCCESS) {
+    err = vec_spann_load_dead_set(dead, view, &dead_set);
+  }
+
+  /* label -> (vec, ref, lists that hold a copy), live lists only. */
+  struct npa_row_t {
+    std::vector<float> vec;
+    std::string ref;
+    std::unordered_set<uint64_t> lists;
+  };
+  std::unordered_map<uint64_t, npa_row_t> labels;
+
+  for (const uint64_t h : live) {
+    if (err != DB_SUCCESS) {
+      break;
+    }
+    err = vec_spann_scan_list(
+        dtrx, postings, h, dims, nullptr /* latest */,
+        [&](uint64_t label, const float *vec, const byte *ref, ulint ref_len) {
+          if (dead_set.count(label) != 0) {
+            return;
+          }
+          npa_row_t &r = labels[label];
+          if (r.lists.empty()) {
+            r.vec.assign(vec, vec + dims);
+            r.ref.assign(reinterpret_cast<const char *>(ref), ref_len);
+          }
+          r.lists.insert(h);
+        });
+  }
+
+  trx_commit_for_mysql(dtrx);
+  trx_free_for_background(dtrx);
+
+  if (err == DB_SUCCESS) {
+    rw_lock_s_lock(&rt->latch, UT_LOCATION_HERE);
+    Vec_live_head_filter filter(rt->retired);
+    for (auto &lr : labels) {
+      try {
+        const auto found = rt->heads->searchKnnCloserFirst(
+            lr.second.vec.data(), 1, rt->retired.empty() ? nullptr : &filter);
+        if (!found.empty() && lr.second.lists.count(found[0].second) == 0) {
+          vec_spann_npa_violation_t v;
+          v.label = lr.first;
+          v.nearest_head = found[0].second;
+          v.vec = std::move(lr.second.vec);
+          v.ref = std::move(lr.second.ref);
+          out->push_back(std::move(v));
+        }
+      } catch (...) {
+        err = DB_OUT_OF_MEMORY;
+        break;
+      }
+    }
+    rw_lock_s_unlock(&rt->latch);
+  }
+
+  vec_aux_close_for_dml(dead, thd, &dead_mdl);
+  vec_aux_close_for_dml(postings, thd, &post_mdl);
+  return err;
+}
+
+dberr_t vec_spann_npa_violations(dict_table_t *table, THD *thd,
+                                 uint64_t *count) {
+  std::vector<vec_spann_npa_violation_t> v;
+  const dberr_t err = vec_spann_collect_npa(table, thd, &v);
+  *count = v.size();
+  return err;
+}
+
+dberr_t vec_spann_reassign(dict_table_t *table, THD *thd) {
+  Vec_spann_runtime *rt = spann_rt(table);
+  if (rt == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  std::vector<vec_spann_npa_violation_t> violations;
+  dberr_t err = vec_spann_collect_npa(table, thd, &violations);
+  if (err != DB_SUCCESS || violations.empty()) {
+    return err;
+  }
+
+  MDL_ticket *post_mdl = nullptr;
+  dict_table_t *postings = vec_aux_open_for_dml(
+      table, rt->index_id, Vec_index_type::SPANN, "", thd, &post_mdl);
+  if (postings == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  /* Appends only, no fence, no publish: the head set does not change,
+  so readers need no transition — each copy becomes visible to new
+  views at commit like any row. Nothing here can create a NEW
+  violation (concurrent inserts route to their nearest live head by
+  construction), so one pass converges. */
+  trx_t *trx = trx_allocate_for_background();
+  trx_start_internal(trx, UT_LOCATION_HERE);
+
+  size_t n_done = 0;
+  for (const auto &v : violations) {
+    const dberr_t ierr = vec_spann_posting_insert(
+        trx, postings, v.nearest_head, v.label, v.vec.data(), rt->dims,
+        reinterpret_cast<const byte *>(v.ref.data()), v.ref.size());
+    /* A racing copy (an UPDATE re-append, say) is fine — the goal is
+    presence, not authorship. */
+    if (ierr != DB_SUCCESS && ierr != DB_DUPLICATE_KEY) {
+      err = ierr;
+      break;
+    }
+    if (++n_done % 256 == 0 && vec_maint_is_canceled(table->id)) {
+      err = DB_INTERRUPTED;
+      break;
+    }
+  }
+
+  if (err == DB_SUCCESS) {
+    trx_commit_for_mysql(trx);
+  } else {
+    trx_rollback_to_savepoint(trx, nullptr);
+  }
+  trx_free_for_background(trx);
+  vec_aux_close_for_dml(postings, thd, &post_mdl);
+
+  if (err == DB_SUCCESS) {
+    MONITOR_INC(MONITOR_VEC_SPANN_REASSIGNS);
+
+#ifdef UNIV_DEBUG
+    /* THE NPA INVARIANT, asserted: after a repair pass no live label
+    may lack a copy in its nearest live head's list. Safe to recompute
+    live — concurrent user inserts are NPA-correct at birth and only
+    this (single) maintenance thread reshapes the head set. */
+    std::vector<vec_spann_npa_violation_t> check;
+    ut_ad(vec_spann_collect_npa(table, thd, &check) != DB_SUCCESS ||
+          check.empty());
+#endif /* UNIV_DEBUG */
+  }
+
+  return err;
+}
+
 dberr_t vec_spann_remove_point(trx_t *trx, dict_table_t *table, THD *thd,
                                uint64_t label) {
   Vec_spann_runtime *rt = spann_rt(table);

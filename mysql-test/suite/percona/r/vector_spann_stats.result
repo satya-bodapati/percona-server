@@ -19,6 +19,7 @@ vec_spann_gcs	0
 vec_spann_merges	0
 vec_spann_posting_appends	21
 vec_spann_probes	0
+vec_spann_reassigns	0
 vec_spann_resamples	0
 vec_spann_searches	0
 vec_spann_splits	0
@@ -36,6 +37,7 @@ vec_spann_gcs	0
 vec_spann_merges	0
 vec_spann_posting_appends	44
 vec_spann_probes	0
+vec_spann_reassigns	0
 vec_spann_resamples	0
 vec_spann_searches	0
 vec_spann_splits	0
@@ -57,6 +59,7 @@ vec_spann_gcs	0
 vec_spann_merges	0
 vec_spann_posting_appends	44
 vec_spann_probes	4
+vec_spann_reassigns	0
 vec_spann_resamples	0
 vec_spann_searches	2
 vec_spann_splits	0
@@ -72,6 +75,7 @@ vec_spann_gcs	0
 vec_spann_merges	0
 vec_spann_posting_appends	45
 vec_spann_probes	4
+vec_spann_reassigns	0
 vec_spann_resamples	0
 vec_spann_searches	2
 vec_spann_splits	0

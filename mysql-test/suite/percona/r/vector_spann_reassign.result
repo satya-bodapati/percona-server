@@ -1,0 +1,93 @@
+#
+# SPANN L3: REASSIGN — the NPA (nearest-posting-assignment) repair.
+# The write path routes every insert to its nearest live head and
+# splits re-assign their list optimally, so NPA violations come from
+# MERGES: folding two distant small lists puts the merged centroid
+# between them, leaving their rows nearer to some third head — which
+# the probe pruning then never scans (recall loss). REASSIGN appends
+# copies of the violating labels to their nearest heads' lists —
+# inserts only, no fence — and the invariant is re-asserted in debug
+# builds after every pass.
+#
+SET GLOBAL innodb_monitor_enable = 'module_vec';
+CREATE TABLE tn (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(2),
+VECTOR KEY vk (v) TYPE spann);
+# Three seeded splits shape four lists on a line:
+#   A ~ x=0..3, Z ~ x=62..69, K ~ x=88..91, N ~ x=104..111.
+SET SESSION debug = '+d,spann_split_threshold_low';
+SET SESSION debug = '-d,spann_split_threshold_low';
+# Splits preserve NPA: no violations.
+SET SESSION innodb_interpreter = 'spann_npa test/tn';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+npa_violations=0
+
+# Shrink A to one row and K to two, then MERGE folds them into one
+# head near x=45 — between the two folded regions, and farther from
+# rows 88/89 than list N's head is: two NPA violations by geometry.
+DELETE FROM tn WHERE id IN (1001, 1002, 1003, 1090, 1091);
+SET GLOBAL debug = '+d,spann_merge_threshold_low';
+SET SESSION innodb_interpreter = 'spann_maint test/tn merge';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+PASS: merge done
+SET GLOBAL debug = '-d,spann_merge_threshold_low';
+SET SESSION innodb_interpreter = 'spann_npa test/tn';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+npa_violations=2
+
+# The recall harness. Exact oracle: row 1089 IS the nearest to
+# [89,0]. The index path misses it — its only copy sits in the
+# merged list, which the probe pruning rightly never scans — and
+# serves the best row it can reach instead.
+SELECT id FROM tn IGNORE INDEX (vk) ORDER BY DISTANCE(v, STRING_TO_VECTOR('[89,0]'), 'EUCLIDEAN') LIMIT 1;
+id
+1089
+SELECT id FROM tn ORDER BY DISTANCE(v, STRING_TO_VECTOR('[89,0]'), 'EUCLIDEAN') LIMIT 1;
+id
+1104
+# REASSIGN: the violating labels get copies in their nearest head's
+# list (the debug build re-asserts the NPA invariant inside).
+SET SESSION innodb_interpreter = 'spann_maint test/tn reassign';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+PASS: reassign done
+SET SESSION innodb_interpreter = 'spann_npa test/tn';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+npa_violations=0
+
+# Recall restored: the index path agrees with the oracle again.
+SELECT id FROM tn ORDER BY DISTANCE(v, STRING_TO_VECTOR('[89,0]'), 'EUCLIDEAN') LIMIT 1;
+id
+1089
+SELECT id FROM tn ORDER BY DISTANCE(v, STRING_TO_VECTOR('[88.4,0]'), 'EUCLIDEAN') LIMIT 2;
+id
+1088
+1089
+SELECT id FROM tn IGNORE INDEX (vk) ORDER BY DISTANCE(v, STRING_TO_VECTOR('[88.4,0]'), 'EUCLIDEAN') LIMIT 2;
+id
+1088
+1089
+# A second pass is a no-op (converged); state survives restart.
+SET SESSION innodb_interpreter = 'spann_maint test/tn reassign';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+PASS: reassign done
+# restart
+# (The query also reopens the runtime, which spann_npa needs.)
+SELECT id FROM tn ORDER BY DISTANCE(v, STRING_TO_VECTOR('[89,0]'), 'EUCLIDEAN') LIMIT 1;
+id
+1089
+SET SESSION innodb_interpreter = 'spann_npa test/tn';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+npa_violations=0
+
+DROP TABLE tn;
+SET GLOBAL innodb_monitor_disable = 'module_vec';
+SET GLOBAL innodb_monitor_reset_all = 'module_vec';
+SET GLOBAL innodb_monitor_enable = default;
+SET GLOBAL innodb_monitor_disable = default;
+SET GLOBAL innodb_monitor_reset_all = default;

@@ -416,6 +416,22 @@ operators and tests alike.
 @return DB_SUCCESS, DB_INTERRUPTED on cancellation, or error */
 dberr_t vec_spann_gc(dict_table_t *table, THD *thd);
 
+/** L3: reassign — repair the NPA (nearest-posting-assignment)
+invariant: every live label holds a posting in its nearest live
+head's list. The write path guarantees it at insert time and splits
+re-assign optimally, so violations come from merges; the repair is
+APPENDS ONLY on one internal transaction — no fence, no publish, the
+head set does not change. In debug builds the invariant is
+re-verified after the pass.
+@return DB_SUCCESS, DB_INTERRUPTED on cancellation, or error */
+dberr_t vec_spann_reassign(dict_table_t *table, THD *thd);
+
+/** Count the current NPA violations (the spann_npa test command and
+the recall-harness observable).
+@return DB_SUCCESS or error */
+dberr_t vec_spann_npa_violations(dict_table_t *table, THD *thd,
+                                 uint64_t *count);
+
 /** Free the runtime (head graph, latch, counters). Safe on tables
 that never opened one — the vec_close analog. */
 void vec_spann_close(dict_table_t *table);
