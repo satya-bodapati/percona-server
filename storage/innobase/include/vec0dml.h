@@ -255,12 +255,30 @@ GC, once every copy of the label is swept.
 @return DB_SUCCESS, DB_RECORD_NOT_FOUND, or error */
 dberr_t vec_spann_dead_delete(trx_t *trx, dict_table_t *dead, uint64_t label);
 
-/** Enumerate (head_id, label) of every non-delete-marked posting
-record, latest versions — the L2 GC's single discovery scan. The
-callback must not run DML (open mini-transaction).
+/** Enumerate (head_id, label, row_ref, row_ref_len) of every
+non-delete-marked posting record, latest versions — the L2 GC's single
+discovery scan. The callback must not run DML (open
+mini-transaction); ref points into the page and is valid only during
+the call.
 @return DB_SUCCESS or error */
 dberr_t vec_spann_scan_all_postings(
-    dict_table_t *postings, const std::function<void(uint64_t, uint64_t)> &fn);
+    dict_table_t *postings,
+    const std::function<void(uint64_t, uint64_t, const byte *, ulint)> &fn);
+
+/** Decide whether a posting is a rollback ORPHAN by probing its base
+row (L2 GC): the posting is an orphan iff its base PK record is
+physically absent in any state (an insert always writes the base row
+before its postings, so absence means rollback or full purge), or the
+version visible to `view` — pass the OLDEST active view — carries a
+DIFFERENT vec_idx_id (PK reuse after the original insert rolled back;
+a live posting's label always equals its row's current label).
+Conservative on everything young: rows with no version visible to the
+oldest view are never called orphans. The caller must have excluded
+dead labels first — committed deletes belong to the _dead rule.
+@return DB_SUCCESS or error */
+dberr_t vec_spann_base_probe(dict_table_t *base, const byte *row_ref,
+                             ulint ref_len, ReadView *view, uint64_t label,
+                             bool *orphan);
 
 /** Collect the dead-label set visible under `view` (nullptr = latest)
 from a spann _dead table. Per-reader delete visibility IS this scan:
