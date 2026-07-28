@@ -58,6 +58,8 @@ enum class Vec_maint_op : uint8_t {
   /** L0: background global re-sample — rebuild the head set from a
   snapshot of the current postings, catch up, swap. */
   RESAMPLE,
+  /** L1: split ONE oversized list into two k-means halves. */
+  SPLIT,
   /** thread shutdown sentinel */
   STOP,
 };
@@ -76,10 +78,11 @@ worker signals `done` after the job and stores its outcome in
 DB_INTERRUPTED reported) when the thread is not running.
 @param[in]  op        job kind
 @param[in]  table_id  base table
+@param[in]  head_id   the list to operate on (SPLIT); 0 otherwise
 @param[in]  done      event to signal on completion, or nullptr
 @param[out] result    outcome sink, or nullptr */
-void vec_maint_enqueue(Vec_maint_op op, table_id_t table_id, os_event_t done,
-                       dberr_t *result);
+void vec_maint_enqueue(Vec_maint_op op, table_id_t table_id, uint64_t head_id,
+                       os_event_t done, dberr_t *result);
 
 /** Ban maintenance on `table_id` and wait until no job for it is
 running: queued jobs are skipped at dequeue, a running job is

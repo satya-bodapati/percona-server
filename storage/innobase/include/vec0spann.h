@@ -96,6 +96,111 @@ scanned. Like every probe constant this trades latency for recall —
 the search is approximate by construction. */
 constexpr size_t VEC_SPANN_PROBE_MIN = 2;
 
+/** L1 split trigger: a list whose since-load append counter crosses a
+multiple of this enqueues a SPLIT for itself (multiples, not a single
+edge, so an aborted split re-arms). INTERNAL; the
+"spann_split_threshold_low" DBUG knob drops it to 8 for tests. */
+constexpr uint64_t VEC_SPANN_SPLIT_THRESHOLD = 4096;
+
+/** Deterministic 2-means for one posting list (L1 split): farthest-
+point initialization (no RNG — the point farthest from the mean, then
+the point farthest from that), then at most `VEC_SPANN_KMEANS_ROUNDS`
+Lloyd's rounds of assign-to-nearer / recompute-mean. Pure and
+gunit-testable like vec_spann_select_heads.
+
+@param[in]  pts   the list's vectors (borrowed pointers)
+@param[in]  dims  vector dimensions
+@param[in]  dist  float(const float*, const float*): the space's raw
+                  distance kernel
+@param[out] c1    first centroid (replaced)
+@param[out] c2    second centroid (replaced)
+@return false when the list cannot split (fewer than two points, or
+all points identical — the centroids would coincide and every row
+would replicate into both halves, splitting nothing) */
+constexpr unsigned VEC_SPANN_KMEANS_ROUNDS = 8;
+
+template <typename Dist_fn>
+inline bool vec_spann_kmeans2(const std::vector<const float *> &pts,
+                              uint32_t dims, Dist_fn dist,
+                              std::vector<float> *c1, std::vector<float> *c2) {
+  if (pts.size() < 2) {
+    return false;
+  }
+
+  std::vector<float> mean(dims, 0.0f);
+  for (const float *p : pts) {
+    for (uint32_t d = 0; d < dims; ++d) {
+      mean[d] += p[d];
+    }
+  }
+  for (uint32_t d = 0; d < dims; ++d) {
+    mean[d] /= pts.size();
+  }
+
+  size_t a = 0;
+  float best = -1.0f;
+  for (size_t i = 0; i < pts.size(); ++i) {
+    const float dm = dist(pts[i], mean.data());
+    if (dm > best) {
+      best = dm;
+      a = i;
+    }
+  }
+  size_t b = 0;
+  best = -1.0f;
+  for (size_t i = 0; i < pts.size(); ++i) {
+    const float da = dist(pts[i], pts[a]);
+    if (da > best) {
+      best = da;
+      b = i;
+    }
+  }
+  if (dist(pts[a], pts[b]) == 0.0f) {
+    return false; /* all points identical */
+  }
+
+  c1->assign(pts[a], pts[a] + dims);
+  c2->assign(pts[b], pts[b] + dims);
+
+  std::vector<uint8_t> side(pts.size(), 0);
+  for (unsigned round = 0; round < VEC_SPANN_KMEANS_ROUNDS; ++round) {
+    bool changed = false;
+    for (size_t i = 0; i < pts.size(); ++i) {
+      const uint8_t s =
+          dist(pts[i], c2->data()) < dist(pts[i], c1->data()) ? 1 : 0;
+      if (s != side[i]) {
+        side[i] = s;
+        changed = true;
+      }
+    }
+    if (!changed && round != 0) {
+      break;
+    }
+    std::vector<float> m1(dims, 0.0f), m2(dims, 0.0f);
+    size_t n1 = 0, n2 = 0;
+    for (size_t i = 0; i < pts.size(); ++i) {
+      std::vector<float> &m = side[i] == 0 ? m1 : m2;
+      (side[i] == 0 ? n1 : n2) += 1;
+      for (uint32_t d = 0; d < dims; ++d) {
+        m[d] += pts[i][d];
+      }
+    }
+    /* An emptied side keeps its previous centroid. */
+    if (n1 != 0) {
+      for (uint32_t d = 0; d < dims; ++d) {
+        (*c1)[d] = m1[d] / n1;
+      }
+    }
+    if (n2 != 0) {
+      for (uint32_t d = 0; d < dims; ++d) {
+        (*c2)[d] = m2[d] / n2;
+      }
+    }
+  }
+
+  return true;
+}
+
 /** One head candidate for closure selection: the space's raw distance
 from the vector being assigned to this head. */
 struct vec_spann_head_cand_t {
@@ -274,6 +379,17 @@ for old readers until GC. Cancellation (vec_maint_cancel_and_wait) and
 crash are plain rollbacks — the old world stands.
 @return DB_SUCCESS, DB_INTERRUPTED on cancellation, or error */
 dberr_t vec_spann_resample(dict_table_t *table, THD *thd);
+
+/** L1: split ONE oversized list, the maintenance-thread job the
+insert path enqueues when a list's append counter crosses
+VEC_SPANN_SPLIT_THRESHOLD. Same one-transaction / fence / publish
+protocol as the re-sample, scoped to a single list: snapshot the list
+under the job trx's view (dead labels pruned — a split is also a
+compaction), k-means(2) it, two fresh-counter-id centroid heads, the
+old head's _meta row deleted, suffix catch-up under the fence, retire.
+A list that cannot split (all points identical) is a clean no-op.
+@return DB_SUCCESS, DB_INTERRUPTED on cancellation, or error */
+dberr_t vec_spann_split(dict_table_t *table, THD *thd, uint64_t head_id);
 
 /** Free the runtime (head graph, latch, counters). Safe on tables
 that never opened one — the vec_close analog. */

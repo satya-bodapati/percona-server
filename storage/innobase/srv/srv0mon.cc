@@ -1169,6 +1169,16 @@ static monitor_info_t innodb_counter_info[] = {
      " (DELETE and UPDATE paths)",
      MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_VEC_SPANN_DEAD_APPENDS},
 
+    {"vec_spann_splits", "vector_index",
+     "Number of posting-list splits completed by the vector maintenance"
+     " thread (SPANN L1)",
+     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_VEC_SPANN_SPLITS},
+
+    {"vec_spann_resamples", "vector_index",
+     "Number of global head-set re-samples completed by the vector"
+     " maintenance thread (SPANN L0)",
+     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_VEC_SPANN_RESAMPLES},
+
     /* ========== Counters for tablespace ========== */
     {"module_file", "file_system", "Tablespace and File System Manager",
      MONITOR_MODULE, MONITOR_DEFAULT_START, MONITOR_MODULE_FIL_SYSTEM},

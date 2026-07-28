@@ -17,7 +17,9 @@ NAME	COUNT
 vec_spann_dead_appends	0
 vec_spann_posting_appends	21
 vec_spann_probes	0
+vec_spann_resamples	0
 vec_spann_searches	0
+vec_spann_splits	0
 # Seeded rebuild: the build's 23 posting appends (closure included)
 # are counted too.
 ALTER TABLE tm DROP KEY vk;
@@ -30,7 +32,9 @@ NAME	COUNT
 vec_spann_dead_appends	0
 vec_spann_posting_appends	44
 vec_spann_probes	0
+vec_spann_resamples	0
 vec_spann_searches	0
+vec_spann_splits	0
 # Two searches: a mid-cluster query probes the floor (2 lists), a
 # far-out query still respects the floor — probes advance by 4.
 SELECT id FROM tm ORDER BY DISTANCE(v, STRING_TO_VECTOR('[2.1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
@@ -47,7 +51,9 @@ NAME	COUNT
 vec_spann_dead_appends	0
 vec_spann_posting_appends	44
 vec_spann_probes	4
+vec_spann_resamples	0
 vec_spann_searches	2
+vec_spann_splits	0
 # DELETE and vector UPDATE: dead appends move; the UPDATE also adds
 # a posting under its fresh label.
 DELETE FROM tm WHERE id = 3;
@@ -58,7 +64,9 @@ NAME	COUNT
 vec_spann_dead_appends	2
 vec_spann_posting_appends	45
 vec_spann_probes	4
+vec_spann_resamples	0
 vec_spann_searches	2
+vec_spann_splits	0
 # Health gauges: dead ratio against the labels still in postings,
 # and list balance (min/max/avg posting-list size).
 SET SESSION innodb_interpreter = 'spann_stats test/tm';

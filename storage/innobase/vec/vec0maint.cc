@@ -52,6 +52,7 @@ the queue owns and frees the heap after processing. */
 struct vec_maint_msg_t {
   Vec_maint_op op;
   table_id_t table_id;
+  uint64_t head_id;
   /** synchronous-caller hooks (tests); may be nullptr */
   os_event_t done;
   dberr_t *result;
@@ -73,12 +74,14 @@ table_id_t vec_maint_running = 0;
 constexpr std::chrono::seconds VEC_MAINT_WAIT{1};
 
 vec_maint_msg_t *vec_maint_create_msg(Vec_maint_op op, table_id_t table_id,
-                                      os_event_t done, dberr_t *result) {
+                                      uint64_t head_id, os_event_t done,
+                                      dberr_t *result) {
   mem_heap_t *heap = mem_heap_create(128, UT_LOCATION_HERE);
   auto *msg = static_cast<vec_maint_msg_t *>(
       mem_heap_alloc(heap, sizeof(vec_maint_msg_t)));
   msg->op = op;
   msg->table_id = table_id;
+  msg->head_id = head_id;
   msg->done = done;
   msg->result = result;
   msg->heap = heap;
@@ -103,6 +106,9 @@ dberr_t vec_maint_run_job(const vec_maint_msg_t *msg, THD *thd) {
   switch (msg->op) {
     case Vec_maint_op::RESAMPLE:
       err = vec_spann_resample(table, thd);
+      break;
+    case Vec_maint_op::SPLIT:
+      err = vec_spann_split(table, thd, msg->head_id);
       break;
     case Vec_maint_op::STOP:
       ut_d(ut_error);
@@ -189,7 +195,7 @@ void vec_maint_shutdown() {
     return;
   }
 
-  auto *msg = vec_maint_create_msg(Vec_maint_op::STOP, 0, nullptr, nullptr);
+  auto *msg = vec_maint_create_msg(Vec_maint_op::STOP, 0, 0, nullptr, nullptr);
   ib_wqueue_add(vec_maint_wq, msg, msg->heap);
 
   srv_threads.m_vec_maint.join();
@@ -214,8 +220,8 @@ void vec_maint_shutdown() {
   vec_maint_wq = nullptr;
 }
 
-void vec_maint_enqueue(Vec_maint_op op, table_id_t table_id, os_event_t done,
-                       dberr_t *result) {
+void vec_maint_enqueue(Vec_maint_op op, table_id_t table_id, uint64_t head_id,
+                       os_event_t done, dberr_t *result) {
   if (vec_maint_wq == nullptr) {
     if (result != nullptr) {
       *result = DB_INTERRUPTED;
@@ -225,7 +231,7 @@ void vec_maint_enqueue(Vec_maint_op op, table_id_t table_id, os_event_t done,
     }
     return;
   }
-  auto *msg = vec_maint_create_msg(op, table_id, done, result);
+  auto *msg = vec_maint_create_msg(op, table_id, head_id, done, result);
   ib_wqueue_add(vec_maint_wq, msg, msg->heap);
 }
 

@@ -1013,7 +1013,7 @@ Ret_t Tester::spann_maint(std::vector<std::string> &tokens) noexcept {
   dd_table_close(base, current_thd, &base_mdl, false);
 
   if (nowait) {
-    vec_maint_enqueue(Vec_maint_op::RESAMPLE, table_id, nullptr, nullptr);
+    vec_maint_enqueue(Vec_maint_op::RESAMPLE, table_id, 0, nullptr, nullptr);
     XLOG("PASS: enqueued");
     set_output(sout);
     return RET_PASS;
@@ -1021,7 +1021,7 @@ Ret_t Tester::spann_maint(std::vector<std::string> &tokens) noexcept {
 
   os_event_t done = os_event_create();
   dberr_t result = DB_ERROR;
-  vec_maint_enqueue(Vec_maint_op::RESAMPLE, table_id, done, &result);
+  vec_maint_enqueue(Vec_maint_op::RESAMPLE, table_id, 0, done, &result);
   os_event_wait(done);
   os_event_destroy(done);
 
