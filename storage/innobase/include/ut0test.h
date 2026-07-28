@@ -287,6 +287,13 @@ struct Tester {
   @return RET_PASS on success */
   [[nodiscard]] Ret_t spann_stats(std::vector<std::string> &tokens) noexcept;
 
+  /** Enqueue a maintenance job for a spann index on the background
+  maintenance thread (phase L) and, by default, wait for it.
+  Usage: spann_maint db/table resample [nowait]
+  @param[in] tokens tokenized command
+  @return RET_PASS on success */
+  [[nodiscard]] Ret_t spann_maint(std::vector<std::string> &tokens) noexcept;
+
   /** A macro to declare a dispatch function or a command function.  They all
   have the same signature.
   @param[in]   func_  the function that is being declared. */

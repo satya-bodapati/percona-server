@@ -44,6 +44,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "vec0aux.h"
 #include "vec0dml.h"
 #include "vec0index.h"
+#include "vec0maint.h"
 #include "vec0spann.h"
 
 #define CALL_MEMBER_FN(object, ptrToMember) ((object).*(ptrToMember))
@@ -87,6 +88,7 @@ Tester::Tester() noexcept {
   DISPATCH(vec_knn);
   DISPATCH(spann_dump);
   DISPATCH(spann_stats);
+  DISPATCH(spann_maint);
   DISPATCH(print_dblwr_has_encrypted_pages);
   DISPATCH(print_tree);
 }
@@ -972,8 +974,63 @@ Ret_t Tester::spann_stats(std::vector<std::string> &tokens) noexcept {
        << " postings=" << obs.n_postings << " labels=" << obs.labels.size()
        << " dead=" << obs.n_dead << " dead_ratio_pct=" << dead_ratio_pct
        << " list_min=" << list_min << " list_max=" << list_max
-       << " list_avg=" << list_avg << "\n";
+       << " list_avg=" << list_avg;
+  if (obs.has_rt) {
+    sout << " retired=" << obs.rt.n_retired;
+  }
+  sout << "\n";
 
+  set_output(sout);
+  return RET_PASS;
+}
+
+Ret_t Tester::spann_maint(std::vector<std::string> &tokens) noexcept {
+  TLOG("Tester::spann_maint()");
+  ut_ad(tokens[0] == "spann_maint");
+  std::ostringstream sout;
+  /* tokens: 0=cmd 1=db/table 2=op [3=nowait] */
+  if (tokens.size() != 3 && tokens.size() != 4) {
+    XLOG("FAIL: usage: spann_maint db/table resample [nowait]");
+    set_output(sout);
+    return RET_FAIL;
+  }
+  if (tokens[2] != "resample") {
+    XLOG("FAIL: unknown op " << tokens[2]);
+    set_output(sout);
+    return RET_FAIL;
+  }
+  const bool nowait = tokens.size() == 4 && tokens[3] == "nowait";
+
+  MDL_ticket *base_mdl = nullptr;
+  dict_table_t *base = dd_table_open_on_name(
+      current_thd, &base_mdl, tokens[1].c_str(), false, DICT_ERR_IGNORE_NONE);
+  if (base == nullptr) {
+    XLOG("FAIL: no such table " << tokens[1]);
+    set_output(sout);
+    return RET_FAIL;
+  }
+  const table_id_t table_id = base->id;
+  dd_table_close(base, current_thd, &base_mdl, false);
+
+  if (nowait) {
+    vec_maint_enqueue(Vec_maint_op::RESAMPLE, table_id, nullptr, nullptr);
+    XLOG("PASS: enqueued");
+    set_output(sout);
+    return RET_PASS;
+  }
+
+  os_event_t done = os_event_create();
+  dberr_t result = DB_ERROR;
+  vec_maint_enqueue(Vec_maint_op::RESAMPLE, table_id, done, &result);
+  os_event_wait(done);
+  os_event_destroy(done);
+
+  if (result != DB_SUCCESS) {
+    XLOG("FAIL: maintenance err=" << static_cast<int>(result));
+    set_output(sout);
+    return RET_FAIL;
+  }
+  XLOG("PASS: resample done");
   set_output(sout);
   return RET_PASS;
 }

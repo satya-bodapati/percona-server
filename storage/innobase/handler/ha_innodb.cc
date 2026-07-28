@@ -915,6 +915,8 @@ static PSI_thread_info all_innodb_threads[] = {
                    PSI_FLAG_SINGLETON, 0, PSI_DOCUMENT_ME),
     PSI_THREAD_KEY(fts_optimize_thread, "ib_fts_opt", PSI_FLAG_SINGLETON, 0,
                    PSI_DOCUMENT_ME),
+    PSI_THREAD_KEY(vec_maint_thread, "ib_vec_maint", PSI_FLAG_SINGLETON, 0,
+                   PSI_DOCUMENT_ME),
     PSI_THREAD_KEY(fts_parallel_merge_thread, "ib_fts_merge", 0, 0,
                    PSI_DOCUMENT_ME),
     PSI_THREAD_KEY(fts_parallel_tokenization_thread, "ib_fts_token", 0, 0,

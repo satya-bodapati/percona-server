@@ -126,6 +126,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "usr0sess.h"
 #include "ut0crc32.h"
 #include "ut0new.h"
+#include "vec0maint.h"
 
 /** fil_space_t::flags for hard-coded tablespaces */
 extern uint32_t predefined_flags;
@@ -180,6 +181,7 @@ mysql_pfs_key_t clone_gtid_thread_key;
 mysql_pfs_key_t ddl_thread_key;
 mysql_pfs_key_t dict_stats_thread_key;
 mysql_pfs_key_t fts_optimize_thread_key;
+mysql_pfs_key_t vec_maint_thread_key;
 mysql_pfs_key_t fts_parallel_merge_thread_key;
 mysql_pfs_key_t fts_parallel_tokenization_thread_key;
 mysql_pfs_key_t srv_error_monitor_thread_key;
@@ -2356,6 +2358,9 @@ void srv_start_threads() {
   /* Create the thread that will optimize the FTS sub-system. */
   fts_optimize_init();
 
+  /* And the vector-index maintenance thread (SPANN phase L). */
+  vec_maint_init();
+
   srv_start_state_set(SRV_START_STATE_STAT);
 }
 
@@ -2550,6 +2555,7 @@ void srv_pre_dd_shutdown() {
   srv_shutdown_set_state(SRV_SHUTDOWN_PRE_DD_AND_SYSTEM_TRANSACTIONS);
 
   if (srv_start_state_is_set(SRV_START_STATE_STAT)) {
+    vec_maint_shutdown();
     fts_optimize_shutdown();
     dict_stats_shutdown();
     dict_stats_thread_deinit();

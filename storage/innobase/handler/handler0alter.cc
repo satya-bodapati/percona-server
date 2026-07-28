@@ -111,6 +111,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ut0stage.h"
 #include "vec0aux.h"
 #include "vec0index.h"
+#include "vec0maint.h"
 #include "vec0vec.h"
 
 /* For supporting Native InnoDB Partitioning. */
@@ -5506,8 +5507,9 @@ error_handled:
       }
 
       /* Mirror the FTS aux drop above for vector aux — same shape,
-      same flag-based gate. */
+      same flag-based gate. Ban maintenance first (phase L). */
       if (DICT_TF2_FLAG_IS_SET(ctx->new_table, DICT_TF2_VEC_HAS_IDX_ID)) {
+        vec_maint_cancel_and_wait(ctx->new_table->id);
         (void)vec_aux_drop_all_tables(ctx->trx, ctx->new_table);
       }
 
@@ -7740,7 +7742,9 @@ after a successful commit_try_norebuild() call.
         graph before its aux table goes away (the commit phase holds
         exclusive MDL, so no writer is inside the graph). Rebuild and
         DROP TABLE paths need no call: their dict_table_t is freed and
-        dict_mem_table_free closes the graph. */
+        dict_mem_table_free closes the graph. Ban maintenance first
+        (phase L) — a re-ADD lifts the ban at aux creation. */
+        vec_maint_cancel_and_wait(index->table->id);
         vec_index_for(index->table)->close(index->table);
         (void)vec_aux_drop_one_table(trx, index->table, index->id,
                                      index->vec_type);

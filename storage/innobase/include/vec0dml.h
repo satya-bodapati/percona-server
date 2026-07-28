@@ -231,7 +231,17 @@ non-delete-marked postings; dead-label filtering is the caller's job
 @return DB_SUCCESS or error */
 dberr_t vec_spann_scan_list(trx_t *trx, dict_table_t *postings,
                             uint64_t head_id, uint32_t dims, ReadView *view,
-                            const vec_spann_posting_fn &fn);
+                            const vec_spann_posting_fn &fn,
+                            uint64_t label_gt = 0);
+
+/** DELETE one _meta row by PK (mtype, id) — head retirement (phase
+L): a plain row delete on the maintenance transaction, so old readers
+keep seeing the head via MVCC and purge reclaims it (never a status
+flag). Positioned upd_node with is_delete, same locking discipline as
+vec_aux_update_row_low.
+@return DB_SUCCESS, DB_RECORD_NOT_FOUND if no such row, or error */
+dberr_t vec_spann_meta_delete(trx_t *trx, dict_table_t *meta, uint8_t mtype,
+                              uint64_t id);
 
 /** Collect the dead-label set visible under `view` (nullptr = latest)
 from a spann _dead table. Per-reader delete visibility IS this scan:

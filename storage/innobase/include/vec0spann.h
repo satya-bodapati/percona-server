@@ -173,8 +173,11 @@ constexpr uint64_t VEC_SPANN_GENESIS_HEAD_ID = 0;
 
 /** Runtime stats for observability (spann_dump). */
 struct vec_spann_stats_t {
-  /** heads in the RAM graph (includes the implicit genesis head) */
+  /** heads in the RAM graph (includes the implicit genesis head and
+  not-yet-GC'd retired heads) */
   size_t n_heads;
+  /** retired heads still probed for old readers (phase L) */
+  size_t n_retired;
   /** dead-label inserts since this runtime loaded (LIRE feed) */
   uint64_t dead_appends;
   /** per-list posting appends since this runtime loaded (LIRE feed) */
@@ -257,6 +260,20 @@ dberr_t vec_spann_knn(dict_table_t *table, THD *thd, const float *query,
                       uint32_t dims, size_t k, size_t ef,
                       std::vector<vec_knn_hit_t> *hits,
                       const std::unordered_set<uint64_t> *exclude);
+
+/** L0: background global re-sample, the maintenance-thread job that
+rebuilds the head set from the CURRENT postings (never the base
+table): snapshot every live label under the job trx's read view,
+sample a new head set (fresh counter ids — head identity and label
+identity share the crash-safe counter), write the new generation's
+_meta rows and postings plus the old generation's _meta deletes all on
+that ONE transaction, catch the concurrent-insert suffix
+(label > snapshot boundary) under a brief X fence on the runtime
+latch, commit, and publish: new heads live, old heads retired-in-RAM
+for old readers until GC. Cancellation (vec_maint_cancel_and_wait) and
+crash are plain rollbacks — the old world stands.
+@return DB_SUCCESS, DB_INTERRUPTED on cancellation, or error */
+dberr_t vec_spann_resample(dict_table_t *table, THD *thd);
 
 /** Free the runtime (head graph, latch, counters). Safe on tables
 that never opened one — the vec_close analog. */

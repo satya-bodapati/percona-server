@@ -55,6 +55,7 @@ naming. No population — that lands in PS-11300. */
 #include "univ.i"
 #include "ut0new.h"
 #include "vec0index.h"
+#include "vec0maint.h"
 
 const char *VEC_AUX_PREFIX = "vec_";
 
@@ -404,6 +405,11 @@ dberr_t vec_aux_create_one_table(trx_t *trx, const dict_table_t *parent,
       return err;
     }
   }
+
+  /* A fresh aux set lifts any maintenance ban left by the drop that
+  preceded it (DROP INDEX + re-ADD, TRUNCATE re-mint, IMPORT). */
+  vec_maint_allow(parent->id);
+
   return DB_SUCCESS;
 }
 

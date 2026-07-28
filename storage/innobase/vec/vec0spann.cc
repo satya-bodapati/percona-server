@@ -57,18 +57,24 @@ A never-built index has no HEAD rows: the implicit genesis head
 
 #include "extra/hnswlib/hnswlib.h"
 
+#include "current_thd.h"
+#include "debug_sync.h"
 #include "dict0dict.h"
 #include "ha_innodb.h" /* thd_to_trx */
 #include "my_dbug.h"
+#include "read0read.h"
 #include "srv0mon.h"
 #include "sync0rw.h"
 #include "sync0sync.h"
+#include "trx0roll.h"
+#include "trx0sys.h"
 #include "trx0trx.h"
 #include "ut0new.h"
 #include "ut0rnd.h"
 #include "vec0aux.h"
 #include "vec0dml.h"
 #include "vec0index.h"
+#include "vec0maint.h"
 
 dberr_t vec_spann_build_index(trx_t *trx, dict_table_t *table,
                               const dict_index_t *vec_index, uint32_t dims,
@@ -271,6 +277,31 @@ struct Vec_spann_runtime : public Vec_runtime {
   committed-only cache keyed by a low-water trx id (S7+), not a set
   maintained from the write path. */
   std::atomic<uint64_t> dead_appends{0};
+
+  /** Retired heads (phase L): head -> the maintenance trx that
+  retired it. THE TRANSITION PROTOCOL IN ONE FIELD — a retired head
+  stays in the RAM graph so readers keep probing its list (their read
+  views decide what they see there; a pre-swap view finds the old
+  world, a post-swap view finds the list superseded), but the WRITE
+  routing filters it out, so its list is append-frozen the moment it
+  retires. Once no active read view predates the retirement
+  (clone_oldest_view check), the head is dropped from the graph
+  (markDelete) — its list is then unreachable garbage for L2 to trim.
+  Modified under the latch in X; read under S. */
+  std::map<uint64_t, trx_id_t> retired;
+};
+
+/** Write-routing filter: retired heads take no new postings. */
+class Vec_live_head_filter : public hnswlib::BaseFilterFunctor {
+ public:
+  explicit Vec_live_head_filter(const std::map<uint64_t, trx_id_t> &retired)
+      : m_retired(retired) {}
+  bool operator()(hnswlib::labeltype label) override {
+    return m_retired.count(label) == 0;
+  }
+
+ private:
+  const std::map<uint64_t, trx_id_t> &m_retired;
 };
 
 /** The spann runtime of `table`, or nullptr. This file allocated it
@@ -346,12 +377,15 @@ static dberr_t vec_spann_load_locked(Vec_spann_runtime *rt, THD *thd) {
                            std::vector<float>(rt->dims, 0.0f));
   }
 
-  /* Replace any previous graph (reload after build/DDL). */
+  /* Replace any previous graph (reload after build/DDL). Retirements
+  do not survive a reload: _meta no longer has the retired heads, and
+  a reload can only run where no reader is mid-flight (fresh open). */
   delete rt->heads;
   rt->heads = nullptr;
   delete rt->space;
   rt->space = nullptr;
   rt->head_vecs.clear();
+  rt->retired.clear();
 
   try {
     rt->space = new hnswlib::L2Space(rt->dims);
@@ -429,14 +463,21 @@ dberr_t vec_spann_insert_point(trx_t *trx, dict_table_t *table, THD *thd,
   std::vector<uint64_t> selected;
 
   {
-    const size_t k =
-        std::min<size_t>(VEC_SPANN_CLOSURE_MAX, rt->head_vecs.size());
+    /* Route against LIVE heads only: a retired head's list is
+    append-frozen from the moment of retirement (see
+    Vec_spann_runtime::retired), so a row landing there could be lost
+    to post-GC readers. */
+    const size_t n_live = rt->head_vecs.size() - rt->retired.size();
+    ut_a(n_live > 0); /* the head set is never empty */
+    const size_t k = std::min<size_t>(VEC_SPANN_CLOSURE_MAX, n_live);
     const hnswlib::DISTFUNC<float> dist_func = rt->space->get_dist_func();
     void *dist_param = rt->space->get_dist_func_param();
 
     std::vector<vec_spann_head_cand_t> cands;
     try {
-      const auto found = rt->heads->searchKnnCloserFirst(vec_data, k);
+      Vec_live_head_filter filter(rt->retired);
+      const auto found = rt->heads->searchKnnCloserFirst(
+          vec_data, k, rt->retired.empty() ? nullptr : &filter);
       cands.reserve(found.size());
       for (const auto &c : found) {
         cands.push_back({c.first, static_cast<uint64_t>(c.second)});
@@ -478,6 +519,420 @@ dberr_t vec_spann_insert_point(trx_t *trx, dict_table_t *table, THD *thd,
 
   rw_lock_s_unlock(&rt->latch);
   vec_aux_close_for_dml(postings, thd, &mdl);
+
+  return err;
+}
+
+/* ------------------------------------------------------------------
+Phase L: the head-set transition protocol and its jobs.
+
+The one idea: readers never coordinate with maintenance. The RAM graph
+holds the UNION of live and retired heads; every reader probes it and
+its own read view decides, list by list, whether it sees the old world
+or the new one; label dedup absorbs rows found in both. Writers route
+around retired heads, so retired lists are append-frozen and can be
+garbage-collected once every active view postdates the retirement. */
+
+/** Add `new_heads` to the live graph and retire `old_heads` as of
+`retire_id` (the maintenance trx). Caller holds rt->latch in X and has
+COMMITTED the transaction that made the corresponding _meta swap
+durable — publish only re-states committed truth in RAM. */
+static void vec_spann_publish_locked(
+    Vec_spann_runtime *rt, const std::vector<vec_spann_head_t> &new_heads,
+    const std::vector<uint64_t> &old_heads, trx_id_t retire_id) {
+  ut_ad(rw_lock_own(&rt->latch, RW_LOCK_X));
+
+  /* Grow the graph if needed (resizeIndex is X-latch-only, which we
+  hold). */
+  const size_t need = rt->heads->cur_element_count.load() + new_heads.size();
+  if (need > rt->heads->max_elements_) {
+    rt->heads->resizeIndex(std::max(need, 2 * rt->heads->max_elements_));
+  }
+
+  for (const auto &h : new_heads) {
+    rt->heads->addPoint(h.second.data(), h.first, false, nullptr);
+    rt->head_vecs.emplace(h.first, h.second);
+  }
+  for (const uint64_t h : old_heads) {
+    rt->retired.emplace(h, retire_id);
+  }
+
+  /* New generation, new split-trigger baseline. */
+  {
+    std::lock_guard<std::mutex> g(rt->counter_mutex);
+    rt->list_appends.clear();
+  }
+}
+
+/** Drop retired heads no active read view can still need: once the
+oldest view sees `retire_id` as committed, every reader also sees the
+new generation's postings, so the retired list is pure garbage (L2
+trims the rows). markDelete hides the head from future probes. */
+static void vec_spann_gc_retired(dict_table_t *table) {
+  Vec_spann_runtime *rt = spann_rt(table);
+  if (rt == nullptr) {
+    return;
+  }
+
+  rw_lock_x_lock(&rt->latch, UT_LOCATION_HERE);
+  if (rt->loaded && !rt->retired.empty()) {
+    ReadView oldest;
+    trx_sys->mvcc->clone_oldest_view(&oldest);
+
+    for (auto it = rt->retired.begin(); it != rt->retired.end();) {
+      if (oldest.changes_visible(it->second, table->name)) {
+        try {
+          rt->heads->markDelete(it->first);
+        } catch (...) {
+          /* not in the graph: nothing to hide */
+        }
+        rt->head_vecs.erase(it->first);
+        it = rt->retired.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  rw_lock_x_unlock(&rt->latch);
+}
+
+/** One collected (label, vector, row_ref) for regeneration. */
+struct vec_spann_snap_row_t {
+  uint64_t label;
+  std::vector<float> vec;
+  std::string ref;
+};
+
+dberr_t vec_spann_resample(dict_table_t *table, THD *thd) {
+  Vec_spann_runtime *rt = spann_rt(table);
+  if (rt == nullptr) {
+    /* Not opened since restart: nobody is writing through it either;
+    nothing to rebalance that a later open + enqueue cannot redo. */
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  rw_lock_s_lock(&rt->latch, UT_LOCATION_HERE);
+  if (!rt->loaded) {
+    rw_lock_s_unlock(&rt->latch);
+    dberr_t lerr = vec_spann_load(table, thd);
+    if (lerr != DB_SUCCESS) {
+      return lerr;
+    }
+    rw_lock_s_lock(&rt->latch, UT_LOCATION_HERE);
+  }
+  /* The OLD generation = the currently live heads. */
+  std::vector<uint64_t> old_live;
+  old_live.reserve(rt->head_vecs.size());
+  for (const auto &hv : rt->head_vecs) {
+    if (rt->retired.count(hv.first) == 0) {
+      old_live.push_back(hv.first);
+    }
+  }
+  const uint32_t dims = rt->dims;
+  rw_lock_s_unlock(&rt->latch);
+
+  /* Labels above this are the catch-up suffix: everything the
+  snapshot below can miss was stamped after this point and routed to
+  the old live heads (routing flips only at publish). */
+  const uint64_t snap_next = table->vec_next_id.load();
+
+  MDL_ticket *post_mdl = nullptr;
+  dict_table_t *postings = vec_aux_open_for_dml(
+      table, rt->index_id, Vec_index_type::SPANN, "", thd, &post_mdl);
+  if (postings == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+  MDL_ticket *meta_mdl = nullptr;
+  dict_table_t *meta = vec_aux_open_for_dml(
+      table, rt->index_id, Vec_index_type::SPANN, "_meta", thd, &meta_mdl);
+  MDL_ticket *dead_mdl = nullptr;
+  dict_table_t *dead =
+      meta == nullptr
+          ? nullptr
+          : vec_aux_open_for_dml(table, rt->index_id, Vec_index_type::SPANN,
+                                 "_dead", thd, &dead_mdl);
+  if (meta == nullptr || dead == nullptr) {
+    if (meta != nullptr) {
+      vec_aux_close_for_dml(meta, thd, &meta_mdl);
+    }
+    vec_aux_close_for_dml(postings, thd, &post_mdl);
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  /* The maintenance transaction: every disk mutation of this job
+  rides it — meta inserts, meta deletes, posting re-appends — so a
+  crash or cancellation at ANY point is a plain rollback and the old
+  world stands untouched. Its read view is the snapshot boundary. */
+  trx_t *trx = trx_allocate_for_background();
+  trx_start_internal(trx, UT_LOCATION_HERE);
+  ReadView *view = trx_assign_read_view(trx);
+
+  dberr_t err = view == nullptr ? DB_OUT_OF_RESOURCES : DB_SUCCESS;
+
+  std::unordered_set<uint64_t> dead_set;
+  if (err == DB_SUCCESS) {
+    err = vec_spann_load_dead_set(dead, view, &dead_set);
+  }
+
+  /* Snapshot: every live (visible, not dead) label with its vector
+  and row_ref, deduped across closure copies, straight from the old
+  posting lists — the base table is never touched. */
+  std::vector<vec_spann_snap_row_t> rows;
+  {
+    std::unordered_set<uint64_t> seen;
+    for (const uint64_t h : old_live) {
+      if (err != DB_SUCCESS) {
+        break;
+      }
+      if (vec_maint_is_canceled(table->id)) {
+        err = DB_INTERRUPTED;
+        break;
+      }
+      err = vec_spann_scan_list(
+          trx, postings, h, dims, view,
+          [&](uint64_t label, const float *vec, const byte *ref,
+              ulint ref_len) {
+            if (dead_set.count(label) != 0 || !seen.insert(label).second) {
+              return;
+            }
+            vec_spann_snap_row_t r;
+            r.label = label;
+            r.vec.assign(vec, vec + dims);
+            r.ref.assign(reinterpret_cast<const char *>(ref), ref_len);
+            rows.push_back(std::move(r));
+          });
+    }
+  }
+
+  if (err == DB_SUCCESS && rows.empty()) {
+    /* Nothing to regenerate; keep the old head set (it is never
+    replaced by an EMPTY one — the genesis rule needs a head). */
+    trx_rollback_to_savepoint(trx, nullptr);
+    trx_free_for_background(trx);
+    vec_aux_close_for_dml(dead, thd, &dead_mdl);
+    vec_aux_close_for_dml(meta, thd, &meta_mdl);
+    vec_aux_close_for_dml(postings, thd, &post_mdl);
+    return DB_SUCCESS;
+  }
+
+  /* New head set: sampled from the snapshot (same rule as the S2
+  build), but with FRESH counter ids — head identity and label
+  identity share the crash-safe counter, so a regenerated head can
+  never collide with any label or any prior head. */
+  std::vector<vec_spann_head_t> new_heads;
+  hnswlib::L2Space *space = nullptr;
+  hnswlib::HierarchicalNSW<float> *route = nullptr;
+
+  if (err == DB_SUCCESS) {
+    const size_t n_heads =
+        std::max<size_t>(1, rows.size() * VEC_SPANN_HEADS_PCT / 100);
+
+    uint64_t seed = ut::random_64();
+    DBUG_EXECUTE_IF("spann_build_seed_42", seed = 42;);
+
+    std::vector<size_t> order(rows.size());
+    std::iota(order.begin(), order.end(), 0);
+    {
+      std::mt19937_64 rng(seed);
+      std::shuffle(order.begin(), order.end(), rng);
+    }
+    order.resize(n_heads);
+    std::sort(order.begin(), order.end(), [&rows](size_t a, size_t b) {
+      return rows[a].label < rows[b].label;
+    });
+
+    try {
+      space = new hnswlib::L2Space(dims);
+      route = new hnswlib::HierarchicalNSW<float>(space, n_heads, rt->M,
+                                                  rt->ef_construction);
+    } catch (...) {
+      err = DB_OUT_OF_MEMORY;
+    }
+
+    for (const size_t pos : order) {
+      if (err != DB_SUCCESS) {
+        break;
+      }
+      const uint64_t head_id = vec_assign_next_idx_id(table);
+      err = vec_spann_meta_insert(
+          trx, meta, VEC_SPANN_META_HEAD, head_id,
+          reinterpret_cast<const byte *>(rows[pos].vec.data()),
+          dims * sizeof(float));
+      if (err != DB_SUCCESS) {
+        break;
+      }
+      try {
+        route->addPoint(rows[pos].vec.data(), head_id, false, nullptr);
+      } catch (...) {
+        err = DB_OUT_OF_MEMORY;
+        break;
+      }
+      new_heads.emplace_back(head_id, rows[pos].vec);
+    }
+  }
+
+  /* Assignment closure over the new heads (S2's rule verbatim). */
+  const hnswlib::DISTFUNC<float> dist_func =
+      space != nullptr ? space->get_dist_func() : nullptr;
+  void *dist_param = space != nullptr ? space->get_dist_func_param() : nullptr;
+
+  const auto head_dist = [&](uint64_t a, uint64_t b) {
+    auto va = std::lower_bound(
+        new_heads.begin(), new_heads.end(), a,
+        [](const vec_spann_head_t &h, uint64_t id) { return h.first < id; });
+    auto vb = std::lower_bound(
+        new_heads.begin(), new_heads.end(), b,
+        [](const vec_spann_head_t &h, uint64_t id) { return h.first < id; });
+    return dist_func(va->second.data(), vb->second.data(), dist_param);
+  };
+
+  const auto assign_one = [&](uint64_t label, const float *vec, const byte *ref,
+                              ulint ref_len) -> dberr_t {
+    const size_t k = std::min<size_t>(VEC_SPANN_CLOSURE_MAX, new_heads.size());
+    std::vector<vec_spann_head_cand_t> cands;
+    try {
+      const auto found = route->searchKnnCloserFirst(vec, k);
+      cands.reserve(found.size());
+      for (const auto &c : found) {
+        cands.push_back({c.first, static_cast<uint64_t>(c.second)});
+      }
+    } catch (...) {
+      return DB_OUT_OF_MEMORY;
+    }
+    std::vector<uint64_t> selected;
+    vec_spann_select_heads(cands, VEC_SPANN_CLOSURE_EPS, VEC_SPANN_CLOSURE_MAX,
+                           head_dist, &selected);
+    ut_a(!selected.empty());
+    for (const uint64_t h : selected) {
+      const dberr_t ierr = vec_spann_posting_insert(trx, postings, h, label,
+                                                    vec, dims, ref, ref_len);
+      if (ierr != DB_SUCCESS) {
+        return ierr;
+      }
+    }
+    return DB_SUCCESS;
+  };
+
+  if (err == DB_SUCCESS) {
+    size_t n_done = 0;
+    for (const auto &r : rows) {
+      err = assign_one(r.label, r.vec.data(),
+                       reinterpret_cast<const byte *>(r.ref.data()),
+                       r.ref.size());
+      if (err != DB_SUCCESS) {
+        break;
+      }
+      if (++n_done % 256 == 0 && vec_maint_is_canceled(table->id)) {
+        err = DB_INTERRUPTED;
+        break;
+      }
+    }
+  }
+
+  /* Retire the old generation's identity: plain row DELETEs, so a
+  reader whose view predates this trx keeps loading... nothing — the
+  RAM graph is what readers use; these deletes matter to the NEXT
+  load. The genesis head has no _meta row by definition. */
+  if (err == DB_SUCCESS) {
+    for (const uint64_t h : old_live) {
+      if (h == VEC_SPANN_GENESIS_HEAD_ID) {
+        continue;
+      }
+      const dberr_t derr =
+          vec_spann_meta_delete(trx, meta, VEC_SPANN_META_HEAD, h);
+      if (derr != DB_SUCCESS && derr != DB_RECORD_NOT_FOUND) {
+        err = derr;
+        break;
+      }
+    }
+  }
+
+  /* Test choreography hook: pause with the new generation fully
+  staged (uncommitted) but the fence not yet taken — concurrent DML
+  runs against the old world here. */
+  DBUG_EXECUTE_IF("spann_resample_pause", {
+    const char act[] =
+        "now SIGNAL spann_resample_paused WAIT_FOR spann_resample_go";
+    ut_a(!debug_sync_set_action(current_thd, STRING_WITH_LEN(act)));
+  });
+
+  /* Last pre-fence cancellation point — in particular the one a DDL
+  that queued up behind the test pause above relies on. */
+  if (err == DB_SUCCESS && vec_maint_is_canceled(table->id)) {
+    err = DB_INTERRUPTED;
+  }
+
+  if (err == DB_SUCCESS) {
+    /* THE FENCE. X on the runtime latch: no insert is mid-route (they
+    hold S across route+append), so the old lists' suffixes are final
+    once scanned here. Latest-read on purpose: a row from a still-open
+    user trx was already routed to an old list — its copy must exist
+    in the new generation the moment that trx commits. If the trx
+    rolls back instead, the copy is an orphan whose base fetch misses
+    (skipped by every reader) until L2 trims it: extra work, right
+    answer. */
+    rw_lock_x_lock(&rt->latch, UT_LOCATION_HERE);
+
+    /* Collect the suffix first, insert after: DML inside a scan
+    callback would run under the scan's open mini-transaction
+    (log_free_check forbids exactly that). */
+    std::vector<vec_spann_snap_row_t> catchup;
+    std::unordered_set<uint64_t> caught;
+    for (const uint64_t h : old_live) {
+      if (err != DB_SUCCESS) {
+        break;
+      }
+      err = vec_spann_scan_list(
+          trx, postings, h, dims, nullptr /* latest */,
+          [&](uint64_t label, const float *vec, const byte *ref,
+              ulint ref_len) {
+            if (!caught.insert(label).second) {
+              return;
+            }
+            vec_spann_snap_row_t r;
+            r.label = label;
+            r.vec.assign(vec, vec + dims);
+            r.ref.assign(reinterpret_cast<const char *>(ref), ref_len);
+            catchup.push_back(std::move(r));
+          },
+          snap_next /* label_gt: the suffix */);
+    }
+    for (const auto &r : catchup) {
+      if (err != DB_SUCCESS) {
+        break;
+      }
+      err = assign_one(r.label, r.vec.data(),
+                       reinterpret_cast<const byte *>(r.ref.data()),
+                       r.ref.size());
+    }
+
+    if (err == DB_SUCCESS) {
+      /* Commit under the fence (one redo sync), then re-state the
+      committed truth in RAM. A crash between the two leaves the
+      committed new world on disk and a stale RAM graph that the
+      restart reload replaces — never the reverse. */
+      const trx_id_t retire_id = trx->id;
+      trx_commit_for_mysql(trx);
+      vec_spann_publish_locked(rt, new_heads, old_live, retire_id);
+      rw_lock_x_unlock(&rt->latch);
+    } else {
+      rw_lock_x_unlock(&rt->latch);
+      trx_rollback_to_savepoint(trx, nullptr);
+    }
+  } else {
+    trx_rollback_to_savepoint(trx, nullptr);
+  }
+
+  delete route;
+  delete space;
+  trx_free_for_background(trx);
+  vec_aux_close_for_dml(dead, thd, &dead_mdl);
+  vec_aux_close_for_dml(meta, thd, &meta_mdl);
+  vec_aux_close_for_dml(postings, thd, &post_mdl);
+
+  if (err == DB_SUCCESS) {
+    vec_spann_gc_retired(table);
+  }
 
   return err;
 }
@@ -673,6 +1128,7 @@ bool vec_spann_runtime_stats(dict_table_t *table, vec_spann_stats_t *stats) {
     return false;
   }
   stats->n_heads = rt->head_vecs.size();
+  stats->n_retired = rt->retired.size();
   stats->dead_appends = rt->dead_appends.load(std::memory_order_relaxed);
   {
     std::lock_guard<std::mutex> g(rt->counter_mutex);
