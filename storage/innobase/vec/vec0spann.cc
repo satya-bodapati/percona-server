@@ -616,6 +616,25 @@ struct vec_spann_snap_row_t {
   std::string ref;
 };
 
+/** Load the committed dead-label set on a SCOPED read-only
+transaction: the view opens, the (small) _dead table is scanned, the
+trx commits and the view closes — milliseconds. Maintenance jobs use
+this instead of assigning a view to their own long transaction, so no
+job ever pins purge's low-water mark beyond one _dead scan (a long
+registered view stalls purge exactly like any long reader would). */
+static dberr_t vec_spann_dead_set_scoped(dict_table_t *dead,
+                                         std::unordered_set<uint64_t> *out) {
+  trx_t *trx = trx_allocate_for_background();
+  trx_start_internal_read_only(trx, UT_LOCATION_HERE);
+  ReadView *view = trx_assign_read_view(trx);
+  const dberr_t err = view == nullptr
+                          ? DB_OUT_OF_RESOURCES
+                          : vec_spann_load_dead_set(dead, view, out);
+  trx_commit_for_mysql(trx);
+  trx_free_for_background(trx);
+  return err;
+}
+
 dberr_t vec_spann_resample(dict_table_t *table, THD *thd) {
   Vec_spann_runtime *rt = spann_rt(table);
   if (rt == nullptr) {
@@ -672,20 +691,16 @@ dberr_t vec_spann_resample(dict_table_t *table, THD *thd) {
     return DB_TABLE_NOT_FOUND;
   }
 
-  /* The maintenance transaction: every disk mutation of this job
-  rides it — meta inserts, meta deletes, posting re-appends — so a
-  crash or cancellation at ANY point is a plain rollback and the old
-  world stands untouched. Its read view is the snapshot boundary. */
-  trx_t *trx = trx_allocate_for_background();
-  trx_start_internal(trx, UT_LOCATION_HERE);
-  ReadView *view = trx_assign_read_view(trx);
-
-  dberr_t err = view == nullptr ? DB_OUT_OF_RESOURCES : DB_SUCCESS;
-
+  /* Dead pruning decisions come from a SCOPED committed view (see
+  vec_spann_dead_set_scoped) — no transaction of this job carries a
+  read view, so a resample of any size cannot stall purge. */
   std::unordered_set<uint64_t> dead_set;
-  if (err == DB_SUCCESS) {
-    err = vec_spann_load_dead_set(dead, view, &dead_set);
-  }
+  dberr_t err = vec_spann_dead_set_scoped(dead, &dead_set);
+
+  /* Read-only, viewless companion for the snapshot scans (LOB reads
+  want a trx context; latest-read wants no view). */
+  trx_t *scan_trx = trx_allocate_for_background();
+  trx_start_internal_read_only(scan_trx, UT_LOCATION_HERE);
 
   /* Snapshot: every label with its vector and row_ref, deduped across
   closure copies, straight from the old posting lists — the base table
@@ -694,12 +709,12 @@ dberr_t vec_spann_resample(dict_table_t *table, THD *thd) {
   invisible to any read view AND outside the catch-up suffix — a
   view-based snapshot would lose it (found by the first split test:
   the very insert that triggers a job is still uncommitted when the
-  job starts). Uncommitted rows' copies commit with our trx; if theirs
-  rolls back the copy is a fetch-miss orphan until L2 trims it.
-  Dead pruning stays VIEW-based: pruning on an uncommitted DELETE
-  would lose the row if that DELETE rolled back — an extra copy of a
-  dead row is harmless (readers filter per view), a lost live row is
-  not. */
+  job starts). Uncommitted rows' copies commit with the job; if theirs
+  rolls back the copy is a fetch-miss orphan until GC's orphan rule
+  trims it. Dead pruning stays VIEW-based: pruning on an uncommitted
+  DELETE would lose the row if that DELETE rolled back — an extra copy
+  of a dead row is harmless (readers filter per view), a lost live row
+  is not. */
   std::vector<vec_spann_snap_row_t> rows;
   {
     std::unordered_set<uint64_t> seen;
@@ -712,7 +727,7 @@ dberr_t vec_spann_resample(dict_table_t *table, THD *thd) {
         break;
       }
       err = vec_spann_scan_list(
-          trx, postings, h, dims, nullptr /* latest */,
+          scan_trx, postings, h, dims, nullptr /* latest */,
           [&](uint64_t label, const float *vec, const byte *ref,
               ulint ref_len) {
             if (dead_set.count(label) != 0 || !seen.insert(label).second) {
@@ -730,8 +745,8 @@ dberr_t vec_spann_resample(dict_table_t *table, THD *thd) {
   if (err == DB_SUCCESS && rows.empty()) {
     /* Nothing to regenerate; keep the old head set (it is never
     replaced by an EMPTY one — the genesis rule needs a head). */
-    trx_rollback_to_savepoint(trx, nullptr);
-    trx_free_for_background(trx);
+    trx_commit_for_mysql(scan_trx);
+    trx_free_for_background(scan_trx);
     vec_aux_close_for_dml(dead, thd, &dead_mdl);
     vec_aux_close_for_dml(meta, thd, &meta_mdl);
     vec_aux_close_for_dml(postings, thd, &post_mdl);
@@ -741,7 +756,10 @@ dberr_t vec_spann_resample(dict_table_t *table, THD *thd) {
   /* New head set: sampled from the snapshot (same rule as the S2
   build), but with FRESH counter ids — head identity and label
   identity share the crash-safe counter, so a regenerated head can
-  never collide with any label or any prior head. */
+  never collide with any label or any prior head. The _meta rows are
+  written by the SWAP transaction below, not here: until they commit,
+  every posting staged under these ids is unreachable garbage at
+  worst. */
   std::vector<vec_spann_head_t> new_heads;
   hnswlib::L2Space *space = nullptr;
   hnswlib::HierarchicalNSW<float> *route = nullptr;
@@ -768,29 +786,13 @@ dberr_t vec_spann_resample(dict_table_t *table, THD *thd) {
       space = new hnswlib::L2Space(dims);
       route = new hnswlib::HierarchicalNSW<float>(space, n_heads, rt->M,
                                                   rt->ef_construction);
+      for (const size_t pos : order) {
+        const uint64_t head_id = vec_assign_next_idx_id(table);
+        route->addPoint(rows[pos].vec.data(), head_id, false, nullptr);
+        new_heads.emplace_back(head_id, rows[pos].vec);
+      }
     } catch (...) {
       err = DB_OUT_OF_MEMORY;
-    }
-
-    for (const size_t pos : order) {
-      if (err != DB_SUCCESS) {
-        break;
-      }
-      const uint64_t head_id = vec_assign_next_idx_id(table);
-      err = vec_spann_meta_insert(
-          trx, meta, VEC_SPANN_META_HEAD, head_id,
-          reinterpret_cast<const byte *>(rows[pos].vec.data()),
-          dims * sizeof(float));
-      if (err != DB_SUCCESS) {
-        break;
-      }
-      try {
-        route->addPoint(rows[pos].vec.data(), head_id, false, nullptr);
-      } catch (...) {
-        err = DB_OUT_OF_MEMORY;
-        break;
-      }
-      new_heads.emplace_back(head_id, rows[pos].vec);
     }
   }
 
@@ -809,12 +811,12 @@ dberr_t vec_spann_resample(dict_table_t *table, THD *thd) {
     return dist_func(va->second.data(), vb->second.data(), dist_param);
   };
 
-  const auto assign_one = [&](uint64_t label, const float *vec, const byte *ref,
-                              ulint ref_len) -> dberr_t {
+  const auto assign_one = [&](trx_t *wtrx,
+                              const vec_spann_snap_row_t &r) -> dberr_t {
     const size_t k = std::min<size_t>(VEC_SPANN_CLOSURE_MAX, new_heads.size());
     std::vector<vec_spann_head_cand_t> cands;
     try {
-      const auto found = route->searchKnnCloserFirst(vec, k);
+      const auto found = route->searchKnnCloserFirst(r.vec.data(), k);
       cands.reserve(found.size());
       for (const auto &c : found) {
         cands.push_back({c.first, static_cast<uint64_t>(c.second)});
@@ -827,8 +829,9 @@ dberr_t vec_spann_resample(dict_table_t *table, THD *thd) {
                            head_dist, &selected);
     ut_a(!selected.empty());
     for (const uint64_t h : selected) {
-      const dberr_t ierr = vec_spann_posting_insert(trx, postings, h, label,
-                                                    vec, dims, ref, ref_len);
+      const dberr_t ierr = vec_spann_posting_insert(
+          wtrx, postings, h, r.label, r.vec.data(), dims,
+          reinterpret_cast<const byte *>(r.ref.data()), r.ref.size());
       if (ierr != DB_SUCCESS) {
         return ierr;
       }
@@ -836,119 +839,148 @@ dberr_t vec_spann_resample(dict_table_t *table, THD *thd) {
     return DB_SUCCESS;
   };
 
+  /* PHASE A — batched staging. The new generation is UNREACHABLE
+  until the swap commits (its head ids exist in neither _meta nor the
+  RAM graph), so these inserts may commit in small view-free batches:
+  bounded undo, no long transaction, purge never waits. A crash or
+  cancellation abandons only unreachable rows, which the existing
+  garbage-list GC rule sweeps. */
   if (err == DB_SUCCESS) {
-    size_t n_done = 0;
-    for (const auto &r : rows) {
-      err = assign_one(r.label, r.vec.data(),
-                       reinterpret_cast<const byte *>(r.ref.data()),
-                       r.ref.size());
-      if (err != DB_SUCCESS) {
-        break;
-      }
-      if (++n_done % 256 == 0 && vec_maint_is_canceled(table->id)) {
-        err = DB_INTERRUPTED;
-        break;
-      }
-    }
-  }
+    size_t pos = 0;
+    while (err == DB_SUCCESS && pos < rows.size()) {
+      trx_t *batch_trx = trx_allocate_for_background();
+      trx_start_internal(batch_trx, UT_LOCATION_HERE);
 
-  /* Retire the old generation's identity: plain row DELETEs, so a
-  reader whose view predates this trx keeps loading... nothing — the
-  RAM graph is what readers use; these deletes matter to the NEXT
-  load. The genesis head has no _meta row by definition. */
-  if (err == DB_SUCCESS) {
-    for (const uint64_t h : old_live) {
-      if (h == VEC_SPANN_GENESIS_HEAD_ID) {
-        continue;
+      const size_t batch_end =
+          std::min(pos + VEC_SPANN_RESAMPLE_BATCH, rows.size());
+      for (; pos < batch_end && err == DB_SUCCESS; ++pos) {
+        err = assign_one(batch_trx, rows[pos]);
       }
-      const dberr_t derr =
-          vec_spann_meta_delete(trx, meta, VEC_SPANN_META_HEAD, h);
-      if (derr != DB_SUCCESS && derr != DB_RECORD_NOT_FOUND) {
-        err = derr;
-        break;
+
+      if (err == DB_SUCCESS) {
+        trx_commit_for_mysql(batch_trx);
+      } else {
+        trx_rollback_to_savepoint(batch_trx, nullptr);
+      }
+      trx_free_for_background(batch_trx);
+
+      if (err == DB_SUCCESS && vec_maint_is_canceled(table->id)) {
+        err = DB_INTERRUPTED;
       }
     }
   }
 
   /* Test choreography hook: pause with the new generation fully
-  staged (uncommitted) but the fence not yet taken — concurrent DML
-  runs against the old world here. */
+  staged (committed but unreachable) and the swap not yet begun —
+  concurrent DML runs against the old world here. */
   DBUG_EXECUTE_IF("spann_resample_pause", {
     const char act[] =
         "now SIGNAL spann_resample_paused WAIT_FOR spann_resample_go";
     ut_a(!debug_sync_set_action(current_thd, STRING_WITH_LEN(act)));
   });
 
-  /* Last pre-fence cancellation point — in particular the one a DDL
+  /* Last pre-swap cancellation point — in particular the one a DDL
   that queued up behind the test pause above relies on. */
   if (err == DB_SUCCESS && vec_maint_is_canceled(table->id)) {
     err = DB_INTERRUPTED;
   }
 
+  /* PHASE B — the atomic swap, deliberately SMALL: new head rows in,
+  old head rows out, the concurrent-insert suffix carried, one commit.
+  This is the only crash-atomicity that matters; everything bulky
+  already sits committed and unreachable. */
   if (err == DB_SUCCESS) {
-    /* THE FENCE. X on the runtime latch: no insert is mid-route (they
-    hold S across route+append), so the old lists' suffixes are final
-    once scanned here. Latest-read on purpose: a row from a still-open
-    user trx was already routed to an old list — its copy must exist
-    in the new generation the moment that trx commits. If the trx
-    rolls back instead, the copy is an orphan whose base fetch misses
-    (skipped by every reader) until L2 trims it: extra work, right
-    answer. */
-    rw_lock_x_lock(&rt->latch, UT_LOCATION_HERE);
+    trx_t *swap_trx = trx_allocate_for_background();
+    trx_start_internal(swap_trx, UT_LOCATION_HERE);
 
-    /* Collect the suffix first, insert after: DML inside a scan
-    callback would run under the scan's open mini-transaction
-    (log_free_check forbids exactly that). */
-    std::vector<vec_spann_snap_row_t> catchup;
-    std::unordered_set<uint64_t> caught;
-    for (const uint64_t h : old_live) {
+    for (const auto &h : new_heads) {
+      err =
+          vec_spann_meta_insert(swap_trx, meta, VEC_SPANN_META_HEAD, h.first,
+                                reinterpret_cast<const byte *>(h.second.data()),
+                                dims * sizeof(float));
       if (err != DB_SUCCESS) {
         break;
       }
-      err = vec_spann_scan_list(
-          trx, postings, h, dims, nullptr /* latest */,
-          [&](uint64_t label, const float *vec, const byte *ref,
-              ulint ref_len) {
-            if (!caught.insert(label).second) {
-              return;
-            }
-            vec_spann_snap_row_t r;
-            r.label = label;
-            r.vec.assign(vec, vec + dims);
-            r.ref.assign(reinterpret_cast<const char *>(ref), ref_len);
-            catchup.push_back(std::move(r));
-          },
-          snap_next /* label_gt: the suffix */);
     }
-    for (const auto &r : catchup) {
-      if (err != DB_SUCCESS) {
-        break;
+
+    /* Retire the old generation's identity: plain row DELETEs, so
+    MVCC serves the old head set to whoever still needs it and purge
+    reclaims. The genesis head has no _meta row by definition. */
+    if (err == DB_SUCCESS) {
+      for (const uint64_t h : old_live) {
+        if (h == VEC_SPANN_GENESIS_HEAD_ID) {
+          continue;
+        }
+        const dberr_t derr =
+            vec_spann_meta_delete(swap_trx, meta, VEC_SPANN_META_HEAD, h);
+        if (derr != DB_SUCCESS && derr != DB_RECORD_NOT_FOUND) {
+          err = derr;
+          break;
+        }
       }
-      err = assign_one(r.label, r.vec.data(),
-                       reinterpret_cast<const byte *>(r.ref.data()),
-                       r.ref.size());
     }
 
     if (err == DB_SUCCESS) {
-      /* Commit under the fence (one redo sync), then re-state the
-      committed truth in RAM. A crash between the two leaves the
-      committed new world on disk and a stale RAM graph that the
-      restart reload replaces — never the reverse. */
-      const trx_id_t retire_id = trx->id;
-      trx_commit_for_mysql(trx);
-      vec_spann_publish_locked(rt, new_heads, old_live, retire_id);
-      rw_lock_x_unlock(&rt->latch);
+      /* THE FENCE. X on the runtime latch: no insert is mid-route
+      (they hold S across route+append), so the old lists' suffixes
+      are final once scanned here. Latest-read for the same reason as
+      the snapshot. */
+      rw_lock_x_lock(&rt->latch, UT_LOCATION_HERE);
+
+      /* Collect the suffix first, insert after: DML inside a scan
+      callback would run under the scan's open mini-transaction
+      (log_free_check forbids exactly that). */
+      std::vector<vec_spann_snap_row_t> catchup;
+      std::unordered_set<uint64_t> caught;
+      for (const uint64_t h : old_live) {
+        if (err != DB_SUCCESS) {
+          break;
+        }
+        err = vec_spann_scan_list(
+            swap_trx, postings, h, dims, nullptr /* latest */,
+            [&](uint64_t label, const float *vec, const byte *ref,
+                ulint ref_len) {
+              if (!caught.insert(label).second) {
+                return;
+              }
+              vec_spann_snap_row_t r;
+              r.label = label;
+              r.vec.assign(vec, vec + dims);
+              r.ref.assign(reinterpret_cast<const char *>(ref), ref_len);
+              catchup.push_back(std::move(r));
+            },
+            snap_next /* label_gt: the suffix */);
+      }
+      for (const auto &r : catchup) {
+        if (err != DB_SUCCESS) {
+          break;
+        }
+        err = assign_one(swap_trx, r);
+      }
+
+      if (err == DB_SUCCESS) {
+        /* Commit under the fence (one redo sync), then re-state the
+        committed truth in RAM. A crash between the two leaves the
+        committed new world on disk and a stale RAM graph that the
+        restart reload replaces — never the reverse. */
+        const trx_id_t retire_id = swap_trx->id;
+        trx_commit_for_mysql(swap_trx);
+        vec_spann_publish_locked(rt, new_heads, old_live, retire_id);
+        rw_lock_x_unlock(&rt->latch);
+      } else {
+        rw_lock_x_unlock(&rt->latch);
+        trx_rollback_to_savepoint(swap_trx, nullptr);
+      }
     } else {
-      rw_lock_x_unlock(&rt->latch);
-      trx_rollback_to_savepoint(trx, nullptr);
+      trx_rollback_to_savepoint(swap_trx, nullptr);
     }
-  } else {
-    trx_rollback_to_savepoint(trx, nullptr);
+    trx_free_for_background(swap_trx);
   }
 
   delete route;
   delete space;
-  trx_free_for_background(trx);
+  trx_commit_for_mysql(scan_trx);
+  trx_free_for_background(scan_trx);
   vec_aux_close_for_dml(dead, thd, &dead_mdl);
   vec_aux_close_for_dml(meta, thd, &meta_mdl);
   vec_aux_close_for_dml(postings, thd, &post_mdl);
@@ -1010,16 +1042,13 @@ dberr_t vec_spann_split(dict_table_t *table, THD *thd, uint64_t head_id) {
     return DB_TABLE_NOT_FOUND;
   }
 
+  /* Scoped dead view (purge is never pinned by the job trx); the job
+  transaction itself is viewless. */
+  std::unordered_set<uint64_t> dead_set;
+  dberr_t err = vec_spann_dead_set_scoped(dead, &dead_set);
+
   trx_t *trx = trx_allocate_for_background();
   trx_start_internal(trx, UT_LOCATION_HERE);
-  ReadView *view = trx_assign_read_view(trx);
-
-  dberr_t err = view == nullptr ? DB_OUT_OF_RESOURCES : DB_SUCCESS;
-
-  std::unordered_set<uint64_t> dead_set;
-  if (err == DB_SUCCESS) {
-    err = vec_spann_load_dead_set(dead, view, &dead_set);
-  }
 
   /* Snapshot the ONE list — LATEST-read, view only for dead pruning
   (see the resample snapshot comment: a view-based snapshot loses the
@@ -1250,16 +1279,13 @@ dberr_t vec_spann_merge(dict_table_t *table, THD *thd) {
     return DB_TABLE_NOT_FOUND;
   }
 
+  /* Scoped dead view (purge is never pinned by the job trx); the job
+  transaction itself is viewless. */
+  std::unordered_set<uint64_t> dead_set;
+  dberr_t err = vec_spann_dead_set_scoped(dead, &dead_set);
+
   trx_t *trx = trx_allocate_for_background();
   trx_start_internal(trx, UT_LOCATION_HERE);
-  ReadView *view = trx_assign_read_view(trx);
-
-  dberr_t err = view == nullptr ? DB_OUT_OF_RESOURCES : DB_SUCCESS;
-
-  std::unordered_set<uint64_t> dead_set;
-  if (err == DB_SUCCESS) {
-    err = vec_spann_load_dead_set(dead, view, &dead_set);
-  }
 
   /* Candidates: LIVE posting count (non-delete-marked minus dead
   labels) below the threshold, two or more of them. */
@@ -1273,7 +1299,7 @@ dberr_t vec_spann_merge(dict_table_t *table, THD *thd) {
       live_counts.emplace(h, 0);
     }
     err = vec_spann_scan_all_postings(
-        postings, [&](uint64_t head_id, uint64_t label) {
+        postings, [&](uint64_t head_id, uint64_t label, const byte *, ulint) {
           auto it = live_counts.find(head_id);
           if (it != live_counts.end() && dead_set.count(label) == 0) {
             ++it->second;
@@ -1500,25 +1526,64 @@ dberr_t vec_spann_gc(dict_table_t *table, THD *thd) {
   view, i.e. to everyone — sweeping such a label changes no reader's
   answer (old views keep the delete-marked versions via MVCC anyway;
   this gate exists so an uncommitted or freshly-committed DELETE is
-  never the basis for physical removal). */
+  never the basis for physical removal). The same all-seeing view
+  drives the orphan probes below. */
   dberr_t err;
+  ReadView oldest;
   std::unordered_set<uint64_t> gc_dead;
   {
-    ReadView oldest;
     trx_sys->mvcc->clone_oldest_view(&oldest);
     err = vec_spann_load_dead_set(dead, &oldest, &gc_dead);
   }
 
   /* ONE discovery scan: garbage-list rows (head unreachable from the
-  RAM graph — no reader can probe them) and swept-dead rows. */
+  RAM graph — no reader can probe them) and swept-dead rows go
+  straight to the victim list; everything else is a survivor whose
+  copy locations and row_ref we keep for the orphan probe. */
+  struct gc_survivor_t {
+    std::string ref;
+    std::vector<uint64_t> heads;
+  };
   std::vector<std::pair<uint64_t, uint64_t>> victims;
+  std::unordered_map<uint64_t, gc_survivor_t> survivors;
   if (err == DB_SUCCESS) {
     err = vec_spann_scan_all_postings(
-        postings, [&](uint64_t head_id, uint64_t label) {
+        postings,
+        [&](uint64_t head_id, uint64_t label, const byte *ref, ulint ref_len) {
           if (ram_heads.count(head_id) == 0 || gc_dead.count(label) != 0) {
             victims.emplace_back(head_id, label);
+            return;
           }
+          gc_survivor_t &sv = survivors[label];
+          if (sv.heads.empty()) {
+            sv.ref.assign(reinterpret_cast<const char *>(ref), ref_len);
+          }
+          sv.heads.push_back(head_id);
         });
+  }
+
+  /* The ORPHAN rule: a surviving not-dead label whose base row is
+  physically gone (its insert rolled back after a maintenance job
+  copied the posting) or whose base PK now belongs to a different row
+  identity (PK reuse after such a rollback — the visible version's
+  vec_idx_id differs). Without this rule such copies would survive and
+  propagate through every future snapshot. One base-PK point probe per
+  distinct label, same cost class as the discovery scan. */
+  if (err == DB_SUCCESS) {
+    for (const auto &sv : survivors) {
+      bool orphan = false;
+      err = vec_spann_base_probe(
+          table, reinterpret_cast<const byte *>(sv.second.ref.data()),
+          sv.second.ref.size(), &oldest, sv.first, &orphan);
+      if (err != DB_SUCCESS) {
+        break;
+      }
+      if (orphan) {
+        for (const uint64_t h : sv.second.heads) {
+          victims.emplace_back(h, sv.first);
+        }
+      }
+    }
   }
 
   if (err == DB_SUCCESS && victims.empty() && gc_dead.empty()) {
@@ -1636,17 +1701,14 @@ static dberr_t vec_spann_collect_npa(
     return DB_TABLE_NOT_FOUND;
   }
 
-  /* One read-only trx spans the dead-set load and the list scans (the
-  latter may need it for off-page vector reads). */
+  /* Scoped dead view; the scan companion trx below is viewless (it
+  exists only as LOB-read context), so an NPA pass over a large index
+  never pins purge. */
+  std::unordered_set<uint64_t> dead_set;
+  dberr_t err = vec_spann_dead_set_scoped(dead, &dead_set);
+
   trx_t *dtrx = trx_allocate_for_background();
   trx_start_internal_read_only(dtrx, UT_LOCATION_HERE);
-  ReadView *view = trx_assign_read_view(dtrx);
-
-  dberr_t err = view == nullptr ? DB_OUT_OF_RESOURCES : DB_SUCCESS;
-  std::unordered_set<uint64_t> dead_set;
-  if (err == DB_SUCCESS) {
-    err = vec_spann_load_dead_set(dead, view, &dead_set);
-  }
 
   /* label -> (vec, ref, lists that hold a copy), live lists only. */
   struct npa_row_t {

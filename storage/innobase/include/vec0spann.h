@@ -107,6 +107,13 @@ this are folded into one merged head when at least two qualify.
 INTERNAL; the "spann_merge_threshold_low" DBUG knob drops it to 4. */
 constexpr uint64_t VEC_SPANN_MERGE_THRESHOLD = VEC_SPANN_SPLIT_THRESHOLD / 8;
 
+/** L0 staging batch: the re-sample's assignment inserts commit in
+view-free transactions of this many rows. Safe because the new
+generation is unreachable until the swap commits — abandoned batches
+are garbage-list GC food, never visible state. Bounds undo size and
+keeps the maintenance thread free of long transactions. */
+constexpr size_t VEC_SPANN_RESAMPLE_BATCH = 1024;
+
 /** Deterministic 2-means for one posting list (L1 split): farthest-
 point initialization (no RNG — the point farthest from the mean, then
 the point farthest from that), then at most `VEC_SPANN_KMEANS_ROUNDS`

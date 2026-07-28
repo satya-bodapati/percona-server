@@ -1,0 +1,115 @@
+#
+# SPANN L2+: the GC ORPHAN rule. A maintenance job snapshots with
+# latest-read, so it can copy a posting whose inserting transaction
+# later ROLLS BACK: the original posting vanishes with the undo, the
+# job's committed copy survives as an orphan — invisible to every
+# reader (base fetch misses) but propagating through future
+# snapshots. GC now probes each surviving label's base row under the
+# oldest view and sweeps (a) labels whose base PK record is
+# physically gone, and (b) labels whose PK was REUSED by a later
+# insert (visible vec_idx_id differs). Both variants below.
+#
+SET GLOBAL innodb_monitor_enable = 'module_vec';
+CREATE TABLE torf (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(2),
+VECTOR KEY vk (v) TYPE spann);
+INSERT INTO torf VALUES (1, STRING_TO_VECTOR('[1,0]'));
+INSERT INTO torf VALUES (2, STRING_TO_VECTOR('[2,0]'));
+INSERT INTO torf VALUES (3, STRING_TO_VECTOR('[3,0]'));
+INSERT INTO torf VALUES (4, STRING_TO_VECTOR('[4,0]'));
+#
+# Variant (a): rollback, PK never reused — base record physically
+# absent. The uncommitted insert (label 5) is snapshotted by a
+# paused re-sample, then rolled back before the job resumes.
+#
+BEGIN;
+INSERT INTO torf VALUES (5, STRING_TO_VECTOR('[5,0]'));
+SET GLOBAL debug = '+d,spann_build_seed_42,spann_resample_pause';
+SET SESSION innodb_interpreter = 'spann_maint test/torf resample nowait';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+PASS: enqueued
+SET DEBUG_SYNC = 'now WAIT_FOR spann_resample_paused';
+ROLLBACK;
+SET DEBUG_SYNC = 'now SIGNAL spann_resample_go';
+SET GLOBAL debug = '-d,spann_resample_pause';
+SET GLOBAL debug = '-d,spann_build_seed_42';
+# The orphan (label 5) sits in the new generation; readers skip it
+# (base fetch misses), so results stay correct.
+SET SESSION innodb_interpreter = 'spann_dump test/torf';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=1 lists=2 postings=9 labels=5 label_min=1 label_max=5 dead=0
+head=0 size=4
+head=6 size=5
+mem heads=1
+
+SELECT id FROM torf ORDER BY DISTANCE(v, STRING_TO_VECTOR('[5,0]'), 'EUCLIDEAN') LIMIT 1;
+id
+4
+# GC probes the base rows and sweeps it.
+SET SESSION innodb_interpreter = 'spann_maint test/torf gc';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+PASS: gc done
+SET SESSION innodb_interpreter = 'spann_dump test/torf';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=1 lists=1 postings=4 labels=4 label_min=1 label_max=4 dead=0
+head=6 size=4
+mem heads=1
+
+#
+# Variant (b): rollback, then the SAME PK is reused by a committed
+# insert. The orphan's row_ref resolves to a base row again — but to
+# a different row identity (its vec_idx_id is the new label), which
+# is exactly what the probe compares.
+#
+BEGIN;
+INSERT INTO torf VALUES (7, STRING_TO_VECTOR('[20,0]'));
+SET GLOBAL debug = '+d,spann_build_seed_42,spann_resample_pause';
+SET SESSION innodb_interpreter = 'spann_maint test/torf resample nowait';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+PASS: enqueued
+SET DEBUG_SYNC = 'now WAIT_FOR spann_resample_paused';
+ROLLBACK;
+SET DEBUG_SYNC = 'now SIGNAL spann_resample_go';
+SET GLOBAL debug = '-d,spann_resample_pause';
+SET GLOBAL debug = '-d,spann_build_seed_42';
+# PK 7 reused with a different vector (fresh label).
+INSERT INTO torf VALUES (7, STRING_TO_VECTOR('[30,0]'));
+SET SESSION innodb_interpreter = 'spann_dump test/torf';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=1 lists=2 postings=10 labels=6 label_min=1 label_max=9 dead=0
+head=6 size=4
+head=8 size=6
+mem heads=1
+mem head=8 appends=1
+
+SET SESSION innodb_interpreter = 'spann_maint test/torf gc';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+PASS: gc done
+SET SESSION innodb_interpreter = 'spann_dump test/torf';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=1 lists=1 postings=5 labels=5 label_min=1 label_max=9 dead=0
+head=8 size=5
+mem heads=1
+mem head=8 appends=1
+
+# The legitimate reused-PK row serves; the stale-vector orphan is
+# gone.
+SELECT id FROM torf ORDER BY DISTANCE(v, STRING_TO_VECTOR('[30,0]'), 'EUCLIDEAN') LIMIT 1;
+id
+7
+SELECT id FROM torf IGNORE INDEX (vk) ORDER BY DISTANCE(v, STRING_TO_VECTOR('[30,0]'), 'EUCLIDEAN') LIMIT 1;
+id
+7
+DROP TABLE torf;
+SET GLOBAL innodb_monitor_disable = 'module_vec';
+SET GLOBAL innodb_monitor_reset_all = 'module_vec';
+SET GLOBAL innodb_monitor_enable = default;
+SET GLOBAL innodb_monitor_disable = default;
+SET GLOBAL innodb_monitor_reset_all = default;

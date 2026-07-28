@@ -679,10 +679,14 @@ dberr_t vec_spann_dead_delete(trx_t *trx, dict_table_t *dead, uint64_t label) {
 }
 
 dberr_t vec_spann_scan_all_postings(
-    dict_table_t *postings, const std::function<void(uint64_t, uint64_t)> &fn) {
+    dict_table_t *postings,
+    const std::function<void(uint64_t, uint64_t, const byte *, ulint)> &fn) {
   ut_a(postings != nullptr);
 
   dict_index_t *clust = postings->first_index();
+
+  const ulint pos_ref = dict_col_get_clust_pos(
+      postings->get_col(VEC_SPANN_POST_COL_ROW_REF), clust);
 
   mem_heap_t *offset_heap = nullptr;
 
@@ -707,7 +711,14 @@ dberr_t vec_spann_scan_all_postings(
       const uint64_t head_id = mach_read_from_8(p);
       p = rec_get_nth_field(clust, rec, offsets, 1, &len);
       ut_a(len == 8);
-      fn(head_id, mach_read_from_8(p));
+      const uint64_t label = mach_read_from_8(p);
+      /* The row_ref is the base PK image — an 8-byte BIGINT today
+      (PS-11264), never off-page. */
+      ut_ad(!rec_offs_nth_extern(clust, offsets, pos_ref));
+      ulint ref_len;
+      const byte *ref =
+          rec_get_nth_field(clust, rec, offsets, pos_ref, &ref_len);
+      fn(head_id, label, ref, ref_len);
     }
 
     if (++n_scanned % 512 == 0) {
@@ -726,6 +737,93 @@ dberr_t vec_spann_scan_all_postings(
   }
 
   return DB_SUCCESS;
+}
+
+/* Forward declaration: defined with the caller-view scans below. */
+static dberr_t vec_spann_visible_version(const rec_t *rec, mtr_t *mtr,
+                                         dict_index_t *clust, ulint **offsets,
+                                         ReadView *view,
+                                         mem_heap_t **offset_heap,
+                                         mem_heap_t *vers_heap,
+                                         const rec_t **vrec);
+
+dberr_t vec_spann_base_probe(dict_table_t *base, const byte *row_ref,
+                             ulint ref_len, ReadView *view, uint64_t label,
+                             bool *orphan) {
+  ut_a(base != nullptr);
+  ut_a(row_ref != nullptr);
+  ut_a(ref_len == 8); /* single-column BIGINT UNSIGNED PK (PS-11264) */
+  ut_a(base->vec_idx_id_col != ULINT_UNDEFINED);
+  ut_a(orphan != nullptr);
+
+  *orphan = false;
+
+  dict_index_t *clust = base->first_index();
+  const ulint pos_id =
+      dict_col_get_clust_pos(base->get_col(base->vec_idx_id_col), clust);
+
+  mem_heap_t *key_heap = mem_heap_create(256, UT_LOCATION_HERE);
+  dtuple_t *key = dtuple_create(key_heap, 1);
+  dict_index_copy_types(key, clust, 1);
+  dfield_set_data(dtuple_get_nth_field(key, 0), row_ref, ref_len);
+
+  dberr_t err = DB_SUCCESS;
+  mem_heap_t *offset_heap = nullptr;
+
+  mtr_t mtr;
+  mtr_start(&mtr);
+
+  btr_pcur_t pcur;
+  pcur.open_no_init(clust, key, PAGE_CUR_LE, BTR_SEARCH_LEAF, 0, &mtr,
+                    UT_LOCATION_HERE);
+  const rec_t *rec = pcur.get_rec();
+
+  if (!page_rec_is_user_rec(rec) ||
+      pcur.get_low_match() < dict_index_get_n_unique(clust)) {
+    /* No record in ANY state, delete-marked included. An insert whose
+    posting exists always wrote its base row first (the write_row hook
+    runs after the base insert), so physical absence means the base
+    row was rolled back or fully purged: this posting is an orphan
+    unless its label is dead (the caller filtered dead labels). */
+    *orphan = true;
+  } else {
+    ulint *offsets = rec_get_offsets(rec, clust, nullptr, ULINT_UNDEFINED,
+                                     UT_LOCATION_HERE, &offset_heap);
+
+    const rec_t *vrec = nullptr;
+    err = vec_spann_visible_version(rec, &mtr, clust, &offsets, view,
+                                    &offset_heap, nullptr, &vrec);
+    if (err == DB_SUCCESS) {
+      if (vrec == nullptr ||
+          rec_get_deleted_flag(vrec, dict_table_is_comp(base))) {
+        /* Too fresh to judge (no version visible to the oldest view:
+        an in-flight or just-committed change), or a visible committed
+        delete — the latter belongs to the _dead rule, not to us.
+        Conservative both ways: not an orphan. */
+      } else {
+        ulint len;
+        const byte *p = rec_get_nth_field(clust, vrec, offsets, pos_id, &len);
+        ut_a(len == 8);
+        /* PK reuse after a rollback: the PK exists, but it belongs to
+        a DIFFERENT row identity now. A live posting's label always
+        equals its base row's current vec_idx_id (vector- and PK-
+        updates both stamp fresh labels and kill the old one via
+        _dead); a not-dead mismatch under the all-seeing view can only
+        be a rolled-back insert's copy. */
+        *orphan = mach_read_from_8(p) != label;
+      }
+    }
+  }
+
+  pcur.close();
+  mtr_commit(&mtr);
+
+  mem_heap_free(key_heap);
+  if (offset_heap != nullptr) {
+    mem_heap_free(offset_heap);
+  }
+
+  return err;
 }
 
 /** Copy one (possibly externally stored) field of an aux clustered-index
