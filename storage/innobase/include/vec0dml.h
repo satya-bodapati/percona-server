@@ -243,6 +243,25 @@ vec_aux_update_row_low.
 dberr_t vec_spann_meta_delete(trx_t *trx, dict_table_t *meta, uint8_t mtype,
                               uint64_t id);
 
+/** DELETE one posting row by PK (head_id, label) — the L2 GC shape.
+Old readers keep seeing the delete-marked row via MVCC; purge
+reclaims it.
+@return DB_SUCCESS, DB_RECORD_NOT_FOUND, or error */
+dberr_t vec_spann_posting_delete(trx_t *trx, dict_table_t *postings,
+                                 uint64_t head_id, uint64_t label);
+
+/** DELETE one _dead row by PK (label) — the tail end of dead-label
+GC, once every copy of the label is swept.
+@return DB_SUCCESS, DB_RECORD_NOT_FOUND, or error */
+dberr_t vec_spann_dead_delete(trx_t *trx, dict_table_t *dead, uint64_t label);
+
+/** Enumerate (head_id, label) of every non-delete-marked posting
+record, latest versions — the L2 GC's single discovery scan. The
+callback must not run DML (open mini-transaction).
+@return DB_SUCCESS or error */
+dberr_t vec_spann_scan_all_postings(
+    dict_table_t *postings, const std::function<void(uint64_t, uint64_t)> &fn);
+
 /** Collect the dead-label set visible under `view` (nullptr = latest)
 from a spann _dead table. Per-reader delete visibility IS this scan:
 each dead row's own hidden DB_TRX_ID decides whether this reader sees

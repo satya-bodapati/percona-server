@@ -1179,6 +1179,16 @@ static monitor_info_t innodb_counter_info[] = {
      " maintenance thread (SPANN L0)",
      MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_VEC_SPANN_RESAMPLES},
 
+    {"vec_spann_merges", "vector_index",
+     "Number of posting-list merges completed by the vector maintenance"
+     " thread (SPANN L2)",
+     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_VEC_SPANN_MERGES},
+
+    {"vec_spann_gcs", "vector_index",
+     "Number of garbage-collection sweeps completed by the vector"
+     " maintenance thread (SPANN L2)",
+     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_VEC_SPANN_GCS},
+
     /* ========== Counters for tablespace ========== */
     {"module_file", "file_system", "Tablespace and File System Manager",
      MONITOR_MODULE, MONITOR_DEFAULT_START, MONITOR_MODULE_FIL_SYSTEM},

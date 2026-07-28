@@ -1201,6 +1201,382 @@ dberr_t vec_spann_split(dict_table_t *table, THD *thd, uint64_t head_id) {
   return err;
 }
 
+dberr_t vec_spann_merge(dict_table_t *table, THD *thd) {
+  Vec_spann_runtime *rt = spann_rt(table);
+  if (rt == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  rw_lock_s_lock(&rt->latch, UT_LOCATION_HERE);
+  if (!rt->loaded) {
+    rw_lock_s_unlock(&rt->latch);
+    dberr_t lerr = vec_spann_load(table, thd);
+    if (lerr != DB_SUCCESS) {
+      return lerr;
+    }
+    rw_lock_s_lock(&rt->latch, UT_LOCATION_HERE);
+  }
+  std::vector<uint64_t> live;
+  for (const auto &hv : rt->head_vecs) {
+    if (rt->retired.count(hv.first) == 0) {
+      live.push_back(hv.first);
+    }
+  }
+  const uint32_t dims = rt->dims;
+  rw_lock_s_unlock(&rt->latch);
+
+  const uint64_t snap_next = table->vec_next_id.load();
+
+  MDL_ticket *post_mdl = nullptr;
+  dict_table_t *postings = vec_aux_open_for_dml(
+      table, rt->index_id, Vec_index_type::SPANN, "", thd, &post_mdl);
+  if (postings == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+  MDL_ticket *meta_mdl = nullptr;
+  dict_table_t *meta = vec_aux_open_for_dml(
+      table, rt->index_id, Vec_index_type::SPANN, "_meta", thd, &meta_mdl);
+  MDL_ticket *dead_mdl = nullptr;
+  dict_table_t *dead =
+      meta == nullptr
+          ? nullptr
+          : vec_aux_open_for_dml(table, rt->index_id, Vec_index_type::SPANN,
+                                 "_dead", thd, &dead_mdl);
+  if (meta == nullptr || dead == nullptr) {
+    if (meta != nullptr) {
+      vec_aux_close_for_dml(meta, thd, &meta_mdl);
+    }
+    vec_aux_close_for_dml(postings, thd, &post_mdl);
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  trx_t *trx = trx_allocate_for_background();
+  trx_start_internal(trx, UT_LOCATION_HERE);
+  ReadView *view = trx_assign_read_view(trx);
+
+  dberr_t err = view == nullptr ? DB_OUT_OF_RESOURCES : DB_SUCCESS;
+
+  std::unordered_set<uint64_t> dead_set;
+  if (err == DB_SUCCESS) {
+    err = vec_spann_load_dead_set(dead, view, &dead_set);
+  }
+
+  /* Candidates: LIVE posting count (non-delete-marked minus dead
+  labels) below the threshold, two or more of them. */
+  uint64_t threshold = VEC_SPANN_MERGE_THRESHOLD;
+  DBUG_EXECUTE_IF("spann_merge_threshold_low", threshold = 4;);
+
+  std::vector<uint64_t> smalls;
+  if (err == DB_SUCCESS) {
+    std::map<uint64_t, uint64_t> live_counts;
+    for (const uint64_t h : live) {
+      live_counts.emplace(h, 0);
+    }
+    err = vec_spann_scan_all_postings(
+        postings, [&](uint64_t head_id, uint64_t label) {
+          auto it = live_counts.find(head_id);
+          if (it != live_counts.end() && dead_set.count(label) == 0) {
+            ++it->second;
+          }
+        });
+    if (err == DB_SUCCESS) {
+      for (const auto &hc : live_counts) {
+        if (hc.second < threshold) {
+          smalls.push_back(hc.first);
+        }
+      }
+    }
+  }
+
+  if (err == DB_SUCCESS && smalls.size() < 2) {
+    trx_rollback_to_savepoint(trx, nullptr);
+    trx_free_for_background(trx);
+    vec_aux_close_for_dml(dead, thd, &dead_mdl);
+    vec_aux_close_for_dml(meta, thd, &meta_mdl);
+    vec_aux_close_for_dml(postings, thd, &post_mdl);
+    return DB_SUCCESS;
+  }
+
+  const std::unordered_set<uint64_t> small_set(smalls.begin(), smalls.end());
+
+  /* Snapshot the small lists — latest-read, dead pruned, closure
+  copies deduped (see the resample snapshot comment for why latest). */
+  std::vector<vec_spann_snap_row_t> rows;
+  {
+    std::unordered_set<uint64_t> seen;
+    for (const uint64_t h : smalls) {
+      if (err != DB_SUCCESS) {
+        break;
+      }
+      err = vec_spann_scan_list(
+          trx, postings, h, dims, nullptr /* latest */,
+          [&](uint64_t label, const float *vec, const byte *ref,
+              ulint ref_len) {
+            if (dead_set.count(label) != 0 || !seen.insert(label).second) {
+              return;
+            }
+            vec_spann_snap_row_t r;
+            r.label = label;
+            r.vec.assign(vec, vec + dims);
+            r.ref.assign(reinterpret_cast<const char *>(ref), ref_len);
+            rows.push_back(std::move(r));
+          });
+    }
+  }
+
+  /* The merged head: centroid of the folded heads' vectors — always
+  defined, even when every folded list turned out empty (the merged
+  list is then just empty, ready for the fence catch-up). Fresh
+  counter id as everywhere in phase L. head_vecs reads need no latch
+  here: only maintenance jobs mutate it, and jobs are serialized on
+  the one maintenance thread — which is us. */
+  std::vector<vec_spann_head_t> new_heads;
+  if (err == DB_SUCCESS) {
+    std::vector<float> centroid(dims, 0.0f);
+    for (const uint64_t h : smalls) {
+      const std::vector<float> &v = rt->head_vecs.at(h);
+      for (uint32_t d = 0; d < dims; ++d) {
+        centroid[d] += v[d];
+      }
+    }
+    for (uint32_t d = 0; d < dims; ++d) {
+      centroid[d] /= smalls.size();
+    }
+
+    const uint64_t hid = vec_assign_next_idx_id(table);
+    err = vec_spann_meta_insert(trx, meta, VEC_SPANN_META_HEAD, hid,
+                                reinterpret_cast<const byte *>(centroid.data()),
+                                dims * sizeof(float));
+    if (err == DB_SUCCESS) {
+      new_heads.emplace_back(hid, std::move(centroid));
+    }
+  }
+
+  const auto fold_one = [&](const vec_spann_snap_row_t &r) -> dberr_t {
+    return vec_spann_posting_insert(
+        trx, postings, new_heads[0].first, r.label, r.vec.data(), dims,
+        reinterpret_cast<const byte *>(r.ref.data()), r.ref.size());
+  };
+
+  if (err == DB_SUCCESS) {
+    size_t n_done = 0;
+    for (const auto &r : rows) {
+      err = fold_one(r);
+      if (err != DB_SUCCESS) {
+        break;
+      }
+      if (++n_done % 256 == 0 && vec_maint_is_canceled(table->id)) {
+        err = DB_INTERRUPTED;
+        break;
+      }
+    }
+  }
+
+  if (err == DB_SUCCESS) {
+    for (const uint64_t h : smalls) {
+      if (h == VEC_SPANN_GENESIS_HEAD_ID) {
+        continue;
+      }
+      const dberr_t derr =
+          vec_spann_meta_delete(trx, meta, VEC_SPANN_META_HEAD, h);
+      if (derr != DB_SUCCESS && derr != DB_RECORD_NOT_FOUND) {
+        err = derr;
+        break;
+      }
+    }
+  }
+
+  DBUG_EXECUTE_IF("spann_merge_pause", {
+    const char act[] = "now SIGNAL spann_merge_paused WAIT_FOR spann_merge_go";
+    ut_a(!debug_sync_set_action(current_thd, STRING_WITH_LEN(act)));
+  });
+
+  if (err == DB_SUCCESS && vec_maint_is_canceled(table->id)) {
+    err = DB_INTERRUPTED;
+  }
+
+  if (err == DB_SUCCESS) {
+    rw_lock_x_lock(&rt->latch, UT_LOCATION_HERE);
+
+    std::vector<vec_spann_snap_row_t> catchup;
+    std::unordered_set<uint64_t> caught;
+    for (const uint64_t h : smalls) {
+      if (err != DB_SUCCESS) {
+        break;
+      }
+      err = vec_spann_scan_list(
+          trx, postings, h, dims, nullptr /* latest */,
+          [&](uint64_t label, const float *vec, const byte *ref,
+              ulint ref_len) {
+            if (!caught.insert(label).second) {
+              return;
+            }
+            vec_spann_snap_row_t r;
+            r.label = label;
+            r.vec.assign(vec, vec + dims);
+            r.ref.assign(reinterpret_cast<const char *>(ref), ref_len);
+            catchup.push_back(std::move(r));
+          },
+          snap_next /* label_gt */);
+    }
+    for (const auto &r : catchup) {
+      if (err != DB_SUCCESS) {
+        break;
+      }
+      err = fold_one(r);
+    }
+
+    if (err == DB_SUCCESS) {
+      const trx_id_t retire_id = trx->id;
+      trx_commit_for_mysql(trx);
+      vec_spann_publish_locked(rt, new_heads, smalls, retire_id);
+      rw_lock_x_unlock(&rt->latch);
+    } else {
+      rw_lock_x_unlock(&rt->latch);
+      trx_rollback_to_savepoint(trx, nullptr);
+    }
+  } else {
+    trx_rollback_to_savepoint(trx, nullptr);
+  }
+
+  trx_free_for_background(trx);
+  vec_aux_close_for_dml(dead, thd, &dead_mdl);
+  vec_aux_close_for_dml(meta, thd, &meta_mdl);
+  vec_aux_close_for_dml(postings, thd, &post_mdl);
+
+  if (err == DB_SUCCESS) {
+    MONITOR_INC(MONITOR_VEC_SPANN_MERGES);
+    vec_spann_gc_retired(table);
+  }
+
+  return err;
+}
+
+dberr_t vec_spann_gc(dict_table_t *table, THD *thd) {
+  Vec_spann_runtime *rt = spann_rt(table);
+  if (rt == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  rw_lock_s_lock(&rt->latch, UT_LOCATION_HERE);
+  if (!rt->loaded) {
+    rw_lock_s_unlock(&rt->latch);
+    dberr_t lerr = vec_spann_load(table, thd);
+    if (lerr != DB_SUCCESS) {
+      return lerr;
+    }
+    rw_lock_s_lock(&rt->latch, UT_LOCATION_HERE);
+  }
+  rw_lock_s_unlock(&rt->latch);
+
+  /* Drain retirements first: whatever clears here becomes sweepable
+  garbage below. */
+  vec_spann_gc_retired(table);
+
+  /* Heads still reachable through the RAM graph (live AND still-
+  retired) — their lists are NOT garbage. */
+  std::unordered_set<uint64_t> ram_heads;
+  rw_lock_s_lock(&rt->latch, UT_LOCATION_HERE);
+  for (const auto &hv : rt->head_vecs) {
+    ram_heads.insert(hv.first);
+  }
+  rw_lock_s_unlock(&rt->latch);
+
+  MDL_ticket *post_mdl = nullptr;
+  dict_table_t *postings = vec_aux_open_for_dml(
+      table, rt->index_id, Vec_index_type::SPANN, "", thd, &post_mdl);
+  if (postings == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+  MDL_ticket *dead_mdl = nullptr;
+  dict_table_t *dead = vec_aux_open_for_dml(
+      table, rt->index_id, Vec_index_type::SPANN, "_dead", thd, &dead_mdl);
+  if (dead == nullptr) {
+    vec_aux_close_for_dml(postings, thd, &post_mdl);
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  /* GC-able dead labels: the deleter is visible to the OLDEST active
+  view, i.e. to everyone — sweeping such a label changes no reader's
+  answer (old views keep the delete-marked versions via MVCC anyway;
+  this gate exists so an uncommitted or freshly-committed DELETE is
+  never the basis for physical removal). */
+  dberr_t err;
+  std::unordered_set<uint64_t> gc_dead;
+  {
+    ReadView oldest;
+    trx_sys->mvcc->clone_oldest_view(&oldest);
+    err = vec_spann_load_dead_set(dead, &oldest, &gc_dead);
+  }
+
+  /* ONE discovery scan: garbage-list rows (head unreachable from the
+  RAM graph — no reader can probe them) and swept-dead rows. */
+  std::vector<std::pair<uint64_t, uint64_t>> victims;
+  if (err == DB_SUCCESS) {
+    err = vec_spann_scan_all_postings(
+        postings, [&](uint64_t head_id, uint64_t label) {
+          if (ram_heads.count(head_id) == 0 || gc_dead.count(label) != 0) {
+            victims.emplace_back(head_id, label);
+          }
+        });
+  }
+
+  if (err == DB_SUCCESS && victims.empty() && gc_dead.empty()) {
+    vec_aux_close_for_dml(dead, thd, &dead_mdl);
+    vec_aux_close_for_dml(postings, thd, &post_mdl);
+    return DB_SUCCESS;
+  }
+
+  trx_t *trx = nullptr;
+  if (err == DB_SUCCESS) {
+    trx = trx_allocate_for_background();
+    trx_start_internal(trx, UT_LOCATION_HERE);
+
+    size_t n_done = 0;
+    for (const auto &v : victims) {
+      const dberr_t derr =
+          vec_spann_posting_delete(trx, postings, v.first, v.second);
+      if (derr != DB_SUCCESS && derr != DB_RECORD_NOT_FOUND) {
+        err = derr;
+        break;
+      }
+      if (++n_done % 256 == 0 && vec_maint_is_canceled(table->id)) {
+        err = DB_INTERRUPTED;
+        break;
+      }
+    }
+
+    /* Retire the _dead rows themselves: every copy of these labels is
+    now delete-marked (live lists, retired lists and garbage lists all
+    passed through the scan above). */
+    if (err == DB_SUCCESS) {
+      for (const uint64_t label : gc_dead) {
+        const dberr_t derr = vec_spann_dead_delete(trx, dead, label);
+        if (derr != DB_SUCCESS && derr != DB_RECORD_NOT_FOUND) {
+          err = derr;
+          break;
+        }
+      }
+    }
+
+    if (err == DB_SUCCESS) {
+      trx_commit_for_mysql(trx);
+    } else {
+      trx_rollback_to_savepoint(trx, nullptr);
+    }
+    trx_free_for_background(trx);
+  }
+
+  vec_aux_close_for_dml(dead, thd, &dead_mdl);
+  vec_aux_close_for_dml(postings, thd, &post_mdl);
+
+  if (err == DB_SUCCESS) {
+    MONITOR_INC(MONITOR_VEC_SPANN_GCS);
+  }
+
+  return err;
+}
+
 dberr_t vec_spann_remove_point(trx_t *trx, dict_table_t *table, THD *thd,
                                uint64_t label) {
   Vec_spann_runtime *rt = spann_rt(table);

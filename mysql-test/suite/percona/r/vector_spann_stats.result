@@ -15,6 +15,8 @@ SELECT NAME, COUNT FROM INFORMATION_SCHEMA.INNODB_METRICS
 WHERE NAME LIKE 'vec_spann%' ORDER BY NAME;
 NAME	COUNT
 vec_spann_dead_appends	0
+vec_spann_gcs	0
+vec_spann_merges	0
 vec_spann_posting_appends	21
 vec_spann_probes	0
 vec_spann_resamples	0
@@ -30,6 +32,8 @@ SELECT NAME, COUNT FROM INFORMATION_SCHEMA.INNODB_METRICS
 WHERE NAME LIKE 'vec_spann%' ORDER BY NAME;
 NAME	COUNT
 vec_spann_dead_appends	0
+vec_spann_gcs	0
+vec_spann_merges	0
 vec_spann_posting_appends	44
 vec_spann_probes	0
 vec_spann_resamples	0
@@ -49,6 +53,8 @@ SELECT NAME, COUNT FROM INFORMATION_SCHEMA.INNODB_METRICS
 WHERE NAME LIKE 'vec_spann%' ORDER BY NAME;
 NAME	COUNT
 vec_spann_dead_appends	0
+vec_spann_gcs	0
+vec_spann_merges	0
 vec_spann_posting_appends	44
 vec_spann_probes	4
 vec_spann_resamples	0
@@ -62,6 +68,8 @@ SELECT NAME, COUNT FROM INFORMATION_SCHEMA.INNODB_METRICS
 WHERE NAME LIKE 'vec_spann%' ORDER BY NAME;
 NAME	COUNT
 vec_spann_dead_appends	2
+vec_spann_gcs	0
+vec_spann_merges	0
 vec_spann_posting_appends	45
 vec_spann_probes	4
 vec_spann_resamples	0

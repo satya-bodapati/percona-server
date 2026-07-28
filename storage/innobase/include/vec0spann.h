@@ -102,6 +102,11 @@ edge, so an aborted split re-arms). INTERNAL; the
 "spann_split_threshold_low" DBUG knob drops it to 8 for tests. */
 constexpr uint64_t VEC_SPANN_SPLIT_THRESHOLD = 4096;
 
+/** L2 merge candidacy: lists with fewer LIVE (non-dead) postings than
+this are folded into one merged head when at least two qualify.
+INTERNAL; the "spann_merge_threshold_low" DBUG knob drops it to 4. */
+constexpr uint64_t VEC_SPANN_MERGE_THRESHOLD = VEC_SPANN_SPLIT_THRESHOLD / 8;
+
 /** Deterministic 2-means for one posting list (L1 split): farthest-
 point initialization (no RNG — the point farthest from the mean, then
 the point farthest from that), then at most `VEC_SPANN_KMEANS_ROUNDS`
@@ -390,6 +395,26 @@ old head's _meta row deleted, suffix catch-up under the fence, retire.
 A list that cannot split (all points identical) is a clean no-op.
 @return DB_SUCCESS, DB_INTERRUPTED on cancellation, or error */
 dberr_t vec_spann_split(dict_table_t *table, THD *thd, uint64_t head_id);
+
+/** L2: merge — fold every list with fewer than
+VEC_SPANN_MERGE_THRESHOLD live postings (two or more must qualify)
+into ONE merged head (fresh counter id, centroid of the folded heads'
+vectors), on the same one-transaction / fence / publish protocol.
+@return DB_SUCCESS, DB_INTERRUPTED on cancellation, or error */
+dberr_t vec_spann_merge(dict_table_t *table, THD *thd);
+
+/** L2: garbage collection — ONE discovery scan of the postings, then
+row DELETEs on one internal transaction for (a) every posting of a
+list whose head is neither in _meta nor the RAM graph (unreachable
+garbage left behind by splits/re-samples once their retired heads
+drained), and (b) every posting of a dead label whose deleter is
+visible to the OLDEST active read view, followed by the _dead rows
+themselves. Old readers keep seeing all of it through MVCC
+(delete-marked versions); purge does the physical reclamation.
+Explicit (never auto-enqueued): sweep timing stays deterministic for
+operators and tests alike.
+@return DB_SUCCESS, DB_INTERRUPTED on cancellation, or error */
+dberr_t vec_spann_gc(dict_table_t *table, THD *thd);
 
 /** Free the runtime (head graph, latch, counters). Safe on tables
 that never opened one — the vec_close analog. */

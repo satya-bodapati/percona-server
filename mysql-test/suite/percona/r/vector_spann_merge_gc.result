@@ -1,0 +1,114 @@
+#
+# SPANN L2: MERGE + GC on the maintenance thread.
+#   MERGE folds every list under the merge threshold into ONE merged
+#   head (centroid of the folded heads, fresh counter id) via the
+#   shared fence/publish protocol.
+#   GC does one postings scan and row-DELETEs (a) lists whose head is
+#   unreachable (split/resample garbage after their retired heads
+#   drained) and (b) dead labels visible to the oldest active view,
+#   then the _dead rows themselves. MVCC keeps every old reader
+#   correct; purge physically reclaims the delete-marked rows.
+#
+SET GLOBAL innodb_monitor_enable = 'module_vec';
+CREATE TABLE tg (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(2),
+VECTOR KEY vk (v) TYPE spann);
+# Two clusters, split once (leaves the genesis list as garbage),
+# then DELETE most of both halves: high dead ratio, tiny live lists.
+SET SESSION debug = '+d,spann_split_threshold_low';
+SET SESSION debug = '-d,spann_split_threshold_low';
+DELETE FROM tg WHERE id IN (1, 2, 3, 6, 7, 8);
+SET SESSION innodb_interpreter = 'spann_stats test/tg';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=2 lists=3 postings=16 labels=8 dead=6 dead_ratio_pct=75 list_min=4 list_max=8 list_avg=5 retired=0
+
+# GC: the genesis garbage list and the six dead labels are swept and
+# the _dead rows retired — dead ratio back to zero, postings shrink
+# to the two live rows (plus their closure copies, if any).
+SET SESSION innodb_interpreter = 'spann_maint test/tg gc';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+PASS: gc done
+SET SESSION innodb_interpreter = 'spann_dump test/tg';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=2 lists=2 postings=2 labels=2 label_min=4 label_max=5 dead=0
+head=9 size=1
+head=10 size=1
+mem heads=2 dead_appends=6
+
+SET SESSION innodb_interpreter = 'spann_stats test/tg';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=2 lists=2 postings=2 labels=2 dead=0 dead_ratio_pct=0 list_min=1 list_max=1 list_avg=1 retired=0
+
+#
+# MERGE with an old reader across it: both halves are now under the
+# (lowered) merge threshold; the reader pinned before the merge keeps
+# resolving through the retired heads.
+#
+BEGIN;
+SELECT COUNT(*) FROM tg;
+COUNT(*)
+2
+INSERT INTO tg VALUES (20, STRING_TO_VECTOR('[3.5,0]'));
+SET GLOBAL debug = '+d,spann_merge_threshold_low';
+SET SESSION innodb_interpreter = 'spann_maint test/tg merge';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+PASS: merge done
+SET GLOBAL debug = '-d,spann_merge_threshold_low';
+# Pinned reader: pre-merge world — row 20 invisible, old lists live.
+SELECT id FROM tg ORDER BY DISTANCE(v, STRING_TO_VECTOR('[4,0]'), 'EUCLIDEAN') LIMIT 2;
+id
+4
+5
+COMMIT;
+# After the view ends: the merged world with row 20.
+SELECT id FROM tg ORDER BY DISTANCE(v, STRING_TO_VECTOR('[4,0]'), 'EUCLIDEAN') LIMIT 2;
+id
+4
+20
+SET SESSION innodb_interpreter = 'spann_stats test/tg';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=1 lists=3 postings=6 labels=3 dead=0 dead_ratio_pct=0 list_min=1 list_max=3 list_avg=2 retired=2
+
+# A second GC after the reader drained: the folded lists (their
+# retired heads now dropped) are swept; one merged list remains.
+SET SESSION innodb_interpreter = 'spann_maint test/tg gc';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+PASS: gc done
+SET SESSION innodb_interpreter = 'spann_dump test/tg';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=1 lists=1 postings=3 labels=3 label_min=4 label_max=11 dead=0
+head=12 size=3
+mem heads=1 dead_appends=6
+
+# The merged index serves correctly, keeps taking writes, and
+# survives a restart (committed rows are the whole story).
+INSERT INTO tg VALUES (21, STRING_TO_VECTOR('[104.5,0]'));
+SELECT id FROM tg ORDER BY DISTANCE(v, STRING_TO_VECTOR('[104.6,0]'), 'EUCLIDEAN') LIMIT 2;
+id
+21
+5
+# restart
+SELECT id FROM tg ORDER BY DISTANCE(v, STRING_TO_VECTOR('[104.6,0]'), 'EUCLIDEAN') LIMIT 2;
+id
+21
+5
+SET SESSION innodb_interpreter = 'spann_dump test/tg';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+heads=1 lists=1 postings=4 labels=4 label_min=4 label_max=13 dead=0
+head=12 size=4
+mem heads=1
+
+DROP TABLE tg;
+SET GLOBAL innodb_monitor_disable = 'module_vec';
+SET GLOBAL innodb_monitor_reset_all = 'module_vec';
+SET GLOBAL innodb_monitor_enable = default;
+SET GLOBAL innodb_monitor_disable = default;
+SET GLOBAL innodb_monitor_reset_all = default;
