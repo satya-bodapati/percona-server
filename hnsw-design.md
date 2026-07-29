@@ -50,11 +50,9 @@ CREATE TABLE t (
 `TYPE` names the index implementation; `WITH (...)` carries its construction parameters.
 Both round-trip through `SHOW CREATE TABLE`.
 
-`TYPE` is resolved against a **registry** of index implementations, and validated at
-CREATE/ALTER — an unknown type is rejected there rather than surfacing later as an engine
-error. At runtime the engine dispatches through a `Vector_index` interface, so adding a
-second index type is one enum value, one registry row, and one implementation; no call site
-changes. hnsw is currently the only registered type.
+`TYPE` is validated at CREATE/ALTER against a registry of index implementations, so an
+unknown type is rejected there rather than surfacing later as an engine error. hnsw is
+currently the only registered type; §3.3 describes what a second one costs.
 
 Reads need no new syntax: `ORDER BY DISTANCE(...) LIMIT k` is recognised by the optimizer
 and served by the index.
@@ -102,9 +100,133 @@ pair is immutable.
 Removing a node can disconnect the graph. A deleted node stays in memory as a router:
 traversal may pass through it, searches never return it.
 
-### 3.3 The auxiliary table
+### 3.3 Supporting more than one index type
 
-**One table per vector index, one row per graph node, edited in place.** A node's row is
+HNSW is one way to build a vector index; it will not be the only one. The engine is
+therefore structured so that a second type is an addition rather than an edit — nothing in
+the hnsw implementation, and no call site outside it, changes when one arrives.
+
+Three pieces do that work.
+
+**A type identity and a registry.** `Vec_index_type` is the enum; the registry is one static
+table mapping it to a token and an implementation singleton:
+
+```c
+enum class Vec_index_type : uint8_t {
+  HNSW = 0,
+  /* a second TYPE (e.g. spann = 1) adds its value here, one registry
+     row, and its implementation singleton — nothing else */
+};
+
+const Vec_type_entry vec_type_registry[] = {
+    {"hnsw", &vec_hnsw_singleton},        /* order matches the enum */
+};
+```
+
+The string token exists only at the two boundaries where SQL hands us text — DDL validation,
+and reading `KEY::vector_index_type` back from the data dictionary at open or build. Past
+those, the type travels as the enum. `vec_index_by_name()` is the case-insensitive boundary
+lookup; `vec_index_by_enum()` is the O(1) internal one; `vec_index_token()` goes back the
+other way, and is how the aux table name embeds its type (§3.4).
+
+**An interface for the runtime operations.** `Vector_index` is an abstract class whose
+implementations are *stateless singletons* — every per-index piece of state lives on the
+table, so there is no lifetime to manage:
+
+```c
+class Vector_index {
+  virtual Vec_index_type type() const = 0;
+
+  virtual void    open(dict_table_t*, field_no, dims, M, ef) const = 0;
+  virtual dberr_t load(dict_table_t*, THD*) const = 0;
+  virtual dberr_t insert(trx, table, thd, label, vec, row_ref, len) const = 0;
+  virtual dberr_t remove(trx, table, thd, label) const = 0;
+  virtual dberr_t refresh_row_ref(trx, table, thd, label, row_ref, len) const = 0;
+  virtual dberr_t knn(table, thd, query, dims, k, ef, hits, exclude) const = 0;
+  virtual size_t  size_hint(const dict_table_t*) const = 0;
+  virtual dberr_t build(trx, table, vec_index, dims, M, ef, thd) const = 0;
+  virtual void    close(dict_table_t*) const = 0;
+  virtual dberr_t recreate_after_import(dict_table_t*, trx) const = 0;
+};
+```
+
+That list is deliberately exactly the operations that exist — the interface grew one method
+at a time, added by the commit that first needed it, never speculatively. What stays
+*outside* is just as deliberate: aux naming, the hidden `vec_idx_id` column, the label
+counter and its persistence, the rollback plumbing, and the memory budget are all
+type-independent machinery, so they are plain functions rather than virtuals.
+
+**A generic runtime slot on the table.** `dict_table_t::vec` is the per-table companion —
+the analogue of `dict_table_t::fts` — and it is typed as the *generic base*, not as hnsw's
+struct:
+
+```c
+struct dict_table_t {
+  ...
+  struct Vec_runtime *vec;      /* nullptr until first open */
+};
+
+struct Vec_runtime {
+  dict_table_t        *table;      /* back pointer */
+  const Vector_index  *impl;       /* who allocated this runtime */
+  space_index_t        index_id;   /* the index it serves */
+  uint16_t             field_no;   /* MySQL ordinal of the vector column */
+  uint32_t             dims;
+  virtual ~Vec_runtime() = default;
+};
+```
+
+`Vec_runtime` carries only the index's SQL-facing identity — the fields call sites legitimately
+read. Everything hnsw-specific (the graph pointer, its rw-latch, `M`/`ef_construction`, the
+loaded/stale flags, the label→`row_ref` map, memory accounting) lives in `vec_t`, which
+derives from it:
+
+```c
+struct vec_t : public Vec_runtime {
+  int M, ef_construction;
+  hnswlib::HierarchicalNSW<float> *hnsw;
+  ...
+};
+```
+
+**Only the implementation that allocated a runtime may interpret its subtype.** That rule is
+enforced by keeping the downcast file-local to the hnsw implementation:
+
+```c
+/* vec0aux.cc — this file called vec_open, so this file alone may downcast */
+static inline vec_t *vec_hnsw(const dict_table_t *table) {
+  return static_cast<vec_t *>(table->vec);
+}
+```
+
+The compiler holds the line: a stray `table->vec->hnsw` elsewhere does not compile.
+
+**How dispatch finds the right implementation.** Two paths, and the distinction matters:
+
+- **A token is available** — `open` and `build` are reached from the SQL layer, which still
+  has `KEY::vector_index_type`. They resolve with `vec_index_by_name()`. Since CREATE/ALTER
+  already validated the token, it must resolve; the fallback is pure defence for a data
+  dictionary written before the token existed.
+- **No token, but a runtime is open** — everything else (insert, delete, knn, close, …) uses
+  `vec_index_for(table)`, which reads `table->vec->impl`. **An open runtime is
+  self-describing**: it remembers which implementation created it, so dispatch never re-reads
+  the DD, and teardown from `dict_mem_table_free` is correct even for a type this code has
+  never heard of.
+
+The residual case is a table with no runtime open — teardown on a table that never built one,
+and IMPORT re-mint before first open. Those are no-ops or type-independent for every type,
+so answering "hnsw" is correct while it is the only registered type; a second type threads
+its token through the IMPORT site.
+
+Note what is *not* here: no per-index `vec_type` column in the dictionary, and no type stored
+on `dict_index_t`. The type is either carried by the token from the SQL layer or implied by
+the open runtime. That keeps one authority for each answer instead of two that can disagree.
+
+### 3.4 The auxiliary table
+
+**One table per vector index, one row per graph node, edited in place.** Its name embeds the
+type token from §3.3 — `vec_hnsw_<tid>_<iid>` — so the datadir is self-describing and each
+type owns a namespace. A node's row is
 created when the node is created and modified whenever anything about that node changes —
 its edge lists, or the base row it points at.
 
@@ -119,13 +241,13 @@ CREATE TABLE vec_hnsw_<tid>_<iid> (
 ```
 
 `neighbors` is the interesting column: the node's edge lists, serialized. It has **exactly
-one reader** — the loader (§3.7). Queries never touch it, which is why its shape is free to
+one reader** — the loader (§3.8). Queries never touch it, which is why its shape is free to
 change without affecting the read path (and in Phase 2, it does).
 
 The table's identity is the label, so there is exactly one row per node at all times: no
 history, no versions. Whatever a node's edges are *now* is what the row holds.
 
-### 3.4 How the graph drives writes into the aux table
+### 3.5 How the graph drives writes into the aux table
 
 hnswlib calls back into InnoDB whenever it changes the graph, and those callbacks write
 rows on the **user's transaction**.
@@ -150,7 +272,7 @@ Two properties of that pattern are worth holding onto, because they are what Pha
 addresses: the UPDATEs are on rows **shared with other concurrent inserters**, and the lock
 on each is held for the **whole transaction**, not the duration of the write.
 
-### 3.5 The write paths
+### 3.6 The write paths
 
 | Statement | In memory | On disk |
 |---|---|---|
@@ -165,7 +287,7 @@ Rollback needs no aux-specific work — undo restores the rows — plus an in-me
 (`unmarkDelete`, or marking a rolled-back insert deleted), applied from a per-transaction
 list of what the statement did to the graph.
 
-### 3.6 How SELECT works
+### 3.7 How SELECT works
 
 **Queries never read the aux table.** It is storage and reload only.
 
@@ -184,7 +306,7 @@ whose row has since moved to a different label, and costs one integer comparison
 The only disk I/O a query performs is the base-row fetch in step 2 — the same lookup any
 secondary index pays to return a row.
 
-### 3.7 How reload works
+### 3.8 How reload works
 
 The graph is rebuilt from the aux table on first access after startup, after a dict-cache
 eviction, or as a self-heal when in-memory state was lost. One scan under a read view:
@@ -220,5 +342,5 @@ slightly less well-connected node.
 
 ---
 
-*Next: `hnsw-phase2-aux-log.md` — why the §3.4 write pattern had to change, and what
+*Next: `hnsw-phase2-aux-log.md` — why the §3.5 write pattern had to change, and what
 replaced it.*

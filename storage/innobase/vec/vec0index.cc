@@ -159,7 +159,7 @@ const Vector_index *vec_index_for(const dict_table_t *table) {
   via vec_index_by_name() and never reach here; what does reach here
   is teardown/close on runtime-less tables (a no-op for every type)
   and IMPORT re-mint before first open. hnsw is the correct answer for
-  all of them while it is the sole registered type; S1 threads the
-  TYPE token through the IMPORT site when the second type lands. */
+  all of them while it is the sole registered type; a second type must
+  thread its TYPE token through the IMPORT site. */
   return vec_index_by_enum(Vec_index_type::HNSW);
 }
