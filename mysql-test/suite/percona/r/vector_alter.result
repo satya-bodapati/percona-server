@@ -63,6 +63,7 @@ ta1	CREATE TABLE `ta1` (
   VECTOR KEY `v` (`v`) TYPE `hnsw` WITH (`M`=6)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 vec_hnsw_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>_dead.ibd
 # A.4 Default ADD COLUMN (server picks algorithm)
 ALTER TABLE ta1 ADD COLUMN c4 INT;
 SHOW CREATE TABLE ta1;
@@ -155,6 +156,7 @@ td1	CREATE TABLE `td1` (
   VECTOR KEY `vix` (`v`) TYPE `hnsw` WITH (`M`=6)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 vec_hnsw_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>_dead.ibd
 DROP TABLE td1;
 #
 # === Section E: ADD VECTOR INDEX after INSTANT DROP COLUMN
@@ -234,6 +236,7 @@ SELECT id, VECTOR_TO_STRING(v) FROM tg1 FORCE INDEX (PRIMARY);
 id	VECTOR_TO_STRING(v)
 1	[1.00000e+00,1.00000e+00,1.00000e+00,1.00000e+00,1.00000e+00,1.00000e+00,1.00000e+00,1.00000e+00]
 vec_hnsw_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>_dead.ibd
 # G.4 First ADD VECTOR INDEX: refused for INPLACE since PS-11300 —
 # the native rebuild would stamp vec_idx_id but leave the aux
 # empty and no graph built (an incomplete index over existing

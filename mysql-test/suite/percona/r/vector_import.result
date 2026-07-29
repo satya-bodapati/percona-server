@@ -35,6 +35,7 @@ Warnings:
 Warning	1817	InnoDB: Index corrupt: Index vk not found or corrupt, you should recreate this index.
 Warning	1088	Vector index on table test/t1 is empty after IMPORT TABLESPACE: imported rows are not indexed. Rebuild it with ALTER TABLE ... DROP INDEX / ADD INDEX to index them.
 vec_hnsw_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>_dead.ibd
 # Base rows are back; the vector index is EMPTY (documented): kNN
 # finds nothing pre-rebuild.
 SELECT id FROM t1 ORDER BY id;
