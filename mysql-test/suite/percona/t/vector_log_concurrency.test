@@ -1,0 +1,105 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # PS-11300: the append-only log makes P1 inexpressible.
+--echo #
+--echo # Under the old aux layout an INSERT took an X record lock on every
+--echo # neighbour whose edge list it rewired, held to COMMIT. Two sessions
+--echo # inserting similar vectors land in the same neighbourhood, so they
+--echo # contend on the same rows — and if they acquire them in opposite
+--echo # order, they deadlock (design doc P1). The log replaces those UPDATEs
+--echo # with appends of DISTINCT keys (label, ver), which take page latches
+--echo # for microseconds and compatible insert-intention locks, so no
+--echo # waits-for cycle can be constructed.
+--echo #
+--echo # Two multi-statement transactions are held open, each inserting into
+--echo # the SAME neighbourhood, interleaved. Neither may block or deadlock,
+--echo # and both must commit.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+                 VECTOR KEY (v) TYPE hnsw WITH (M = 4));
+
+--echo # Seed a neighbourhood every later insert will rewire.
+INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]')),
+                      (2, STRING_TO_VECTOR('[0.9,0.1,0,0]')),
+                      (3, STRING_TO_VECTOR('[0.8,0.2,0,0]'));
+
+connect(c1, localhost, root,,);
+connect(c2, localhost, root,,);
+
+--connection c1
+BEGIN;
+INSERT INTO t1 VALUES (10, STRING_TO_VECTOR('[0.95,0.05,0,0]'));
+
+--echo # c2 inserts into the same neighbourhood while c1 still holds its
+--echo # transaction open. With in-place neighbour UPDATEs this is where c2
+--echo # would queue behind c1's uncommitted X locks, or deadlock.
+--connection c2
+BEGIN;
+INSERT INTO t1 VALUES (11, STRING_TO_VECTOR('[0.85,0.15,0,0]'));
+
+--echo # Interleave again in the opposite order — the AB-BA shape. Distinct
+--echo # append keys mean there is nothing to wait on.
+--connection c1
+INSERT INTO t1 VALUES (12, STRING_TO_VECTOR('[0.92,0.08,0,0]'));
+--connection c2
+INSERT INTO t1 VALUES (13, STRING_TO_VECTOR('[0.88,0.12,0,0]'));
+
+--echo # Both commit; neither was rolled back as a deadlock victim.
+--connection c1
+COMMIT;
+--connection c2
+COMMIT;
+
+--connection default
+SELECT id FROM t1 ORDER BY id;
+
+--echo # Every append landed and the log resolves cleanly — one birth row per
+--echo # label plus the snapshots, no lost edges.
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # The graph rebuilt from that log answers kNN across the whole
+--echo # contended neighbourhood: the edges BOTH sessions wrote are present,
+--echo # which is what P2 used to break.
+--source include/restart_mysqld.inc
+SELECT id FROM t1
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0.9,0.1,0,0]'), 'EUCLIDEAN')
+  LIMIT 7;
+
+--echo #
+--echo # Rollback of a multi-append statement: one INSERT appends the birth
+--echo # row plus a snapshot per rewired neighbour, all on the user
+--echo # transaction, so undo must remove every one of them. Asserted on raw=
+--echo # (the log's live row count) rather than the resolved node count,
+--echo # because the resolved count would look correct even if orphan version
+--echo # rows survived.
+--echo #
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+BEGIN;
+INSERT INTO t1 VALUES (20, STRING_TO_VECTOR('[0.91,0.09,0,0]')),
+                      (21, STRING_TO_VECTOR('[0.93,0.07,0,0]'));
+ROLLBACK;
+--echo # raw= must be back to its pre-statement value: no orphan version
+--echo # rows, no half-applied snapshot.
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # A crash before commit is the same property enforced by recovery
+--echo # rather than by undo.
+BEGIN;
+INSERT INTO t1 VALUES (30, STRING_TO_VECTOR('[0.94,0.06,0,0]'));
+SET SESSION debug = '+d,crash_commit_before';
+--exec echo "restart" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
+--error 2013
+COMMIT;
+--source include/wait_until_connected_again.inc
+SELECT id FROM t1 ORDER BY id;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--disconnect c1
+--disconnect c2
+DROP TABLE t1;
