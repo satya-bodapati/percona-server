@@ -386,7 +386,95 @@ to hang from. Sessions needing it fall back to the exact path.
 
 ---
 
-## 4. What this deliberately does not do
+## 4. Limitations
+
+These are properties of this design, not bugs to be found later. Phase 2
+(`hnsw-phase2-aux-log.md`) addresses the first three; the rest stand.
+
+### 4.1 A neighbour-list update can be lost on disk
+
+The callbacks persist a node's edge list *as captured at the in-memory mutation*, but the
+order those writes reach disk is decided by row-lock acquisition, which has no relationship to
+mutation order:
+
+```
+memory:    n5=[a] → T1 adds v10 → [a,v10] → T2 adds v11 → [a,v10,v11]
+captured:  S1=[a,v10] (T1)                  S2=[a,v10,v11] (T2)
+disk:      T2 wins the row lock, writes S2, commits;  T1 writes S1 after
+result:    the OLDER list overwrote the newer — v11's incoming edge is gone ON DISK
+```
+
+Memory stays correct, so nothing looks wrong until the next reload, where the edge is simply
+absent. The effect is **silent recall erosion**, not a wrong answer or a crash. The X lock
+serializes the writes perfectly; it just cannot know that S1 predates S2. Fixing this needs an
+ordering token on disk, which this design has no field for.
+
+### 4.2 Concurrent inserters deadlock, and hub nodes serialize
+
+An INSERT UPDATEs ~M shared rows and holds each X lock to COMMIT (§3.5). Two sessions
+inserting similar vectors land in the same neighbourhood; in opposite order that is an AB-BA
+cycle and one is rolled back as the victim. Even without a cycle, high-degree nodes near the
+entry point are in nearly every insert's write set, so one hot row throttles the insert
+stream — for the duration of the transaction, not of the write.
+
+Deadlocks are retryable, so this is a throughput limitation rather than a correctness one.
+
+### 4.3 Dangling edges after rollback interleaving
+
+A committed `neighbors` blob can name a label whose own row no longer exists, because the
+blob was captured before that label's inserting transaction rolled back. The loader drops
+such edges (§3.8): the graph stays connected and searches stay correct, at the cost of one
+edge's worth of reachability per occurrence.
+
+### 4.4 Reload can miss concurrently-committing rows, and retries
+
+The loader scans under a read view, so it cannot see aux rows written by a transaction that
+has not committed yet — even though that transaction's `addPoint` already happened in memory
+and will commit moments later. The rebuilt graph is then missing a node that is committed on
+disk. This is detected (the scan notes that it skipped invisible rows) and handled by marking
+the runtime stale so a later access reloads again, converging after the writers commit. It is
+correct but it is a retry loop, and a graph can be briefly incomplete.
+
+### 4.5 Graph memory is held for the server's lifetime
+
+The graph hangs off `dict_table_t`, so an LRU eviction of the dict entry would free it and the
+next query would pay a full rebuild — a multi-second stall triggered by dict-cache pressure
+from unrelated tables. To avoid that cliff, **a table with a vector index is pinned in the
+dict cache.**
+
+The consequence is the limitation: once such a table is opened, its graph is resident until
+the server restarts. `innodb_hnsw_max_memory` bounds how much graph a server will *build*, but
+there is no mechanism to reclaim an idle graph, and pinning grows the non-LRU portion of the
+dict cache.
+
+Note that pinning removes only the *involuntary* path. Every DDL case frees the table object
+explicitly — DROP TABLE, DROP INDEX, TRUNCATE, ALTER rebuild — so the graph is still released
+there, and those paths are unaffected.
+
+The underlying issue is that graph lifetime is coupled to dict-entry lifetime, and pinning
+masks that rather than fixing it. The decoupled form is a registry keyed by
+`(table_id, index_id)` holding the graph and the label→`row_ref` map — the only two things
+that cost a full aux scan to rebuild — with everything else in the companion recreated on
+attach. That is deliberately deferred: it trades nested ownership's *guarantee* of cleanup for
+five invalidation sites that must remember, and leaking a multi-gigabyte graph is a worse
+failure than rebuilding one.
+
+### 4.6 IMPORT leaves the index empty
+
+IMPORT TABLESPACE brings in rows whose hidden `vec_idx_id` values were stamped elsewhere,
+while the aux arrives empty. The index is therefore empty until a DROP/ADD VECTOR INDEX
+rebuilds it. Blocking IMPORT/DISCARD on vector-indexed tables is the simpler posture and is
+under consideration.
+
+### 4.7 MVCC check ② is not implementable as it stands
+
+Of the two read-side checks §3.9 needs, the label-match compare works today. View-gated
+tombstone inclusion does not: it requires the deleted label's `row_ref`, and a delete here
+sets `row_ref = NULL`. See §3.9.
+
+---
+
+## 5. What this deliberately does not do
 
 - **No on-disk traversal.** Searching from disk is a different algorithm; this design keeps
   the graph resident and uses disk only to reconstruct it.

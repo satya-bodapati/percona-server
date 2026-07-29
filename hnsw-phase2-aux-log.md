@@ -50,7 +50,8 @@ changes to any DDL path.
 
 An INSERT rewires ~M existing nodes, so the original design issued M UPDATEs of shared rows,
 each taking an X record lock **held until COMMIT** (`hnsw-design.md` §3.4). Three problems
-followed — the first two operational, the third a silent correctness bug.
+followed — the first two operational, the third a silent correctness bug. They are
+`hnsw-design.md` §4.2 and §4.1 respectively.
 
 **Deadlocks.** Two sessions inserting similar vectors land in the same neighbourhood and
 contend on the same rows. In opposite order, that is a textbook AB-BA cycle:
@@ -124,6 +125,21 @@ second table needed no changes to any of those paths.
 The cost is stated plainly in §5.
 
 ---
+
+### Which limitations this addresses
+
+| `hnsw-design.md` | Phase 2 |
+|---|---|
+| §4.1 lost neighbour-list update | **fixed** — no overwrite is possible, and `ver` carries the order |
+| §4.2 deadlocks and hub serialization | **fixed** — distinct-key appends, nothing held to COMMIT |
+| §4.3 dangling edges | contained, not fixed — same absorber, smaller surface |
+| §4.4 reload retry on concurrent commits | unchanged |
+| §4.5 graph memory held for server lifetime | unchanged — and reload, when it does happen, is more expensive here (§3b) |
+| §4.6 IMPORT leaves the index empty | unchanged |
+| §4.7 MVCC check ② unimplementable | **fixed** — `_dead` keeps `row_ref` and carries the deleter's identity (§4) |
+
+It also introduces one of its own: the aux grows with mutations and is only pruned at reload
+(§6).
 
 ## 3b. The trade, in one table
 
