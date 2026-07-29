@@ -54,8 +54,12 @@ full redo/undo/locking, no global mutex. */
 /** One materialized aux row for insertion. Pointers are caller-owned;
 vec_aux_insert copies what it needs. */
 struct vec_aux_row_t {
-  /** vec_idx_id of the base row == HNSW label == aux PK */
+  /** vec_idx_id of the base row == HNSW label == aux PK prefix */
   uint64_t id;
+  /** edge-list version (H1): 0 = birth row (identity payload present);
+  > 0 = a neighbors-only snapshot appended by a rewire. Assigned under
+  hnswlib's per-node link lock — version order == mutation order. */
+  uint32_t ver{0};
   /** vector data, dims * sizeof(float) bytes */
   const float *vec;
   uint32_t dims;
@@ -75,7 +79,7 @@ hnswlib's VecAuxLoadedRowTuple so the load path converts by construction;
 defined here without including hnswlib to keep this header engine-only. */
 using vec_loaded_row_t =
     std::tuple<std::uint64_t, std::uint64_t, std::vector<float>,
-               std::vector<std::vector<std::size_t>>>;
+               std::vector<std::vector<std::size_t>>, std::uint32_t>;
 
 /** Serialize per-level neighbor label lists into the aux `neighbors` BLOB.
 Format (big-endian, ported from the PS-10258 prototype):
@@ -112,17 +116,7 @@ and the row is undone with the statement, like any user DML.
 @param[in]     aux  aux table (opened by the caller)
 @param[in]     row  row contents
 @return DB_SUCCESS or error */
-dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
-                       const vec_aux_row_t &row);
-
-/** Update the `neighbors` column of one aux row identified by id.
-Parser-free upd_node execution mirroring the FK-cascade update pattern.
-Passing row_ref_null=true additionally sets row_ref to SQL NULL (the
-tombstone form — unused until DELETE support lands, shaped for it).
-@return DB_SUCCESS, DB_RECORD_NOT_FOUND if no such id, or error */
-dberr_t vec_aux_update_neighbors(trx_t *trx, dict_table_t *aux, uint64_t id,
-                                 const byte *neighbors, ulint neighbors_len,
-                                 bool row_ref_null = false);
+dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux, const vec_aux_row_t &row);
 
 /** Tombstone one aux row: set row_ref to SQL NULL, leaving the graph
 geometry (vec/level/neighbors) in place. The node stops being loadable

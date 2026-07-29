@@ -84,7 +84,7 @@ size_t db_prefix_len(const char *parent_name) {
 
 void vec_aux_get_table_name(const dict_table_t *parent, space_index_t index_id,
                             Vec_index_type type, char *name_out,
-                            size_t name_out_len) {
+                            size_t name_out_len, const char *suffix) {
   ut_a(parent != nullptr);
   ut_a(name_out != nullptr);
   ut_a(name_out_len >= MAX_FULL_NAME_LEN);
@@ -105,9 +105,12 @@ void vec_aux_get_table_name(const dict_table_t *parent, space_index_t index_id,
   n = fts_write_object_id(index_id, index_id_str);
   ut_a(n > 0);
 
+  /* A member table appends its suffix ("_dead"); the main table's is
+  the empty string, so both share one format. */
+  ut_a(suffix != nullptr);
   const int written = snprintf(
-      name_out, name_out_len, "%.*s%s%s_%s_%s", static_cast<int>(db_len),
-      parent_name, VEC_AUX_PREFIX, token, table_id_str, index_id_str);
+      name_out, name_out_len, "%.*s%s%s_%s_%s%s", static_cast<int>(db_len),
+      parent_name, VEC_AUX_PREFIX, token, table_id_str, index_id_str, suffix);
   ut_a(written > 0);
   ut_a(static_cast<size_t>(written) < name_out_len);
 }
@@ -155,6 +158,9 @@ bool vec_aux_parse_table_name(const char *name, table_id_t *parent_id_out,
   if (sep == nullptr) return false;
   space_index_t iid = 0;
   if (!fts_read_object_id(&iid, sep + 1)) return false;
+  /* A member table's name carries a trailing suffix after the index id
+  (e.g. "..._dead"); fts_read_object_id stops at it, so the ids parse
+  identically for the main table and its members. */
 
   if (parent_id_out != nullptr) *parent_id_out = pid;
   if (index_id_out != nullptr) *index_id_out = iid;
@@ -241,19 +247,75 @@ uint64_t vec_assign_next_idx_id(dict_table_t *table) {
 
 namespace {
 
-/** Allocate and fully populate the in-memory dict_table_t for one vector
-aux table. Schema is fixed:
-  id        BIGINT UNSIGNED NOT NULL PRIMARY KEY,
-  vec       BLOB NOT NULL,
-  row_ref   VARBINARY(3072),         -- NULLable; no index
-  level     TINYINT NOT NULL,
-  neighbors BLOB NOT NULL */
+/* --------------------------------------------------------------------
+Per-TYPE aux table sets. One index owns a SET of aux tables, each
+described by a suffix + fixed schema; the PK is always the leading n_pk
+columns. Adding an index TYPE means adding its descriptors and one case
+in vec_aux_table_set — no create/drop/rename/import path changes, and
+the DD writer (dd_create_vec_aux_table) derives its entry from the
+in-memory table these descriptors build. */
+
+struct Vec_aux_col_def {
+  const char *name;
+  ulint mtype;
+  ulint prtype;
+  ulint len;
+};
+
+struct Vec_aux_table_def {
+  const char *suffix; /* "" = the main table */
+  ulint n_cols;
+  const Vec_aux_col_def *cols;
+  ulint n_pk; /* the PK = the first n_pk columns */
+};
+
+constexpr ulint VEC_AUX_BLOB_PRTYPE =
+    (DATA_MTYPE_MAX << 16) | DATA_BINARY_TYPE | DATA_NOT_NULL;
+
+/* hnsw H1 (design doc hnsw-aux-log-design.md §04): ONE ROW PER
+   MUTATION. PK(label, ver): ver 0 is the birth row and alone carries
+   the node's identity (vec, row_ref, level); ver > 0 rows are
+   edge-list snapshots captured atomically under hnswlib's per-node
+   link lock, so version order provably equals mutation order. Nothing
+   is ever UPDATEd — appends of distinct keys cannot deadlock and
+   cannot overwrite. The loader takes, per label, identity from ver 0
+   and edges from the HIGHEST VISIBLE ver. */
+const Vec_aux_col_def vec_hnsw_log_cols[] = {
+    {"label", DATA_INT, DATA_NOT_NULL | DATA_UNSIGNED, VEC_AUX_ID_COL_LEN},
+    {"ver", DATA_INT, DATA_NOT_NULL | DATA_UNSIGNED, 4},
+    /* vec/row_ref/level: ver-0 (birth) rows only — NULL on version rows */
+    {"vec", DATA_BLOB, (DATA_MTYPE_MAX << 16) | DATA_BINARY_TYPE,
+     VEC_AUX_VEC_COL_LEN},
+    {"row_ref", DATA_BINARY, DATA_BINARY_TYPE, VEC_AUX_ROW_REF_COL_LEN},
+    {"level", DATA_INT, 0, VEC_AUX_LEVEL_COL_LEN},
+    {"neighbors", DATA_BLOB, VEC_AUX_BLOB_PRTYPE, VEC_AUX_NEIGHBORS_COL_LEN},
+};
+
+const Vec_aux_table_def vec_hnsw_defs[] = {
+    {"", UT_ARR_SIZE(vec_hnsw_log_cols), vec_hnsw_log_cols, 2},
+};
+
+/** The aux table set for one index TYPE. hnsw is the only registered
+TYPE; a second one adds its descriptors above and a case here. */
+void vec_aux_table_set(Vec_index_type type, const Vec_aux_table_def **defs,
+                       ulint *n_defs) {
+  switch (type) {
+    case Vec_index_type::HNSW:
+      break;
+  }
+  *defs = vec_hnsw_defs;
+  *n_defs = UT_ARR_SIZE(vec_hnsw_defs);
+}
+
+/** Allocate and fully populate the in-memory dict_table_t for one aux
+table from its descriptor. */
 dict_table_t *create_in_mem_vec_aux_table(const char *aux_name,
                                           const dict_table_t *parent,
-                                          mem_heap_t *heap) {
+                                          mem_heap_t *heap,
+                                          const Vec_aux_table_def &def) {
   dict_table_t *t =
-      dict_mem_table_create(aux_name, parent->space, VEC_AUX_TABLE_NUM_COLS, 0,
-                            0, parent->flags, aux_flags2_from_parent(parent));
+      dict_mem_table_create(aux_name, parent->space, def.n_cols, 0, 0,
+                            parent->flags, aux_flags2_from_parent(parent));
 
   if (DICT_TF_HAS_SHARED_SPACE(parent->flags)) {
     ut_ad(parent->space == fil_space_get_id_by_name(parent->tablespace()));
@@ -264,29 +326,10 @@ dict_table_t *create_in_mem_vec_aux_table(const char *aux_name,
     t->data_dir_path = mem_heap_strdup(t->heap, parent->data_dir_path);
   }
 
-  /* id BIGINT UNSIGNED NOT NULL */
-  dict_mem_table_add_col(t, heap, "id", DATA_INT, DATA_NOT_NULL | DATA_UNSIGNED,
-                         VEC_AUX_ID_COL_LEN, true);
-
-  /* vec BLOB NOT NULL */
-  dict_mem_table_add_col(
-      t, heap, "vec", DATA_BLOB,
-      (DATA_MTYPE_MAX << 16) | DATA_BINARY_TYPE | DATA_NOT_NULL,
-      VEC_AUX_VEC_COL_LEN, true);
-
-  /* row_ref VARBINARY(3072) — nullable, NULL means tombstone */
-  dict_mem_table_add_col(t, heap, "row_ref", DATA_BINARY, DATA_BINARY_TYPE,
-                         VEC_AUX_ROW_REF_COL_LEN, true);
-
-  /* level TINYINT NOT NULL — stored as 1-byte INT */
-  dict_mem_table_add_col(t, heap, "level", DATA_INT, DATA_NOT_NULL,
-                         VEC_AUX_LEVEL_COL_LEN, true);
-
-  /* neighbors BLOB NOT NULL */
-  dict_mem_table_add_col(
-      t, heap, "neighbors", DATA_BLOB,
-      (DATA_MTYPE_MAX << 16) | DATA_BINARY_TYPE | DATA_NOT_NULL,
-      VEC_AUX_NEIGHBORS_COL_LEN, true);
+  for (ulint i = 0; i < def.n_cols; ++i) {
+    const Vec_aux_col_def &c = def.cols[i];
+    dict_mem_table_add_col(t, heap, c.name, c.mtype, c.prtype, c.len, true);
+  }
 
   return t;
 }
@@ -298,33 +341,47 @@ dberr_t vec_aux_create_one_table(trx_t *trx, const dict_table_t *parent,
   ut_a(trx != nullptr);
   ut_a(parent != nullptr);
 
-  char aux_name[MAX_FULL_NAME_LEN];
-  vec_aux_get_table_name(parent, index_id, Vec_index_type::HNSW, aux_name,
-                         sizeof(aux_name));
+  const Vec_aux_table_def *defs = nullptr;
+  ulint n_defs = 0;
+  vec_aux_table_set(Vec_index_type::HNSW, &defs, &n_defs);
 
-  mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
-  dict_table_t *aux = create_in_mem_vec_aux_table(aux_name, parent, heap);
+  for (ulint d = 0; d < n_defs; ++d) {
+    const Vec_aux_table_def &def = defs[d];
 
-  dberr_t err = row_create_table_for_mysql(aux, nullptr, nullptr, trx, nullptr);
+    char aux_name[MAX_FULL_NAME_LEN];
+    vec_aux_get_table_name(parent, index_id, Vec_index_type::HNSW, aux_name,
+                           sizeof(aux_name), def.suffix);
 
-  if (err == DB_SUCCESS) {
-    dict_index_t *cidx =
-        dict_mem_index_create(aux_name, "VEC_AUX_TABLE_PK", aux->space,
-                              DICT_UNIQUE | DICT_CLUSTERED, 1);
-    cidx->add_field("id", 0, true);
+    mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
+    dict_table_t *aux =
+        create_in_mem_vec_aux_table(aux_name, parent, heap, def);
 
-    const trx_dict_op_t saved_op = trx_get_dict_operation(trx);
-    err = row_create_index_for_mysql(cidx, trx, nullptr, nullptr);
-    trx->dict_operation = saved_op;
+    dberr_t err =
+        row_create_table_for_mysql(aux, nullptr, nullptr, trx, nullptr);
+
+    if (err == DB_SUCCESS) {
+      dict_index_t *cidx =
+          dict_mem_index_create(aux_name, "VEC_AUX_TABLE_PK", aux->space,
+                                DICT_UNIQUE | DICT_CLUSTERED, def.n_pk);
+      for (ulint k = 0; k < def.n_pk; ++k) {
+        cidx->add_field(def.cols[k].name, 0, true);
+      }
+
+      const trx_dict_op_t saved_op = trx_get_dict_operation(trx);
+      err = row_create_index_for_mysql(cidx, trx, nullptr, nullptr);
+      trx->dict_operation = saved_op;
+    }
+
+    mem_heap_free(heap);
+
+    if (err != DB_SUCCESS) {
+      trx->error_state = err;
+      ib::warn(ER_IB_MSG_465)
+          << "Failed to create vector aux table " << aux_name;
+      return err;
+    }
   }
-
-  mem_heap_free(heap);
-
-  if (err != DB_SUCCESS) {
-    trx->error_state = err;
-    ib::warn(ER_IB_MSG_465) << "Failed to create vector aux table " << aux_name;
-  }
-  return err;
+  return DB_SUCCESS;
 }
 
 dberr_t vec_aux_create_all_tables(trx_t *trx, const dict_table_t *parent) {
@@ -637,7 +694,7 @@ ctx->err; addPoint's caller turns that into a statement error, and the
 statement rollback undoes base row + aux rows together. */
 static void vec_insert_cb(
     hnswlib::labeltype label, hnswlib::tableint internal_id [[maybe_unused]],
-    const void *data_point,
+    uint32_t version, const void *data_point,
     const hnswlib::HierarchicalNSW<float>::NeighborLabelListsByLevel
         &neighbors_by_level,
     void *arg) {
@@ -656,6 +713,8 @@ static void vec_insert_cb(
 
   vec_aux_row_t row;
   row.id = label;
+  row.ver = version; /* birth rows are always version 0 (fork contract) */
+  ut_ad(version == 0);
   row.vec = static_cast<const float *>(data_point);
   row.dims = ctx->dims;
   row.row_ref = ctx->row_ref;
@@ -678,7 +737,7 @@ static void vec_insert_cb(
 
 static void vec_update_cb(
     hnswlib::labeltype label, hnswlib::tableint internal_id [[maybe_unused]],
-    const void *data_point [[maybe_unused]],
+    uint32_t version, const void *data_point [[maybe_unused]],
     const hnswlib::HierarchicalNSW<float>::NeighborLabelListsByLevel
         &neighbors_by_level,
     void *arg) {
@@ -695,17 +754,26 @@ static void vec_update_cb(
   std::vector<byte> blob;
   vec_aux_serialize_neighbors(nbl, blob);
 
-  ctx->err = vec_aux_update_neighbors(ctx->trx, ctx->aux, label, blob.data(),
-                                      blob.size());
+  /* H1: a rewired neighbor persists as an APPEND of (label, ver,
+  neighbors) — never an UPDATE of a shared row. The snapshot and its
+  version were captured atomically under the node's link lock, so the
+  loader's highest-visible-ver rule reconstructs mutation order no
+  matter how transactions commit or roll back. A version row whose
+  label's birth row was rolled back is a harmless orphan: the loader
+  finds no ver-0 identity and skips the label entirely. */
+  ut_ad(version > 0);
+  vec_aux_row_t row;
+  row.id = label;
+  row.ver = version;
+  row.vec = nullptr;
+  row.dims = 0;
+  row.row_ref = nullptr;
+  row.row_ref_len = 0;
+  row.level = 0;
+  row.neighbors = blob.data();
+  row.neighbors_len = blob.size();
 
-  /* No aux row for this label: its inserting transaction rolled back
-  (the node survives in the graph marked deleted, and addPoint may
-  still link new points to it). There is nothing to persist — the new
-  node's own row keeps the reference, and loadIndex drops such
-  dangling edges at reload. */
-  if (ctx->err == DB_RECORD_NOT_FOUND) {
-    ctx->err = DB_SUCCESS;
-  }
+  ctx->err = vec_aux_insert(ctx->trx, ctx->aux, row);
 }
 
 vec_t *vec_open(dict_table_t *table, const Vector_index *impl,

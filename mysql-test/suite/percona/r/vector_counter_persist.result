@@ -16,7 +16,7 @@ SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 count=1 max_id=1 invisible=0
-id=1 level=1 nb=|
+id=1 level=1 ver=0 nb=|
 
 # Restart: the counter must remember id 2 although max(aux) is 1 —
 # the next insert gets id 3, closing the NULL-row hole.
@@ -26,8 +26,8 @@ SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 count=2 max_id=3 invisible=0
-id=1 level=1 nb=3|3
-id=3 level=1 nb=1|1
+id=1 level=1 ver=2 nb=3|3
+id=3 level=1 ver=0 nb=1|1
 
 # Rolled-back inserts consume ids 4 and 5; rollback removes their aux
 # rows, but the ids stay consumed even across a restart.
@@ -39,9 +39,9 @@ SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 count=3 max_id=6 invisible=0
-id=1 level=1 nb=3:6|3:6
-id=3 level=1 nb=1:6|1:6
-id=6 level=1 nb=3:1|3:1
+id=1 level=1 ver=4 nb=3:6|3:6
+id=3 level=1 ver=2 nb=1:6|1:6
+id=6 level=1 ver=0 nb=3:1|3:1
 
 # Crash durability: ids 7 and 8 go to NULL rows (nothing in the aux,
 # nothing flushed), then the server is killed. The redo record
@@ -54,10 +54,10 @@ SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 count=4 max_id=9 invisible=0
-id=1 level=1 nb=3:6:9|3:6:9
-id=3 level=1 nb=1:6:9|1:6:9
-id=6 level=1 nb=3:1:9|3:1:9
-id=9 level=1 nb=6:1:3|6:1:3
+id=1 level=1 ver=6 nb=3:6:9|3:6:9
+id=3 level=1 ver=4 nb=1:6:9|1:6:9
+id=6 level=1 ver=2 nb=3:1:9|3:1:9
+id=9 level=1 ver=0 nb=6:1:3|6:1:3
 
 # TRUNCATE reassigns the table_id: metadata is orphaned with it and
 # the counter legitimately restarts at 1.
@@ -67,6 +67,6 @@ SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 count=1 max_id=1 invisible=0
-id=1 level=1 nb=|
+id=1 level=1 ver=0 nb=|
 
 DROP TABLE t1;

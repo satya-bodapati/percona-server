@@ -93,19 +93,23 @@ enum class Vec_index_type : uint8_t;
 /** Build the on-disk aux table name for one vector index:
 "<db>/vec_<type>_<parent_table_id>_<index_id>", e.g.
 "test/vec_hnsw_4a_5b" (SPANN R4: the registry's type token makes the
-datadir self-describing and gives every TYPE its own namespace —
-spann's three tables become vec_spann_<t>_<i>[/_meta/_dead] without
-ambiguity).
+datadir self-describing and gives every TYPE its own namespace. A
+TYPE whose set has more than one table distinguishes them by suffix,
+e.g. the H1 log's companion vec_hnsw_<t>_<i>_dead.
 
 @param[in]      parent          parent table that owns the vector index
 @param[in]      index_id        id of the vector index (from dict_index_t)
 @param[in]      type            the index's registered TYPE (names the
                                 token embedded in the name)
+@param[in]      suffix          member-table suffix ("" = the main
+                                table; a TYPE whose set has more than
+                                one table names the others, e.g.
+                                "_dead")
 @param[out]     name_out        destination buffer (>= MAX_FULL_NAME_LEN)
 @param[in]      name_out_len    size of destination buffer */
 void vec_aux_get_table_name(const dict_table_t *parent, space_index_t index_id,
                             Vec_index_type type, char *name_out,
-                            size_t name_out_len);
+                            size_t name_out_len, const char *suffix = "");
 
 /** True if `name` starts with the reserved "vec_" prefix (ALL types).
 Used to hide aux tables from INFORMATION_SCHEMA / SHOW TABLES and to

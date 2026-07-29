@@ -50,11 +50,12 @@ DEVIATION FROM FTS rationale (no fts_parse_sql / pars_mutex). */
 
 /* Aux table user-column ordinals, fixed by create_in_mem_vec_aux_table
 (vec0aux.cc): id, vec, row_ref, level, neighbors. */
-constexpr ulint VEC_AUX_COL_ID = 0;
-constexpr ulint VEC_AUX_COL_VEC = 1;
-constexpr ulint VEC_AUX_COL_ROW_REF = 2;
-constexpr ulint VEC_AUX_COL_LEVEL = 3;
-constexpr ulint VEC_AUX_COL_NEIGHBORS = 4;
+constexpr ulint VEC_AUX_COL_LABEL = 0;
+constexpr ulint VEC_AUX_COL_VER = 1;
+constexpr ulint VEC_AUX_COL_VEC = 2;
+constexpr ulint VEC_AUX_COL_ROW_REF = 3;
+constexpr ulint VEC_AUX_COL_LEVEL = 4;
+constexpr ulint VEC_AUX_COL_NEIGHBORS = 5;
 
 void vec_aux_serialize_neighbors(
     const std::vector<std::vector<std::size_t>> &neighbors_by_level,
@@ -152,13 +153,15 @@ dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
                        const vec_aux_row_t &row) {
   ut_a(trx != nullptr);
   ut_a(aux != nullptr);
-  ut_a(row.vec != nullptr);
   ut_a(row.neighbors != nullptr || row.neighbors_len == 0);
+  /* H1: birth rows (ver 0) carry the identity payload; version rows
+  carry a neighbors snapshot only. */
+  ut_a(row.ver == 0 ? row.vec != nullptr : row.vec == nullptr);
 
   /* The aux column is TINYINT; the HNSW level is geometrically
   distributed and cannot plausibly reach 127, but never store a
   truncated level. */
-  if (row.level < 0 || row.level > 127) {
+  if (row.ver == 0 && (row.level < 0 || row.level > 127)) {
     return DB_CORRUPTION;
   }
 
@@ -177,13 +180,22 @@ dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
 
   byte id_buf[8];
   mach_write_to_8(id_buf, row.id);
-  vec_aux_set_field(tuple, VEC_AUX_COL_ID, id_buf, sizeof(id_buf), heap);
-  vec_aux_set_field(tuple, VEC_AUX_COL_VEC, row.vec,
-                    row.dims * sizeof(float), heap);
-  vec_aux_set_field(tuple, VEC_AUX_COL_ROW_REF, row.row_ref, row.row_ref_len,
-                    heap);
-  const byte level_byte = static_cast<byte>(row.level);
-  vec_aux_set_field(tuple, VEC_AUX_COL_LEVEL, &level_byte, 1, heap);
+  vec_aux_set_field(tuple, VEC_AUX_COL_LABEL, id_buf, sizeof(id_buf), heap);
+  byte ver_buf[4];
+  mach_write_to_4(ver_buf, row.ver);
+  vec_aux_set_field(tuple, VEC_AUX_COL_VER, ver_buf, sizeof(ver_buf), heap);
+  if (row.ver == 0) {
+    vec_aux_set_field(tuple, VEC_AUX_COL_VEC, row.vec, row.dims * sizeof(float),
+                      heap);
+    vec_aux_set_field(tuple, VEC_AUX_COL_ROW_REF, row.row_ref, row.row_ref_len,
+                      heap);
+    const byte level_byte = static_cast<byte>(row.level);
+    vec_aux_set_field(tuple, VEC_AUX_COL_LEVEL, &level_byte, 1, heap);
+  } else {
+    dfield_set_null(dtuple_get_nth_field(tuple, VEC_AUX_COL_VEC));
+    dfield_set_null(dtuple_get_nth_field(tuple, VEC_AUX_COL_ROW_REF));
+    dfield_set_null(dtuple_get_nth_field(tuple, VEC_AUX_COL_LEVEL));
+  }
   vec_aux_set_field(tuple, VEC_AUX_COL_NEIGHBORS, row.neighbors,
                     row.neighbors_len, heap);
 
@@ -254,12 +266,17 @@ static dberr_t vec_aux_update_row_low(trx_t *trx, dict_table_t *aux,
   don't have — hence a private loop.) */
   upd_node_t *node = row_create_update_node_for_mysql(aux, heap);
 
-  /* Search tuple for the target row's PK. */
-  dtuple_t *ref = dtuple_create(heap, 1);
-  dict_index_copy_types(ref, clust, 1);
+  /* Search tuple for the target row's PK — H1: the identity payload
+  lives in the (label, ver=0) birth row alone; version rows are
+  immutable snapshots and are never updated. */
+  dtuple_t *ref = dtuple_create(heap, 2);
+  dict_index_copy_types(ref, clust, 2);
   byte id_buf[8];
   mach_write_to_8(id_buf, id);
   dfield_set_data(dtuple_get_nth_field(ref, 0), id_buf, sizeof(id_buf));
+  byte ver_buf[4];
+  mach_write_to_4(ver_buf, 0);
+  dfield_set_data(dtuple_get_nth_field(ref, 1), ver_buf, sizeof(ver_buf));
 
   que_thr_t *thr = pars_complete_graph_for_exec(node, trx, heap, nullptr);
 
@@ -397,14 +414,6 @@ static dberr_t vec_aux_update_row_low(trx_t *trx, dict_table_t *aux,
   return DB_SUCCESS;
 }
 
-dberr_t vec_aux_update_neighbors(trx_t *trx, dict_table_t *aux, uint64_t id,
-                                 const byte *neighbors, ulint neighbors_len,
-                                 bool row_ref_null) {
-  return vec_aux_update_row_low(trx, aux, id, neighbors, neighbors_len,
-                                true /* set_neighbors */, row_ref_null, nullptr,
-                                0);
-}
-
 dberr_t vec_aux_tombstone(trx_t *trx, dict_table_t *aux, uint64_t id) {
   return vec_aux_update_row_low(trx, aux, id, nullptr, 0,
                                 false /* set_neighbors */,
@@ -429,8 +438,8 @@ static bool vec_aux_copy_field(trx_t *trx, const dict_index_t *clust,
   if (rec_offs_nth_extern(clust, offsets, clust_pos)) {
     size_t ver;
     *data = lob::btr_rec_copy_externally_stored_field(
-        trx, clust, rec, offsets, dict_table_page_size(clust->table),
-        clust_pos, len, &ver, false, heap);
+        trx, clust, rec, offsets, dict_table_page_size(clust->table), clust_pos,
+        len, &ver, false, heap);
     return *data != nullptr;
   }
   *data = rec_get_nth_field(clust, rec, offsets, clust_pos, len);
@@ -564,6 +573,49 @@ dberr_t vec_aux_load_rows(
       dict_col_get_clust_pos(aux->get_col(VEC_AUX_COL_LEVEL), clust);
   const ulint pos_neighbors =
       dict_col_get_clust_pos(aux->get_col(VEC_AUX_COL_NEIGHBORS), clust);
+  const ulint pos_ver =
+      dict_col_get_clust_pos(aux->get_col(VEC_AUX_COL_VER), clust);
+
+  /* H1 streaming group-by: PK(label, ver) clusters one label's rows
+  adjacently in ASCENDING ver order, so per-label resolution needs no
+  map — accumulate while the label repeats, finalize when it changes.
+  Identity (vec, row_ref, level) comes from the ver-0 birth row; the
+  edge list from the HIGHEST VISIBLE ver (each later visible row simply
+  overwrites the candidate); the winning ver seeds the in-memory
+  version counter (it rides the loaded tuple; loadIndex seeds
+  element_versions_ from it). A label with version rows but no visible
+  birth row
+  is an orphan — its inserting transaction rolled back or is not yet
+  visible to this view — and is skipped whole; edges pointing at it are
+  dropped by loadIndex's dangling-label tolerance. */
+  struct {
+    uint64_t label = 0;
+    bool active = false;
+    bool have_birth = false;
+    bool tombstone = false;
+    uint32_t win_ver = 0;
+    uint64_t level = 0;
+    std::vector<float> vec;
+    std::string row_ref;
+    std::vector<std::vector<std::size_t>> neighbors;
+  } acc;
+
+  auto finalize_label = [&]() {
+    if (acc.active && acc.have_birth) {
+      if (acc.tombstone) {
+        if (dead_labels != nullptr) {
+          dead_labels->push_back(acc.label);
+        }
+      } else {
+        if (row_refs != nullptr) {
+          row_refs->emplace_back(acc.label, std::move(acc.row_ref));
+        }
+        rows->emplace_back(acc.label, acc.level, std::move(acc.vec),
+                           std::move(acc.neighbors), acc.win_ver);
+      }
+    }
+    acc = {};
+  };
 
   /* A background transaction with a read view gives a consistent
   snapshot without blocking writers; shape borrowed from
@@ -632,85 +684,99 @@ dberr_t vec_aux_load_rows(
       continue;
     }
 
-    /* id (from the visible version — PK never changes, but be exact) */
+    /* PK = (label, ver), from the visible version (the PK never
+    changes, but be exact). */
     ulint id_len;
     const byte *id_ptr = rec_get_nth_field(clust, vrec, voffsets, 0, &id_len);
     const uint64_t id = mach_read_from_8(id_ptr);
+    ulint ver_len;
+    const byte *ver_ptr =
+        rec_get_nth_field(clust, vrec, voffsets, pos_ver, &ver_len);
+    ut_ad(ver_len == 4);
+    const uint32_t ver = mach_read_from_4(ver_ptr);
 
-    /* row_ref NULL = tombstone: not part of the graph. Committed
-    neighbor lists may still reference it — loadIndex drops those
-    edges (dangling-label tolerance). Live rows optionally emit their
-    row_ref image for the label -> base-PK map the kNN path uses. */
+    if (!acc.active || acc.label != id) {
+      finalize_label();
+      acc.active = true;
+      acc.label = id;
+    }
+
+    /* Every visible row of this label carries a neighbors snapshot;
+    ascending ver order means plain overwrite keeps the highest one. */
     {
+      const byte *nb_data;
+      ulint nb_len;
+      if (!vec_aux_copy_field(trx, clust, vrec, voffsets, pos_neighbors,
+                              row_heap, &nb_data, &nb_len)) {
+        err = DB_CORRUPTION;
+        break;
+      }
+      std::vector<std::vector<std::size_t>> neighbors;
+      if (vec_aux_deserialize_neighbors(nb_data, nb_len, neighbors)) {
+        err = DB_CORRUPTION;
+        break;
+      }
+      acc.win_ver = ver;
+      acc.neighbors = std::move(neighbors);
+    }
+
+    if (ver == 0) {
+      /* Birth row: the identity payload. row_ref NULL = tombstone —
+      the label is not loaded into the graph, but committed neighbor
+      lists may still name it (loadIndex drops such edges). */
+      acc.have_birth = true;
+
       ulint rr_len;
       const byte *rr =
           rec_get_nth_field(clust, vrec, voffsets, pos_row_ref, &rr_len);
       if (rr_len == UNIV_SQL_NULL) {
-        if (dead_labels != nullptr) {
-          dead_labels->push_back(id);
+        acc.tombstone = true;
+      } else if (rec_offs_nth_extern(clust, voffsets, pos_row_ref)) {
+        const byte *data;
+        ulint len;
+        if (!vec_aux_copy_field(trx, clust, vrec, voffsets, pos_row_ref,
+                                row_heap, &data, &len)) {
+          err = DB_CORRUPTION;
+          break;
         }
-        continue;
+        acc.row_ref.assign(reinterpret_cast<const char *>(data), len);
+      } else {
+        acc.row_ref.assign(reinterpret_cast<const char *>(rr), rr_len);
       }
-      if (row_refs != nullptr) {
-        if (rec_offs_nth_extern(clust, voffsets, pos_row_ref)) {
-          const byte *data;
-          ulint len;
-          if (!vec_aux_copy_field(trx, clust, vrec, voffsets, pos_row_ref,
-                                  row_heap, &data, &len)) {
+
+      if (!acc.tombstone) {
+        const byte *vec_data;
+        ulint vec_len;
+        if (!vec_aux_copy_field(trx, clust, vrec, voffsets, pos_vec, row_heap,
+                                &vec_data, &vec_len)) {
+          err = DB_CORRUPTION;
+          break;
+        }
+
+        /* dims == 0 means "derive from the data": used by callers that
+        have no SQL-layer Field_vector at hand (debug tooling). Rows
+        must still be float-aligned and mutually consistent. */
+        if (dims == 0) {
+          if (vec_len == 0 || vec_len % sizeof(float) != 0) {
             err = DB_CORRUPTION;
             break;
           }
-          row_refs->emplace_back(
-              id, std::string(reinterpret_cast<const char *>(data), len));
-        } else {
-          row_refs->emplace_back(
-              id, std::string(reinterpret_cast<const char *>(rr), rr_len));
+          dims = static_cast<uint32_t>(vec_len / sizeof(float));
+        } else if (vec_len != dims * sizeof(float)) {
+          err = DB_CORRUPTION;
+          break;
         }
+
+        ulint level_len;
+        const byte *level_ptr =
+            rec_get_nth_field(clust, vrec, voffsets, pos_level, &level_len);
+        ut_ad(level_len == 1);
+        acc.level = static_cast<uint64_t>(*level_ptr);
+
+        acc.vec.resize(dims);
+        memcpy(acc.vec.data(), vec_data, vec_len);
       }
     }
-
-    const byte *vec_data;
-    ulint vec_len;
-    const byte *nb_data;
-    ulint nb_len;
-    if (!vec_aux_copy_field(trx, clust, vrec, voffsets, pos_vec, row_heap,
-                            &vec_data, &vec_len) ||
-        !vec_aux_copy_field(trx, clust, vrec, voffsets, pos_neighbors,
-                            row_heap, &nb_data, &nb_len)) {
-      err = DB_CORRUPTION;
-      break;
-    }
-
-    /* dims == 0 means "derive from the data": used by callers that
-    have no SQL-layer Field_vector at hand (debug tooling). Rows must
-    still be float-aligned and mutually consistent. */
-    if (dims == 0) {
-      if (vec_len == 0 || vec_len % sizeof(float) != 0) {
-        err = DB_CORRUPTION;
-        break;
-      }
-      dims = static_cast<uint32_t>(vec_len / sizeof(float));
-    } else if (vec_len != dims * sizeof(float)) {
-      err = DB_CORRUPTION;
-      break;
-    }
-
-    ulint level_len;
-    const byte *level_ptr =
-        rec_get_nth_field(clust, vrec, voffsets, pos_level, &level_len);
-    ut_ad(level_len == 1);
-    const uint64_t level = static_cast<uint64_t>(*level_ptr);
-
-    std::vector<float> vec_copy(dims);
-    memcpy(vec_copy.data(), vec_data, vec_len);
-
-    std::vector<std::vector<std::size_t>> neighbors;
-    if (vec_aux_deserialize_neighbors(nb_data, nb_len, neighbors)) {
-      err = DB_CORRUPTION;
-      break;
-    }
-
-    rows->emplace_back(id, level, std::move(vec_copy), std::move(neighbors));
 
     mem_heap_empty(row_heap);
 
@@ -725,6 +791,10 @@ dberr_t vec_aux_load_rows(
       mtr_start(&mtr);
       pcur.restore_position(BTR_SEARCH_LEAF, &mtr, UT_LOCATION_HERE);
     }
+  }
+
+  if (err == DB_SUCCESS) {
+    finalize_label();
   }
 
   pcur.close();

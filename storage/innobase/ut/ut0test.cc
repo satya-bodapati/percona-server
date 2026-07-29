@@ -554,8 +554,8 @@ Ret_t Tester::vec_aux_update_row(std::vector<std::string> &tokens) noexcept {
   ut_ad(tokens[0] == "vec_aux_update_row");
   std::ostringstream sout;
   /* tokens: 0=cmd 1=db/table 2=id 3=nb_spec */
-  if (tokens.size() != 4) {
-    XLOG("FAIL: usage: vec_aux_update_row db/table id nb_spec");
+  if (tokens.size() != 5) {
+    XLOG("FAIL: usage: vec_aux_update_row db/table id ver nb_spec");
     set_output(sout);
     return RET_FAIL;
   }
@@ -570,15 +570,24 @@ Ret_t Tester::vec_aux_update_row(std::vector<std::string> &tokens) noexcept {
   auto guard = create_scope_guard([&]() { vec_test_close_aux(tt); });
 
   uint64_t id;
+  uint32_t ver;
   std::vector<std::vector<std::size_t>> neighbors;
   try {
     id = std::stoull(tokens[2]);
+    ver = static_cast<uint32_t>(std::stoul(tokens[3]));
   } catch (...) {
-    XLOG("FAIL: bad id");
+    XLOG("FAIL: bad id/ver");
     set_output(sout);
     return RET_FAIL;
   }
-  if (vec_test_parse_nb(tokens[3], neighbors)) {
+  if (ver == 0) {
+    /* H1: version 0 is the birth row — use vec_aux_insert_row for it.
+    This command appends an edge-list version row. */
+    XLOG("FAIL: ver must be > 0");
+    set_output(sout);
+    return RET_FAIL;
+  }
+  if (vec_test_parse_nb(tokens[4], neighbors)) {
     XLOG("FAIL: bad nb_spec");
     set_output(sout);
     return RET_FAIL;
@@ -587,19 +596,30 @@ Ret_t Tester::vec_aux_update_row(std::vector<std::string> &tokens) noexcept {
   std::vector<byte> nb_blob;
   vec_aux_serialize_neighbors(neighbors, nb_blob);
 
+  /* H1: appending a version row, never updating a shared one. */
+  vec_aux_row_t row;
+  row.id = id;
+  row.ver = ver;
+  row.vec = nullptr;
+  row.dims = 0;
+  row.row_ref = nullptr;
+  row.row_ref_len = 0;
+  row.level = 0;
+  row.neighbors = nb_blob.data();
+  row.neighbors_len = nb_blob.size();
+
   trx_t *trx = trx_allocate_for_background();
   trx_start_internal(trx, UT_LOCATION_HERE);
-  const dberr_t err =
-      vec_aux_update_neighbors(trx, aux, id, nb_blob.data(), nb_blob.size());
+  const dberr_t err = vec_aux_insert(trx, aux, row);
   trx_commit_for_mysql(trx);
   trx_free_for_background(trx);
 
   if (err != DB_SUCCESS) {
-    XLOG("FAIL: vec_aux_update_neighbors err=" << static_cast<int>(err));
+    XLOG("FAIL: vec_aux_insert(version row) err=" << static_cast<int>(err));
     set_output(sout);
     return RET_FAIL;
   }
-  XLOG("PASS: updated id=" << id);
+  XLOG("PASS: appended id=" << id << " ver=" << ver);
   set_output(sout);
   return RET_PASS;
 }
@@ -649,7 +669,8 @@ Ret_t Tester::vec_aux_dump(std::vector<std::string> &tokens) noexcept {
   }
   sout << "\n";
   for (const auto &r : rows) {
-    sout << "id=" << std::get<0>(r) << " level=" << std::get<1>(r) << " nb=";
+    sout << "id=" << std::get<0>(r) << " level=" << std::get<1>(r)
+         << " ver=" << std::get<4>(r) << " nb=";
     const auto &nbl = std::get<3>(r);
     for (size_t l = 0; l < nbl.size(); ++l) {
       if (l != 0) sout << "|";

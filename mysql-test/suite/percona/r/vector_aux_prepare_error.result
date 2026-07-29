@@ -41,6 +41,6 @@ SET SESSION innodb_interpreter = 'vec_aux_dump test/tva';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 count=1 max_id=1 invisible=0
-id=1 level=1 nb=|
+id=1 level=1 ver=0 nb=|
 
 DROP TABLE tva;

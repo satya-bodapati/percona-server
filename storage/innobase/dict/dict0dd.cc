@@ -79,7 +79,7 @@ Data dictionary interface */
 #include "sql_table.h"
 #include "univ.i"  // Using OS_PATH_SEPARATOR
 #include "vec0aux.h"
-#endif             /* !UNIV_HOTBACKUP */
+#endif /* !UNIV_HOTBACKUP */
 
 const char *DD_instant_col_val_coder::encode(const byte *stream, size_t in_len,
                                              size_t *out_len) {
@@ -6702,55 +6702,75 @@ bool dd_create_vec_aux_table(const dict_table_t *parent_table,
   no compression/encryption) — the vec aux is the same kind of object. */
   dd_set_fts_table_options(dd_table, table);
 
-  /* Columns. Order and types must match the in-memory dict_table_t
-  created by vec_aux_create_one_table; see vec0aux.h for the layout. */
+  /* Columns, generically from the in-memory dict_table_t — the
+  authoritative schema, built from the per-type aux table-set
+  descriptors (vec0aux.cc). One mapping per column kind the descriptors
+  use: DATA_INT (1-, 4- or 8-byte), DATA_BLOB, DATA_BINARY.
 
-  /* 1: id BIGINT UNSIGNED NOT NULL */
-  dd::Column *col = dd_table->add_column();
-  col->set_name("id");
-  col->set_type(dd::enum_column_types::LONGLONG);
-  col->set_char_length(20);
-  col->set_numeric_scale(0);
-  col->set_nullable(false);
-  col->set_unsigned(true);
-  col->set_collation_id(my_charset_bin.number);
-  dd_set_fts_nullability(col, table->get_col(0));
-  dd::Column *key_col = col;
+  This replaces a hand-rolled per-column version that hardcoded one aux
+  shape (the pre-H1 single-column PK on `id`). That is a trap worth
+  naming: a descriptor whose shape the DD writer does not know reloads
+  with the wrong columns and n_uniq, and stays latent until the FIRST
+  RESTART — within one server run the dict cache still holds the
+  correct in-memory objects, so nothing looks wrong. Deriving the DD
+  entry from the in-memory table keeps the two definitions from
+  drifting, for this TYPE's log and for any TYPE added later. */
+  const ulint n_user_cols = table->get_n_user_cols();
+  std::vector<dd::Column *> dd_cols;
+  dd_cols.reserve(n_user_cols);
 
-  /* 2: vec BLOB NOT NULL */
-  col = dd_table->add_column();
-  col->set_name("vec");
-  col->set_type(dd::enum_column_types::BLOB);
-  col->set_char_length(8);
-  col->set_nullable(false);
-  col->set_collation_id(my_charset_bin.number);
+  for (ulint i = 0; i < n_user_cols; ++i) {
+    const dict_col_t *dcol = table->get_col(i);
+    dd::Column *col = dd_table->add_column();
+    col->set_name(table->get_col_name(i));
+    col->set_nullable(!(dcol->prtype & DATA_NOT_NULL));
+    col->set_collation_id(my_charset_bin.number);
 
-  /* 3: row_ref VARBINARY(3072) NULLABLE */
-  col = dd_table->add_column();
-  col->set_name("row_ref");
-  col->set_type(dd::enum_column_types::VARCHAR);
-  col->set_char_length(VEC_AUX_ROW_REF_COL_LEN);
-  col->set_nullable(true);
-  col->set_collation_id(my_charset_bin.number);
+    switch (dcol->mtype) {
+      case DATA_INT:
+        /* Widths the vec aux descriptors use: BIGINT (labels), INT (the
+        H1 edge-list version) and TINYINT (levels). */
+        switch (dcol->len) {
+          case 8:
+            col->set_type(dd::enum_column_types::LONGLONG);
+            col->set_char_length(20);
+            break;
+          case 4:
+            col->set_type(dd::enum_column_types::LONG);
+            col->set_char_length(11);
+            break;
+          case 1:
+            col->set_type(dd::enum_column_types::TINY);
+            col->set_char_length(1);
+            break;
+          default:
+            ut_d(ut_error);
+            ut_o(break);
+        }
+        col->set_numeric_scale(0);
+        if (dcol->prtype & DATA_UNSIGNED) {
+          col->set_unsigned(true);
+        }
+        break;
+      case DATA_BLOB:
+        col->set_type(dd::enum_column_types::BLOB);
+        col->set_char_length(8);
+        break;
+      case DATA_BINARY:
+        col->set_type(dd::enum_column_types::VARCHAR);
+        col->set_char_length(dcol->len);
+        break;
+      default:
+        ut_d(ut_error);
+    }
 
-  /* 4: level TINYINT NOT NULL */
-  col = dd_table->add_column();
-  col->set_name("level");
-  col->set_type(dd::enum_column_types::TINY);
-  col->set_char_length(1);
-  col->set_numeric_scale(0);
-  col->set_nullable(false);
-  col->set_collation_id(my_charset_bin.number);
+    dd_set_fts_nullability(col, dcol);
+    dd_cols.push_back(col);
+  }
 
-  /* 5: neighbors BLOB NOT NULL */
-  col = dd_table->add_column();
-  col->set_name("neighbors");
-  col->set_type(dd::enum_column_types::BLOB);
-  col->set_char_length(8);
-  col->set_nullable(false);
-  col->set_collation_id(my_charset_bin.number);
-
-  /* Clustered PRIMARY index on `id`. */
+  /* Clustered PRIMARY index: mirror the in-memory clustered index's
+  unique fields — the descriptor's leading n_pk columns, which is a
+  COMPOSITE key for the H1 edge log (label, ver). */
   dd::Index *index = dd_table->add_index();
   index->set_name("VEC_AUX_TABLE_PK");
   index->set_algorithm(dd::Index::IA_BTREE);
@@ -6762,8 +6782,15 @@ bool dd_create_vec_aux_table(const dict_table_t *parent_table,
   index->set_engine(dd_table->engine());
   index->options().set("flags", 32);
 
-  dd::Index_element *index_elem = index->add_element(key_col);
-  index_elem->set_length(VEC_AUX_ID_COL_LEN);
+  const dict_index_t *clust = table->first_index();
+  ut_a(clust != nullptr);
+  for (ulint f = 0; f < dict_index_get_n_unique(clust); ++f) {
+    const dict_col_t *kcol = clust->get_field(f)->col;
+    ut_a(kcol->mtype == DATA_INT); /* every aux PK column is integral */
+    dd::Index_element *index_elem =
+        index->add_element(dd_cols[dict_col_get_no(kcol)]);
+    index_elem->set_length(kcol->len);
+  }
 
   /* Tablespace. Same machinery FTS uses for its per-aux tablespace. */
   dd::Object_id dd_space_id;
