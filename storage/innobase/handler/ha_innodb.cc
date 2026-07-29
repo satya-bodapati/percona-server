@@ -7955,7 +7955,7 @@ static void innobase_vec_open_from_sql_layer(TABLE *table,
       }
 
       /* Resolve the implementation by the KEY's TYPE token (reloaded
-      from the DD index options; SPANN R3). CREATE/ALTER validated the
+      from the DD index options). CREATE/ALTER validated the
       token against the registry, so it must resolve — the fallback is
       pure defense for a DD written before the token existed. */
       const Vector_index *vidx =

@@ -92,7 +92,7 @@ enum class Vec_index_type : uint8_t;
 
 /** Build the on-disk aux table name for one vector index:
 "<db>/vec_<type>_<parent_table_id>_<index_id>", e.g.
-"test/vec_hnsw_4a_5b" (SPANN R4: the registry's type token makes the
+"test/vec_hnsw_4a_5b" (the registry's type token makes the
 datadir self-describing and gives every TYPE its own namespace. A
 TYPE whose set has more than one table distinguishes them by suffix,
 e.g. the H1 log's companion vec_hnsw_<t>_<i>_dead.
@@ -207,7 +207,7 @@ void vec_stamp_idx_id(dict_table_t *table, dtuple_t *row, mem_heap_t *heap);
 
 /* ------------------------------------------------------------------
 In-memory vector runtime state (PS-11300 phase 2a; genericized by
-SPANN R2). */
+genericized for multiple TYPEs). */
 
 class Vector_index;
 

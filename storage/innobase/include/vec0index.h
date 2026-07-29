@@ -26,7 +26,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 *****************************************************************************/
 
 /** @file include/vec0index.h
-The vector-index type seam (SPANN plan, commit R1).
+The vector-index type seam.
 
 One abstract interface over the per-type runtime operations of a vector
 index, so a second index TYPE (spann) can be added without touching the
@@ -43,9 +43,9 @@ What deliberately STAYS OUTSIDE (type-independent machinery):
   counter and its persistence, prebuilt fetch-time capture, the
   trx-rollback plumbing (implementations record into it or not), the
   memory budget. Aux-table DDL lifecycle (create/drop/rename/detach)
-  also stays direct until commit S1 introduces the second aux schema.
+  is table-set driven by the per-TYPE aux descriptors (vec0aux.cc).
 
-The R1 couplings are retired by R2: dict_table_t::vec is the generic
+dict_table_t::vec is the generic
 Vec_runtime base (identity fields only — the gates and field_no/dims
 peeks at the call sites are type-agnostic reads of it), and each
 runtime carries a back-pointer to the Vector_index implementation that
@@ -62,10 +62,11 @@ subtype (vec_t for hnsw). */
 used everywhere the type is already known (registry indexing, runtime
 dispatch, future switch()es); the string token exists only at the
 boundaries where SQL hands us text — DDL validation and the
-KEY::vector_index_type reloaded from the DD (SPANN R3). */
+KEY::vector_index_type reloaded from the DD. */
 enum class Vec_index_type : uint8_t {
   HNSW = 0,
-  /* SPANN = 1 — added by commit S1 */
+  /* a second TYPE (e.g. spann = 1) adds its value here, one registry
+     row, and its implementation singleton — nothing else */
 };
 
 /** Per-TYPE vector-index runtime operations. Implementations are
@@ -149,7 +150,7 @@ CREATE/ALTER is what keeps them out of every engine path.
 [[nodiscard]] const Vector_index *vec_index_by_enum(Vec_index_type type);
 
 /** The registered token for a known TYPE, e.g. "hnsw" — the string
-embedded in aux table names (vec_<token>_<tid>_<iid>, SPANN R4) and
+embedded in aux table names (vec_<token>_<tid>_<iid>) and
 printed by SHOW CREATE. Tokens are lowercase ASCII identifiers and
 MUST NOT contain '_' (the aux-name field separator). */
 [[nodiscard]] const char *vec_index_token(Vec_index_type type);

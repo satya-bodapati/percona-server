@@ -6697,7 +6697,7 @@ bool ha_innobase::inplace_alter_table_impl(TABLE *altered_table,
                 key.vector_construction_params, param);
           }
 
-          /* Resolve by the KEY's TYPE token (SPANN R3); validated at
+          /* Resolve by the KEY's TYPE token; validated at
           CREATE/ALTER, so it must resolve — fallback is defensive. */
           const Vector_index *vidx = vec_index_by_name(
               key.vector_index_type.str, key.vector_index_type.length);
