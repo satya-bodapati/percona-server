@@ -1,9 +1,6 @@
-call mtr.add_suppression("Index vk not found or corrupt");
-call mtr.add_suppression("Skip adjustment of root pages for index");
-call mtr.add_suppression("FLUSH TABLES on tables that have a vector index");
 #
 # PS-11300 R1: ADD VECTOR INDEX on a table that retained vec_idx_id
-# (after DROP INDEX, or after IMPORT) runs INPLACE: a clustered scan
+# (after DROP INDEX) runs INPLACE: a clustered scan
 # builds the graph and populates the aux — no table rebuild, no COPY.
 # Labels are the rows' already-stamped ids (unique since counter
 # persistence), so the base table is not written at all.
@@ -91,26 +88,15 @@ id
 1
 DROP TABLE t2;
 #
-# Post-import rebuild: IMPORT leaves an empty index; DROP/ADD now
-# rebuilds it INPLACE — the imported rows keep their stamped ids.
+# A second DROP/ADD cycle on the same table is INPLACE too — the
+# retained column keeps its stamped ids across both, so the labels
+# after the second rebuild match the first.
 #
-FLUSH TABLES t1 FOR EXPORT;
-Warnings:
-Warning	1235	InnoDB: This version of MySQL doesn't yet support 'FLUSH TABLES on tables that have a vector index. Vector auxiliary tables will not be flushed.'
-Warning	1235	InnoDB: This version of MySQL doesn't yet support 'FLUSH TABLES on tables that have a vector index. Vector auxiliary tables will not be flushed.'
-UNLOCK TABLES;
-Warnings:
-Warning	1235	InnoDB: This version of MySQL doesn't yet support 'FLUSH TABLES on tables that have a vector index. Vector auxiliary tables will not be flushed.'
-ALTER TABLE t1 DISCARD TABLESPACE;
-ALTER TABLE t1 IMPORT TABLESPACE;
-Warnings:
-Warning	1817	InnoDB: Index corrupt: Index vk not found or corrupt, you should recreate this index.
-Warning	1088	Vector index on table test/t1 is empty after IMPORT TABLESPACE: imported rows are not indexed. Rebuild it with ALTER TABLE ... DROP INDEX / ADD INDEX to index them.
-SELECT TABLE_ID INTO @tid_import FROM information_schema.INNODB_TABLES
+SELECT TABLE_ID INTO @tid_cycle2 FROM information_schema.INNODB_TABLES
 WHERE NAME = 'test/t1';
 ALTER TABLE t1 DROP KEY vk;
 ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 4), ALGORITHM=INPLACE;
-SELECT TABLE_ID = @tid_import AS same_table_id
+SELECT TABLE_ID = @tid_cycle2 AS same_table_id
 FROM information_schema.INNODB_TABLES WHERE NAME = 'test/t1';
 same_table_id
 1

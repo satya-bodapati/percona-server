@@ -344,17 +344,6 @@ dberr_t vec_build_index(trx_t *trx, dict_table_t *table,
                         const dict_index_t *vec_index, uint32_t dims, int M,
                         int ef_construction, THD *thd);
 
-/** After ALTER TABLE ... IMPORT TABLESPACE: the aux was dropped at
-DISCARD (its content belonged to the discarded rows), so re-mint a
-fresh EMPTY one on a dedicated DDL transaction and reset the label
-counter. The imported base rows are NOT in the index until
-DROP INDEX + ADD INDEX rebuilds it via COPY — the caller warns.
-Rides the SESSION transaction (the DDL log asserts trx ==
-thd_to_trx(current_thd)); the statement commit finalizes it and a
-statement rollback removes the half-created aux via the DDL log.
-@return DB_SUCCESS or error */
-dberr_t vec_aux_recreate_after_import(dict_table_t *table, trx_t *trx);
-
 /* ------------------------------------------------------------------
 Per-transaction graph-mutation tracking (rollback support).
 
