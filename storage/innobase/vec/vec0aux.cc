@@ -882,8 +882,36 @@ static dberr_t vec_load_locked(dict_table_t *table, vec_t *vec, THD *thd) {
   uint64_t raw_max_id = 0;
   bool saw_invisible = false;
   std::vector<std::pair<uint64_t, std::string>> row_refs;
+  std::vector<std::pair<uint64_t, uint32_t>> collapsible;
   dberr_t err = vec_aux_load_rows(aux, vec->dims, &rows, &raw_max_id,
-                                  &saw_invisible, &row_refs);
+                                  &saw_invisible, &row_refs, &collapsible);
+
+  /* Reload-time collapse: the scan above already identified every
+  superseded version row, so reclaiming them costs one pass over a list
+  we are holding — no background thread, no second scan. Done on a system
+  transaction: a single actor taking no user locks, so it cannot
+  reintroduce the write-side contention the log removed. Skipped when the
+  scan saw rows it could not resolve (saw_invisible): concurrent writers
+  may still be mid-commit, and a reload that could not see the whole
+  picture should not decide what is garbage.
+
+  Failure is deliberately ignored — collapse is opportunistic and the
+  next reload finds the same rows still collapsible. */
+  if (err == DB_SUCCESS && !collapsible.empty() && !saw_invisible) {
+    trx_t *ctrx = trx_allocate_for_background();
+    trx_start_internal(ctrx, UT_LOCATION_HERE);
+    const dberr_t cerr = vec_aux_collapse_versions(ctrx, aux, collapsible);
+    if (cerr == DB_SUCCESS) {
+      trx_commit_for_mysql(ctrx);
+    } else {
+      trx_rollback_for_mysql(ctrx);
+      ib::info() << "vec_load: version collapse deferred for "
+                 << table->name.m_name << " (" << collapsible.size()
+                 << " rows, err=" << static_cast<int>(cerr) << ")";
+    }
+    trx_free_for_background(ctrx);
+  }
+
   vec_aux_close_for_dml(aux, thd, &mdl);
   if (err != DB_SUCCESS) {
     return err;

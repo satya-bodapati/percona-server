@@ -20,7 +20,7 @@ DELETE FROM t1 WHERE id = 104;
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=3 max_id=5 invisible=0 dead=5
+count=3 raw=10 max_id=5 invisible=0 dead=5
 id=1 level=1 ver=3 nb=2:4:5|
 id=2 level=0 ver=2 nb=1:4:5
 id=4 level=0 ver=1 nb=2:1:5
@@ -43,7 +43,7 @@ same_table_id
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=3 max_id=4 invisible=0
+count=3 raw=5 max_id=4 invisible=0
 id=1 level=1 ver=2 nb=2:4|
 id=2 level=0 ver=1 nb=1:4
 id=4 level=0 ver=0 nb=2:1
@@ -61,7 +61,7 @@ DELETE FROM t1 WHERE id = 101;
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=3 max_id=8 invisible=0 dead=2
+count=3 raw=10 max_id=8 invisible=0 dead=2
 id=1 level=1 ver=4 nb=2:4:8|8
 id=4 level=0 ver=1 nb=2:1:8
 id=8 level=1 ver=0 nb=4:2:1|1
@@ -103,7 +103,7 @@ same_table_id
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=3 max_id=8 invisible=0
+count=3 raw=5 max_id=8 invisible=0
 id=1 level=1 ver=2 nb=4:8|
 id=4 level=0 ver=1 nb=1:8
 id=8 level=0 ver=0 nb=4:1

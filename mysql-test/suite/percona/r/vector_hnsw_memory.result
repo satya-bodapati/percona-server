@@ -21,14 +21,14 @@ ERROR HY000: Out of memory; check if mysqld or some other process uses all avail
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=0 max_id=0 invisible=0
+count=0 raw=0 max_id=0 invisible=0
 
 # Raise the budget: the deferred load succeeds and the insert works.
 SET GLOBAL innodb_hnsw_max_memory = 1073741824;
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=1 max_id=2 invisible=0
+count=1 raw=1 max_id=2 invisible=0
 id=2 level=1 ver=0 nb=|
 
 # Shrinking the budget below current usage makes further inserts
@@ -38,14 +38,14 @@ ERROR HY000: Out of memory; check if mysqld or some other process uses all avail
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=1 max_id=2 invisible=0
+count=1 raw=1 max_id=2 invisible=0
 id=2 level=1 ver=0 nb=|
 
 SET GLOBAL innodb_hnsw_max_memory = default;
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=2 max_id=4 invisible=0
+count=2 raw=3 max_id=4 invisible=0
 id=2 level=1 ver=1 nb=4|
 id=4 level=0 ver=0 nb=2
 

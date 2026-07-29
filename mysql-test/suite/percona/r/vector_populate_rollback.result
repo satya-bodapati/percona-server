@@ -17,7 +17,7 @@ ROLLBACK;
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=0 max_id=0 invisible=0
+count=0 raw=0 max_id=0 invisible=0
 
 SELECT id FROM t1 ORDER BY id;
 id
@@ -30,7 +30,7 @@ INSERT INTO t1 VALUES (102, STRING_TO_VECTOR('[1,0.1,0,0]')),
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=3 max_id=5 invisible=0
+count=3 raw=9 max_id=5 invisible=0
 id=3 level=0 ver=2 nb=1:4:5
 id=4 level=0 ver=1 nb=1:3:5
 id=5 level=0 ver=0 nb=3:1:4
@@ -48,7 +48,7 @@ COMMIT;
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=5 max_id=8 invisible=0
+count=5 raw=17 max_id=8 invisible=0
 id=3 level=0 ver=4 nb=1:4:5:7:8
 id=4 level=0 ver=3 nb=1:3:5:7:8
 id=5 level=0 ver=3 nb=3:1:4:6:7:8
@@ -69,7 +69,7 @@ ERROR 23000: Duplicate entry '102' for key 't1.PRIMARY'
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=5 max_id=8 invisible=0
+count=5 raw=17 max_id=8 invisible=0
 id=3 level=0 ver=4 nb=1:4:5:7:8
 id=4 level=0 ver=3 nb=1:3:5:7:8
 id=5 level=0 ver=3 nb=3:1:4:6:7:8
@@ -81,7 +81,7 @@ INSERT INTO t1 VALUES (108, STRING_TO_VECTOR('[0.2,0.2,0.2,0.2]'));
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=6 max_id=11 invisible=0
+count=6 raw=21 max_id=11 invisible=0
 id=3 level=0 ver=5 nb=1:4:5:7:8:11
 id=4 level=0 ver=3 nb=1:3:5:7:8
 id=5 level=0 ver=3 nb=3:1:4:6:7:8
@@ -111,7 +111,7 @@ INSERT INTO t1 VALUES (109, STRING_TO_VECTOR('[0.9,0,0,0.9]'));
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=7 max_id=12 invisible=0
+count=7 raw=15 max_id=12 invisible=0
 id=3 level=0 ver=6 nb=4:5:8:11:12
 id=4 level=0 ver=3 nb=1:3:5:7:8
 id=5 level=0 ver=3 nb=3:1:4:6:7:8
