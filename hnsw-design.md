@@ -30,7 +30,8 @@ we do not traverse on disk — the graph stays in RAM and disk is used only to r
 
 **The engine owns durability.** The graph is a cache. Everything needed to reconstruct it is
 written to an ordinary InnoDB table on the user's transaction, so a vector index is as
-crash-safe as a secondary index and needs no separate recovery machinery.
+crash-safe as a secondary index and needs no separate recovery machinery. That table is
+written for one purpose only — rebuilding the graph — and is never read by a query.
 
 ---
 
@@ -103,7 +104,9 @@ traversal may pass through it, searches never return it.
 
 ### 3.3 The auxiliary table
 
-One row per graph node:
+**One table per vector index, one row per graph node, edited in place.** A node's row is
+created when the node is created and modified whenever anything about that node changes —
+its edge lists, or the base row it points at.
 
 ```sql
 CREATE TABLE vec_hnsw_<tid>_<iid> (
@@ -115,8 +118,12 @@ CREATE TABLE vec_hnsw_<tid>_<iid> (
 )
 ```
 
-`neighbors` is the interesting column: it is the node's edge lists, serialized. It has
-**exactly one reader** — the loader (§3.7). Queries never touch it.
+`neighbors` is the interesting column: the node's edge lists, serialized. It has **exactly
+one reader** — the loader (§3.7). Queries never touch it, which is why its shape is free to
+change without affecting the read path (and in Phase 2, it does).
+
+The table's identity is the label, so there is exactly one row per node at all times: no
+history, no versions. Whatever a node's edges are *now* is what the row holds.
 
 ### 3.4 How the graph drives writes into the aux table
 
@@ -139,7 +146,9 @@ Each of those UPDATEs is a read-modify-write of a shared row: fetch the row, rea
 existing `neighbors` BLOB, write a replacement. And each takes an **X record lock, held until
 COMMIT** — because that is what an UPDATE does.
 
-That property is the subject of Phase 2.
+Two properties of that pattern are worth holding onto, because they are what Phase 2
+addresses: the UPDATEs are on rows **shared with other concurrent inserters**, and the lock
+on each is held for the **whole transaction**, not the duration of the write.
 
 ### 3.5 The write paths
 
@@ -203,7 +212,7 @@ slightly less well-connected node.
 ## 4. What this deliberately does not do
 
 - **No on-disk traversal.** Searching from disk is a different algorithm; this design keeps
-  the graph resident and treats disk as a rebuild log.
+  the graph resident and uses disk only to reconstruct it.
 - **No SERIALIZABLE on the index path.** Phantom prevention needs predicate locks over "the
   k nearest neighbours of q", and there is no key order on ℝᵈ to hang gap locks from. READ
   COMMITTED and REPEATABLE READ work fully; the exact path remains for sessions needing more.
