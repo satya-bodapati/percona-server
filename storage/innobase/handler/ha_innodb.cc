@@ -14753,6 +14753,16 @@ void create_table_info_t::detach() {
   ut_ad(!m_table->can_be_evicted);
   ut_ad(!m_table->is_temporary());
 
+  /* The BASE table keeps its pin if it has a vector index: the HNSW
+  graph will hang off this very dict_table_t, and LRU eviction would
+  discard it. Pin explicitly rather than just skipping the unpin, so
+  the state matches a table that entered the cache through the DD open
+  path (dd_open_table_one) — one invariant, not two. Phase-1
+  restriction; see hnsw-design.md. */
+  if (vec_aux_table_has_vector_index(m_table)) {
+    dict_table_prevent_eviction(m_table);
+  }
+
   if (!m_table->explicitly_non_lru) {
     dict_table_allow_eviction(m_table);
   }

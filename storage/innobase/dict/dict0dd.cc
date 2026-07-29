@@ -5320,6 +5320,27 @@ dict_table_t *dd_open_table_one(dd::cache::Dictionary_client *client,
     }
   }
 
+  /* A vector-indexed table is pinned in the dict cache for as long as
+  it is cached. The HNSW graph hangs off dict_table_t::vec, so LRU
+  eviction would silently discard it — and rebuilding it means
+  re-scanning the aux table, which cannot be done safely from the
+  eviction path (it needs a transaction and a read view, under the
+  dict_sys mutex, while concurrent writers mutate the graph).
+
+  Outside the if/else on purpose: a table created in this server has
+  already been put in the cache by row_create_table_for_mysql, so it
+  arrives here on the `exist` branch and would otherwise never be
+  pinned — it would carry a live graph on the LRU list. Pinning is
+  idempotent, so re-applying it on every open is free.
+
+  This is a phase-1 restriction, not the design: the graph is the
+  durable asset and vec_t is derived state, so the fix is to let the
+  graph outlive the dict object rather than to keep the dict object
+  alive for the graph. See hnsw-design.md. */
+  if (vec_aux_table_has_vector_index(m_table)) {
+    dict_table_prevent_eviction(m_table);
+  }
+
   m_table->acquire();
 
   dict_sys_mutex_exit();

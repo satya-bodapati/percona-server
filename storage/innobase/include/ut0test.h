@@ -262,6 +262,15 @@ struct Tester {
   @return RET_PASS on success, or the error code. */
   [[nodiscard]] Ret_t vec_aux_dump(std::vector<std::string> &tokens) noexcept;
 
+  /** Report the dict-cache residency of a vector-indexed table:
+  evictable / explicitly_non_lru / whether a graph is attached. Exists
+  so the phase-1 pinning restriction is asserted rather than assumed.
+  Usage: vec_table_state db/table
+  @param[in]   tokens   the given command line
+  @return RET_PASS on success, or the error code. */
+  [[nodiscard]] Ret_t vec_table_state(
+      std::vector<std::string> &tokens) noexcept;
+
   /** Approximate kNN over a table's in-memory HNSW graph (storage
   level: returns labels + distances + decoded row_refs; no base-row
   fetch, no visibility filtering).

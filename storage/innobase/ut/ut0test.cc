@@ -79,6 +79,7 @@ Tester::Tester() noexcept {
   DISPATCH(vec_aux_insert_row);
   DISPATCH(vec_aux_update_row);
   DISPATCH(vec_aux_dump);
+  DISPATCH(vec_table_state);
   DISPATCH(vec_knn);
   DISPATCH(print_dblwr_has_encrypted_pages);
   DISPATCH(print_tree);
@@ -659,6 +660,38 @@ Ret_t Tester::vec_aux_dump(std::vector<std::string> &tokens) noexcept {
     }
     sout << "\n";
   }
+  set_output(sout);
+  return RET_PASS;
+}
+
+Ret_t Tester::vec_table_state(std::vector<std::string> &tokens) noexcept {
+  TLOG("Tester::vec_table_state()");
+  ut_ad(tokens[0] == "vec_table_state");
+  std::ostringstream sout;
+  if (tokens.size() != 2) {
+    XLOG("FAIL: usage: vec_table_state db/table");
+    set_output(sout);
+    return RET_FAIL;
+  }
+
+  /* Reports the dict-cache residency of a vector-indexed table. The
+  point of interest is evictable=0: the HNSW graph hangs off
+  dict_table_t, so a vector-indexed table must never sit on the LRU
+  list where it could be evicted out from under the graph. */
+  MDL_ticket *mdl = nullptr;
+  dict_table_t *table = dd_table_open_on_name(
+      current_thd, &mdl, tokens[1].c_str(), false, DICT_ERR_IGNORE_NONE);
+  if (table == nullptr) {
+    XLOG("FAIL: cannot open " << tokens[1]);
+    set_output(sout);
+    return RET_FAIL;
+  }
+
+  sout << "evictable=" << (table->can_be_evicted ? 1 : 0)
+       << " explicitly_non_lru=" << (table->explicitly_non_lru ? 1 : 0)
+       << " graph=" << (table->vec != nullptr ? 1 : 0) << "\n";
+
+  dd_table_close(table, current_thd, &mdl, false);
   set_output(sout);
   return RET_PASS;
 }
