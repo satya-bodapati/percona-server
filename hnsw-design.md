@@ -7,7 +7,7 @@ auxiliary table that persists it, and how each statement maintains both.
 
 There is a second line of development that replaces that auxiliary table with an append-only
 edge log and a companion `_dead` table. It lives on the `vec-hnsw-aux-log` branch, with its
-own document (`hnsw-phase2-aux-log.md`) stated as a delta against this one; that branch is
+own document (`vec-hnsw-aux-log.md`) stated as a delta against this one; that branch is
 referred to below as "Phase 2". This branch (`vec-hnsw-aux-original`) keeps the one-row-per-node
 table and is where MVCC is being built — §3.9.
 
@@ -643,7 +643,7 @@ Two different things, kept apart on purpose.
 
 A **limitation** is a property of this design. Nothing refuses the operation; it just behaves
 in a way you need to know about. §4.1–§4.5 are limitations. Phase 2
-(`hnsw-phase2-aux-log.md`) addresses §4.1–§4.3; §4.4 stands; §4.5 is fixed on this branch by
+(`vec-hnsw-aux-log.md`) addresses §4.1–§4.3; §4.4 stands; §4.5 is fixed on this branch by
 the aux format change of §3.11.
 
 A **restriction** is an operation deliberately *refused*, because every way of allowing it in
@@ -794,5 +794,5 @@ INPLACE — that table has no vector index at the time, so the refusal does not 
 
 ---
 
-*Next: `hnsw-phase2-aux-log.md` — why the §3.5 write pattern had to change, and what
+*Next: `vec-hnsw-aux-log.md` — why the §3.5 write pattern had to change, and what
 replaced it.*
