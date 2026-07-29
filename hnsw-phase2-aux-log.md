@@ -196,6 +196,12 @@ So the honest summary is: Phase 2 did not simplify MVCC — the original design 
 insight. Phase 2 removed the one obstacle to implementing half of it, and it removed the
 write-side locks that made the cache-eviction machinery look necessary in the first place.
 
+**This is now the weakest claim in the document.** `_dead` solves check ② only because the aux
+holds `row_ref` at all. If `row_ref` moves to a unique index on the base table's `vec_idx_id`
+(`hnsw-design.md` §3.11), a delete-marked index entry answers check ② by itself, and `_dead`
+loses its visibility role entirely — leaving it a garbage-collection device at most. §7 works
+through what that would mean here.
+
 ## 5. Making it sequential
 
 The append-only shape is **not** the same thing as sequential I/O, and it is worth being
@@ -284,3 +290,134 @@ candidate set, so a dead node is traversed as a router but not selected as a nei
 list is normally never rewired again. The exception is the update/repair path when the entry
 point itself is deleted: it can be selected, and a snapshot can appear for an
 already-dead label. Do not build anything that assumes a dead label's last row is final.
+
+---
+
+## 7. If `row_ref` moves to a base-table index
+
+**Conditional.** `hnsw-design.md` §3.11 on the `vec-hnsw-aux-original` branch proposes
+dropping `row_ref` from the aux entirely and resolving `label → row` through a unique index on
+the base table's hidden `vec_idx_id` — the `FTS_DOC_ID_INDEX` analogue. Nothing here is
+decided or implemented; this section records what that decision would do to *this* branch,
+because it turns out to remove most of §5's and §6's difficulties rather than add to them.
+
+### 7.1 The format it enables
+
+```
+vec_hnsw_<tid>_<iid>:
+  seq        BIGINT UNSIGNED PRIMARY KEY  -- monotonic, taken under the node's link lock
+  label      BIGINT UNSIGNED
+  vec        BLOB                         -- non-NULL only on a birth row
+  level      TINYINT                      -- birth row only
+  neighbors  BLOB
+```
+
+Against §5's `PK(seq)` proposal, four things go away:
+
+- **`row_ref`** — the column, and with it the override row a PK-only UPDATE had to append. A
+  PK change now touches nothing at all: InnoDB re-points the index entry itself.
+- **The `_dead` table, completely.** It existed to record a deletion as an append rather than
+  an in-place `row_ref = NULL`. With liveness owned by the base table's index, **a DELETE
+  writes nothing to the aux.** §5's awkward second sequence `PK(dead_seq)` disappears with it.
+- **The `row_ref` clause of the purgability rule** (§6). It becomes simply *garbage iff a
+  higher-seq row exists for the same label* — no second condition to get wrong.
+- **`ver`**, already folded into `seq` by §5.
+
+So the log's entire write set is birth rows and neighbour snapshots, both appends of new keys
+at the right edge. Nothing in the aux refers to the base table any more.
+
+### 7.2 Reload becomes a replay, not a resolve
+
+`seq` order is a **valid topological order**: a node must exist before it can be rewired, and
+a rewired neighbour was inserted earlier, so a label's birth row always has a lower `seq` than
+any of its snapshots. A single forward scan can therefore apply rows as it reads them — birth
+row creates the node, each snapshot overwrites that node's edges, last writer wins — with no
+`map<label, winner>` and no version resolution at all. Recovery-style replay, in `seq` order.
+
+That removes the one cost §5's table charges to `PK(seq)`. The map becomes an *optimization*
+(it avoids setting a hot node's edges repeatedly) rather than a requirement. The
+implementation caveat is real though: today's loader hands a finished batch to `loadIndex`, so
+incremental replay needs a different entry point into hnswlib.
+
+### 7.3 Pruning is still needed — and splits cleanly in two
+
+Removing `row_ref` does **not** fix log growth. The log still grows with mutations, ~N(1+M̄)
+rows before compaction. But the garbage divides into two kinds that need completely different
+reasoning, and only one of them involves read views at all.
+
+**Kind A — superseded snapshots. No visibility reasoning whatsoever.**
+Label L has snapshots at `seq` 100, 140, 200. Only 200 can ever matter. 100 and 140 are
+garbage, and *no reader has an opinion about them*, because *edges are navigation, not data*
+(`hnsw-design.md` §3.9): no query result depends on which edges exist, only on which labels
+resolve to visible rows. So the rule is purely local — **garbage iff a higher `seq` exists for
+the same label** — and it needs no read view, no transaction ids, and no probe. This is the
+bulk of the garbage by volume.
+
+**Kind B — whole labels.** A label's birth row plus its winning snapshot can go only when the
+label is needed by nobody, ever again. This is the visibility-sensitive part, and it is what
+§6 records as unimplemented ("reclaiming those needs a rule about the oldest active read
+view").
+
+### 7.4 How we know which labels to purge, without reasoning about views
+
+The rule, and it is short:
+
+> **Label L is prunable iff looking up `vec_idx_id = L` in the base table's index finds
+> nothing at all — not even a delete-marked entry.**
+
+Why that is sound, case by case:
+
+| what the probe finds | meaning | decision |
+|---|---|---|
+| a live entry | some reader can see the row | keep |
+| a delete-marked entry | purge has **not yet** removed it, and purge removes one only once no active read view can need it | keep (conservative) |
+| nothing | purge is finished with L, and the *only* path from a label to a row is this index | **prune** |
+
+The point is what we do *not* do: we never enumerate read views, never compare transaction
+ids, never track the oldest view ourselves. We ask whether InnoDB's purge has already made
+that decision. Purge is the component whose job is exactly "no view needs this any more", so
+the correct move is to read its conclusion rather than recompute it.
+
+Two properties make the probe safe rather than racy:
+
+- **Labels are never reused** (`hnsw-design.md` §3.2). So a negative answer is *permanent* —
+  once L is absent from the index it can never come back, and there is no window in which a
+  new insert resurrects L between the probe and the delete.
+- **Conservative is free.** A wrong "keep" costs space until the next pass. A wrong "prune"
+  would lose a row an old reader is entitled to. The rule errs the safe way by construction,
+  which is the right asymmetry for a GC rule.
+
+Cost: one index dive per *candidate* label — only labels that already look dead, against a
+small, hot index. Open implementation question: the probe needs to see delete-marked entries,
+which is not an ordinary MVCC read; it wants purge's own see-all semantics.
+
+### 7.5 Resuming after a restart
+
+Three separate questions, and only the third needs a new mechanism.
+
+**The `seq` counter.** Restore it as `max(seq)` over all rows. With `PK(seq)` that is the
+rightmost record — one page, not a scan. (Strictly: max over *all* records including
+delete-marked, the same conservative rule the label counter uses, so a `seq` consumed by a
+rolled-back statement is never reissued.)
+
+**Crash in the middle of compaction — nothing to repair.** Compaction is either row deletions
+on a transaction or a rewrite-and-swap; both are atomic. A crash leaves the pre-state or the
+post-state, never a mixture, and the graph is rebuilt from whatever survived. Correctness
+needs no resume, and there is no partial-graph state to recover because the graph is never
+persisted as such.
+
+**Not redoing work already done — this is the real resume problem.** Without a marker, every
+reload re-examines every row to rediscover the same garbage. A persisted **compaction
+watermark** — *all `seq` < W are already compacted* — bounds each pass to `seq >= W`. The
+device already exists in this codebase: the label counter persists its watermark through
+`dict_table_vec_next_id_log` and `dict_table_persist_to_dd_table_buffer` (dynamic metadata),
+and a re-minted aux (TRUNCATE, DROP/ADD INDEX) gets a new `table_id` and therefore a fresh
+metadata row, so no invalidation logic is needed.
+
+**The trap, which we have already met once.** Advancing W *before* the compaction's redo is in
+the mtr is a crash window: crash after persisting W and the rows below it were never actually
+compacted — and now never will be, because every future pass skips them. That is a permanent
+unbounded leak rather than corruption, which makes it the kind of bug that is found late.
+Either advance W in the **same mtr** as the deletions, or advance it only after commit and
+accept re-scanning a little. This is the same shape as the autoinc persist crash window filed
+separately; do not solve it by hand a second time.
