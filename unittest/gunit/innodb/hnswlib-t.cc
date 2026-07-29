@@ -60,43 +60,91 @@ static std::vector<float> make_vec(uint64_t seed) {
   return v;
 }
 
-/* Mirrors what the InnoDB callbacks persist: latest state per label.
-The insert callback creates the row; update callbacks overwrite the
-neighbors (and carry the node's own vector, per the fork's contract). */
+/* Mirrors what the InnoDB callbacks persist (H1): an append-only log of
+(label, ver, neighbors) rows plus a ver-0 birth row per label. `rows`
+resolves the log exactly the way vec_aux_load_rows does — identity from
+ver 0, edges from the HIGHEST ver seen — so a test that inspects `rows`
+is asserting what a reload would reconstruct. `log` keeps every append
+in emission order so tests can assert the versions themselves. */
 struct Capture {
+  struct Append {
+    labeltype label;
+    uint32_t ver;
+    std::vector<std::vector<size_t>> neighbors;
+  };
+  std::vector<Append> log;
   std::map<labeltype, VecAuxLoadedRowTuple> rows;
+  std::map<labeltype, uint32_t> win_ver;
   size_t inserts = 0;
   size_t updates = 0;
 
-  void store(labeltype label, const void *data,
+  void store(labeltype label, uint32_t ver, const void *data,
              const HierarchicalNSW<float>::NeighborLabelListsByLevel &nbl) {
-    const float *f = static_cast<const float *>(data);
-    std::vector<float> vec(f, f + DIM);
     std::vector<std::vector<size_t>> neighbors;
     for (const auto &lvl : nbl) {
       neighbors.emplace_back(lvl.begin(), lvl.end());
     }
+    log.push_back(Append{label, ver, neighbors});
+
+    /* Loader semantics: only a strictly higher version wins. */
+    auto it = win_ver.find(label);
+    const bool wins = (it == win_ver.end()) || (ver >= it->second);
+    if (!wins) {
+      return;
+    }
+    win_ver[label] = ver;
+
     const uint64_t level = nbl.empty() ? 0 : nbl.size() - 1;
-    rows[label] = VecAuxLoadedRowTuple(label, level, std::move(vec),
-                                       std::move(neighbors));
+    auto existing = rows.find(label);
+    std::vector<float> vec;
+    if (data != nullptr) {
+      const float *f = static_cast<const float *>(data);
+      vec.assign(f, f + DIM);
+    } else if (existing != rows.end()) {
+      vec = std::get<2>(existing->second); /* identity from the birth row */
+    }
+    const uint64_t keep_level = (data == nullptr && existing != rows.end())
+                                    ? std::get<1>(existing->second)
+                                    : level;
+    rows[label] = VecAuxLoadedRowTuple(label, keep_level, std::move(vec),
+                                       std::move(neighbors), ver);
   }
 };
 
 static void install_capture(HierarchicalNSW<float> *hnsw, Capture *cap) {
   hnsw->setAddPointInsertCallback(
-      [cap](labeltype label, hnswlib::tableint, const void *data,
+      [cap](labeltype label, hnswlib::tableint, uint32_t ver, const void *data,
             const HierarchicalNSW<float>::NeighborLabelListsByLevel &nbl,
             void *) {
         ++cap->inserts;
-        cap->store(label, data, nbl);
+        cap->store(label, ver, data, nbl);
       });
   hnsw->setAddPointUpdateCallback(
-      [cap](labeltype label, hnswlib::tableint, const void *data,
+      [cap](labeltype label, hnswlib::tableint, uint32_t ver, const void *data,
             const HierarchicalNSW<float>::NeighborLabelListsByLevel &nbl,
             void *) {
         ++cap->updates;
-        cap->store(label, data, nbl);
+        cap->store(label, ver, data, nbl);
       });
+}
+
+/* H1's load-bearing invariant: per label, the captured versions are
+strictly increasing in capture order, and a birth row is always 0. If
+this ever breaks, the loader's highest-visible-ver rule stops
+reconstructing mutation order — P2 comes back. */
+static void assert_versions_monotonic_per_label(const Capture &cap) {
+  std::map<labeltype, uint32_t> last;
+  std::map<labeltype, bool> seen;
+  for (const Capture::Append &a : cap.log) {
+    if (!seen[a.label]) {
+      seen[a.label] = true;
+      last[a.label] = a.ver;
+      continue;
+    }
+    EXPECT_GT(a.ver, last[a.label]) << "label " << a.label << " emitted ver "
+                                    << a.ver << " after " << last[a.label];
+    last[a.label] = a.ver;
+  }
 }
 
 /* Insert callback fires exactly once per addPoint; update callbacks fire
@@ -121,6 +169,57 @@ TEST(HnswlibFork, InsertCallbackFiresOncePerAddPoint) {
   /* A connected graph must have produced neighbor-list rewrites on
   existing nodes. */
   EXPECT_GT(cap.updates, 0u);
+  assert_versions_monotonic_per_label(cap);
+}
+
+/* H1: after a reload, each node's version counter resumes from the
+version the reload consumed — so the next mutation appends ver+1 and can
+never collide with (or be mistaken for) a persisted row. */
+TEST(HnswlibFork, VersionCountersResumeAfterLoadIndex) {
+  L2Space space(DIM);
+  constexpr size_t N = 60;
+
+  HierarchicalNSW<float> a(&space, N * 2, 8, 40);
+  Capture cap;
+  install_capture(&a, &cap);
+  for (uint64_t i = 0; i < N; ++i) {
+    auto v = make_vec(i);
+    a.addPoint(v.data(), i, false, nullptr);
+  }
+  assert_versions_monotonic_per_label(cap);
+
+  std::vector<VecAuxLoadedRowTuple> rows;
+  rows.reserve(N);
+  for (auto &kv : cap.rows) rows.push_back(kv.second);
+
+  HierarchicalNSW<float> b(&space, N * 2, 8, 40);
+  b.loadIndex(rows);
+  ASSERT_EQ(b.cur_element_count.load(), N);
+
+  /* Every reloaded node reports the version its winning row carried. */
+  for (const auto &kv : cap.rows) {
+    const labeltype label = kv.first;
+    const uint32_t persisted = std::get<4>(kv.second);
+    EXPECT_EQ(b.getVersionByLabel(label), persisted) << "label " << label;
+  }
+
+  /* Mutations after the reload continue the sequence: every append for a
+  pre-existing label carries a version strictly above what was loaded. */
+  Capture cap2;
+  install_capture(&b, &cap2);
+  for (uint64_t i = N; i < N + 10; ++i) {
+    auto v = make_vec(i);
+    b.addPoint(v.data(), i, false, nullptr);
+  }
+  for (const Capture::Append &ap : cap2.log) {
+    auto it = cap.rows.find(ap.label);
+    if (it == cap.rows.end()) {
+      continue; /* a label born after the reload */
+    }
+    EXPECT_GT(ap.ver, std::get<4>(it->second))
+        << "label " << ap.label << " re-emitted a loaded version";
+  }
+  assert_versions_monotonic_per_label(cap2);
 }
 
 /* The core persistence contract: rows captured through the callbacks,
@@ -138,6 +237,7 @@ TEST(HnswlibFork, CallbackRowsRoundTripThroughLoadIndex) {
     a.addPoint(v.data(), i, false, nullptr);
   }
   ASSERT_EQ(cap.rows.size(), N);
+  assert_versions_monotonic_per_label(cap);
 
   std::vector<VecAuxLoadedRowTuple> rows;
   rows.reserve(N);

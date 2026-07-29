@@ -6697,7 +6697,7 @@ bool dd_create_vec_aux_table(const dict_table_t *parent_table,
   /* Columns, generically from the in-memory dict_table_t — the
   authoritative schema, built from the per-type aux table-set
   descriptors (vec0aux.cc). One mapping per column kind the
-  descriptors use: DATA_INT (1- or 8-byte), DATA_BLOB, DATA_BINARY.
+  descriptors use: DATA_INT (1-, 4- or 8-byte), DATA_BLOB, DATA_BINARY.
   A hand-rolled per-column version of this function once hardcoded
   the hnsw shape (single-column PK on `id`); the spann set reloaded
   from such DD entries came back with the wrong columns and n_uniq —
@@ -6716,10 +6716,25 @@ bool dd_create_vec_aux_table(const dict_table_t *parent_table,
 
     switch (dcol->mtype) {
       case DATA_INT:
-        ut_a(dcol->len == 8 || dcol->len == 1);
-        col->set_type(dcol->len == 8 ? dd::enum_column_types::LONGLONG
-                                     : dd::enum_column_types::TINY);
-        col->set_char_length(dcol->len == 8 ? 20 : 1);
+        /* Widths the vec aux descriptors use: BIGINT (labels, ids),
+        INT (hnsw H1 edge-list version) and TINYINT (levels, mtype). */
+        switch (dcol->len) {
+          case 8:
+            col->set_type(dd::enum_column_types::LONGLONG);
+            col->set_char_length(20);
+            break;
+          case 4:
+            col->set_type(dd::enum_column_types::LONG);
+            col->set_char_length(11);
+            break;
+          case 1:
+            col->set_type(dd::enum_column_types::TINY);
+            col->set_char_length(1);
+            break;
+          default:
+            ut_d(ut_error);
+            ut_o(break);
+        }
         col->set_numeric_scale(0);
         if (dcol->prtype & DATA_UNSIGNED) {
           col->set_unsigned(true);

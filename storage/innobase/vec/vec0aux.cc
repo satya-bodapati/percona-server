@@ -265,17 +265,27 @@ struct Vec_aux_table_def {
 constexpr ulint VEC_AUX_BLOB_PRTYPE =
     (DATA_MTYPE_MAX << 16) | DATA_BINARY_TYPE | DATA_NOT_NULL;
 
-const Vec_aux_col_def vec_hnsw_node_cols[] = {
-    {"id", DATA_INT, DATA_NOT_NULL | DATA_UNSIGNED, VEC_AUX_ID_COL_LEN},
-    {"vec", DATA_BLOB, VEC_AUX_BLOB_PRTYPE, VEC_AUX_VEC_COL_LEN},
-    /* row_ref is NULLable: NULL == tombstone */
+/* hnsw H1 (design doc hnsw-aux-log-design.md §04): ONE ROW PER MUTATION.
+   PK(label, ver): ver 0 is the birth row and alone carries the node's
+   identity (vec, row_ref, level); ver > 0 rows are edge-list snapshots
+   captured atomically under hnswlib's per-node link lock, so version
+   order provably equals mutation order. Nothing is ever UPDATEd —
+   appends of distinct keys cannot deadlock and cannot overwrite. The
+   loader takes, per label, identity from ver 0 and edges from the
+   HIGHEST VISIBLE ver. */
+const Vec_aux_col_def vec_hnsw_log_cols[] = {
+    {"label", DATA_INT, DATA_NOT_NULL | DATA_UNSIGNED, VEC_AUX_ID_COL_LEN},
+    {"ver", DATA_INT, DATA_NOT_NULL | DATA_UNSIGNED, 4},
+    /* vec/row_ref/level: ver-0 (birth) rows only — NULL on version rows */
+    {"vec", DATA_BLOB, (DATA_MTYPE_MAX << 16) | DATA_BINARY_TYPE,
+     VEC_AUX_VEC_COL_LEN},
     {"row_ref", DATA_BINARY, DATA_BINARY_TYPE, VEC_AUX_ROW_REF_COL_LEN},
-    {"level", DATA_INT, DATA_NOT_NULL, VEC_AUX_LEVEL_COL_LEN},
+    {"level", DATA_INT, 0, VEC_AUX_LEVEL_COL_LEN},
     {"neighbors", DATA_BLOB, VEC_AUX_BLOB_PRTYPE, VEC_AUX_NEIGHBORS_COL_LEN},
 };
 
 const Vec_aux_table_def vec_hnsw_defs[] = {
-    {"", UT_ARR_SIZE(vec_hnsw_node_cols), vec_hnsw_node_cols, 1},
+    {"", UT_ARR_SIZE(vec_hnsw_log_cols), vec_hnsw_log_cols, 2},
 };
 
 /* spann (design doc spann-percona-design.html §2):
@@ -749,7 +759,7 @@ ctx->err; addPoint's caller turns that into a statement error, and the
 statement rollback undoes base row + aux rows together. */
 static void vec_insert_cb(
     hnswlib::labeltype label, hnswlib::tableint internal_id [[maybe_unused]],
-    const void *data_point,
+    uint32_t version, const void *data_point,
     const hnswlib::HierarchicalNSW<float>::NeighborLabelListsByLevel
         &neighbors_by_level,
     void *arg) {
@@ -768,6 +778,8 @@ static void vec_insert_cb(
 
   vec_aux_row_t row;
   row.id = label;
+  row.ver = version; /* birth rows are always version 0 (fork contract) */
+  ut_ad(version == 0);
   row.vec = static_cast<const float *>(data_point);
   row.dims = ctx->dims;
   row.row_ref = ctx->row_ref;
@@ -790,7 +802,7 @@ static void vec_insert_cb(
 
 static void vec_update_cb(
     hnswlib::labeltype label, hnswlib::tableint internal_id [[maybe_unused]],
-    const void *data_point [[maybe_unused]],
+    uint32_t version, const void *data_point [[maybe_unused]],
     const hnswlib::HierarchicalNSW<float>::NeighborLabelListsByLevel
         &neighbors_by_level,
     void *arg) {
@@ -807,17 +819,26 @@ static void vec_update_cb(
   std::vector<byte> blob;
   vec_aux_serialize_neighbors(nbl, blob);
 
-  ctx->err = vec_aux_update_neighbors(ctx->trx, ctx->aux, label, blob.data(),
-                                      blob.size());
+  /* H1: a rewired neighbor persists as an APPEND of (label, ver,
+  neighbors) — never an UPDATE of a shared row. The snapshot and its
+  version were captured atomically under the node's link lock, so the
+  loader's highest-visible-ver rule reconstructs mutation order no
+  matter how transactions commit or roll back. A version row whose
+  label's birth row was rolled back is a harmless orphan: the loader
+  finds no ver-0 identity and skips the label entirely. */
+  ut_ad(version > 0);
+  vec_aux_row_t row;
+  row.id = label;
+  row.ver = version;
+  row.vec = nullptr;
+  row.dims = 0;
+  row.row_ref = nullptr;
+  row.row_ref_len = 0;
+  row.level = 0;
+  row.neighbors = blob.data();
+  row.neighbors_len = blob.size();
 
-  /* No aux row for this label: its inserting transaction rolled back
-  (the node survives in the graph marked deleted, and addPoint may
-  still link new points to it). There is nothing to persist — the new
-  node's own row keeps the reference, and loadIndex drops such
-  dangling edges at reload. */
-  if (ctx->err == DB_RECORD_NOT_FOUND) {
-    ctx->err = DB_SUCCESS;
-  }
+  ctx->err = vec_aux_insert(ctx->trx, ctx->aux, row);
 }
 
 vec_t *vec_open(dict_table_t *table, const Vector_index *impl,
