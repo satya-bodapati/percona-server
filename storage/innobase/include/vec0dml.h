@@ -121,12 +121,6 @@ and the row is undone with the statement, like any user DML.
 @return DB_SUCCESS or error */
 dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux, const vec_aux_row_t &row);
 
-/** Point one aux row's row_ref at a new base-PK image (the base row's
-PRIMARY KEY changed under it; the graph node is untouched).
-@return DB_SUCCESS, DB_RECORD_NOT_FOUND if no such id, or error */
-dberr_t vec_aux_update_row_ref(trx_t *trx, dict_table_t *aux, uint64_t id,
-                               const byte *row_ref, ulint row_ref_len);
-
 /** INSERT one label into the _dead table — the delete mechanism. No
 explicit deleter column: the row's hidden DB_TRX_ID is the deleter's
 identity, so a reader's own read view decides whether the delete is
@@ -158,7 +152,6 @@ dberr_t vec_aux_load_dead_set(dict_table_t *dead, ReadView *view,
 dberr_t vec_aux_load_rows(
     dict_table_t *aux, uint32_t dims, std::vector<vec_loaded_row_t> *rows,
     uint64_t *raw_max_id, bool *saw_invisible,
-    std::vector<uint64_t> *dead_labels = nullptr,
     std::vector<std::pair<uint64_t, std::string>> *row_refs = nullptr);
 
 /** Max vec_idx_id over ALL records of the BASE table's clustered index

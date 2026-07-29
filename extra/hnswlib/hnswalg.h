@@ -1396,6 +1396,25 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                                       gatherAllNeighborsForNodeUnlocked(internal_id)};
     }
 
+    /* Percona (H1): bump a node's edge-list version and return the
+    resulting state, under that node's link lock. Used by writers that
+    must append a version row for a node they did not rewire — the
+    PK-only UPDATE, which changes the stored base-row reference while
+    leaving the graph untouched. Throws if the label is unknown. */
+    CapturedNeighborUpdate captureNodeStateByLabel(labeltype label) {
+        tableint internal_id;
+        {
+            std::unique_lock<std::mutex> lock_table(label_lookup_lock);
+            auto search = label_lookup_.find(label);
+            if (search == label_lookup_.end()) {
+                throw std::runtime_error("captureNodeStateByLabel: unknown label");
+            }
+            internal_id = search->second;
+        }
+        std::unique_lock<std::mutex> lock(link_list_locks_[internal_id]);
+        return captureNodeStateLocked(internal_id);
+    }
+
     /* Percona (H1): version inspection by label — test/diagnostic use.
     Returns 0 for an unknown label. */
     uint32_t getVersionByLabel(labeltype label) {

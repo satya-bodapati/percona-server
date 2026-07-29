@@ -239,8 +239,17 @@ dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
     vec_aux_set_field(tuple, VEC_AUX_COL_LEVEL, &level_byte, 1, heap);
   } else {
     dfield_set_null(dtuple_get_nth_field(tuple, VEC_AUX_COL_VEC));
-    dfield_set_null(dtuple_get_nth_field(tuple, VEC_AUX_COL_ROW_REF));
     dfield_set_null(dtuple_get_nth_field(tuple, VEC_AUX_COL_LEVEL));
+    /* A version row normally carries neighbors only. The PK-only UPDATE
+    also sets row_ref: the loader takes the LATEST VISIBLE non-NULL
+    row_ref per label, so an override row repoints the node without
+    touching the birth row. */
+    if (row.row_ref != nullptr) {
+      vec_aux_set_field(tuple, VEC_AUX_COL_ROW_REF, row.row_ref,
+                        row.row_ref_len, heap);
+    } else {
+      dfield_set_null(dtuple_get_nth_field(tuple, VEC_AUX_COL_ROW_REF));
+    }
   }
   vec_aux_set_field(tuple, VEC_AUX_COL_NEIGHBORS, row.neighbors,
                     row.neighbors_len, heap);
@@ -265,188 +274,6 @@ dberr_t vec_aux_dead_insert(trx_t *trx, dict_table_t *dead, uint64_t label) {
   vec_aux_set_field(tuple, 0, label_buf, sizeof(label_buf), heap);
 
   return vec_aux_insert_exec(trx, node, heap);
-}
-
-/** Shared body for the three targeted aux-row updates (neighbors,
-tombstone, row_ref refresh): position on the PK, lock like a regular
-UPDATE would, run one row_upd_step. Which columns land in the update
-vector is driven by the arguments. */
-static dberr_t vec_aux_update_row_low(trx_t *trx, dict_table_t *aux,
-                                      uint64_t id, const byte *neighbors,
-                                      ulint neighbors_len, bool set_neighbors,
-                                      bool row_ref_null, const byte *row_ref,
-                                      ulint row_ref_len) {
-  ut_a(trx != nullptr);
-  ut_a(aux != nullptr);
-  ut_a(!set_neighbors || neighbors != nullptr || neighbors_len == 0);
-  ut_a(!(row_ref_null && row_ref != nullptr));
-
-  mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
-  dict_index_t *clust = aux->first_index();
-
-  /* Standard update machinery — the same upd_node + row_upd_step every
-  SQL UPDATE runs on. In a regular UPDATE the preceding row_search_mvcc
-  read positions the cursor and takes the locks; we know the PK and
-  skip the search, so we position and lock ourselves below.
-  (Self-positioned-upd_node implementation reference: the FK-cascade
-  code, row0ins.cc:1153; its run loop touches thr->prebuilt, which we
-  don't have — hence a private loop.) */
-  upd_node_t *node = row_create_update_node_for_mysql(aux, heap);
-
-  /* Search tuple for the target row's PK — H1: the identity payload
-  lives in the (label, ver=0) birth row alone; version rows are
-  immutable snapshots and are never updated. */
-  dtuple_t *ref = dtuple_create(heap, 2);
-  dict_index_copy_types(ref, clust, 2);
-  byte id_buf[8];
-  mach_write_to_8(id_buf, id);
-  dfield_set_data(dtuple_get_nth_field(ref, 0), id_buf, sizeof(id_buf));
-  byte ver_buf[4];
-  mach_write_to_4(ver_buf, 0);
-  dfield_set_data(dtuple_get_nth_field(ref, 1), ver_buf, sizeof(ver_buf));
-
-  que_thr_t *thr = pars_complete_graph_for_exec(node, trx, heap, nullptr);
-
-  auto savept = trx_savept_take(trx);
-
-  que_thr_move_to_run_state_for_mysql(thr, trx);
-
-  /* Take the locks row_search_mvcc would have taken for a regular
-  UPDATE: IX on the table, explicit X on the record (row_upd_clust_step
-  asserts both via lock_trx_has_rec_x_lock). Position the cursor, take
-  the locks, retry on lock waits with the standard
-  row_mysql_handle_errors machinery. */
-  mtr_t mtr;
-  mem_heap_t *offset_heap = nullptr;
-  for (;;) {
-    mtr_start(&mtr);
-    node->pcur->open_no_init(clust, ref, PAGE_CUR_LE, BTR_SEARCH_LEAF, 0, &mtr,
-                             UT_LOCATION_HERE);
-    const rec_t *rec = node->pcur->get_rec();
-    if (!page_rec_is_user_rec(rec) ||
-        node->pcur->get_low_match() < dict_index_get_n_unique(clust)) {
-      mtr_commit(&mtr);
-      que_thr_stop_for_mysql_no_error(thr, trx);
-      if (offset_heap != nullptr) {
-        mem_heap_free(offset_heap);
-      }
-      mem_heap_free(heap);
-      return DB_RECORD_NOT_FOUND;
-    }
-
-    dberr_t lerr = lock_table(0, aux, LOCK_IX, thr);
-    if (lerr == DB_SUCCESS) {
-      ulint *offsets = rec_get_offsets(rec, clust, nullptr, ULINT_UNDEFINED,
-                                       UT_LOCATION_HERE, &offset_heap);
-      /* Not lock_clust_rec_modify_check_and_lock: that one uses
-      lock_rec_lock(impl=true), which creates NO explicit lock when
-      uncontended (the caller is expected to modify the record in the
-      same mtr, making the lock implicit via the new trx id). We modify
-      in a LATER mtr, so we need the explicit X lock a SELECT ... FOR
-      UPDATE would take. */
-      lerr = lock_clust_rec_read_check_and_lock(
-          lock_duration_t::REGULAR, node->pcur->get_block(), rec, clust,
-          offsets, SELECT_ORDINARY, LOCK_X, LOCK_REC_NOT_GAP, thr);
-      if (lerr == DB_SUCCESS_LOCKED_REC) {
-        lerr = DB_SUCCESS;
-      }
-    }
-
-    if (lerr == DB_SUCCESS) {
-      node->pcur->store_position(&mtr);
-      mtr_commit(&mtr);
-      break;
-    }
-
-    mtr_commit(&mtr);
-    trx->error_state = lerr;
-    que_thr_stop_for_mysql(thr);
-    thr->lock_state = QUE_THR_LOCK_ROW;
-    const bool was_lock_wait =
-        row_mysql_handle_errors(&lerr, trx, thr, &savept);
-    thr->lock_state = QUE_THR_LOCK_NOLOCK;
-    if (!was_lock_wait) {
-      if (offset_heap != nullptr) {
-        mem_heap_free(offset_heap);
-      }
-      mem_heap_free(heap);
-      return lerr;
-    }
-  }
-  if (offset_heap != nullptr) {
-    mem_heap_free(offset_heap);
-  }
-
-  /* One- or two-field update vector, per the caller's request. */
-  upd_t *update = upd_create(2, heap);
-  update->table = aux;
-  ulint n_fields = 0;
-
-  if (set_neighbors) {
-    upd_field_t *uf = upd_get_nth_field(update, n_fields++);
-    const dict_col_t *col = aux->get_col(VEC_AUX_COL_NEIGHBORS);
-    upd_field_set_field_no(uf, dict_col_get_clust_pos(col, clust), clust);
-    void *copy = neighbors_len != 0
-                     ? mem_heap_dup(heap, neighbors, neighbors_len)
-                     : nullptr;
-    dfield_set_data(&uf->new_val, copy, neighbors_len);
-    col->copy_type(dfield_get_type(&uf->new_val));
-  }
-
-  if (row_ref_null || row_ref != nullptr) {
-    upd_field_t *uf = upd_get_nth_field(update, n_fields++);
-    const dict_col_t *col = aux->get_col(VEC_AUX_COL_ROW_REF);
-    upd_field_set_field_no(uf, dict_col_get_clust_pos(col, clust), clust);
-    if (row_ref_null) {
-      dfield_set_null(&uf->new_val);
-    } else {
-      dfield_set_data(&uf->new_val, mem_heap_dup(heap, row_ref, row_ref_len),
-                      row_ref_len);
-    }
-    col->copy_type(dfield_get_type(&uf->new_val));
-  }
-  ut_a(n_fields > 0);
-
-  update->n_fields = n_fields;
-  node->update = update;
-  node->update_n_fields = n_fields;
-  node->cmpl_info = 0;
-  node->state = UPD_NODE_UPDATE_CLUSTERED;
-
-  dberr_t err;
-  for (;;) {
-    thr->run_node = node;
-    thr->prev_node = node;
-
-    row_upd_step(thr);
-
-    err = trx->error_state;
-    if (err == DB_SUCCESS) {
-      break;
-    }
-
-    que_thr_stop_for_mysql(thr);
-    thr->lock_state = QUE_THR_LOCK_ROW;
-    const bool was_lock_wait = row_mysql_handle_errors(&err, trx, thr, &savept);
-    thr->lock_state = QUE_THR_LOCK_NOLOCK;
-
-    if (!was_lock_wait) {
-      mem_heap_free(heap);
-      return err;
-    }
-  }
-
-  que_thr_stop_for_mysql_no_error(thr, trx);
-  mem_heap_free(heap);
-  return DB_SUCCESS;
-}
-
-dberr_t vec_aux_update_row_ref(trx_t *trx, dict_table_t *aux, uint64_t id,
-                               const byte *row_ref, ulint row_ref_len) {
-  ut_a(row_ref != nullptr);
-  return vec_aux_update_row_low(trx, aux, id, nullptr, 0,
-                                false /* set_neighbors */,
-                                false /* row_ref_null */, row_ref, row_ref_len);
 }
 
 /** Collect the dead-label set visible under `view` (nullptr = latest)
@@ -722,7 +549,6 @@ dberr_t vec_base_collect_rows(trx_t *trx, dict_table_t *base,
 dberr_t vec_aux_load_rows(
     dict_table_t *aux, uint32_t dims, std::vector<vec_loaded_row_t> *rows,
     uint64_t *raw_max_id, bool *saw_invisible,
-    std::vector<uint64_t> *dead_labels,
     std::vector<std::pair<uint64_t, std::string>> *row_refs) {
   ut_a(aux != nullptr);
   ut_a(rows != nullptr);
@@ -764,7 +590,6 @@ dberr_t vec_aux_load_rows(
     uint64_t label = 0;
     bool active = false;
     bool have_birth = false;
-    bool tombstone = false;
     uint32_t win_ver = 0;
     uint64_t level = 0;
     std::vector<float> vec;
@@ -774,17 +599,11 @@ dberr_t vec_aux_load_rows(
 
   auto finalize_label = [&]() {
     if (acc.active && acc.have_birth) {
-      if (acc.tombstone) {
-        if (dead_labels != nullptr) {
-          dead_labels->push_back(acc.label);
-        }
-      } else {
-        if (row_refs != nullptr) {
-          row_refs->emplace_back(acc.label, std::move(acc.row_ref));
-        }
-        rows->emplace_back(acc.label, acc.level, std::move(acc.vec),
-                           std::move(acc.neighbors), acc.win_ver);
+      if (row_refs != nullptr) {
+        row_refs->emplace_back(acc.label, std::move(acc.row_ref));
       }
+      rows->emplace_back(acc.label, acc.level, std::move(acc.vec),
+                         std::move(acc.neighbors), acc.win_ver);
     }
     acc = {};
   };
@@ -892,31 +711,36 @@ dberr_t vec_aux_load_rows(
       acc.neighbors = std::move(neighbors);
     }
 
-    if (ver == 0) {
-      /* Birth row: the identity payload. row_ref NULL = tombstone —
-      the label is not loaded into the graph, but committed neighbor
-      lists may still name it (loadIndex drops such edges). */
-      acc.have_birth = true;
-
+    /* row_ref: the LATEST VISIBLE non-NULL value wins. The birth row
+    supplies it; a PK-only UPDATE appends an override row carrying a new
+    one. Ascending ver order makes overwrite the whole rule. */
+    {
       ulint rr_len;
       const byte *rr =
           rec_get_nth_field(clust, vrec, voffsets, pos_row_ref, &rr_len);
-      if (rr_len == UNIV_SQL_NULL) {
-        acc.tombstone = true;
-      } else if (rec_offs_nth_extern(clust, voffsets, pos_row_ref)) {
-        const byte *data;
-        ulint len;
-        if (!vec_aux_copy_field(trx, clust, vrec, voffsets, pos_row_ref,
-                                row_heap, &data, &len)) {
-          err = DB_CORRUPTION;
-          break;
+      if (rr_len != UNIV_SQL_NULL) {
+        if (rec_offs_nth_extern(clust, voffsets, pos_row_ref)) {
+          const byte *data;
+          ulint len;
+          if (!vec_aux_copy_field(trx, clust, vrec, voffsets, pos_row_ref,
+                                  row_heap, &data, &len)) {
+            err = DB_CORRUPTION;
+            break;
+          }
+          acc.row_ref.assign(reinterpret_cast<const char *>(data), len);
+        } else {
+          acc.row_ref.assign(reinterpret_cast<const char *>(rr), rr_len);
         }
-        acc.row_ref.assign(reinterpret_cast<const char *>(data), len);
-      } else {
-        acc.row_ref.assign(reinterpret_cast<const char *>(rr), rr_len);
       }
+    }
 
-      if (!acc.tombstone) {
+    if (ver == 0) {
+      /* Birth row: the identity payload. Deadness is NOT here — it lives
+      in the _dead table, so a birth row's row_ref is simply the label's
+      first base-row reference (already picked up above). */
+      acc.have_birth = true;
+
+      {
         const byte *vec_data;
         ulint vec_len;
         if (!vec_aux_copy_field(trx, clust, vrec, voffsets, pos_vec, row_heap,
