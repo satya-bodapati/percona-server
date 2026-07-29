@@ -883,7 +883,7 @@ static dberr_t vec_load_locked(dict_table_t *table, vec_t *vec, THD *thd) {
   bool saw_invisible = false;
   std::vector<std::pair<uint64_t, std::string>> row_refs;
   dberr_t err = vec_aux_load_rows(aux, vec->dims, &rows, &raw_max_id,
-                                  &saw_invisible, nullptr, &row_refs);
+                                  &saw_invisible, &row_refs);
   vec_aux_close_for_dml(aux, thd, &mdl);
   if (err != DB_SUCCESS) {
     return err;
@@ -959,10 +959,15 @@ static dberr_t vec_load_locked(dict_table_t *table, vec_t *vec, THD *thd) {
   {
     std::lock_guard<std::mutex> g(vec->row_ref_mutex);
     vec->row_ref_map.clear();
+    /* Dead labels KEEP their map entry. Dead-ness gates the SEARCH, not
+    the load: a reader whose view predates the delete is entitled to the
+    row and must be able to fetch it, which needs this label's row_ref.
+    Dropping the entry here would make that reader silently miss the row
+    once view-gated tombstone inclusion lands - and it would present as
+    an MVCC bug rather than a loader one. The log already holds the value
+    (birth row, or the latest override row), so there is nothing to
+    duplicate into _dead. */
     for (auto &lr : row_refs) {
-      if (dead_labels.count(lr.first) != 0) {
-        continue; /* dead: no base row to point at */
-      }
       vec->row_ref_map.emplace(lr.first, std::move(lr.second));
     }
   }
@@ -1203,7 +1208,58 @@ dberr_t vec_refresh_row_ref(trx_t *trx, dict_table_t *table, THD *thd,
 
   const undo_no_t undo_mark = trx->undo_no;
 
-  dberr_t err = vec_aux_update_row_ref(trx, aux, label, row_ref, row_ref_len);
+  /* Repointing a node at a moved base row is an APPEND, not an update.
+  The override row carries the new row_ref plus the node's CURRENT
+  neighbors snapshot (keeping the log's neighbors-NOT-NULL invariant),
+  and its version is assigned under the node's link lock so it is
+  ordered against any concurrent rewire of the same node. The loader
+  then takes the latest visible non-NULL row_ref per label.
+
+  An old reader is served for free: it cannot see this row, so it
+  resolves the pre-move row_ref and fetches the base-row version its own
+  snapshot still holds. */
+  dberr_t err = DB_SUCCESS;
+  rw_lock_s_lock(&vec->latch, UT_LOCATION_HERE);
+  if (vec->stale.load() || !vec->loaded) {
+    rw_lock_s_unlock(&vec->latch);
+    err = vec_load(table, thd);
+    if (err != DB_SUCCESS) {
+      vec_aux_close_for_dml(aux, thd, &mdl);
+      return err;
+    }
+    rw_lock_s_lock(&vec->latch, UT_LOCATION_HERE);
+  }
+
+  try {
+    const auto cap = vec->hnsw->captureNodeStateByLabel(label);
+
+    std::vector<std::vector<std::size_t>> nbl;
+    nbl.reserve(cap.neighbors_by_level.size());
+    for (const auto &lvl : cap.neighbors_by_level) {
+      nbl.emplace_back(lvl.begin(), lvl.end());
+    }
+    std::vector<byte> blob;
+    vec_aux_serialize_neighbors(nbl, blob);
+
+    vec_aux_row_t vrow;
+    vrow.id = label;
+    vrow.ver = cap.version;
+    vrow.vec = nullptr;
+    vrow.dims = 0;
+    vrow.row_ref = row_ref;
+    vrow.row_ref_len = row_ref_len;
+    vrow.level = 0;
+    vrow.neighbors = blob.data();
+    vrow.neighbors_len = blob.size();
+
+    err = vec_aux_insert(trx, aux, vrow);
+  } catch (...) {
+    /* Label not in the graph (a reload dropped it, or it was never
+    loaded). Nothing to repoint on disk: the next load rebuilds the map
+    from whatever the log's visible rows say. */
+    err = DB_SUCCESS;
+  }
+  rw_lock_s_unlock(&vec->latch);
 
   if (err == DB_SUCCESS) {
     /* Repoint the in-memory map entry. The undo log restores the aux

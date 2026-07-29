@@ -249,8 +249,10 @@ struct Tester {
   [[nodiscard]] Ret_t vec_aux_insert_row(
       std::vector<std::string> &tokens) noexcept;
 
-  /** Update the neighbors BLOB of one aux row via vec0dml.
-  Usage: vec_aux_update_row db/table id nb_spec
+  /** APPEND an edge-list version row for one label via vec0dml — the
+  shape the update callback persists. Nothing is updated in place; ver
+  must be > 0 (version 0 is the birth row, owned by vec_aux_insert_row).
+  Usage: vec_aux_update_row db/table id ver nb_spec
   @param[in]   tokens   the given command line
   @return RET_PASS on success, or the error code. */
   [[nodiscard]] Ret_t vec_aux_update_row(
