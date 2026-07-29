@@ -730,7 +730,6 @@ vec_t *vec_open(dict_table_t *table, const Vector_index *impl,
     ut_a(vec_index != nullptr);
 
     auto *vec = ut::new_withkey<vec_t>(ut::make_psi_memory_key(mem_key_other));
-    vec->table = table;
     vec->impl = impl;
     vec->index_id = vec_index->id;
     vec->field_no = field_no;
@@ -749,11 +748,14 @@ vec_t *vec_open(dict_table_t *table, const Vector_index *impl,
   return vec_hnsw(table);
 }
 
-/** Build the graph from the aux table. Caller holds vec->latch in X. */
-static dberr_t vec_load_locked(vec_t *vec, THD *thd) {
+/** Build the graph from the aux table. Caller holds vec->latch in X.
+The base table is a parameter, not a field of vec: the runtime is
+reachable only through dict_table_t::vec, so every caller already has
+the table in hand and a stored back pointer would only be a second
+copy of it to keep consistent. */
+static dberr_t vec_load_locked(dict_table_t *table, vec_t *vec, THD *thd) {
   ut_ad(rw_lock_own(&vec->latch, RW_LOCK_X));
-
-  dict_table_t *table = vec->table;
+  ut_ad(table->vec == vec);
 
   MDL_ticket *mdl = nullptr;
   dict_table_t *aux = vec_aux_open_for_dml(table, vec->index_id, thd, &mdl);
@@ -857,7 +859,7 @@ dberr_t vec_load(dict_table_t *table, THD *thd) {
   rw_lock_x_lock(&vec->latch, UT_LOCATION_HERE);
   dberr_t err = DB_SUCCESS;
   if (!vec->loaded || vec->stale.load()) {
-    err = vec_load_locked(vec, thd);
+    err = vec_load_locked(table, vec, thd);
   }
   rw_lock_x_unlock(&vec->latch);
   return err;
