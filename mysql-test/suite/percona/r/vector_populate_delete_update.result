@@ -17,9 +17,9 @@ SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 count=3 max_id=3 invisible=0
-id=1 level=1 nb=2:3|
-id=2 level=0 nb=1:3
-id=3 level=0 nb=1:2
+id=1 level=1 ver=2 nb=2:3|
+id=2 level=0 ver=1 nb=1:3
+id=3 level=0 ver=0 nb=1:2
 
 # DELETE: id=2 becomes a tombstone (dead), base row gone. The
 # survivors' neighbor lists still reference it — geometry is kept
@@ -34,8 +34,8 @@ SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 count=2 max_id=3 invisible=0 dead=2
-id=1 level=1 nb=2:3|
-id=3 level=0 nb=1:2
+id=1 level=1 ver=2 nb=2:3|
+id=3 level=0 ver=0 nb=1:2
 
 # ROLLBACK of a DELETE: undo restores row_ref, tracking unmarks
 # the node — the point is fully live again.
@@ -51,8 +51,8 @@ SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 count=2 max_id=3 invisible=0 dead=2
-id=1 level=1 nb=2:3|
-id=3 level=0 nb=1:2
+id=1 level=1 ver=2 nb=2:3|
+id=3 level=0 ver=0 nb=1:2
 
 # UPDATE vector value -> value: old label 3 tombstones, the new
 # point gets a FRESH label (5).
@@ -61,8 +61,8 @@ SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 count=2 max_id=5 invisible=0 dead=2:3
-id=1 level=1 nb=2:3:5|
-id=5 level=0 nb=1
+id=1 level=1 ver=3 nb=2:3:5|
+id=5 level=0 ver=0 nb=1
 
 # UPDATE NULL -> value: a FRESH label (6), never the row's
 # INSERT-time id — that id never reached the aux, so the restart
@@ -72,9 +72,9 @@ SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 count=3 max_id=6 invisible=0 dead=2:3
-id=1 level=1 nb=2:3:5:6|
-id=5 level=0 nb=1:6
-id=6 level=0 nb=5:1
+id=1 level=1 ver=4 nb=2:3:5:6|
+id=5 level=0 ver=1 nb=1:6
+id=6 level=0 ver=0 nb=5:1
 
 # UPDATE value -> NULL: tombstone only.
 UPDATE t1 SET v = NULL WHERE id = 103;
@@ -82,8 +82,8 @@ SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 count=2 max_id=6 invisible=0 dead=2:3:6
-id=1 level=1 nb=2:3:5:6|
-id=5 level=0 nb=1:6
+id=1 level=1 ver=4 nb=2:3:5:6|
+id=5 level=0 ver=1 nb=1:6
 
 # Non-vector, non-PK UPDATE: the index is untouched.
 ALTER TABLE t1 ADD COLUMN k INT DEFAULT 0, ALGORITHM=COPY;
@@ -92,8 +92,8 @@ SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 count=2 max_id=2 invisible=0
-id=1 level=1 nb=2|
-id=2 level=0 nb=1
+id=1 level=1 ver=1 nb=2|
+id=2 level=0 ver=0 nb=1
 
 # PK-only UPDATE: same label, row_ref repointed (not visible in
 # the dump, but the statement must succeed and the graph must not
@@ -108,8 +108,8 @@ SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 count=2 max_id=2 invisible=0
-id=1 level=1 nb=2|
-id=2 level=0 nb=1
+id=1 level=1 ver=1 nb=2|
+id=2 level=0 ver=0 nb=1
 
 # ROLLBACK of a vector UPDATE: both halves invert — the fresh
 # label vanishes, the old label comes back to life.
@@ -120,8 +120,8 @@ SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 count=2 max_id=2 invisible=0
-id=1 level=1 nb=2|
-id=2 level=0 nb=1
+id=1 level=1 ver=1 nb=2|
+id=2 level=0 ver=0 nb=1
 
 #
 # Restart: tombstones stay out of the graph, live rows load, the
@@ -138,17 +138,17 @@ SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 count=2 max_id=2 invisible=0
-id=1 level=1 nb=2|
-id=2 level=0 nb=1
+id=1 level=1 ver=1 nb=2|
+id=2 level=0 ver=0 nb=1
 
 INSERT INTO t1 VALUES (104, STRING_TO_VECTOR('[0.3,0.3,0.3,0.3]'), 0);
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 count=3 max_id=5 invisible=0
-id=1 level=1 nb=2:5|5
-id=2 level=0 nb=1:5
-id=5 level=1 nb=1:2|1
+id=1 level=1 ver=3 nb=2:5|5
+id=2 level=0 ver=1 nb=1:5
+id=5 level=1 ver=0 nb=1:2|1
 
 #
 # NULL-vector row before a restart, insert after it, then
@@ -173,10 +173,10 @@ SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 count=5 max_id=8 invisible=0
-id=1 level=1 nb=2:5:7|5:7
-id=2 level=0 nb=1:5:7
-id=5 level=1 nb=1:2:7:8|1:7
-id=7 level=1 nb=1:2:5|1:5
-id=8 level=0 nb=5
+id=1 level=1 ver=5 nb=2:5:7|5:7
+id=2 level=0 ver=2 nb=1:5:7
+id=5 level=1 ver=3 nb=1:2:7:8|1:7
+id=7 level=1 ver=0 nb=1:2:5|1:5
+id=8 level=0 ver=0 nb=5
 
 DROP TABLE t1;

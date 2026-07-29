@@ -40,8 +40,8 @@ SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 count=2 max_id=3 invisible=0 dead=2
-id=1 level=1 nb=2:3|
-id=3 level=0 nb=2:1
+id=1 level=1 ver=2 nb=2:3|
+id=3 level=0 ver=0 nb=2:1
 
 # Virtual column + its index added in ONE alter on a vector table.
 ALTER TABLE t1 ADD COLUMN c3 INT AS (c1 * 2) VIRTUAL, ADD INDEX i_c3 (c3);

@@ -28,15 +28,37 @@ SELECT @@session.innodb_interpreter_output;
 --error ER_WRONG_VALUE_FOR_VAR
 SET SESSION innodb_interpreter = 'vec_aux_insert_row test/t1 1 0 9.0,9.0,9.0,9.0 -';
 
---echo # Update neighbors of id=1 (the update-callback persistence shape).
-SET SESSION innodb_interpreter = 'vec_aux_update_row test/t1 1 2:3';
+--echo # H1: a rewire APPENDS (label, ver, neighbors) — the update
+--echo # callback's persistence shape. Nothing is updated in place.
+SET SESSION innodb_interpreter = 'vec_aux_update_row test/t1 1 1 2:3';
 SELECT @@session.innodb_interpreter_output;
+--echo # The dump resolves the log: id=1 now reports ver=1's edges.
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 
---echo # Updating a nonexistent id fails cleanly.
+--echo # A higher version supersedes it; a LOWER version arriving later
+--echo # (the P2 race: an older snapshot reaching disk after a newer
+--echo # one) is simply not the winner — no overwrite is possible.
+SET SESSION innodb_interpreter = 'vec_aux_update_row test/t1 1 3 3';
+SELECT @@session.innodb_interpreter_output;
+SET SESSION innodb_interpreter = 'vec_aux_update_row test/t1 1 2 2';
+SELECT @@session.innodb_interpreter_output;
+--echo # ver=3 wins over the later-arriving ver=2.
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # Version 0 is the birth row: vec_aux_insert_row owns it.
 --error ER_WRONG_VALUE_FOR_VAR
-SET SESSION innodb_interpreter = 'vec_aux_update_row test/t1 42 1:2';
+SET SESSION innodb_interpreter = 'vec_aux_update_row test/t1 1 0 1:2';
+
+--echo # A version row for a label with no birth row is an ORPHAN (the
+--echo # inserting transaction rolled back). The append succeeds — no
+--echo # read-modify-write, so nothing can fail — and the loader skips
+--echo # the label entirely: it is absent from the dump below.
+SET SESSION innodb_interpreter = 'vec_aux_update_row test/t1 42 1 1:2';
+SELECT @@session.innodb_interpreter_output;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
 
 --echo # Durability: restart, rows and neighbor updates must survive.
 --source include/restart_mysqld.inc

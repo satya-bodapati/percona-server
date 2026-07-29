@@ -23,7 +23,7 @@ typedef unsigned int linklistsizeint;
 /** (label_id, layer, vector, neighbors_by_level); same as InnoDB vec_aux_loaded_row_t. */
 using VecAuxLoadedRowTuple =
     std::tuple<std::uint64_t, std::uint64_t, std::vector<float>,
-               std::vector<std::vector<std::size_t>>>;
+               std::vector<std::vector<std::size_t>>, std::uint32_t>;
 
 template<typename dist_t>
 class HierarchicalNSW : public AlgorithmInterface<dist_t> {
@@ -61,6 +61,11 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
     char *data_level0_memory_{nullptr};
     char **linkLists_{nullptr};
     std::vector<int> element_levels_;  // keeps level of each element
+    /* Percona (H1): per-element edge-list version. Incremented ONLY while
+    holding that element's link_list_locks_ entry, at the moment its lists
+    are mutated — so version order provably equals mutation order for each
+    node. Persisted with every captured snapshot; reload seeds it back. */
+    std::vector<uint32_t> element_versions_;
 
     size_t data_size_{0};
 
@@ -86,36 +91,51 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
     // neighbors_by_level[level] = neighbor labels at that level (level in [0, element_levels_[id]])
     using NeighborLabelListsByLevel = std::vector<NeighborLabelList>;
 
+    /* Percona (H1): one edge-list snapshot captured atomically (list bytes
+    + version) under the owning node's link lock at mutation time. Emission
+    to the persistence callback may happen later and in ANY order — the
+    version carries the mutation order. */
+    struct CapturedNeighborUpdate {
+        labeltype label;
+        uint32_t version;
+        NeighborLabelListsByLevel neighbors_by_level;
+    };
+
     /*
      * Optional callbacks (public API). data_point is the vector last passed to addPoint where applicable.
      *
-     * add_point_update_callback_ is also invoked for neighbors whose edge lists change during insert
-     *   (mutuallyConnectNewElement) or updatePoint/repair: once per distinct internal id, with
-     *   neighbors_by_level gathered after all levels are updated for that batch (neighbor labels).
+     * add_point_update_callback_ is invoked for neighbors whose edge lists change during insert
+     *   (mutuallyConnectNewElement) or updatePoint/repair: once per MUTATION, with the snapshot
+     *   and version captured atomically under that node's link lock at the mutation itself
+     *   (Percona H1 — capture order is version order; invocation order is meaningless).
      *
-     * add_point_insert_callback_ / add_point_update_callback_: invoked after the full operation;
-     *   neighbors_by_level lists neighbor labels per level for that node (insert/update target).
+     * add_point_insert_callback_: invoked after the full operation with the new node's birth
+     *   snapshot, captured under its own link lock before release; its version is always 0.
      * When addPoint is entered from the label-locked overload, getLabelOpMutex(label) may still be held.
      * callback_context is the pointer last passed to addPoint / updatePoint for this operation.
      */
-    std::function<void(labeltype label, tableint internal_id, const void *data_point,
+    std::function<void(labeltype label, tableint internal_id, uint32_t version,
+                       const void *data_point,
                        const NeighborLabelListsByLevel &neighbors_by_level,
                        void *callback_context)>
         add_point_insert_callback_{};
-    std::function<void(labeltype label, tableint internal_id, const void *data_point,
+    std::function<void(labeltype label, tableint internal_id, uint32_t version,
+                       const void *data_point,
                        const NeighborLabelListsByLevel &neighbors_by_level,
                        void *callback_context)>
         add_point_update_callback_{};
 
     void setAddPointInsertCallback(
-        std::function<void(labeltype label, tableint internal_id, const void *data_point,
+        std::function<void(labeltype label, tableint internal_id, uint32_t version,
+                           const void *data_point,
                            const NeighborLabelListsByLevel &neighbors_by_level,
                            void *callback_context)> cb) {
         add_point_insert_callback_ = std::move(cb);
     }
 
     void setAddPointUpdateCallback(
-        std::function<void(labeltype label, tableint internal_id, const void *data_point,
+        std::function<void(labeltype label, tableint internal_id, uint32_t version,
+                           const void *data_point,
                            const NeighborLabelListsByLevel &neighbors_by_level,
                            void *callback_context)> cb) {
         add_point_update_callback_ = std::move(cb);
@@ -152,6 +172,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         : label_op_locks_(MAX_LABEL_OPERATION_LOCKS),
             link_list_locks_(max_elements),
             element_levels_(max_elements),
+            element_versions_(max_elements, 0),
             allow_replace_deleted_(allow_replace_deleted) {
         max_elements_ = max_elements;
         num_deleted_ = 0;
@@ -565,7 +586,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> &top_candidates,
         int level,
         bool isUpdate,
-        std::unordered_set<tableint> *out_updated_neighbor_ids = nullptr) {
+        std::vector<CapturedNeighborUpdate> *out_captured_updates = nullptr) {
         size_t Mcurmax = level ? maxM_ : maxM0_;
         getNeighborsByHeuristic2(top_candidates, M_);
         if (top_candidates.size() > M_)
@@ -607,7 +628,8 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                 data[idx] = selectedNeighbors[idx];
             }
         }
-        // cur_c is omitted from out_updated_neighbor_ids; add_point_insert/update callbacks cover it.
+        // cur_c is omitted from out_captured_updates; its birth snapshot is
+        // captured under lock_el at the end of addPoint (version 0).
 
         for (size_t idx = 0; idx < selectedNeighbors.size(); idx++) {
             tableint neigh_id = selectedNeighbors[idx];
@@ -687,9 +709,12 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                         } */
                     }
                 }
-            }
-            if (list_changed && out_updated_neighbor_ids != nullptr) {
-                out_updated_neighbor_ids->insert(neigh_id);
+
+                /* Percona (H1): capture THIS mutation's resulting state and
+                its version while the node's lock is still held. */
+                if (list_changed && out_captured_updates != nullptr) {
+                    out_captured_updates->push_back(captureNodeStateLocked(neigh_id));
+                }
             }
         }
 
@@ -704,6 +729,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         visited_list_pool_.reset(new VisitedListPool(1, new_max_elements));
 
         element_levels_.resize(new_max_elements);
+        element_versions_.resize(new_max_elements, 0);
 
         std::vector<std::mutex>(new_max_elements).swap(link_list_locks_);
 
@@ -936,6 +962,9 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
 
             const int top_level = static_cast<int>(std::get<1>(row));
             element_levels_[internal_id] = top_level;
+            /* Percona (H1): seed the edge-list version counter from the
+            winning (highest visible) persisted version. */
+            element_versions_[internal_id] = std::get<4>(row);
             if (top_level > maxlevel_) {
                 maxlevel_ = top_level;
                 enterpoint_node_ = internal_id;
@@ -1161,9 +1190,13 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
             unmarkDeletedInternal(internal_id_replaced);
             updatePoint(data_point, internal_id_replaced, 1.0, callback_context);
             if (add_point_update_callback_) {
-                add_point_update_callback_(label, internal_id_replaced, data_point,
-                                           gatherAllNeighborsForNode(internal_id_replaced),
-                                           callback_context);
+                CapturedNeighborUpdate c;
+                {
+                    std::unique_lock <std::mutex> lock(link_list_locks_[internal_id_replaced]);
+                    c = captureNodeStateLocked(internal_id_replaced);
+                }
+                add_point_update_callback_(label, internal_id_replaced, c.version, data_point,
+                                           c.neighbors_by_level, callback_context);
             }
         }
     }
@@ -1181,7 +1214,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
             return;
 
         int elemLevel = element_levels_[internalId];
-        std::unordered_set<tableint> updated_neighbor_ids;
+        std::vector<CapturedNeighborUpdate> captured_updates;
         std::uniform_real_distribution<float> distribution(0.0, 1.0);
         for (int layer = 0; layer <= elemLevel; layer++) {
             std::unordered_set<tableint> sCand;
@@ -1242,14 +1275,16 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                         data[idx] = candidates.top().second;
                         candidates.pop();
                     }
+
+                    /* Percona (H1): capture under the held lock. */
+                    captured_updates.push_back(captureNodeStateLocked(neigh));
                 }
-                updated_neighbor_ids.insert(neigh);
             }
         }
 
         repairConnectionsForUpdate(dataPoint, entryPointCopy, internalId, elemLevel, maxLevelCopy,
-                                   &updated_neighbor_ids);
-        flushAddPointUpdateCallbackForNeighborIds(updated_neighbor_ids, callback_context);
+                                   &captured_updates);
+        flushCapturedUpdates(captured_updates, callback_context);
     }
 
 
@@ -1259,7 +1294,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         tableint dataPointInternalId,
         int dataPointLevel,
         int maxLevel,
-        std::unordered_set<tableint> *out_updated_neighbor_ids = nullptr) {
+        std::vector<CapturedNeighborUpdate> *out_captured_updates = nullptr) {
         tableint currObj = entryPointInternalId;
         if (dataPointLevel < maxLevel) {
             dist_t curdist = fstdistfunc_(dataPoint, getDataByInternalId(currObj), dist_func_param_);
@@ -1317,7 +1352,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                 }
 
                 currObj = mutuallyConnectNewElement(dataPoint, dataPointInternalId, filteredTopCandidates, level, true,
-                                                    out_updated_neighbor_ids);
+                                                    out_captured_updates);
             }
         }
     }
@@ -1331,6 +1366,45 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         tableint *ll = (tableint *) (data + 1);
         memcpy(result.data(), ll, size * sizeof(tableint));
         return result;
+    }
+
+    /* Percona (H1): as gatherAllNeighborsForNode but WITHOUT taking the
+    node's link lock — for use at capture sites that already hold it. */
+    NeighborLabelListsByLevel gatherAllNeighborsForNodeUnlocked(tableint internal_id) {
+        int top = element_levels_[internal_id];
+        NeighborLabelListsByLevel out;
+        out.resize(static_cast<size_t>(top) + 1);
+        for (int lev = 0; lev <= top; ++lev) {
+            unsigned int *data = get_linklist_at_level(internal_id, lev);
+            int size = getListCount(data);
+            tableint *ll = (tableint *) (data + 1);
+            NeighborLabelList labels;
+            labels.reserve(size);
+            for (int i = 0; i < size; ++i) {
+                labels.push_back(getExternalLabel(ll[i]));
+            }
+            out[static_cast<size_t>(lev)] = std::move(labels);
+        }
+        return out;
+    }
+
+    /* Percona (H1): capture (label, ++version, full snapshot) for a node —
+    caller MUST hold link_list_locks_[internal_id]. */
+    CapturedNeighborUpdate captureNodeStateLocked(tableint internal_id) {
+        return CapturedNeighborUpdate{getExternalLabel(internal_id),
+                                      ++element_versions_[internal_id],
+                                      gatherAllNeighborsForNodeUnlocked(internal_id)};
+    }
+
+    /* Percona (H1): version inspection by label — test/diagnostic use.
+    Returns 0 for an unknown label. */
+    uint32_t getVersionByLabel(labeltype label) {
+        std::unique_lock<std::mutex> lock_table(label_lookup_lock);
+        auto search = label_lookup_.find(label);
+        if (search == label_lookup_.end()) {
+            return 0;
+        }
+        return element_versions_[search->second];
     }
 
     NeighborLabelListsByLevel gatherAllNeighborsForNode(tableint internal_id) {
@@ -1349,15 +1423,17 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         return out;
     }
 
-    void flushAddPointUpdateCallbackForNeighborIds(const std::unordered_set<tableint> &neighbor_ids,
-                                                   void *callback_context = nullptr) {
-        if (!add_point_update_callback_ || neighbor_ids.empty()) {
+    void flushCapturedUpdates(const std::vector<CapturedNeighborUpdate> &captured,
+                              void *callback_context = nullptr) {
+        if (!add_point_update_callback_ || captured.empty()) {
             return;
         }
-        for (tableint id : neighbor_ids) {
-            add_point_update_callback_(
-                getExternalLabel(id), id, getDataByInternalId(id), gatherAllNeighborsForNode(id),
-                callback_context);
+        /* Percona (H1): emit the snapshots captured under the node locks.
+        internal_id/data_point are not re-resolved — the (label, version,
+        snapshot) triple is the payload; emission order is irrelevant. */
+        for (const CapturedNeighborUpdate &c : captured) {
+            add_point_update_callback_(c.label, 0, c.version, nullptr,
+                                       c.neighbors_by_level, callback_context);
         }
     }
 
@@ -1384,8 +1460,16 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                 }
                 updatePoint(data_point, existingInternalId, 1.0, callback_context);
                 if (add_point_update_callback_) {
-                    add_point_update_callback_(label, existingInternalId, data_point,
-                                               gatherAllNeighborsForNode(existingInternalId),
+                    /* Percona (H1): capture the target's own post-update
+                    state under its link lock, so its version row is
+                    ordered against concurrent rewires of the same node. */
+                    CapturedNeighborUpdate c;
+                    {
+                        std::unique_lock <std::mutex> lock(link_list_locks_[existingInternalId]);
+                        c = captureNodeStateLocked(existingInternalId);
+                    }
+                    add_point_update_callback_(label, existingInternalId, c.version,
+                                               data_point, c.neighbors_by_level,
                                                callback_context);
                 }
 
@@ -1428,7 +1512,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
             memset(linkLists_[cur_c], 0, size_links_per_element_ * curlevel + 1);
         }
 
-        std::unordered_set<tableint> mutual_connect_updated_neighbors;
+        std::vector<CapturedNeighborUpdate> mutual_connect_captured;
         if ((signed)currObj != -1) {
             if (curlevel < maxlevelcopy) {
                 dist_t curdist = fstdistfunc_(data_point, getDataByInternalId(currObj), dist_func_param_);
@@ -1473,7 +1557,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                         top_candidates.pop();
                 }
                 currObj = mutuallyConnectNewElement(data_point, cur_c, top_candidates, lvl, false,
-                                                    &mutual_connect_updated_neighbors);
+                                                    &mutual_connect_captured);
             }
         } else {
             // Do nothing for the first element
@@ -1486,14 +1570,21 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
             enterpoint_node_ = cur_c;
             maxlevel_ = curlevel;
         }
+        /* Percona (H1): the birth snapshot is captured while cur_c's link
+        lock is still held — concurrent rewires of cur_c either precede the
+        capture (included here, and their version rows also exist) or follow
+        it (their version rows carry them); the loader's max-visible-version
+        rule is consistent either way. A new node's version is always 0. */
+        element_versions_[cur_c] = 0;
+        NeighborLabelListsByLevel birth_snapshot =
+            gatherAllNeighborsForNodeUnlocked(cur_c);
         lock_el.unlock();
         if (templock.owns_lock()) {
             templock.unlock();
         }
-        flushAddPointUpdateCallbackForNeighborIds(mutual_connect_updated_neighbors,
-                                                  callback_context);
+        flushCapturedUpdates(mutual_connect_captured, callback_context);
         if (add_point_insert_callback_) {
-            add_point_insert_callback_(label, cur_c, data_point, gatherAllNeighborsForNode(cur_c),
+            add_point_insert_callback_(label, cur_c, 0, data_point, birth_snapshot,
                                        callback_context);
         }
         return cur_c;
