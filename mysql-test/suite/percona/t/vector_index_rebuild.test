@@ -1,12 +1,8 @@
 --source include/have_debug.inc
 
-call mtr.add_suppression("Index vk not found or corrupt");
-call mtr.add_suppression("Skip adjustment of root pages for index");
-call mtr.add_suppression("FLUSH TABLES on tables that have a vector index");
-
 --echo #
 --echo # PS-11300 R1: ADD VECTOR INDEX on a table that retained vec_idx_id
---echo # (after DROP INDEX, or after IMPORT) runs INPLACE: a clustered scan
+--echo # (after DROP INDEX) runs INPLACE: a clustered scan
 --echo # builds the graph and populates the aux — no table rebuild, no COPY.
 --echo # Labels are the rows' already-stamped ids (unique since counter
 --echo # persistence), so the base table is not written at all.
@@ -75,29 +71,18 @@ SELECT id FROM t2 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,1]'), 'EUCLIDEAN') L
 DROP TABLE t2;
 
 --echo #
---echo # Post-import rebuild: IMPORT leaves an empty index; DROP/ADD now
---echo # rebuilds it INPLACE — the imported rows keep their stamped ids.
+--echo # A second DROP/ADD cycle on the same table is INPLACE too — the
+--echo # retained column keeps its stamped ids across both, so the labels
+--echo # after the second rebuild match the first.
 --echo #
---let $MYSQLD_DATADIR = `SELECT @@datadir`
-FLUSH TABLES t1 FOR EXPORT;
---copy_file $MYSQLD_DATADIR/test/t1.ibd $MYSQLTEST_VARDIR/tmp/t1r.ibd
---copy_file $MYSQLD_DATADIR/test/t1.cfg $MYSQLTEST_VARDIR/tmp/t1r.cfg
-UNLOCK TABLES;
-ALTER TABLE t1 DISCARD TABLESPACE;
---copy_file $MYSQLTEST_VARDIR/tmp/t1r.ibd $MYSQLD_DATADIR/test/t1.ibd
---copy_file $MYSQLTEST_VARDIR/tmp/t1r.cfg $MYSQLD_DATADIR/test/t1.cfg
-ALTER TABLE t1 IMPORT TABLESPACE;
-
-SELECT TABLE_ID INTO @tid_import FROM information_schema.INNODB_TABLES
+SELECT TABLE_ID INTO @tid_cycle2 FROM information_schema.INNODB_TABLES
   WHERE NAME = 'test/t1';
 ALTER TABLE t1 DROP KEY vk;
 ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 4), ALGORITHM=INPLACE;
-SELECT TABLE_ID = @tid_import AS same_table_id
+SELECT TABLE_ID = @tid_cycle2 AS same_table_id
   FROM information_schema.INNODB_TABLES WHERE NAME = 'test/t1';
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 5;
 
 DROP TABLE t1;
---remove_file $MYSQLTEST_VARDIR/tmp/t1r.ibd
---remove_file $MYSQLTEST_VARDIR/tmp/t1r.cfg

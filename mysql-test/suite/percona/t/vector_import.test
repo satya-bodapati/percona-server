@@ -1,15 +1,16 @@
---source include/have_debug.inc
-
 --echo #
---echo # PS-11300: DISCARD/IMPORT TABLESPACE on a vector-indexed table.
---echo # The aux table's content belongs to the discarded rows, so DISCARD
---echo # drops the aux (and the in-memory graph) alongside the tablespace;
---echo # IMPORT re-mints a fresh EMPTY aux and warns that pre-import rows
---echo # are not indexed until DROP INDEX + ADD INDEX rebuilds.
+--echo # PS-11300: DISCARD/IMPORT TABLESPACE is refused on a vector-indexed
+--echo # table. An imported tablespace carries base rows that no aux table
+--echo # describes, so the only reachable outcomes are an index that
+--echo # silently misses every imported row, or a rebuild the user never
+--echo # asked for. The block sits at the entry of
+--echo # ha_innobase::discard_or_import_tablespace, before any lock is
+--echo # taken, so a refused statement leaves the table untouched.
+--echo #
+--echo # Lifting this needs a graph rebuildable from the clustered index
+--echo # independently of the dict object — see hnsw-design.md.
 --echo #
 
-call mtr.add_suppression("Index vk not found or corrupt");
-call mtr.add_suppression("Skip adjustment of root pages for index");
 call mtr.add_suppression("FLUSH TABLES on tables that have a vector index");
 
 --let $MYSQLD_DATADIR = `SELECT @@datadir`
@@ -21,49 +22,50 @@ CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
 INSERT INTO t1 VALUES (100, STRING_TO_VECTOR('[1,0,0,0]')),
                       (101, STRING_TO_VECTOR('[0,1,0,0]')),
                       (102, STRING_TO_VECTOR('[0,0,1,0]'));
-SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
 
---echo # Export: base .ibd/.cfg only — the aux is warned unflushed.
-FLUSH TABLES t1 FOR EXPORT;
---copy_file $MYSQLD_DATADIR/test/t1.ibd $MYSQLTEST_VARDIR/tmp/t1.ibd
---copy_file $MYSQLD_DATADIR/test/t1.cfg $MYSQLTEST_VARDIR/tmp/t1.cfg
-UNLOCK TABLES;
-
---echo # DISCARD removes the base tablespace AND the aux .ibd.
+--echo # Both directions are refused.
+--error ER_NOT_ALLOWED_COMMAND
 ALTER TABLE t1 DISCARD TABLESPACE;
---list_files $MYSQLD_DATADIR/test vec_*.ibd
-
---copy_file $MYSQLTEST_VARDIR/tmp/t1.ibd $MYSQLD_DATADIR/test/t1.ibd
---copy_file $MYSQLTEST_VARDIR/tmp/t1.cfg $MYSQLD_DATADIR/test/t1.cfg
-
---echo # IMPORT succeeds without any vector aux files, warns, and a fresh
---echo # empty aux .ibd exists afterwards.
+--error ER_NOT_ALLOWED_COMMAND
 ALTER TABLE t1 IMPORT TABLESPACE;
+
+--echo # Nothing was disturbed: base rows, aux .ibd and kNN all intact.
+SELECT id FROM t1 ORDER BY id;
 --replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+\.ibd/vec_hnsw_<TID>_<IID>.ibd/
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
 
---echo # Base rows are back; the vector index is EMPTY (documented): kNN
---echo # finds nothing pre-rebuild.
-SELECT id FROM t1 ORDER BY id;
-SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 3;
-SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
-SELECT @@session.innodb_interpreter_output;
-
---echo # New inserts index normally. The counter was re-seeded from the
---echo # imported rows' stamped ids (max 3) — the new row gets label 4,
---echo # never a duplicate of an imported base id.
+--echo # Writes still work after the refusal — no half-closed graph.
 INSERT INTO t1 VALUES (103, STRING_TO_VECTOR('[0,0,0,1]'));
 SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,0,1]'), 'EUCLIDEAN') LIMIT 1;
-SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
-SELECT @@session.innodb_interpreter_output;
 
---echo # Full rebuild via DROP/ADD (COPY) indexes everything.
-ALTER TABLE t1 DROP KEY vk;
-ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 4);
-SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
-SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
-SELECT @@session.innodb_interpreter_output;
+--echo # FLUSH TABLES ... FOR EXPORT still works and still warns that the
+--echo # aux is not quiesced — the export is only usable for a table
+--echo # without a vector index.
+FLUSH TABLES t1 FOR EXPORT;
+UNLOCK TABLES;
 
 DROP TABLE t1;
---remove_file $MYSQLTEST_VARDIR/tmp/t1.ibd
---remove_file $MYSQLTEST_VARDIR/tmp/t1.cfg
+
+--echo #
+--echo # The block is scoped to vector-indexed tables: a plain table in the
+--echo # same server still round-trips through DISCARD/IMPORT.
+--echo #
+
+CREATE TABLE t2 (id BIGINT UNSIGNED PRIMARY KEY, c INT);
+INSERT INTO t2 VALUES (1, 10), (2, 20);
+
+FLUSH TABLES t2 FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/t2.ibd $MYSQLTEST_VARDIR/tmp/t2.ibd
+--copy_file $MYSQLD_DATADIR/test/t2.cfg $MYSQLTEST_VARDIR/tmp/t2.cfg
+UNLOCK TABLES;
+
+ALTER TABLE t2 DISCARD TABLESPACE;
+--copy_file $MYSQLTEST_VARDIR/tmp/t2.ibd $MYSQLD_DATADIR/test/t2.ibd
+--copy_file $MYSQLTEST_VARDIR/tmp/t2.cfg $MYSQLD_DATADIR/test/t2.cfg
+ALTER TABLE t2 IMPORT TABLESPACE;
+SELECT * FROM t2 ORDER BY id;
+
+DROP TABLE t2;
+--remove_file $MYSQLTEST_VARDIR/tmp/t2.ibd
+--remove_file $MYSQLTEST_VARDIR/tmp/t2.cfg

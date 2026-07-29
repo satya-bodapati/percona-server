@@ -158,18 +158,6 @@ dberr_t vec_aux_load_rows(
     std::vector<uint64_t> *dead_labels = nullptr,
     std::vector<std::pair<uint64_t, std::string>> *row_refs = nullptr);
 
-/** Max vec_idx_id over ALL records of the BASE table's clustered index
-(visible or not, delete-marked included — conservative, like the aux
-loader's raw_max_id). Used to re-seed the counter when its persisted
-metadata is unavailable, e.g. after IMPORT TABLESPACE: the imported
-rows carry their source-stamped ids in the hidden column, and new
-assignments must stay above every one of them (base-id uniqueness,
-PS-11300 counter persistence).
-@param[in]  base    base table (quiesced: exclusive-MDL context)
-@param[out] max_id  max stamped id, 0 for an empty table
-@return DB_SUCCESS or error */
-dberr_t vec_base_max_idx_id(dict_table_t *base, uint64_t *max_id);
-
 /** One base row collected for the index build:
 (stamped vec_idx_id, vector floats, 8-byte base-PK image). */
 using vec_base_row_t =

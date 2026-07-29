@@ -160,10 +160,11 @@ ALTER TABLE t_rt ADD COLUMN vec_idx_id BIGINT UNSIGNED;
 DROP TABLE t_rt;
 
 --echo #
---echo # DISCARD TABLESPACE is supported since PS-11300: the aux table is
---echo # dropped with the tablespace (its content belongs to the discarded
---echo # rows) and IMPORT re-mints an empty one. Full coverage lives in
---echo # vector_import; here only the aux .ibd disappearance is checked.
+--echo # DISCARD / IMPORT TABLESPACE on a table with a vector index is
+--echo # rejected: the imported base rows have no aux table describing
+--echo # them, so the index would silently miss every one. The block
+--echo # lives at the very entry of
+--echo # ha_innobase::discard_or_import_tablespace.
 --echo #
 
 CREATE TABLE t_disc (
@@ -171,7 +172,10 @@ CREATE TABLE t_disc (
   v1 VECTOR(8),
   VECTOR KEY (v1) TYPE hnsw
 );
+--error ER_NOT_ALLOWED_COMMAND
 ALTER TABLE t_disc DISCARD TABLESPACE;
+--echo # Refused, so both .ibd files are still here.
+--replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+\.ibd/vec_hnsw_<TID>_<IID>.ibd/
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
 DROP TABLE t_disc;
 

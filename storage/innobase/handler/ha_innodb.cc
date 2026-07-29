@@ -16632,12 +16632,23 @@ int ha_innobase::discard_or_import_tablespace(bool discard,
     return HA_ERR_NOT_ALLOWED_COMMAND;
   }
 
-  /* DISCARD/IMPORT with a vector index (PS-11300, lifts the phase-1
-  block): the aux table's content belongs to the discarded rows, so
-  DISCARD drops the aux and the in-memory graph with the tablespace
-  (row_discard_tablespace); IMPORT re-mints a fresh empty aux below.
-  The imported rows are not indexed until DROP/ADD INDEX rebuilds —
-  IMPORT pushes a warning saying exactly that. */
+  /* DISCARD/IMPORT is blocked while a vector index exists. IMPORT
+  brings in base rows that no aux table describes, so the only honest
+  outcomes are an empty index (queries silently miss every imported
+  row) or a full rebuild the user did not ask for. Both were tried;
+  see 5ca935ff828 for the re-mint variant and hnsw-design.md for what
+  lifting this needs — a graph that can be rebuilt from the clustered
+  index independently of the dict object. Until then the restriction
+  keeps the aux and the base rows from ever disagreeing. */
+  if (DICT_TF2_FLAG_IS_SET(dict_table, DICT_TF2_VEC_HAS_IDX_ID)) {
+    my_printf_error(ER_NOT_ALLOWED_COMMAND,
+                    "InnoDB: Cannot %s table `%s` because it has a vector"
+                    " index. DISCARD/IMPORT TABLESPACE is not yet supported"
+                    " for tables with vector indexes.",
+                    MYF(0), discard ? "discard" : "import",
+                    dict_table->name.m_name);
+    return HA_ERR_NOT_ALLOWED_COMMAND;
+  }
 
   TrxInInnoDB trx_in_innodb(m_prebuilt->trx);
 
@@ -16695,29 +16706,6 @@ int ha_innobase::discard_or_import_tablespace(bool discard,
     return HA_ERR_TABLE_EXIST;
   } else {
     err = row_import_for_mysql(dict_table, table_def, m_prebuilt);
-
-    /* The vector aux table was dropped at DISCARD; re-mint an empty
-    one so the table is fully operational (inserts index normally).
-    Pre-import rows are NOT in the vector index until DROP INDEX +
-    ADD INDEX rebuilds it — warn so the incompleteness is explicit. */
-    if (err == DB_SUCCESS &&
-        DICT_TF2_FLAG_IS_SET(dict_table, DICT_TF2_VEC_HAS_IDX_ID) &&
-        vec_aux_table_has_vector_index(dict_table)) {
-      THD *ithd = m_prebuilt->trx->mysql_thd;
-      const dberr_t verr = vec_index_for(dict_table)
-                               ->recreate_after_import(dict_table,
-                                                       m_prebuilt->trx);
-      if (verr != DB_SUCCESS) {
-        err = verr;
-      } else {
-        push_warning_printf(
-            ithd, Sql_condition::SL_WARNING, ER_ALTER_INFO,
-            "Vector index on table %s is empty after IMPORT TABLESPACE:"
-            " imported rows are not indexed. Rebuild it with"
-            " ALTER TABLE ... DROP INDEX / ADD INDEX to index them.",
-            dict_table->name.m_name);
-      }
-    }
 
     if (err == DB_SUCCESS) {
       info(HA_STATUS_TIME | HA_STATUS_CONST | HA_STATUS_VARIABLE |

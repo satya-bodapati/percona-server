@@ -36,7 +36,7 @@ are added when a second implementation demands them.
 
 What is BEHIND the seam (type-specific runtime):
   open / load / insert / remove / refresh_row_ref / knn / size_hint /
-  build / close / recreate_after_import.
+  build / close.
 
 What deliberately STAYS OUTSIDE (type-independent machinery):
   aux naming + predicates, the hidden vec_idx_id column, the label
@@ -127,10 +127,9 @@ class Vector_index {
   one. See vec_close. */
   virtual void close(dict_table_t *table) const = 0;
 
-  /** Re-mint empty aux state after IMPORT TABLESPACE. See
-  vec_aux_recreate_after_import. */
-  [[nodiscard]] virtual dberr_t recreate_after_import(dict_table_t *table,
-                                                      trx_t *trx) const = 0;
+  /* No recreate_after_import(): DISCARD/IMPORT TABLESPACE is refused
+  for vector-indexed tables, so no type has an import hook to
+  implement. Re-add it here when that restriction lifts. */
 };
 
 /** Look up the implementation registered under a TYPE token, e.g. the
