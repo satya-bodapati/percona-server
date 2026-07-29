@@ -291,8 +291,20 @@ const Vec_aux_col_def vec_hnsw_log_cols[] = {
     {"neighbors", DATA_BLOB, VEC_AUX_BLOB_PRTYPE, VEC_AUX_NEIGHBORS_COL_LEN},
 };
 
+/* _dead — PK(label): a DELETE is one INSERT here, replacing the
+   in-place row_ref -> NULL tombstone UPDATE. There is no explicit
+   deleter column: the row's own hidden DB_TRX_ID is the deleter's
+   identity, so per-reader delete visibility falls out of an ordinary
+   read-view scan, and rollback needs nothing beyond undo removing the
+   row. With this, every hnsw write is an INSERT — nothing UPDATEs a
+   shared aux row anywhere. */
+const Vec_aux_col_def vec_hnsw_dead_cols[] = {
+    {"label", DATA_INT, DATA_NOT_NULL | DATA_UNSIGNED, VEC_AUX_ID_COL_LEN},
+};
+
 const Vec_aux_table_def vec_hnsw_defs[] = {
     {"", UT_ARR_SIZE(vec_hnsw_log_cols), vec_hnsw_log_cols, 2},
+    {"_dead", UT_ARR_SIZE(vec_hnsw_dead_cols), vec_hnsw_dead_cols, 1},
 };
 
 /** The aux table set for one index TYPE. hnsw is the only registered
@@ -305,6 +317,21 @@ void vec_aux_table_set(Vec_index_type type, const Vec_aux_table_def **defs,
   }
   *defs = vec_hnsw_defs;
   *n_defs = UT_ARR_SIZE(vec_hnsw_defs);
+}
+
+/** Every member suffix of the aux set for `type`, in creation order.
+Lifecycle operations (DD registration, drop, detach, rename) iterate
+this so a TYPE whose set grows needs no changes at those sites. */
+static std::vector<const char *> vec_aux_suffixes(Vec_index_type type) {
+  const Vec_aux_table_def *defs = nullptr;
+  ulint n_defs = 0;
+  vec_aux_table_set(type, &defs, &n_defs);
+  std::vector<const char *> out;
+  out.reserve(n_defs);
+  for (ulint d = 0; d < n_defs; ++d) {
+    out.push_back(defs[d].suffix);
+  }
+  return out;
 }
 
 /** Allocate and fully populate the in-memory dict_table_t for one aux
@@ -412,14 +439,16 @@ bool vec_aux_create_dd_tables(dict_table_t *parent) {
        idx != nullptr; idx = UT_LIST_GET_NEXT(indexes, idx)) {
     if (!idx->is_vector()) continue;
 
-    char aux_name[MAX_FULL_NAME_LEN];
-    vec_aux_get_table_name(parent, idx->id, Vec_index_type::HNSW, aux_name,
-                           sizeof(aux_name));
-    dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, false);
-    ut_a(aux != nullptr);
-    const bool ok = dd_create_vec_aux_table(parent, aux);
-    dd_table_close(aux, nullptr, nullptr, false);
-    if (!ok) return false;
+    for (const char *suffix : vec_aux_suffixes(Vec_index_type::HNSW)) {
+      char aux_name[MAX_FULL_NAME_LEN];
+      vec_aux_get_table_name(parent, idx->id, Vec_index_type::HNSW, aux_name,
+                             sizeof(aux_name), suffix);
+      dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, false);
+      ut_a(aux != nullptr);
+      const bool ok = dd_create_vec_aux_table(parent, aux);
+      dd_table_close(aux, nullptr, nullptr, false);
+      if (!ok) return false;
+    }
   }
   return true;
 }
@@ -429,67 +458,76 @@ dberr_t vec_aux_drop_one_table(trx_t *trx, const dict_table_t *parent,
   ut_a(trx != nullptr);
   ut_a(parent != nullptr);
 
-  char aux_name[MAX_FULL_NAME_LEN];
-  vec_aux_get_table_name(parent, index_id, Vec_index_type::HNSW, aux_name,
-                         sizeof(aux_name));
+  /* Drop every member of this index's aux set (the log and its
+  companions). Reverse order is not required — each is an independent
+  table — but dropping the main table last keeps the datadir readable
+  if an error stops the loop midway. */
+  for (const char *suffix : vec_aux_suffixes(Vec_index_type::HNSW)) {
+    char aux_name[MAX_FULL_NAME_LEN];
+    vec_aux_get_table_name(parent, index_id, Vec_index_type::HNSW, aux_name,
+                           sizeof(aux_name), suffix);
 
-  const bool file_per_table = dict_table_is_file_per_table(parent);
+    const bool file_per_table = dict_table_is_file_per_table(parent);
 
-  /* Open the aux with MDL before row_drop_table_for_mysql. Without
-  this, row_drop_table_for_mysql's call into dd_table_open_on_name
-  trips dictionary_client.cc:734 because the SQL layer never
-  acquires MDL on the hidden aux. Mirrors fts_drop_table at
-  fts0fts.cc:1301-1313. Callers of vec_aux_drop_one_table always
-  hold dict_sys (parent row_drop_table_for_mysql, ALTER commit
-  drop-index loop, error_handling), so pass dict_locked=true and
-  let dd_table_open_on_name handle the release-around-MDL-acquire
-  dance internally — same convention FTS uses. */
-  THD *thd = current_thd;
-  MDL_ticket *aux_mdl = nullptr;
-  if (thd != nullptr) {
-    dict_table_t *aux = dd_table_open_on_name(
-        thd, &aux_mdl, aux_name, true,
-        static_cast<dict_err_ignore_t>(DICT_ERR_IGNORE_INDEX_ROOT |
-                                       DICT_ERR_IGNORE_CORRUPT));
-    if (aux != nullptr) {
-      dd_table_close(aux, thd, &aux_mdl, true);
+    /* Open the aux with MDL before row_drop_table_for_mysql. Without
+    this, row_drop_table_for_mysql's call into dd_table_open_on_name
+    trips dictionary_client.cc:734 because the SQL layer never
+    acquires MDL on the hidden aux. Mirrors fts_drop_table at
+    fts0fts.cc:1301-1313. Callers of vec_aux_drop_one_table always
+    hold dict_sys (parent row_drop_table_for_mysql, ALTER commit
+    drop-index loop, error_handling), so pass dict_locked=true and
+    let dd_table_open_on_name handle the release-around-MDL-acquire
+    dance internally — same convention FTS uses. */
+    THD *thd = current_thd;
+    MDL_ticket *aux_mdl = nullptr;
+    if (thd != nullptr) {
+      dict_table_t *aux = dd_table_open_on_name(
+          thd, &aux_mdl, aux_name, true,
+          static_cast<dict_err_ignore_t>(DICT_ERR_IGNORE_INDEX_ROOT |
+                                         DICT_ERR_IGNORE_CORRUPT));
+      if (aux != nullptr) {
+        dd_table_close(aux, thd, &aux_mdl, true);
+      }
+    }
+
+    dberr_t err = row_drop_table_for_mysql(aux_name, trx, false, nullptr);
+    if (err != DB_SUCCESS && err != DB_TABLE_NOT_FOUND) {
+      ib::warn(ER_IB_MSG_466) << "Failed to drop vector aux table " << aux_name
+                              << " err=" << static_cast<int>(err);
+      return err;
+    }
+
+    /* row_drop_table_for_mysql only tears down dict_sys + the .ibd. The
+    matching dd::Table + dd::Tablespace entries created by
+    dd_create_vec_aux_table linger until we explicitly drop them; reuse
+    dd_drop_fts_table for that, which is generic across aux-table kinds.
+    dict_sys mutex must be released around the DD client call.
+
+    DEVIATION FROM FTS: fts_drop_table drops the DD entry inline only
+    when called with aux_vec == nullptr; on the DROP TABLE path it
+    instead pushes the aux name into aux_vec and the caller
+    (row_drop_table_for_mysql's funct_exit) drops the DD entries AFTER
+    the parent drop trx commits. Vec has no aux_vec mode — the DD drop
+    always happens here, potentially under an open parent-drop trx.
+    Acceptable in phase 1 (empty aux, one aux per index, no partial-
+    batch window); the aux_vec deferral is the upgrade path if
+    PS-11300's crash-atomicity work needs it. */
+    const bool dict_locked = trx->dict_operation_lock_mode == RW_X_LATCH;
+    if (dict_locked) {
+      dict_sys_mutex_exit();
+    }
+    (void)dd_drop_fts_table(aux_name, file_per_table);
+    if (dict_locked) {
+      dict_sys_mutex_enter();
+    }
+
+    /* Treat NOT_FOUND from the in-memory drop as success — covers
+    tables created before this code landed. */
+    if (err != DB_SUCCESS && err != DB_TABLE_NOT_FOUND) {
+      return err;
     }
   }
-
-  dberr_t err = row_drop_table_for_mysql(aux_name, trx, false, nullptr);
-  if (err != DB_SUCCESS && err != DB_TABLE_NOT_FOUND) {
-    ib::warn(ER_IB_MSG_466) << "Failed to drop vector aux table " << aux_name
-                            << " err=" << static_cast<int>(err);
-    return err;
-  }
-
-  /* row_drop_table_for_mysql only tears down dict_sys + the .ibd. The
-  matching dd::Table + dd::Tablespace entries created by
-  dd_create_vec_aux_table linger until we explicitly drop them; reuse
-  dd_drop_fts_table for that, which is generic across aux-table kinds.
-  dict_sys mutex must be released around the DD client call.
-
-  DEVIATION FROM FTS: fts_drop_table drops the DD entry inline only
-  when called with aux_vec == nullptr; on the DROP TABLE path it
-  instead pushes the aux name into aux_vec and the caller
-  (row_drop_table_for_mysql's funct_exit) drops the DD entries AFTER
-  the parent drop trx commits. Vec has no aux_vec mode — the DD drop
-  always happens here, potentially under an open parent-drop trx.
-  Acceptable in phase 1 (empty aux, one aux per index, no partial-
-  batch window); the aux_vec deferral is the upgrade path if
-  PS-11300's crash-atomicity work needs it. */
-  const bool dict_locked = trx->dict_operation_lock_mode == RW_X_LATCH;
-  if (dict_locked) {
-    dict_sys_mutex_exit();
-  }
-  (void)dd_drop_fts_table(aux_name, file_per_table);
-  if (dict_locked) {
-    dict_sys_mutex_enter();
-  }
-
-  /* Treat NOT_FOUND from the in-memory drop as success — covers tables
-  created before this code landed. */
-  return err == DB_TABLE_NOT_FOUND ? DB_SUCCESS : err;
+  return DB_SUCCESS;
 }
 
 dberr_t vec_aux_drop_all_tables(trx_t *trx, dict_table_t *parent) {
@@ -516,16 +554,18 @@ void vec_aux_detach_tables(const dict_table_t *parent, bool dict_locked) {
        idx != nullptr; idx = UT_LIST_GET_NEXT(indexes, idx)) {
     if (!idx->is_vector()) continue;
 
-    char aux_name[MAX_FULL_NAME_LEN];
-    vec_aux_get_table_name(parent, idx->id, Vec_index_type::HNSW, aux_name,
-                           sizeof(aux_name));
+    for (const char *suffix : vec_aux_suffixes(Vec_index_type::HNSW)) {
+      char aux_name[MAX_FULL_NAME_LEN];
+      vec_aux_get_table_name(parent, idx->id, Vec_index_type::HNSW, aux_name,
+                             sizeof(aux_name), suffix);
 
-    dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, true);
-    if (aux != nullptr) {
-      if (!aux->can_be_evicted) {
-        dict_table_allow_eviction(aux);
+      dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, true);
+      if (aux != nullptr) {
+        if (!aux->can_be_evicted) {
+          dict_table_allow_eviction(aux);
+        }
+        dd_table_close(aux, nullptr, nullptr, true);
       }
-      dd_table_close(aux, nullptr, nullptr, true);
     }
   }
 
@@ -568,40 +608,44 @@ dberr_t vec_aux_rename_tables(trx_t *trx, dict_table_t *parent,
        idx != nullptr; idx = UT_LIST_GET_NEXT(indexes, idx)) {
     if (!idx->is_vector()) continue;
 
-    char old_aux_name[MAX_FULL_NAME_LEN];
-    vec_aux_get_table_name(parent, idx->id, Vec_index_type::HNSW, old_aux_name,
-                           sizeof(old_aux_name));
+    /* Rename every member of the set; only the db prefix changes, so
+    the suffix and the (table_id, index_id) pair are invariant. */
+    for (const char *suffix : vec_aux_suffixes(Vec_index_type::HNSW)) {
+      char old_aux_name[MAX_FULL_NAME_LEN];
+      vec_aux_get_table_name(parent, idx->id, Vec_index_type::HNSW,
+                             old_aux_name, sizeof(old_aux_name), suffix);
 
-    char new_aux_name[MAX_FULL_NAME_LEN];
-    rebuild_aux_name_with_new_db(old_aux_name, new_parent_name, new_aux_name,
-                                 sizeof(new_aux_name));
+      char new_aux_name[MAX_FULL_NAME_LEN];
+      rebuild_aux_name_with_new_db(old_aux_name, new_parent_name, new_aux_name,
+                                   sizeof(new_aux_name));
 
-    dberr_t err = row_rename_table_for_mysql(old_aux_name, new_aux_name,
-                                             nullptr, trx, replay);
-    if (err != DB_SUCCESS) {
-      ib::warn(ER_IB_MSG_466)
-          << "Failed to rename vector aux table " << old_aux_name << " -> "
-          << new_aux_name << " err=" << static_cast<int>(err);
-      return err;
-    }
+      dberr_t err = row_rename_table_for_mysql(old_aux_name, new_aux_name,
+                                               nullptr, trx, replay);
+      if (err != DB_SUCCESS) {
+        ib::warn(ER_IB_MSG_466)
+            << "Failed to rename vector aux table " << old_aux_name << " -> "
+            << new_aux_name << " err=" << static_cast<int>(err);
+        return err;
+      }
 
-    /* Update the DD entry (dd::Table parent schema_id + dd::Tablespace
-    file_name) — reuses dd_rename_fts_table since aux tables are
-    DD-registered with the same shape. dict_sys mutex must be released
-    around the DD client call. */
-    if (!replay) {
-      dict_table_t *aux = dict_table_check_if_in_cache_low(new_aux_name);
-      ut_ad(aux != nullptr);
-      if (aux != nullptr) {
-        aux->acquire();
-        dict_sys_mutex_exit();
-        const bool ok = dd_rename_fts_table(aux, old_aux_name);
-        dict_sys_mutex_enter();
-        aux->release();
-        if (!ok) {
-          ib::warn(ER_IB_MSG_466)
-              << "Failed to rename DD entry for vector aux " << old_aux_name;
-          return DB_ERROR;
+      /* Update the DD entry (dd::Table parent schema_id + dd::Tablespace
+      file_name) — reuses dd_rename_fts_table since aux tables are
+      DD-registered with the same shape. dict_sys mutex must be released
+      around the DD client call. */
+      if (!replay) {
+        dict_table_t *aux = dict_table_check_if_in_cache_low(new_aux_name);
+        ut_ad(aux != nullptr);
+        if (aux != nullptr) {
+          aux->acquire();
+          dict_sys_mutex_exit();
+          const bool ok = dd_rename_fts_table(aux, old_aux_name);
+          dict_sys_mutex_enter();
+          aux->release();
+          if (!ok) {
+            ib::warn(ER_IB_MSG_466)
+                << "Failed to rename DD entry for vector aux " << old_aux_name;
+            return DB_ERROR;
+          }
         }
       }
     }
@@ -667,12 +711,15 @@ MDL on the BASE table (write_row / table open), and every DDL that can
 drop the aux takes exclusive base MDL first — same protection argument
 FTS relies on for its aux DML. Fast path is the dict cache; fall back to
 the DD (with MDL) only when evicted. */
+/** Open one member of an index's aux set for DML. `suffix` selects the
+member ("" = the log; "_dead" = the delete set). */
 static dict_table_t *vec_aux_open_for_dml(dict_table_t *base,
                                           space_index_t index_id, THD *thd,
-                                          MDL_ticket **mdl) {
+                                          MDL_ticket **mdl,
+                                          const char *suffix = "") {
   char aux_name[MAX_FULL_NAME_LEN];
   vec_aux_get_table_name(base, index_id, Vec_index_type::HNSW, aux_name,
-                         sizeof(aux_name));
+                         sizeof(aux_name), suffix);
 
   *mdl = nullptr;
   dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, false);
@@ -842,6 +889,28 @@ static dberr_t vec_load_locked(dict_table_t *table, vec_t *vec, THD *thd) {
     return err;
   }
 
+  /* Dead labels come from the _dead table, not from the log: a DELETE
+  leaves the node's log rows untouched, so its geometry still loads and
+  the node is marked deleted in the graph instead — usable as a
+  traversal router, excluded from results. Scanned at latest state: a
+  committed delete means no NEW reader may see the label, and a reader
+  whose view predates the delete is served by the base-row visibility
+  check on the read path, not by this load. */
+  std::unordered_set<uint64_t> dead_labels;
+  {
+    MDL_ticket *dmdl = nullptr;
+    dict_table_t *dead =
+        vec_aux_open_for_dml(table, vec->index_id, thd, &dmdl, "_dead");
+    if (dead == nullptr) {
+      return DB_TABLE_NOT_FOUND;
+    }
+    err = vec_aux_load_dead_set(dead, nullptr, &dead_labels);
+    vec_aux_close_for_dml(dead, thd, &dmdl);
+    if (err != DB_SUCCESS) {
+      return err;
+    }
+  }
+
   /* Replace any previous graph (exception-fallback reload). */
   if (vec->hnsw != nullptr) {
     delete vec->hnsw;
@@ -862,6 +931,16 @@ static dberr_t vec_load_locked(dict_table_t *table, vec_t *vec, THD *thd) {
     /* vec_loaded_row_t and hnswlib::VecAuxLoadedRowTuple are the same
     std::tuple type by construction (vec0dml.h) — pass through. */
     vec->hnsw->loadIndex(rows);
+    /* Dead labels keep their geometry but leave the result set:
+    searchKnn skips them (hnswlib's DELETE_MARK) while traversal may
+    still route through them. A dead label with no loaded node — its
+    birth row was never visible — has nothing to mark. */
+    for (const uint64_t label : dead_labels) {
+      try {
+        vec->hnsw->markDelete(label);
+      } catch (...) {
+      }
+    }
   } catch (const std::exception &e) {
     ib::warn() << "vec_load: graph construction failed for "
                << table->name.m_name << " (dims=" << vec->dims
@@ -881,6 +960,9 @@ static dberr_t vec_load_locked(dict_table_t *table, vec_t *vec, THD *thd) {
     std::lock_guard<std::mutex> g(vec->row_ref_mutex);
     vec->row_ref_map.clear();
     for (auto &lr : row_refs) {
+      if (dead_labels.count(lr.first) != 0) {
+        continue; /* dead: no base row to point at */
+      }
       vec->row_ref_map.emplace(lr.first, std::move(lr.second));
     }
   }
@@ -1053,9 +1135,14 @@ dberr_t vec_delete_point(trx_t *trx, dict_table_t *table, THD *thd,
   vec_t *vec = vec_hnsw(table);
   ut_a(vec != nullptr);
 
+  /* A DELETE is one INSERT into _dead. The log table is never touched —
+  the node keeps all of its rows, which is what lets a reader whose view
+  predates this delete keep using the node (its geometry is still there)
+  while newer readers exclude it. */
   MDL_ticket *mdl = nullptr;
-  dict_table_t *aux = vec_aux_open_for_dml(table, vec->index_id, thd, &mdl);
-  if (aux == nullptr) {
+  dict_table_t *dead =
+      vec_aux_open_for_dml(table, vec->index_id, thd, &mdl, "_dead");
+  if (dead == nullptr) {
     return DB_TABLE_NOT_FOUND;
   }
 
@@ -1064,7 +1151,7 @@ dberr_t vec_delete_point(trx_t *trx, dict_table_t *table, THD *thd,
     rw_lock_s_unlock(&vec->latch);
     dberr_t lerr = vec_load(table, thd);
     if (lerr != DB_SUCCESS) {
-      vec_aux_close_for_dml(aux, thd, &mdl);
+      vec_aux_close_for_dml(dead, thd, &mdl);
       return lerr;
     }
     rw_lock_s_lock(&vec->latch, UT_LOCATION_HERE);
@@ -1072,7 +1159,13 @@ dberr_t vec_delete_point(trx_t *trx, dict_table_t *table, THD *thd,
 
   const undo_no_t undo_mark = trx->undo_no;
 
-  dberr_t err = vec_aux_tombstone(trx, aux, label);
+  dberr_t err = vec_aux_dead_insert(trx, dead, label);
+  /* Already dead: an earlier statement in this or another committed
+  transaction deleted the label. Idempotent by design — the in-memory
+  markDelete below is what this path still owes. */
+  if (err == DB_DUPLICATE_KEY) {
+    err = DB_SUCCESS;
+  }
 
   bool marked = false;
   if (err == DB_SUCCESS) {
@@ -1081,13 +1174,13 @@ dberr_t vec_delete_point(trx_t *trx, dict_table_t *table, THD *thd,
       marked = true;
     } catch (...) {
       /* Label not in the graph: a reload since the row was inserted
-      (tombstones are skipped at load, or an exception reload). The
-      aux tombstone above still stands. */
+      (dead labels are skipped at load, or an exception reload). The
+      _dead row above still stands. */
     }
   }
 
   rw_lock_s_unlock(&vec->latch);
-  vec_aux_close_for_dml(aux, thd, &mdl);
+  vec_aux_close_for_dml(dead, thd, &mdl);
 
   if (marked) {
     vec_trx_record(trx, table, label, vec_trx_op_type::MARKED, undo_mark);

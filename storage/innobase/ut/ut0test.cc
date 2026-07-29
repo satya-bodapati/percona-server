@@ -377,8 +377,12 @@ go through the DD layer, which requires real MDL. */
 struct vec_test_tables_t {
   dict_table_t *base{nullptr};
   dict_table_t *aux{nullptr};
+  /* Deletes live in the _dead member table, so any command that reports
+  liveness must consult it — opened alongside the log. */
+  dict_table_t *dead{nullptr};
   MDL_ticket *base_mdl{nullptr};
   MDL_ticket *aux_mdl{nullptr};
+  MDL_ticket *dead_mdl{nullptr};
 };
 
 static bool vec_test_open_aux(const std::string &base_name,
@@ -421,10 +425,26 @@ static bool vec_test_open_aux(const std::string &base_name,
     t.base = nullptr;
     return false;
   }
+
+  char dead_name[MAX_FULL_NAME_LEN];
+  vec_aux_get_table_name(t.base, vec_index->id, Vec_index_type::HNSW, dead_name,
+                         sizeof(dead_name), "_dead");
+  t.dead = dd_table_open_on_name(current_thd, &t.dead_mdl, dead_name, false,
+                                 DICT_ERR_IGNORE_NONE);
+  if (t.dead == nullptr) {
+    dd_table_close(t.aux, current_thd, &t.aux_mdl, false);
+    t.aux = nullptr;
+    dd_table_close(t.base, current_thd, &t.base_mdl, false);
+    t.base = nullptr;
+    return false;
+  }
   return true;
 }
 
 static void vec_test_close_aux(vec_test_tables_t &t) {
+  if (t.dead != nullptr) {
+    dd_table_close(t.dead, current_thd, &t.dead_mdl, false);
+  }
   if (t.aux != nullptr) {
     dd_table_close(t.aux, current_thd, &t.aux_mdl, false);
   }
@@ -647,14 +667,32 @@ Ret_t Tester::vec_aux_dump(std::vector<std::string> &tokens) noexcept {
   std::vector<vec_loaded_row_t> rows;
   uint64_t raw_max_id = 0;
   bool saw_invisible = false;
-  std::vector<uint64_t> dead;
-  const dberr_t err =
-      vec_aux_load_rows(aux, dims, &rows, &raw_max_id, &saw_invisible, &dead);
+  dberr_t err =
+      vec_aux_load_rows(aux, dims, &rows, &raw_max_id, &saw_invisible);
   if (err != DB_SUCCESS) {
     XLOG("FAIL: vec_aux_load_rows err=" << static_cast<int>(err));
     set_output(sout);
     return RET_FAIL;
   }
+
+  /* Liveness lives in _dead, not in the log — a deleted label keeps all
+  of its log rows (its geometry still routes traversal), so the dump must
+  consult _dead both to report the label as dead and to drop it from the
+  live row list. */
+  std::unordered_set<uint64_t> dead_set;
+  err = vec_aux_load_dead_set(tt.dead, nullptr, &dead_set);
+  if (err != DB_SUCCESS) {
+    XLOG("FAIL: vec_aux_load_dead_set err=" << static_cast<int>(err));
+    set_output(sout);
+    return RET_FAIL;
+  }
+  std::vector<uint64_t> dead(dead_set.begin(), dead_set.end());
+  std::sort(dead.begin(), dead.end());
+  rows.erase(std::remove_if(rows.begin(), rows.end(),
+                            [&dead_set](const vec_loaded_row_t &r) {
+                              return dead_set.count(std::get<0>(r)) != 0;
+                            }),
+             rows.end());
 
   sout << "count=" << rows.size() << " max_id=" << raw_max_id
        << " invisible=" << (saw_invisible ? 1 : 0);

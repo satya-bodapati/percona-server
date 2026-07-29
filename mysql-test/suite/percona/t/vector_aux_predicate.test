@@ -23,7 +23,7 @@ CREATE TABLE tva (
 );
 
 --echo # The aux .ibd exists on disk.
---replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+\.ibd/vec_hnsw_<TID>_<IID>.ibd/
+--replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+/vec_hnsw_<TID>_<IID>/
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
 
 --echo # INFORMATION_SCHEMA.TABLES must not surface the vec_*_* aux to users.

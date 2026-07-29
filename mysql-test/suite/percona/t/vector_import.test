@@ -31,7 +31,7 @@ ALTER TABLE t1 IMPORT TABLESPACE;
 
 --echo # Nothing was disturbed: base rows, aux .ibd and kNN all intact.
 SELECT id FROM t1 ORDER BY id;
---replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+\.ibd/vec_hnsw_<TID>_<IID>.ibd/
+--replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+/vec_hnsw_<TID>_<IID>/
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
 SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
 

@@ -67,6 +67,7 @@ c1	CREATE TABLE `c1` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 # One vector aux file present (re-minted with the new table_id).
 vec_hnsw_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>_dead.ibd
 DROP TABLE c1;
 #
 # === D. DROP PK in a separate ALTER (not same-statement re-add) ===

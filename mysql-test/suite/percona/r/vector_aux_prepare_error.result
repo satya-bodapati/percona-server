@@ -18,6 +18,7 @@ SET @@SESSION.debug = '+d,vec_prepare_fail_after_aux_create';
 ALTER TABLE tva ADD VECTOR KEY (v) TYPE hnsw WITH (M = 6);
 SET @@SESSION.debug = '-d,vec_prepare_fail_after_aux_create';
 vec_hnsw_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>_dead.ibd
 # Re-ADD path (column retained after DROP): INPLACE is real now —
 # the armed knob makes prepare fail AFTER the aux was created, and
 # the cleanup must drop it: no vec_*.ibd leftover, and a clean
@@ -37,6 +38,7 @@ tva	CREATE TABLE `tva` (
   VECTOR KEY `v` (`v`) TYPE `hnsw` WITH (`M`=6)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 vec_hnsw_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>_dead.ibd
 SET SESSION innodb_interpreter = 'vec_aux_dump test/tva';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output

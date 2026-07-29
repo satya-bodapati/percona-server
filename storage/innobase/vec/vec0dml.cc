@@ -136,6 +136,52 @@ ulint vec_row_ref_serialize(const dtuple_t *row, const dict_table_t *table,
   return p - out;
 }
 
+/** Run a prepared aux INSERT node to completion on `trx` and free
+`heap`. The row operations of every aux table share this: each call is
+its own mini-statement (explicit IX table lock, cheap when an earlier
+row of the same statement already took it), with lock waits retried
+through the standard row_mysql_handle_errors machinery.
+@return DB_SUCCESS, DB_DUPLICATE_KEY, or error */
+static dberr_t vec_aux_insert_exec(trx_t *trx, ins_node_t *node,
+                                   mem_heap_t *heap) {
+  que_thr_t *thr = pars_complete_graph_for_exec(node, trx, heap, nullptr);
+
+  auto savept = trx_savept_take(trx);
+
+  que_thr_move_to_run_state_for_mysql(thr, trx);
+
+  node->state = INS_NODE_SET_IX_LOCK;
+
+  dberr_t err;
+  for (;;) {
+    thr->run_node = node;
+    thr->prev_node = node;
+
+    row_ins_step(thr);
+
+    err = trx->error_state;
+    if (err == DB_SUCCESS) {
+      break;
+    }
+
+    que_thr_stop_for_mysql(thr);
+    thr->lock_state = QUE_THR_LOCK_ROW;
+    const bool was_lock_wait = row_mysql_handle_errors(&err, trx, thr, &savept);
+    thr->lock_state = QUE_THR_LOCK_NOLOCK;
+
+    if (!was_lock_wait) {
+      mem_heap_free(heap);
+      return err;
+    }
+    ut_ad(node->state == INS_NODE_INSERT_ENTRIES ||
+          node->state == INS_NODE_ALLOC_ROW_ID);
+  }
+
+  que_thr_stop_for_mysql_no_error(thr, trx);
+  mem_heap_free(heap);
+  return DB_SUCCESS;
+}
+
 /** Fill one user dfield of the aux row tuple with a heap-duplicated
 value (the run loop may retry after lock waits; values must be stable). */
 static void vec_aux_set_field(dtuple_t *tuple, ulint col_no, const void *data,
@@ -199,45 +245,26 @@ dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
   vec_aux_set_field(tuple, VEC_AUX_COL_NEIGHBORS, row.neighbors,
                     row.neighbors_len, heap);
 
-  que_thr_t *thr = pars_complete_graph_for_exec(node, trx, heap, nullptr);
+  return vec_aux_insert_exec(trx, node, heap);
+}
 
-  auto savept = trx_savept_take(trx);
+dberr_t vec_aux_dead_insert(trx_t *trx, dict_table_t *dead, uint64_t label) {
+  ut_a(trx != nullptr);
+  ut_a(dead != nullptr);
 
-  que_thr_move_to_run_state_for_mysql(thr, trx);
+  mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
 
-  /* Each call is its own mini-statement on the trx: take the IX table
-  lock explicitly (cheap when already held by an earlier row of the same
-  statement). */
-  node->state = INS_NODE_SET_IX_LOCK;
+  ins_node_t *node = ins_node_create(INS_DIRECT, dead, heap);
 
-  dberr_t err;
-  for (;;) {
-    thr->run_node = node;
-    thr->prev_node = node;
+  dtuple_t *tuple = dtuple_create(heap, dead->get_n_cols());
+  dict_table_copy_types(tuple, dead);
+  ins_node_set_new_row(node, tuple);
 
-    row_ins_step(thr);
+  byte label_buf[8];
+  mach_write_to_8(label_buf, label);
+  vec_aux_set_field(tuple, 0, label_buf, sizeof(label_buf), heap);
 
-    err = trx->error_state;
-    if (err == DB_SUCCESS) {
-      break;
-    }
-
-    que_thr_stop_for_mysql(thr);
-    thr->lock_state = QUE_THR_LOCK_ROW;
-    const bool was_lock_wait = row_mysql_handle_errors(&err, trx, thr, &savept);
-    thr->lock_state = QUE_THR_LOCK_NOLOCK;
-
-    if (!was_lock_wait) {
-      mem_heap_free(heap);
-      return err;
-    }
-    ut_ad(node->state == INS_NODE_INSERT_ENTRIES ||
-          node->state == INS_NODE_ALLOC_ROW_ID);
-  }
-
-  que_thr_stop_for_mysql_no_error(thr, trx);
-  mem_heap_free(heap);
-  return DB_SUCCESS;
+  return vec_aux_insert_exec(trx, node, heap);
 }
 
 /** Shared body for the three targeted aux-row updates (neighbors,
@@ -414,18 +441,108 @@ static dberr_t vec_aux_update_row_low(trx_t *trx, dict_table_t *aux,
   return DB_SUCCESS;
 }
 
-dberr_t vec_aux_tombstone(trx_t *trx, dict_table_t *aux, uint64_t id) {
-  return vec_aux_update_row_low(trx, aux, id, nullptr, 0,
-                                false /* set_neighbors */,
-                                true /* row_ref_null */, nullptr, 0);
-}
-
 dberr_t vec_aux_update_row_ref(trx_t *trx, dict_table_t *aux, uint64_t id,
                                const byte *row_ref, ulint row_ref_len) {
   ut_a(row_ref != nullptr);
   return vec_aux_update_row_low(trx, aux, id, nullptr, 0,
                                 false /* set_neighbors */,
                                 false /* row_ref_null */, row_ref, row_ref_len);
+}
+
+/** Collect the dead-label set visible under `view` (nullptr = latest)
+from a _dead table. Per-reader delete visibility IS this scan: each dead
+row's own hidden DB_TRX_ID decides whether this reader sees the delete,
+so an old view misses young deletes and keeps using the node, while a
+transaction sees its own uncommitted delete.
+@return DB_SUCCESS or error */
+dberr_t vec_aux_load_dead_set(dict_table_t *dead, ReadView *view,
+                              std::unordered_set<uint64_t> *labels) {
+  ut_a(dead != nullptr);
+  ut_a(labels != nullptr);
+
+  labels->clear();
+
+  dict_index_t *clust = dead->first_index();
+
+  /* Own background trx + read view when the caller did not supply one
+  (the reload path wants "latest committed"). */
+  trx_t *trx = trx_allocate_for_background();
+  trx_start_internal_read_only(trx, UT_LOCATION_HERE);
+  ReadView *own_view = nullptr;
+  if (view == nullptr) {
+    own_view = trx_assign_read_view(trx);
+    if (own_view == nullptr) {
+      trx_commit_for_mysql(trx);
+      trx_free_for_background(trx);
+      return DB_OUT_OF_RESOURCES;
+    }
+    view = own_view;
+  }
+
+  dberr_t err = DB_SUCCESS;
+  mem_heap_t *offset_heap = nullptr;
+  mem_heap_t *vers_heap = nullptr;
+
+  mtr_t mtr;
+  mtr_start(&mtr);
+
+  btr_pcur_t pcur;
+  pcur.open_at_side(true /* left */, clust, BTR_SEARCH_LEAF, true, 0, &mtr);
+
+  ulint n_scanned = 0;
+
+  while (pcur.move_to_next_user_rec(&mtr) == DB_SUCCESS) {
+    const rec_t *rec = pcur.get_rec();
+    ulint *offsets = rec_get_offsets(rec, clust, nullptr, ULINT_UNDEFINED,
+                                     UT_LOCATION_HERE, &offset_heap);
+
+    const rec_t *vrec = rec;
+    ulint *voffsets = offsets;
+
+    const trx_id_t rec_trx_id = row_get_rec_trx_id(rec, clust, offsets);
+    if (!view->changes_visible(rec_trx_id, dead->name)) {
+      rec_t *old_vers = nullptr;
+      err = row_vers_build_for_consistent_read(rec, &mtr, clust, &voffsets,
+                                               view, &offset_heap, vers_heap,
+                                               &old_vers, nullptr, nullptr);
+      if (err != DB_SUCCESS) {
+        break;
+      }
+      if (old_vers == nullptr) {
+        continue; /* the delete is not visible to this reader */
+      }
+      vrec = old_vers;
+    }
+
+    if (rec_get_deleted_flag(vrec, dict_table_is_comp(dead))) {
+      continue; /* the dead row itself was removed (rollback of DELETE) */
+    }
+
+    ulint len;
+    const byte *lp = rec_get_nth_field(clust, vrec, voffsets, 0, &len);
+    ut_ad(len == 8);
+    labels->insert(mach_read_from_8(lp));
+
+    /* Batch the mtr; same positioning contract as vec_aux_load_rows. */
+    if (++n_scanned % 512 == 0) {
+      pcur.store_position(&mtr);
+      mtr_commit(&mtr);
+      mtr_start(&mtr);
+      pcur.restore_position(BTR_SEARCH_LEAF, &mtr, UT_LOCATION_HERE);
+    }
+  }
+
+  pcur.close();
+  mtr_commit(&mtr);
+
+  if (offset_heap != nullptr) {
+    mem_heap_free(offset_heap);
+  }
+
+  trx_commit_for_mysql(trx);
+  trx_free_for_background(trx);
+
+  return err;
 }
 
 /** Copy one (possibly externally stored) field of an aux clustered-index

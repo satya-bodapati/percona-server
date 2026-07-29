@@ -43,11 +43,14 @@ full redo/undo/locking, no global mutex. */
 #include <cstdint>
 #include <string>
 #include <tuple>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "db0err.h"
 #include "dict0mem.h"
+
+class ReadView;
 #include "trx0trx.h"
 #include "univ.i"
 
@@ -118,18 +121,24 @@ and the row is undone with the statement, like any user DML.
 @return DB_SUCCESS or error */
 dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux, const vec_aux_row_t &row);
 
-/** Tombstone one aux row: set row_ref to SQL NULL, leaving the graph
-geometry (vec/level/neighbors) in place. The node stops being loadable
-(vec_aux_load_rows skips tombstones); a rollback restores row_ref via
-the undo log like any column.
-@return DB_SUCCESS, DB_RECORD_NOT_FOUND if no such id, or error */
-dberr_t vec_aux_tombstone(trx_t *trx, dict_table_t *aux, uint64_t id);
-
 /** Point one aux row's row_ref at a new base-PK image (the base row's
 PRIMARY KEY changed under it; the graph node is untouched).
 @return DB_SUCCESS, DB_RECORD_NOT_FOUND if no such id, or error */
 dberr_t vec_aux_update_row_ref(trx_t *trx, dict_table_t *aux, uint64_t id,
                                const byte *row_ref, ulint row_ref_len);
+
+/** INSERT one label into the _dead table — the delete mechanism. No
+explicit deleter column: the row's hidden DB_TRX_ID is the deleter's
+identity, so a reader's own read view decides whether the delete is
+visible to it, and rollback is just undo removing the row.
+@return DB_SUCCESS, or DB_DUPLICATE_KEY if the label is already dead */
+dberr_t vec_aux_dead_insert(trx_t *trx, dict_table_t *dead, uint64_t label);
+
+/** Collect the dead-label set visible under `view` (nullptr = latest)
+from a _dead table. See the definition for the visibility contract.
+@return DB_SUCCESS or error */
+dberr_t vec_aux_load_dead_set(dict_table_t *dead, ReadView *view,
+                              std::unordered_set<uint64_t> *labels);
 
 /** Load every visible row of a vector aux table under a fresh read view
 (background transaction), for graph reconstruction.
