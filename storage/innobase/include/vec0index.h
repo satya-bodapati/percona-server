@@ -153,13 +153,21 @@ printed by SHOW CREATE. Tokens are lowercase ASCII identifiers and
 MUST NOT contain '_' (the aux-name field separator). */
 [[nodiscard]] const char *vec_index_token(Vec_index_type type);
 
-/** Resolve the runtime for `table`'s vector index.
+/** The implementation behind `table`'s OPEN vector runtime.
 
-R1: always the HNSW singleton — the only registered TYPE — and
-therefore safe to call for ANY table (close() etc. no-op on tables
-without a vector runtime, preserving today's semantics). R2 turns this
-into a registry lookup keyed by the index's TYPE token.
-@return never nullptr */
+An open runtime is self-describing: it records the implementation that
+allocated it, so this is a field read, not a guess. It deliberately
+does NOT resolve a TYPE for a table with no runtime — there is nothing
+to read, and answering anyway would mean picking a type, which is only
+ever right by luck. A resolver that guesses is worse than one that
+fails: with a second TYPE registered, the guess silently hands one
+implementation's table to another.
+
+Callers that have no runtime yet (open, build) must resolve from the
+KEY's TYPE token via vec_index_by_name() and treat an unresolved token
+as an error. Callers on a teardown path must handle nullptr — it means
+this table never opened a runtime, so there is nothing to close.
+@return the implementation, or nullptr if no runtime is open */
 [[nodiscard]] const Vector_index *vec_index_for(const dict_table_t *table);
 
 #endif /* vec0index_h */

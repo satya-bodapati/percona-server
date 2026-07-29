@@ -111,8 +111,11 @@ void dict_mem_table_free(dict_table_t *table) /*!< in: table */
 
   /* Free the in-memory vector runtime, if this table built one — the
   vec analog of fts_free above (dict-cache eviction and shutdown both
-  land here). Runs for EVERY table; close() no-ops without a runtime. */
-  vec_index_for(table)->close(table);
+  land here). Runs for EVERY table, so nullptr is the normal answer:
+  it means no runtime was ever opened and there is nothing to free. */
+  if (const Vector_index *vidx = vec_index_for(table); vidx != nullptr) {
+    vidx->close(table);
+  }
 
   dict_table_mutex_destroy(table);
 

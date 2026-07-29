@@ -141,20 +141,12 @@ const char *vec_index_token(Vec_index_type type) {
 }
 
 const Vector_index *vec_index_for(const dict_table_t *table) {
-  /* An open runtime is self-describing (SPANN R2): dispatch on the
-  implementation that allocated it — this is what makes teardown
-  (dict_mem_table_free) correct once several TYPEs coexist, without
-  re-resolving the TYPE from the DD. */
-  if (table != nullptr && table->vec != nullptr &&
-      table->vec->impl != nullptr) {
+  /* An open runtime is self-describing: dispatch on the implementation
+  that allocated it. No fallback — see the header for why guessing a
+  TYPE here would be worse than returning nullptr. */
+  if (table != nullptr && table->vec != nullptr) {
+    ut_ad(table->vec->impl != nullptr);
     return table->vec->impl;
   }
-
-  /* No runtime open. The token-carrying paths (open, build) resolve
-  via vec_index_by_name() and never reach here; what does reach here
-  is teardown/close on runtime-less tables (a no-op for every type)
-  and IMPORT re-mint before first open. hnsw is the correct answer for
-  all of them while it is the sole registered type; S1 threads the
-  TYPE token through the IMPORT site when the second type lands. */
-  return vec_index_by_enum(Vec_index_type::HNSW);
+  return nullptr;
 }

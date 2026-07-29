@@ -7955,15 +7955,23 @@ static void innobase_vec_open_from_sql_layer(TABLE *table,
       }
 
       /* Resolve the implementation by the KEY's TYPE token (reloaded
-      from the DD index options; SPANN R3). CREATE/ALTER validated the
-      token against the registry, so it must resolve — the fallback is
-      pure defense for a DD written before the token existed. */
+      from the DD index options). The token is the authority here:
+      no runtime is open yet, so there is nothing else to ask. */
       const Vector_index *vidx =
           vec_index_by_name(table->key_info[i].vector_index_type.str,
                             table->key_info[i].vector_index_type.length);
       ut_ad(vidx != nullptr);
       if (vidx == nullptr) {
-        vidx = vec_index_for(ib_table);
+        /* The TYPE is validated at CREATE/ALTER, so this is
+        unreachable in a consistent server. Leaving the table without a
+        runtime is the only safe answer: opening it as some other type
+        would build the wrong structure over the aux rows. Queries then
+        fail on the missing runtime instead of returning wrong
+        neighbours. */
+        ib::error(ER_IB_MSG_567)
+            << "Vector index on table " << ib_table->name.m_name
+            << " has an unrecognized TYPE; the index will not be opened.";
+        continue;
       }
       vidx->open(ib_table, field_vec->field_index(),
                  field_vec->get_max_dimensions(), param.M,
@@ -12422,7 +12430,11 @@ int ha_innobase::vec_read_next(uchar *buf) {
       excluding what we returned — filters above the iterator may
       consume any number of rows, so `limit` is only the initial batch
       size (PS-11300-search-design.md par 4). */
+      /* vec_read_first established the runtime and the table is pinned
+      in the dict cache, so it cannot have gone away under us mid
+      iteration. */
       const Vector_index *vidx = vec_index_for(table);
+      ut_a(vidx != nullptr);
       if (m_vec_search_k >= vidx->size_hint(table)) {
         return HA_ERR_END_OF_FILE;
       }
