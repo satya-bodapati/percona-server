@@ -265,10 +265,11 @@ change without affecting the read path (and in Phase 2, it does).
 The table's identity is the label, so there is exactly one row per node at all times: no
 history, no versions. Whatever a node's edges are *now* is what the row holds.
 
-That `NULL = tombstone` convention is the one part of this shape that has to change: it makes
-a delete destructive, which costs an isolation property. §3.9 replaces it with a `del_trx_id`
-column — one row per node still, but a delete records *who* deleted the node instead of
-erasing *where* its row was.
+`row_ref` is the part of this shape that does not survive contact with MVCC. It makes a delete
+destructive (`NULL = tombstone` erases the only address an old reader had), and it forces a
+resident `label → PK` map to avoid a B-tree dive per candidate, which is one entry per row.
+§3.10 sets out both problems; §3.11 removes the column altogether and indexes the hidden
+`vec_idx_id` on the base table instead.
 
 ### 3.5 How the graph drives writes into the aux table
 
@@ -306,9 +307,11 @@ on each is held for the **whole transaction**, not the duration of the write.
 
 A NULL vector is not indexed at all: no graph node, no aux row. It still consumes a label.
 
-The two tombstoning rows are what §3.9 changes: `row_ref = NULL` becomes
-`del_trx_id = <deleting trx>`, and `markDelete` is dropped so the node stays a candidate for
-readers whose snapshot predates the delete. Everything else in this table is unaffected.
+Three of these rows are what §3.11 changes. The two tombstoning rows lose their aux write
+entirely — a delete just delete-marks the base row's `vec_idx_id` index entry — and
+`markDelete` is dropped so the node stays a candidate for readers whose snapshot predates the
+delete. The PK-changed-only row disappears completely: InnoDB re-points the index entry
+itself, so that statement stops touching the vector index. INSERT is unaffected.
 
 Rollback needs no aux-specific work — undo restores the rows — plus an in-memory inverse
 (`unmarkDelete`, or marking a rolled-back insert deleted), applied from a per-transaction
@@ -414,74 +417,9 @@ would answer "nearest to `[1,0]`" with a row that is not. Check ① rejects it: 
 reader whose snapshot still shows `vec_idx_id = 42` passes the same check and correctly gets
 the row. One integer compare, and the label does all the version bookkeeping.
 
-#### Check ②: what breaks without it
-
-Same table, row `id=7, v=[1,0]` under label 42:
-
-| time | session A (REPEATABLE READ) | session B |
-|---|---|---|
-| t1 | `SELECT …` → read view **V_A** created; row 7 visible | |
-| t2 | | `DELETE FROM t WHERE id = 7;` **COMMIT** |
-| t3 | `SELECT id FROM t ORDER BY DISTANCE(v,[1,0]) LIMIT 1` | |
-
-At t3 the correct answer is **`id = 7`**. A's snapshot predates the delete, and
-`SELECT id FROM t WHERE id = 7` in that same transaction *does* still return 7 from undo. If
-the index path disagrees, one transaction gets different answers depending on which plan the
-optimizer chose — a non-repeatable read introduced by an index.
-
-It disagrees today. At t2 the delete sets `row_ref = NULL` and marks the graph node, so
-hnswlib will not return label 42; and even if it did, the loader skipped the tombstoned row,
-so there is no `label → row_ref` entry to fetch with. **A gets no rows.**
-
-Two separate things are missing, and naming both is what makes the fix obvious:
-
-- **the address is destroyed** — returning row 7 requires `row_ref = pk 7`, and the delete
-  overwrote that column. It survives only in the aux row's own undo, which is not reachable
-  by label and is eventually purged.
-- **there is nothing to judge with** — even with `row_ref` kept, including a dead node is
-  correct only for readers whose view predates the deletion. That needs the deleting
-  transaction's identity, which is recorded nowhere.
-
-#### Check ②: one column fixes it
-
-*Planned, not yet implemented.* A delete stops destroying anything and starts recording:
-
-```
-vec_hnsw_<tid>_<iid>:
-  id          BIGINT UNSIGNED  PK     -- the label
-  vec         BLOB
-  row_ref     VARBINARY(3072)         -- NEVER nulled any more
-  level       TINYINT
-  neighbors   BLOB
-  del_trx_id  BIGINT UNSIGNED         -- NEW: 0 = live, else who deleted it
-```
-
-Three changes follow, and nothing else moves:
-
-- **DELETE** becomes `UPDATE aux SET del_trx_id = <deleting trx> WHERE id = label`. `row_ref`
-  is untouched, and the graph node is *not* marked deleted.
-- **The loader** keeps dead rows and builds a second map, `label → del_trx_id`.
-- **Search** filters per candidate: `del_trx_id == 0` → live, apply check ①; otherwise include
-  it **iff `!view->changes_visible(del_trx_id)`** — this reader cannot see the deletion, so the
-  row is still theirs.
-
-**Why an explicit column and not the aux row's `DB_TRX_ID`.** A dead node's aux row keeps
-being UPDATEd by unrelated rewires — a neighbour list changing has nothing to do with the
-delete — and every rewire overwrites `DB_TRX_ID` with the rewiring transaction's id,
-destroying the deletion timestamp. A dedicated column is written only by the delete, so it
-cannot be clobbered. This is the whole reason the column exists rather than reusing what
-InnoDB already stores.
-
-Two costs worth stating plainly rather than discovering later:
-
-- **Dead nodes stay searchable.** They occupy candidate slots, so `k` has to widen to
-  compensate — a recall and latency cost. The resumable-search loop (§3.7) already copes with
-  candidates being filtered out, so the mechanism exists, but the cost is real. Phase 2's
-  `_dead` table has exactly the same property; it buys the same thing with an insert instead
-  of an update.
-- **Purge needs a rule.** A dead aux row may be removed only once no live read view could
-  still need it *and* the base row's own undo has been purged — otherwise a reader entitled to
-  the row loses it. Reload-time collapse is the natural place for that sweep.
+Check ② is **not** satisfied by the aux format of §3.4, and cannot be — a delete there
+destroys the very thing an old reader needs. §3.10 shows exactly how, and §3.11 gives the
+format that fixes it.
 
 #### Isolation levels
 
@@ -506,10 +444,196 @@ updated. This needs a decision, not an assumption, before locking reads are supp
 index path.
 
 **Isolation targeted:** READ COMMITTED and REPEATABLE READ. Reached today only for inserts
-and updates — deletes need check ②, hence the column above (§4.5).
+and updates — deletes need check ②, which needs the format change of §3.11 (§4.5).
 **Not reachable, by design:** SERIALIZABLE on the index path — phantom prevention needs
 predicate locks over "the k nearest neighbours of q", and ℝᵈ has no key order for gap locks
 to hang from. Sessions needing it fall back to the exact path.
+
+### 3.10 MVCC problems with the current aux format
+
+Two problems, and they are different in kind. The first makes check ② impossible. The second
+is about what the design costs to run, and it is the one that decides the fix.
+
+#### Problem 1: a delete destroys the address
+
+Row `id=7, v=[1,0]` indexed under label 42.
+
+| time | session A (REPEATABLE READ) | session B |
+|---|---|---|
+| t1 | `SELECT …` → read view **V_A** created; row 7 visible | |
+| t2 | | `DELETE FROM t WHERE id = 7;` **COMMIT** |
+| t3 | `SELECT id FROM t ORDER BY DISTANCE(v,[1,0]) LIMIT 1` | |
+
+At t3 the correct answer is **`id = 7`**. A's snapshot predates the delete, and
+`SELECT id FROM t WHERE id = 7` in that same transaction *does* still return 7 from undo. If
+the index path disagrees, one transaction gets two different answers depending on which plan
+the optimizer chose — a non-repeatable read introduced by an index.
+
+It disagrees. At t2 the delete does `UPDATE aux SET row_ref = NULL WHERE id = 42` and marks
+the graph node, so hnswlib will not offer label 42; and even if it did, the loader skips
+tombstoned rows, so there is no `label → row_ref` entry to fetch with. **A gets no rows.**
+
+Two independent things are missing, and naming both is what makes the fix obvious:
+
+- **the address is destroyed** — returning row 7 requires `row_ref = pk 7`, and the delete
+  overwrote that column. The old value survives only in the aux row's own undo, which is not
+  reachable by label and is eventually purged.
+- **there is nothing to judge with** — even if `row_ref` were kept, including a dead node is
+  correct only for readers whose view predates the deletion. That needs the deleting
+  transaction's identity, which this format records nowhere.
+
+#### One way to fix it: a `del_trx_id` column
+
+A delete stops destroying anything and starts recording:
+
+```
+vec_hnsw_<tid>_<iid>:
+  id          BIGINT UNSIGNED  PK     -- the label
+  vec         BLOB
+  row_ref     VARBINARY(3072)         -- NEVER nulled any more
+  level       TINYINT
+  neighbors   BLOB
+  del_trx_id  BIGINT UNSIGNED         -- 0 = live, else who deleted it
+```
+
+- **DELETE** becomes `UPDATE aux SET del_trx_id = <deleting trx> WHERE id = label`; `row_ref`
+  is untouched and the graph node is *not* marked deleted.
+- **The loader** keeps dead rows and builds a second map, `label → del_trx_id`.
+- **Search** includes a dead candidate **iff `!view->changes_visible(del_trx_id)`** — this
+  reader cannot see the deletion, so the row is still theirs.
+
+It has to be an explicit column, not the aux row's `DB_TRX_ID`: a dead node's aux row keeps
+being UPDATEd by unrelated rewires, and every rewire overwrites `DB_TRX_ID` with the rewiring
+transaction, destroying the deletion timestamp. A dedicated column is written only by the
+delete.
+
+This works. It is not what §3.11 proposes, for the reason Problem 2 gives.
+
+#### Problem 2: the lookup is O(N) resident memory, not a lookup
+
+Search happens in the in-memory graph, which yields a **label**. A label is not an address, so
+something must map `label → base PK`. Today that something is `row_ref_map`, an
+`unordered_map<uint64_t, std::string>` rebuilt from the aux's `row_ref` column on every load.
+
+Counting what a single candidate costs, where a *dive* is one root-to-leaf B-tree traversal:
+
+| step | today | if `row_ref` were read from the aux instead of cached |
+|---|---|---|
+| `label → PK` | 0 dives — RAM hash lookup | 1 dive — aux `PK(label)` |
+| `PK → row` | 1 dive — clustered, `ROW_SEL_EXACT` | 1 dive |
+| **total** | **1 dive + O(N) memory** | **2 dives, no memory** |
+
+The memory is the problem. For 10M rows the map is roughly 64–72 bytes per entry — an 8-byte
+key, a 32-byte `std::string` (an 8-byte PK fits in SSO), plus bucket — so **~0.7 GB**, held
+for as long as the table is cached, and reconstructed by a full aux scan on every reload.
+`del_trx_id` does not improve this at all: it fixes Problem 1 while leaving the map, and in
+fact adds a second map beside it.
+
+That is the real objection to this format. Caching one entry per row does not scale, and the
+right question is not "how do we shrink the map" but "why are we keeping a second copy of the
+PK at all, when the base row already holds the label".
+
+### 3.11 The proposed aux format
+
+Drop `row_ref` entirely, and index the hidden column instead — the `FTS_DOC_ID_INDEX`
+analogue this design knowingly went without:
+
+```sql
+-- base table gains an index on the column it already has
+t ( id PK, v VECTOR(768), vec_idx_id BIGINT UNSIGNED NOT NULL /*hidden*/,
+    UNIQUE KEY vec_idx_id_index (vec_idx_id) /*hidden*/ )
+
+-- aux keeps only graph geometry
+CREATE TABLE vec_hnsw_<tid>_<iid> (
+  id        BIGINT UNSIGNED PRIMARY KEY,  -- the label
+  vec       BLOB NOT NULL,
+  level     TINYINT NOT NULL,
+  neighbors BLOB NOT NULL
+)
+```
+
+The read path becomes, per candidate:
+
+```
+graph search                    → label 42
+lookup vec_idx_id = 42 in vec_idx_id_index, UNDER THIS READER'S VIEW   (1 dive)
+   not visible → skip this candidate
+   visible     → yields pk 7
+fetch clustered row 7                                                  (1 dive)
+```
+
+**Two dives, no resident map** — the same read cost as reading `row_ref` from the aux, but
+without a second copy of the PK and, as below, without any visibility logic of our own. The
+index is ~16 bytes of payload per entry, so for 10M rows it is about three levels deep with
+the upper levels effectively always resident — a far better memory profile than 0.7 GB of
+hash table, because it pages in and out like any other index.
+
+Note what does *not* change: the read path still never consults the aux table. The aux stays
+reload-only (§3.4). Only the *place* `label → PK` is kept moves — from a RAM copy to an index
+on the column that already holds the label.
+
+#### 1. Why this is MVCC-friendly
+
+Because the mapping is now an ordinary secondary index entry `(vec_idx_id, PK)`, it is
+versioned by undo like any other. Every case the two checks existed to handle is handled by
+machinery that already exists and is already tested:
+
+| situation | what the index lookup does | correct? |
+|---|---|---|
+| another transaction's uncommitted INSERT | entry not visible | skipped ✓ |
+| row deleted, deletion visible to me | entry delete-marked, deletion visible | skipped ✓ |
+| row deleted **after my snapshot** | entry delete-marked, but visibility resolves through the clustered record and undo | **row returned ✓ — this is check ②** |
+| vector updated: 42 retired, 44 minted | `(42,pk)` delete-marked, `(44,pk)` inserted. An old reader searching 42 still resolves it; a new reader finds nothing for 42 and reaches the row under 44 | **both correct ✓ — this is check ①** |
+
+Check ① was "compare the fetched row's `vec_idx_id` against the candidate label". Searching
+*by* the label, through an index on that column, makes the comparison structural instead of a
+step we perform and could get wrong.
+
+#### 2. Why `del_trx_id` is no longer needed
+
+`del_trx_id` existed to answer one question: *may this reader see a node whose row was
+deleted?* A delete-marked secondary index entry answers it already — that is precisely what
+InnoDB keeps delete-marked entries readable for. So:
+
+- no new column, and no second `label → del_trx_id` map
+- no `!view->changes_visible(...)` filter of our own to write, test, and get right at every
+  isolation level
+- the deleting transaction's identity is where InnoDB already puts it, not in a column we
+  maintain by hand and must protect from being clobbered by unrelated rewires
+
+The `_dead` table of the Phase 2 branch loses its MVCC justification for the same reason; what
+remains there is a garbage-collection role, not a visibility one.
+
+#### 3. What else it makes better
+
+- **The PK-only UPDATE path disappears.** Secondary index entries contain the PK, so InnoDB
+  re-points `(42 → pk)` itself. `vec_aux_update_row_ref`, `refresh_row_ref`, its `REFRESHED`
+  rollback tracking and one interface virtual all cease to exist. Today a PK change writes the
+  aux; afterwards it does not touch the vector index at all.
+- **No tombstone convention.** `row_ref = NULL` is gone, so the aux has no representation of
+  liveness to keep consistent — and §3.4's "the one part of this shape that has to change"
+  is resolved rather than replaced.
+- **Reload gets cheaper and simpler.** The loader feeds geometry to `loadIndex` and stops;
+  there is no map to rebuild, so the scan reads less and produces less.
+- **The aux becomes purely graph geometry**, which makes the separation the design claims
+  literally true: the aux persists the *graph*, the base table owns the *label → row* mapping.
+  Nothing in the aux refers to the base table any more.
+- **A stale mapping cannot produce a wrong row.** Resolution goes through the base table's own
+  index under the reader's view, so there is no cached copy that can disagree with it — which
+  also removes the correctness burden from any future scheme that keeps graphs alive across
+  dict-cache eviction (§4.6).
+
+Costs, stated plainly:
+
+- **One extra dive per candidate** (two instead of one), against a small hot index, next to a
+  clustered dive already being paid.
+- **Index maintenance on writes** — every INSERT and every vector UPDATE maintains it. Net-new
+  write cost, partly offset by PK-only UPDATEs no longer writing the aux. FTS pays exactly
+  this for `FTS_DOC_ID_INDEX`.
+- **Aux purge needs a base-table probe.** With no liveness marker in the aux, deciding that an
+  aux row is removable means asking whether any version with `vec_idx_id = L` still exists that
+  a live reader could need. This is more work than reading a `del_trx_id`, and it is the one
+  place this format is harder than the column.
 
 ---
 
@@ -520,7 +644,7 @@ Two different things, kept apart on purpose.
 A **limitation** is a property of this design. Nothing refuses the operation; it just behaves
 in a way you need to know about. §4.1–§4.5 are limitations. Phase 2
 (`hnsw-phase2-aux-log.md`) addresses §4.1–§4.3; §4.4 stands; §4.5 is fixed on this branch by
-the `del_trx_id` column of §3.9.
+the aux format change of §3.11.
 
 A **restriction** is an operation deliberately *refused*, because every way of allowing it in
 phase 1 was worse than not offering it. §4.6–§4.8 are restrictions. Each states what is
@@ -575,14 +699,15 @@ correct but it is a retry loop, and a graph can be briefly incomplete.
 
 Of the two read-side checks §3.9 needs, the label-match compare (①) works on this design as it
 stands. View-gated tombstone inclusion (②) does not, because a delete sets `row_ref = NULL`
-and so destroys the address the old reader needs.
+and so destroys the address the old reader needs (§3.10).
 
 The consequence is a visible isolation gap: a REPEATABLE READ transaction that could still
 fetch a row by primary key will *not* get it from a `ORDER BY DISTANCE` query if another
 session deleted it after the snapshot. One transaction, two answers, depending on the plan.
 
-The fix is decided and scoped — a `del_trx_id` column on the aux table, so a delete records
-who did it instead of erasing where the row was (§3.9). Until it lands, this is the one
+The fix is decided and scoped: drop `row_ref` from the aux and index the hidden `vec_idx_id`
+on the base table, so resolution goes through a normal secondary index and both checks fall
+out of InnoDB's existing visibility machinery (§3.11). Until it lands, this is the one
 isolation property the index path does not honour.
 
 ---
