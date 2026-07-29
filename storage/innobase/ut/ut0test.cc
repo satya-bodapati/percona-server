@@ -747,9 +747,18 @@ Ret_t Tester::vec_knn(std::vector<std::string> &tokens) noexcept {
   const size_t k = std::stoul(tokens[3]);
   const size_t ef = tokens.size() == 5 ? std::stoul(tokens[4]) : 0;
 
+  /* Needs an open runtime: opening the table through the DD does not
+  build the graph, so a table nothing has queried yet has none. */
+  const Vector_index *vidx = vec_index_for(tt.base);
+  if (vidx == nullptr) {
+    XLOG("FAIL: no vector runtime open for " << tokens[1]);
+    set_output(sout);
+    return RET_FAIL;
+  }
+
   std::vector<vec_knn_hit_t> hits;
-  const dberr_t err = vec_index_for(tt.base)->knn(
-      tt.base, current_thd, qvec.data(), qvec.size(), k, ef, &hits);
+  const dberr_t err =
+      vidx->knn(tt.base, current_thd, qvec.data(), qvec.size(), k, ef, &hits);
   if (err != DB_SUCCESS) {
     XLOG("FAIL: vec_knn_search err=" << static_cast<int>(err));
     set_output(sout);

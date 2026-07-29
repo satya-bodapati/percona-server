@@ -6704,17 +6704,18 @@ bool ha_innobase::inplace_alter_table_impl(TABLE *altered_table,
                 key.vector_construction_params, param);
           }
 
-          /* Resolve by the KEY's TYPE token (SPANN R3); validated at
-          CREATE/ALTER, so it must resolve — fallback is defensive. */
+          /* Resolve by the KEY's TYPE token. Nothing else can answer:
+          the build runs before any runtime is open, so the token is the
+          only authority. An unresolved token fails the ALTER rather
+          than building some other type's structure over the aux. */
           const Vector_index *vidx = vec_index_by_name(
               key.vector_index_type.str, key.vector_index_type.length);
           ut_ad(vidx != nullptr);
-          if (vidx == nullptr) {
-            vidx = vec_index_for(ctx->new_table);
-          }
-          err = vidx->build(m_prebuilt->trx, ctx->new_table, vec_index,
-                            field_vec->get_max_dimensions(), param.M,
-                            param.ef_construction, m_user_thd);
+          err = (vidx == nullptr)
+                    ? DB_UNSUPPORTED
+                    : vidx->build(m_prebuilt->trx, ctx->new_table, vec_index,
+                                  field_vec->get_max_dimensions(), param.M,
+                                  param.ef_construction, m_user_thd);
           if (err != DB_SUCCESS) {
             m_prebuilt->trx->error_key_num = ULINT_UNDEFINED;
           }
@@ -7737,7 +7738,10 @@ after a successful commit_try_norebuild() call.
         exclusive MDL, so no writer is inside the graph). Rebuild and
         DROP TABLE paths need no call: their dict_table_t is freed and
         dict_mem_table_free closes the graph. */
-        vec_index_for(index->table)->close(index->table);
+        if (const Vector_index *vidx = vec_index_for(index->table);
+            vidx != nullptr) {
+          vidx->close(index->table);
+        }
         (void)vec_aux_drop_one_table(trx, index->table, index->id);
       }
 
