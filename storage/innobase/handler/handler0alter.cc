@@ -5048,6 +5048,13 @@ template <typename Table>
         /* To bump up the table ref count and move it
         to LRU list if it's not temporary table */
         ut_ad(dict_sys_mutex_own());
+        /* A rebuilt table with a vector index keeps the pin, for the
+        same reason CREATE does: the graph will hang off this
+        dict_table_t. Phase-1 restriction; see hnsw-design.md. */
+        if (!ctx->new_table->is_temporary() &&
+            vec_aux_table_has_vector_index(ctx->new_table)) {
+          dict_table_prevent_eviction(ctx->new_table);
+        }
         if (!ctx->new_table->is_temporary() &&
             !ctx->new_table->explicitly_non_lru) {
           dict_table_allow_eviction(ctx->new_table);

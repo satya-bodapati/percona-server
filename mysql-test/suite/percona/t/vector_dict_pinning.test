@@ -1,0 +1,63 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # PS-11300: a vector-indexed table is pinned in the dict cache.
+--echo #
+--echo # The HNSW graph hangs off dict_table_t::vec, so LRU eviction would
+--echo # silently discard it, and rebuilding it from the eviction path is
+--echo # not possible (it needs a transaction and a read view, under the
+--echo # dict_sys mutex, while writers mutate the graph). Phase 1 keeps the
+--echo # dict object alive instead. This is a restriction, not the design —
+--echo # see hnsw-design.md for what lifting it needs.
+--echo #
+
+CREATE TABLE plain (id BIGINT UNSIGNED PRIMARY KEY, c INT);
+INSERT INTO plain VALUES (1, 1);
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(4),
+                 VECTOR KEY vk (v) TYPE hnsw WITH (M = 4));
+INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]')),
+                      (2, STRING_TO_VECTOR('[0,1,0,0]'));
+
+--echo # The vector table is non-evictable and explicitly so; a plain table
+--echo # in the same server stays evictable. The pin is what the vector
+--echo # table has and the plain table does not.
+SET SESSION innodb_interpreter = 'vec_table_state test/t1';
+SELECT @@session.innodb_interpreter_output;
+SET SESSION innodb_interpreter = 'vec_table_state test/plain';
+SELECT @@session.innodb_interpreter_output;
+
+--echo #
+--echo # The pin is re-applied on every dict-cache entry, not just at
+--echo # CREATE: after a restart the table is loaded through the DD open
+--echo # path and must come back pinned.
+--echo #
+--source include/restart_mysqld.inc
+
+--echo # Nothing has touched t1 yet — no graph is attached, and the table is
+--echo # not even in the cache. Query it first so it is opened.
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 1;
+SET SESSION innodb_interpreter = 'vec_table_state test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo #
+--echo # A table that loses its vector index is no longer pinned when it
+--echo # next enters the cache: the pin follows the index, not the retained
+--echo # vec_idx_id column (which survives the DROP).
+--echo #
+ALTER TABLE t1 DROP KEY vk;
+--source include/restart_mysqld.inc
+SELECT id FROM t1 ORDER BY id;
+SET SESSION innodb_interpreter = 'vec_table_state test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # And re-adding the index pins it again.
+ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 4);
+--source include/restart_mysqld.inc
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 1;
+SET SESSION innodb_interpreter = 'vec_table_state test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+DROP TABLE t1;
+DROP TABLE plain;
