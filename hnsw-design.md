@@ -6,7 +6,7 @@ This describes the vector index as originally designed: the in-memory graph, the
 auxiliary table that persists it, and how each statement maintains both.
 
 Phase 2 replaced that auxiliary table with an append-only log and a companion `_dead`
-table — see `hnsw-phase2-aux-log.md`. Read this document first; Phase 2 is stated as a
+table — see `vec-hnsw-aux-log.md`. Read this document first; Phase 2 is stated as a
 delta against it.
 
 ---
@@ -408,7 +408,7 @@ Two different things, kept apart on purpose.
 
 A **limitation** is a property of this design. Nothing refuses the operation; it just behaves
 in a way you need to know about. §4.1–§4.5 are limitations. Phase 2
-(`hnsw-phase2-aux-log.md`) addresses the first three; the rest stand.
+(`vec-hnsw-aux-log.md`) addresses the first three; the rest stand.
 
 A **restriction** is an operation deliberately *refused*, because every way of allowing it in
 phase 1 was worse than not offering it. §4.6–§4.8 are restrictions. Each states what is
@@ -549,5 +549,5 @@ INPLACE — that table has no vector index at the time, so the refusal does not 
 
 ---
 
-*Next: `hnsw-phase2-aux-log.md` — why the §3.5 write pattern had to change, and what
+*Next: `vec-hnsw-aux-log.md` — why the §3.5 write pattern had to change, and what
 replaced it.*

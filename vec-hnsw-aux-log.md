@@ -1,6 +1,10 @@
-# HNSW Phase 2 — The Append-Only Aux Log
+# The Append-Only Aux Log — `vec-hnsw-aux-log`
 
 *Why the auxiliary table was rewritten, what it bought, and what is still owed.*
+
+This is the design document for the `vec-hnsw-aux-log` branch. It is a delta against
+`hnsw-design.md`, which describes the one-row-per-node aux the other branch keeps; read that
+first. "Phase 2" below means this branch's work.
 
 Read `hnsw-design.md` first. This is stated as a delta against it, and in particular against
 its §3.4: **one `addPoint` produced one INSERT and M UPDATEs of shared rows, each holding an
