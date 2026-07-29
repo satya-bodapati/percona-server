@@ -215,8 +215,12 @@ TYPE hnsw). Everything type-specific — structure pointers, locking
 discipline, state machine, side maps, memory accounting — lives in the
 subtype, invisible to the rest of the engine. */
 struct Vec_runtime {
-  /** back pointer */
-  dict_table_t *table{nullptr};
+  /* No back pointer to the base table. A runtime is reachable only as
+  dict_table_t::vec, so every caller already holds the table it belongs
+  to; storing it again would be a second copy to keep consistent across
+  RENAME and rebuild, for no reader that could not take a parameter
+  instead. */
+
   /** the type implementation that allocated this runtime; set before
   publication under dict_sys mutex, so teardown can always dispatch
   table->vec->impl->close() without resolving the TYPE again */
