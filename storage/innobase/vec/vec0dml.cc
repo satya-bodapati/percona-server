@@ -32,6 +32,7 @@ DEVIATION FROM FTS rationale (no fts_parse_sql / pars_mutex). */
 #include "vec0dml.h"
 
 #include <algorithm>
+#include <functional>
 #include <limits>
 
 #include "btr0pcur.h"
@@ -372,6 +373,181 @@ dberr_t vec_aux_load_dead_set(dict_table_t *dead, ReadView *view,
   return err;
 }
 
+/** DELETE one aux row by a filled PK search tuple.
+
+Self-positioned upd_node with node->is_delete: a plain row DELETE, so
+reclamation is MVCC + purge, never a status flag. In a regular SQL DELETE
+the preceding row_search_mvcc read positions the cursor and takes the
+locks; we know the PK and skip the search, so we position the cursor and
+take the locks row_upd_clust_step asserts (IX on the table, explicit X on
+the record) ourselves, retrying lock waits through
+row_mysql_handle_errors. Implementation reference: the FK-cascade code,
+row0ins.cc:1153; its run loop touches thr->prebuilt, which we do not
+have — hence the private loop.
+
+This reintroduces the positioning shape that the PK-only-UPDATE commit
+removed, for a different operation: nothing needs in-place UPDATES any
+more, but reclaiming space requires DELETES.
+
+`fill_key` writes the n_key PK fields; the data it points at must outlive
+this call. */
+static dberr_t vec_aux_delete_by_pk(
+    trx_t *trx, dict_table_t *aux, ulint n_key,
+    const std::function<void(dtuple_t *)> &fill_key) {
+  ut_a(trx != nullptr);
+  ut_a(aux != nullptr);
+
+  mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
+  dict_index_t *clust = aux->first_index();
+
+  upd_node_t *node = row_create_update_node_for_mysql(aux, heap);
+
+  dtuple_t *ref = dtuple_create(heap, n_key);
+  dict_index_copy_types(ref, clust, n_key);
+  fill_key(ref);
+
+  que_thr_t *thr = pars_complete_graph_for_exec(node, trx, heap, nullptr);
+
+  auto savept = trx_savept_take(trx);
+
+  que_thr_move_to_run_state_for_mysql(thr, trx);
+
+  mtr_t mtr;
+  mem_heap_t *offset_heap = nullptr;
+  for (;;) {
+    mtr_start(&mtr);
+    node->pcur->open_no_init(clust, ref, PAGE_CUR_LE, BTR_SEARCH_LEAF, 0, &mtr,
+                             UT_LOCATION_HERE);
+    const rec_t *rec = node->pcur->get_rec();
+    if (!page_rec_is_user_rec(rec) ||
+        node->pcur->get_low_match() < dict_index_get_n_unique(clust)) {
+      mtr_commit(&mtr);
+      que_thr_stop_for_mysql_no_error(thr, trx);
+      if (offset_heap != nullptr) {
+        mem_heap_free(offset_heap);
+      }
+      mem_heap_free(heap);
+      return DB_RECORD_NOT_FOUND;
+    }
+
+    dberr_t lerr = lock_table(0, aux, LOCK_IX, thr);
+    if (lerr == DB_SUCCESS) {
+      ulint *offsets = rec_get_offsets(rec, clust, nullptr, ULINT_UNDEFINED,
+                                       UT_LOCATION_HERE, &offset_heap);
+      lerr = lock_clust_rec_read_check_and_lock(
+          lock_duration_t::REGULAR, node->pcur->get_block(), rec, clust,
+          offsets, SELECT_ORDINARY, LOCK_X, LOCK_REC_NOT_GAP, thr);
+      if (lerr == DB_SUCCESS_LOCKED_REC) {
+        lerr = DB_SUCCESS;
+      }
+    }
+
+    if (lerr == DB_SUCCESS) {
+      node->pcur->store_position(&mtr);
+      mtr_commit(&mtr);
+      break;
+    }
+
+    mtr_commit(&mtr);
+    trx->error_state = lerr;
+    que_thr_stop_for_mysql(thr);
+    thr->lock_state = QUE_THR_LOCK_ROW;
+    const bool was_lock_wait =
+        row_mysql_handle_errors(&lerr, trx, thr, &savept);
+    thr->lock_state = QUE_THR_LOCK_NOLOCK;
+    if (!was_lock_wait) {
+      if (offset_heap != nullptr) {
+        mem_heap_free(offset_heap);
+      }
+      mem_heap_free(heap);
+      return lerr;
+    }
+  }
+  if (offset_heap != nullptr) {
+    mem_heap_free(offset_heap);
+  }
+
+  upd_t *update = upd_create(1, heap);
+  update->table = aux;
+  update->n_fields = 0;
+  node->update = update;
+  node->update_n_fields = 0;
+  node->cmpl_info = 0;
+  node->is_delete = true;
+  node->state = UPD_NODE_UPDATE_CLUSTERED;
+
+  dberr_t err;
+  for (;;) {
+    thr->run_node = node;
+    thr->prev_node = node;
+
+    row_upd_step(thr);
+
+    err = trx->error_state;
+    if (err == DB_SUCCESS) {
+      break;
+    }
+
+    que_thr_stop_for_mysql(thr);
+    thr->lock_state = QUE_THR_LOCK_ROW;
+    const bool was_lock_wait = row_mysql_handle_errors(&err, trx, thr, &savept);
+    thr->lock_state = QUE_THR_LOCK_NOLOCK;
+
+    if (!was_lock_wait) {
+      mem_heap_free(heap);
+      return err;
+    }
+  }
+
+  que_thr_stop_for_mysql_no_error(thr, trx);
+  mem_heap_free(heap);
+  return DB_SUCCESS;
+}
+
+/** DELETE the superseded edge-list version rows named by `losers`
+(reload-time collapse). Each entry is a (label, ver) PK.
+
+The purgability rule, with the caveat implementation forced: a version
+row is garbage iff a COMMITTED higher version of the same label exists
+AND the row carries no row_ref. The row_ref clause is not optional — a
+PK-only UPDATE appends an override row whose row_ref is the label's
+current base-row reference, and the loader resolves row_ref as the latest
+visible NON-NULL value. Collapsing such a row because a higher
+neighbors-only version exists would silently revert the label to its
+pre-move reference, pointing the index at a vacated PK. The caller
+excludes them; this function only executes the list.
+
+Delete-marking is MVCC-safe with no extra bookkeeping: a reader whose
+view predates the winning version's commit also predates these marks, so
+it still sees the row it needs; newer readers take the winner and skip
+the marked rows. Purge reclaims the space afterwards.
+@return DB_SUCCESS or the first error (the rest are left to a later
+        reload — collapse is opportunistic, never required) */
+dberr_t vec_aux_collapse_versions(
+    trx_t *trx, dict_table_t *aux,
+    const std::vector<std::pair<uint64_t, uint32_t>> &losers) {
+  ut_a(trx != nullptr);
+  ut_a(aux != nullptr);
+
+  for (const auto &lv : losers) {
+    ut_ad(lv.second > 0); /* birth rows carry identity — never garbage */
+    byte label_buf[8];
+    mach_write_to_8(label_buf, lv.first);
+    byte ver_buf[4];
+    mach_write_to_4(ver_buf, lv.second);
+
+    const dberr_t err = vec_aux_delete_by_pk(trx, aux, 2, [&](dtuple_t *ref) {
+      dfield_set_data(dtuple_get_nth_field(ref, 0), label_buf,
+                      sizeof(label_buf));
+      dfield_set_data(dtuple_get_nth_field(ref, 1), ver_buf, sizeof(ver_buf));
+    });
+    if (err != DB_SUCCESS && err != DB_RECORD_NOT_FOUND) {
+      return err;
+    }
+  }
+  return DB_SUCCESS;
+}
+
 /** Copy one (possibly externally stored) field of an aux clustered-index
 record into a byte vector.
 @return true on success */
@@ -549,7 +725,9 @@ dberr_t vec_base_collect_rows(trx_t *trx, dict_table_t *base,
 dberr_t vec_aux_load_rows(
     dict_table_t *aux, uint32_t dims, std::vector<vec_loaded_row_t> *rows,
     uint64_t *raw_max_id, bool *saw_invisible,
-    std::vector<std::pair<uint64_t, std::string>> *row_refs) {
+    std::vector<std::pair<uint64_t, std::string>> *row_refs,
+    std::vector<std::pair<uint64_t, uint32_t>> *collapsible,
+    uint64_t *n_raw_rows) {
   ut_a(aux != nullptr);
   ut_a(rows != nullptr);
   ut_a(raw_max_id != nullptr);
@@ -558,6 +736,9 @@ dberr_t vec_aux_load_rows(
   rows->clear();
   *raw_max_id = 0;
   *saw_invisible = false;
+  if (n_raw_rows != nullptr) {
+    *n_raw_rows = 0;
+  }
 
   dict_index_t *clust = aux->first_index();
 
@@ -591,6 +772,9 @@ dberr_t vec_aux_load_rows(
     bool active = false;
     bool have_birth = false;
     uint32_t win_ver = 0;
+    /* whether the row that supplied win_ver carried a row_ref — such a
+    row is NOT collapsible (see vec_aux_collapse_versions) */
+    bool win_has_row_ref = false;
     uint64_t level = 0;
     std::vector<float> vec;
     std::string row_ref;
@@ -675,6 +859,13 @@ dberr_t vec_aux_load_rows(
       continue;
     }
 
+    /* Rows still live in the log — births plus every snapshot not yet
+    collapsed. Exposed so tests can observe collapse reclaiming them (the
+    resolved count says nothing about log size). */
+    if (n_raw_rows != nullptr) {
+      ++(*n_raw_rows);
+    }
+
     /* PK = (label, ver), from the visible version (the PK never
     changes, but be exact). */
     ulint id_len;
@@ -692,6 +883,31 @@ dberr_t vec_aux_load_rows(
       acc.label = id;
     }
 
+    /* row_ref: the LATEST VISIBLE non-NULL value wins. The birth row
+    supplies it; a PK-only UPDATE appends an override row carrying a new
+    one. Ascending ver order makes overwrite the whole rule. */
+    bool this_row_has_row_ref = false;
+    {
+      ulint rr_len;
+      const byte *rr =
+          rec_get_nth_field(clust, vrec, voffsets, pos_row_ref, &rr_len);
+      if (rr_len != UNIV_SQL_NULL) {
+        this_row_has_row_ref = true;
+        if (rec_offs_nth_extern(clust, voffsets, pos_row_ref)) {
+          const byte *data;
+          ulint len;
+          if (!vec_aux_copy_field(trx, clust, vrec, voffsets, pos_row_ref,
+                                  row_heap, &data, &len)) {
+            err = DB_CORRUPTION;
+            break;
+          }
+          acc.row_ref.assign(reinterpret_cast<const char *>(data), len);
+        } else {
+          acc.row_ref.assign(reinterpret_cast<const char *>(rr), rr_len);
+        }
+      }
+    }
+
     /* Every visible row of this label carries a neighbors snapshot;
     ascending ver order means plain overwrite keeps the highest one. */
     {
@@ -707,31 +923,16 @@ dberr_t vec_aux_load_rows(
         err = DB_CORRUPTION;
         break;
       }
-      acc.win_ver = ver;
-      acc.neighbors = std::move(neighbors);
-    }
-
-    /* row_ref: the LATEST VISIBLE non-NULL value wins. The birth row
-    supplies it; a PK-only UPDATE appends an override row carrying a new
-    one. Ascending ver order makes overwrite the whole rule. */
-    {
-      ulint rr_len;
-      const byte *rr =
-          rec_get_nth_field(clust, vrec, voffsets, pos_row_ref, &rr_len);
-      if (rr_len != UNIV_SQL_NULL) {
-        if (rec_offs_nth_extern(clust, voffsets, pos_row_ref)) {
-          const byte *data;
-          ulint len;
-          if (!vec_aux_copy_field(trx, clust, vrec, voffsets, pos_row_ref,
-                                  row_heap, &data, &len)) {
-            err = DB_CORRUPTION;
-            break;
-          }
-          acc.row_ref.assign(reinterpret_cast<const char *>(data), len);
-        } else {
-          acc.row_ref.assign(reinterpret_cast<const char *>(rr), rr_len);
-        }
+      /* This row supersedes the previous candidate, which becomes
+      collapsible — unless it carried a row_ref the loader still needs,
+      or is the birth row (identity). */
+      if (collapsible != nullptr && acc.win_ver > 0 && ver > acc.win_ver &&
+          !acc.win_has_row_ref) {
+        collapsible->emplace_back(acc.label, acc.win_ver);
       }
+      acc.win_ver = ver;
+      acc.win_has_row_ref = this_row_has_row_ref;
+      acc.neighbors = std::move(neighbors);
     }
 
     if (ver == 0) {

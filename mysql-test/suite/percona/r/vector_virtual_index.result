@@ -39,7 +39,7 @@ id
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=2 max_id=3 invisible=0 dead=2
+count=2 raw=6 max_id=3 invisible=0 dead=2
 id=1 level=1 ver=2 nb=2:3|
 id=3 level=0 ver=0 nb=2:1
 

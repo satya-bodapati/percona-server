@@ -152,7 +152,16 @@ dberr_t vec_aux_load_dead_set(dict_table_t *dead, ReadView *view,
 dberr_t vec_aux_load_rows(
     dict_table_t *aux, uint32_t dims, std::vector<vec_loaded_row_t> *rows,
     uint64_t *raw_max_id, bool *saw_invisible,
-    std::vector<std::pair<uint64_t, std::string>> *row_refs = nullptr);
+    std::vector<std::pair<uint64_t, std::string>> *row_refs = nullptr,
+    std::vector<std::pair<uint64_t, uint32_t>> *collapsible = nullptr,
+    uint64_t *n_raw_rows = nullptr);
+
+/** DELETE superseded edge-list version rows. See the definition in
+vec0dml.cc for the purgability rule and why rows carrying a row_ref are
+excluded from `losers` by the caller. */
+dberr_t vec_aux_collapse_versions(
+    trx_t *trx, dict_table_t *aux,
+    const std::vector<std::pair<uint64_t, uint32_t>> &losers);
 
 /** Max vec_idx_id over ALL records of the BASE table's clustered index
 (visible or not, delete-marked included — conservative, like the aux
