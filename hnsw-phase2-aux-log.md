@@ -84,6 +84,23 @@ Locking harder cannot fix that last one. It needs an *ordering token* on disk.
 
 ## 3. What it bought
 
+Before the list: two changes landed together here and are worth separating, because only one
+of them needed the log.
+
+**Capture-under-lock is about ordering, and could have shipped in Phase 1.** The fork now
+keeps a per-element `element_versions_` counter and takes both the version and the neighbour
+snapshot *inside* that node's `link_list_locks_` region, at each of the three sites that
+mutate an edge list. That is what gives the disk any way to know which of two writes to the
+same node happened later in memory. It is necessary for fixing P2 — and **not sufficient**:
+capture correctly under the lock, then write with an in-place UPDATE, and the older snapshot
+can still land last and win. Phase 1 could have fixed P2 on its own by adding a `ver` column
+and making the write conditional (`... WHERE id = ? AND ver < ?`), so the stale update matches
+no row. What that would *not* fix is P1, because the UPDATE still takes an X lock held to
+COMMIT.
+
+So: **the fork change buys ordering; the log buys lock-freedom.** They are independent, and
+only the second one required a new aux layout.
+
 **Deadlocks became inexpressible.** Appends use distinct primary keys, so they take page
 latches for microseconds and compatible insert-intention locks. There is no lock held to
 COMMIT for another session to wait on, so no waits-for cycle can form.
@@ -128,56 +145,40 @@ The cost is stated plainly in §5.
 and a silent correctness bug*, and moved complexity out of the concurrent write path into the
 single-threaded loader. Sequential I/O is reachable from this shape but not yet realised.
 
-**Attribution, so the log is not over-credited:** the MVCC simplification in §4 comes mostly
-from *labels-are-versions* plus base-row visibility, which does not depend on how the aux is
-keyed. The log's contribution there is narrower: it makes `_dead` natural (turning the
-tombstone map into a durable table rather than hand-fed RAM state), and it removes the
-write-side locks that made the old plan's prepare-time cache eviction necessary at all.
+**Attribution, so the log is not over-credited:** the MVCC design is the *original*
+design's, not this phase's — see §4.
 
-## 4. How MVCC works now
+## 4. What this changes for MVCC — less than it looks
 
-**Yes — this removed the caches.** The earlier plan versioned *graph nodes*: a shared cache
-holding only latest-committed nodes stamped with `db_trx_id`, a private per-transaction
-cache for uncommitted changes and reconstructed older versions, a three-tier lookup, eviction
-of touched nodes at prepare time under the still-held X locks, undo-chain walks to rebuild
-old node versions, and whole-cache invalidation when a private cache overflowed.
+The MVCC design is **not** a Phase 2 achievement, and earlier drafts of this document
+implied it was. It belongs to the original design and is described there
+(`hnsw-design.md` §3.9): labels are already versions, nodes are already retained, the hidden
+`vec_idx_id` is already versioned by undo, and edges are already hints — so the shared cache,
+the private per-transaction cache, the three-tier lookup, the prepare-time eviction and the
+whole-cache invalidation were never needed. That conclusion required no change to the aux
+table at all.
 
-None of that exists. What replaced it is the observation that the versions were already
-there under a different name:
+Of the two read-side checks that design needs, **check ① — `row.vec_idx_id == candidate
+label` — is implementable on the original layout unchanged.** It is a base-row fetch the read
+path already performs plus one integer comparison.
 
-- a changed vector mints a **fresh label**, so every historical value is a distinct
-  immutable node — that *is* a version;
-- deleted nodes are **marked, not removed**, so history is retained;
-- the base row's hidden `vec_idx_id` is an **ordinary column, versioned by undo** — so the
-  row version a reader sees *names* the label that represents it;
-- edges are **navigation, not data** — the path taken to a candidate never affects what may
-  be returned, so nodes never needed versioning at all.
+Phase 2's contribution is confined to **check ②**, view-gated tombstone inclusion, and it is
+a narrow but real one. For an old reader to return a row deleted after its snapshot it must
+fetch that row, which needs the label's `row_ref`. The original delete is
+`row_ref = NULL` — it destroys precisely that value — and the loader then skips the row, so
+the node is not even a candidate.
 
-So the graph is a versionless candidate generator and InnoDB's existing read view is the
-visibility oracle. Two small read-side checks finish the job:
+`_dead` fixes exactly that, and two details of it matter:
 
-```
-① after fetching the base row:  row.vec_idx_id == candidate label ?
-     one integer compare; rejects a candidate whose row has moved to another label
-② include a dead label in the search iff the reader's view predates its deletion
-     the _dead row's own DB_TRX_ID answers this
-```
+- the log row keeps its `row_ref`, so the value an old reader needs survives the delete;
+- the deletion is a **row of its own**, so its hidden `DB_TRX_ID` is unambiguously the
+  *deleter's* identity. That is not true of an in-place tombstone: a dead node can still have
+  its edge list rewired (see §6), and that later UPDATE would overwrite the row's
+  `DB_TRX_ID`, losing the delete's timestamp.
 
-**One graph in memory, not one per snapshot.** Nothing is ever removed, so the single
-current graph is a *superset* of every snapshot's node set. An old reader wants "today's
-graph, filtered to what my view can see" — and that filter runs per candidate at fetch
-time. Only the *edges* differ from the older reality, and edges decide the search path, not
-what may be returned: worst case a slight recall difference, never a wrong row.
-
-**Reached:** READ COMMITTED and REPEATABLE READ, in full.
-**Not reachable, by design:** SERIALIZABLE on the index path — phantom prevention would
-need predicate locks over "the k nearest neighbours of q", and ℝᵈ has no key order to hang
-gap locks from. The exact path remains available for sessions that need it.
-
-*Status: the two read-side checks are the phase-3 read path. The write side and the loader
-described here are implemented; ① and ② land with it.*
-
----
+So the honest summary is: Phase 2 did not simplify MVCC — the original design already had the
+insight. Phase 2 removed the one obstacle to implementing half of it, and it removed the
+write-side locks that made the cache-eviction machinery look necessary in the first place.
 
 ## 5. Making it sequential
 

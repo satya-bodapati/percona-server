@@ -329,15 +329,67 @@ no longer exists — its inserting transaction rolled back after the blob was ca
 loader drops such edges: the graph stays connected, searches stay correct, and the cost is a
 slightly less well-connected node.
 
+### 3.9 How MVCC works
+
+A vector index has to obey the same isolation rules as any other index: a REPEATABLE READ
+transaction must keep seeing the rows its snapshot is entitled to, including rows another
+session has since changed or deleted, and must not see rows created after it started.
+
+The obvious way to get that — and the way this was first planned — is to version the graph:
+a shared cache holding only latest-committed nodes stamped with `db_trx_id`, a private
+per-transaction cache for a transaction's own uncommitted changes plus older node versions
+rebuilt from undo, a three-tier lookup across them, eviction of touched nodes at prepare
+time, and whole-cache invalidation when a private cache overflows.
+
+**None of that is necessary, because the versions already exist.** Four properties of the
+design above, each present for its own unrelated reason, add up to a multi-version store:
+
+| Property | Why it exists | What it also gives us |
+|---|---|---|
+| fresh label per vector change (§3.2) | counter crash-safety | every historical vector value is a distinct, immutable node — *a version* |
+| nodes marked, never removed (§3.2) | HNSW deletion is unsafe | version history is retained |
+| `vec_idx_id` is an ordinary hidden column | it is the FTS_DOC_ID analogue | it is **versioned by undo**, so the row version a reader sees *names* the label that represents it |
+| edges are navigation, not data | HNSW rewires freely | the path taken to a candidate never affects what may be returned, so nodes never needed versioning |
+
+So the graph is a **versionless candidate generator** and InnoDB's existing read view is the
+visibility oracle. One shared graph serves every snapshot, because nothing is ever removed:
+the current graph is a *superset* of every snapshot's node set, and each reader filters it.
+
+Two read-side checks are all that is required:
+
+```
+① after fetching the base row:   row.vec_idx_id == candidate label ?
+     one integer compare. Rejects a candidate whose row has since moved to
+     a different label — e.g. an UPDATE minted a fresh label and this
+     candidate is the retired one, or vice versa.
+
+② include a deleted label in the search iff the reader's view predates
+   the deletion — so an old reader can still return a row deleted after
+   its snapshot.
+```
+
+Check ① needs nothing from the aux table: it is the base-row fetch the read path (§3.7)
+already performs, plus a comparison. It works on this design as it stands.
+
+Check ② needs something this design cannot yet provide, and it is worth being precise about
+why. To return a row deleted after its snapshot, an old reader must *fetch* that row — which
+means having its `row_ref`. But a delete here is `row_ref = NULL` (§3.6): **the delete
+destroys the exact value the old reader needs**, and the loader skips those rows, so the node
+is not even a candidate. Enabling ② therefore requires changing how a delete is represented —
+keeping `row_ref` and recording the deletion separately, with the deleting transaction's
+identity attached so each reader can judge it. Phase 2 does that with the `_dead` table.
+
+**Isolation reached:** READ COMMITTED and REPEATABLE READ.
+**Not reachable, by design:** SERIALIZABLE on the index path — phantom prevention needs
+predicate locks over "the k nearest neighbours of q", and ℝᵈ has no key order for gap locks
+to hang from. Sessions needing it fall back to the exact path.
+
 ---
 
 ## 4. What this deliberately does not do
 
 - **No on-disk traversal.** Searching from disk is a different algorithm; this design keeps
   the graph resident and uses disk only to reconstruct it.
-- **No SERIALIZABLE on the index path.** Phantom prevention needs predicate locks over "the
-  k nearest neighbours of q", and there is no key order on ℝᵈ to hang gap locks from. READ
-  COMMITTED and REPEATABLE READ work fully; the exact path remains for sessions needing more.
 - **One vector index per table**, and a single-column integer PRIMARY KEY, for now.
 
 ---
