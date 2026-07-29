@@ -9,6 +9,7 @@ v VECTOR(8),
 VECTOR KEY (v) TYPE hnsw WITH (M = 6));
 # Source has its vec aux.
 vec_<SRC>.ibd
+vec_<SRC>_dead.ibd
 CREATE TABLE copy_t LIKE src;
 SHOW CREATE TABLE copy_t;
 Table	Create Table
@@ -20,7 +21,9 @@ copy_t	CREATE TABLE `copy_t` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 # The copy has its own aux .ibd — distinct (TID/IID) from source's.
 vec_hnsw_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>_dead.ibd
 vec_hnsw_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>_dead.ibd
 # Drop the SOURCE first, the COPY must remain functional.
 DROP TABLE src;
 SHOW CREATE TABLE copy_t;
@@ -33,4 +36,5 @@ copy_t	CREATE TABLE `copy_t` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 # Only the copy's aux remains.
 vec_<COPY>.ibd
+vec_<COPY>_dead.ibd
 DROP TABLE copy_t;

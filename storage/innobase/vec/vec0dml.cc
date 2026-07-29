@@ -298,7 +298,7 @@ dberr_t vec_spann_posting_insert(trx_t *trx, dict_table_t *aux,
   return err;
 }
 
-dberr_t vec_spann_dead_insert(trx_t *trx, dict_table_t *aux, uint64_t label) {
+dberr_t vec_aux_dead_insert(trx_t *trx, dict_table_t *aux, uint64_t label) {
   ut_a(trx != nullptr);
   ut_a(aux != nullptr);
 
@@ -522,12 +522,6 @@ static dberr_t vec_aux_update_row_low(trx_t *trx, dict_table_t *aux,
   return DB_SUCCESS;
 }
 
-dberr_t vec_aux_tombstone(trx_t *trx, dict_table_t *aux, uint64_t id) {
-  return vec_aux_update_row_low(trx, aux, id, nullptr, 0,
-                                false /* set_neighbors */,
-                                true /* row_ref_null */, nullptr, 0);
-}
-
 dberr_t vec_aux_update_row_ref(trx_t *trx, dict_table_t *aux, uint64_t id,
                                const byte *row_ref, ulint row_ref_len) {
   ut_a(row_ref != nullptr);
@@ -679,7 +673,7 @@ dberr_t vec_spann_posting_delete(trx_t *trx, dict_table_t *postings,
   });
 }
 
-dberr_t vec_spann_dead_delete(trx_t *trx, dict_table_t *dead, uint64_t label) {
+dberr_t vec_aux_dead_delete(trx_t *trx, dict_table_t *dead, uint64_t label) {
   byte label_buf[8];
   mach_write_to_8(label_buf, label);
   return vec_spann_delete_by_pk(trx, dead, 1, [&](dtuple_t *ref) {
@@ -1183,8 +1177,8 @@ dberr_t vec_spann_scan_list(trx_t *trx, dict_table_t *postings,
   return err;
 }
 
-dberr_t vec_spann_load_dead_set(dict_table_t *dead, ReadView *view,
-                                std::unordered_set<uint64_t> *labels) {
+dberr_t vec_aux_load_dead_set(dict_table_t *dead, ReadView *view,
+                              std::unordered_set<uint64_t> *labels) {
   ut_a(dead != nullptr);
   ut_a(labels != nullptr);
 

@@ -67,4 +67,5 @@ ERROR HY000: The index type nosuch is not supported for vector indexes.
 CREATE TABLE th (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
 VECTOR KEY (v) TYPE hnsw WITH (M = 4));
 vec_hnsw_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>_dead.ibd
 DROP TABLE th;

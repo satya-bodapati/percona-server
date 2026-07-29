@@ -20,6 +20,7 @@ VECTOR KEY (v) TYPE hnsw WITH (M = 6)
 );
 # The aux .ibd exists on disk.
 vec_hnsw_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>_dead.ibd
 # INFORMATION_SCHEMA.TABLES must not surface the vec_*_* aux to users.
 # Same hiding rule the FTS aux gets — proves is_aux() covers vec.
 SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
@@ -33,6 +34,7 @@ SELECT NAME FROM INFORMATION_SCHEMA.INNODB_TABLES
 WHERE NAME LIKE 'test/vec\_%' ESCAPE '\\';
 NAME
 test/vec_hnsw_<TID>_<IID>
+test/vec_hnsw_<TID>_<IID>_dead
 # Restart server. On reload, dd_open_table_one detects the vec_<id>_<id>
 # name pattern and re-sets DICT_TF2_VEC_AUX + parent_id. Without that
 # reconstruction the aux would lose its "aux" identity entirely.
@@ -42,6 +44,7 @@ SELECT NAME FROM INFORMATION_SCHEMA.INNODB_TABLES
 WHERE NAME LIKE 'test/vec\_%' ESCAPE '\\';
 NAME
 test/vec_hnsw_<TID>_<IID>
+test/vec_hnsw_<TID>_<IID>_dead
 # And still hidden from the user-facing view.
 SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
 WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME LIKE 'vec\_%' ESCAPE '\\';

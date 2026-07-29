@@ -627,9 +627,8 @@ static dberr_t vec_spann_dead_set_scoped(dict_table_t *dead,
   trx_t *trx = trx_allocate_for_background();
   trx_start_internal_read_only(trx, UT_LOCATION_HERE);
   ReadView *view = trx_assign_read_view(trx);
-  const dberr_t err = view == nullptr
-                          ? DB_OUT_OF_RESOURCES
-                          : vec_spann_load_dead_set(dead, view, out);
+  const dberr_t err = view == nullptr ? DB_OUT_OF_RESOURCES
+                                      : vec_aux_load_dead_set(dead, view, out);
   trx_commit_for_mysql(trx);
   trx_free_for_background(trx);
   return err;
@@ -1533,7 +1532,7 @@ dberr_t vec_spann_gc(dict_table_t *table, THD *thd) {
   std::unordered_set<uint64_t> gc_dead;
   {
     trx_sys->mvcc->clone_oldest_view(&oldest);
-    err = vec_spann_load_dead_set(dead, &oldest, &gc_dead);
+    err = vec_aux_load_dead_set(dead, &oldest, &gc_dead);
   }
 
   /* ONE discovery scan: garbage-list rows (head unreachable from the
@@ -1616,7 +1615,7 @@ dberr_t vec_spann_gc(dict_table_t *table, THD *thd) {
     passed through the scan above). */
     if (err == DB_SUCCESS) {
       for (const uint64_t label : gc_dead) {
-        const dberr_t derr = vec_spann_dead_delete(trx, dead, label);
+        const dberr_t derr = vec_aux_dead_delete(trx, dead, label);
         if (derr != DB_SUCCESS && derr != DB_RECORD_NOT_FOUND) {
           err = derr;
           break;
@@ -1859,7 +1858,7 @@ dberr_t vec_spann_remove_point(trx_t *trx, dict_table_t *table, THD *thd,
     return DB_TABLE_NOT_FOUND;
   }
 
-  const dberr_t err = vec_spann_dead_insert(trx, dead, label);
+  const dberr_t err = vec_aux_dead_insert(trx, dead, label);
 
   if (err == DB_SUCCESS) {
     rt->dead_appends.fetch_add(1, std::memory_order_relaxed);
@@ -1916,7 +1915,7 @@ dberr_t vec_spann_knn(dict_table_t *table, THD *thd, const float *query,
   MONITOR_INC(MONITOR_VEC_SPANN_SEARCHES);
 
   std::unordered_set<uint64_t> dead_set;
-  dberr_t err = vec_spann_load_dead_set(dead, view, &dead_set);
+  dberr_t err = vec_aux_load_dead_set(dead, view, &dead_set);
 
   rw_lock_s_lock(&rt->latch, UT_LOCATION_HERE);
   if (err == DB_SUCCESS && !rt->loaded) {

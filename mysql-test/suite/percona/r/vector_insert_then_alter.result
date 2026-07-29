@@ -53,6 +53,7 @@ COUNT(*)
 # === Aux .ibd created and POPULATED by the COPY (one graph row
 # === per copied base row, compact ids 1..5) ===
 vec_hnsw_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>_dead.ibd
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output

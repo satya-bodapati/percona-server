@@ -357,7 +357,7 @@ dberr_t vec_spann_insert_point(trx_t *trx, dict_table_t *table, THD *thd,
 
 /** Retire one label (SPANN S4, the DELETE hook and the delete half of
 an UPDATE): one INSERT into _dead on the USER transaction — see
-vec_spann_dead_insert for the visibility/rollback contract. Touches
+vec_aux_dead_insert for the visibility/rollback contract. Touches
 neither the head graph nor the postings; needs no load. */
 dberr_t vec_spann_remove_point(trx_t *trx, dict_table_t *table, THD *thd,
                                uint64_t label);

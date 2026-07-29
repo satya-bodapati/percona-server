@@ -146,14 +146,13 @@ the typed payload (a head's vector bytes for mtype HEAD).
 dberr_t vec_spann_meta_insert(trx_t *trx, dict_table_t *aux, uint8_t mtype,
                               uint64_t id, const byte *mval, ulint mval_len);
 
-/** Insert one label into a spann _dead table (SPANN S4): a DELETE —
-or the delete half of an UPDATE — is exactly this one INSERT on the
-user transaction. The deleter's identity is the row's hidden DB_TRX_ID
-(engine-stamped, undo-protected), so per-reader delete visibility is
-the read-view scan itself and a rollback is pure undo. One dead row
-retires EVERY closure copy of the label at once.
-@return DB_SUCCESS or error */
-dberr_t vec_spann_dead_insert(trx_t *trx, dict_table_t *aux, uint64_t label);
+/** INSERT one label into a _dead table — the shared delete mechanism
+for BOTH index TYPEs (spann postings, hnsw edge log). There is no
+explicit deleter column: the row's hidden DB_TRX_ID is the deleter's
+identity, so a reader's own read view decides whether the delete is
+visible to it. Rollback needs nothing special — undo removes the row.
+@return DB_SUCCESS, or DB_DUPLICATE_KEY if the label is already dead */
+dberr_t vec_aux_dead_insert(trx_t *trx, dict_table_t *aux, uint64_t label);
 
 /** One spann head loaded from _meta: (head label, vector). */
 using vec_spann_head_t = std::pair<std::uint64_t, std::vector<float>>;
@@ -168,13 +167,6 @@ bootstrap shapes); any other width mismatch is DB_CORRUPTION.
 @return DB_SUCCESS or error */
 dberr_t vec_spann_meta_load_heads(dict_table_t *meta, uint32_t dims,
                                   std::vector<vec_spann_head_t> *heads);
-
-/** Tombstone one aux row: set row_ref to SQL NULL, leaving the graph
-geometry (vec/level/neighbors) in place. The node stops being loadable
-(vec_aux_load_rows skips tombstones); a rollback restores row_ref via
-the undo log like any column.
-@return DB_SUCCESS, DB_RECORD_NOT_FOUND if no such id, or error */
-dberr_t vec_aux_tombstone(trx_t *trx, dict_table_t *aux, uint64_t id);
 
 /** Point one aux row's row_ref at a new base-PK image (the base row's
 PRIMARY KEY changed under it; the graph node is untouched).
@@ -216,7 +208,7 @@ prefix head_id — under the CALLER's read view (SPANN S5): the reader's
 MVCC position, not a background snapshot. view == nullptr reads latest
 record versions (no version building). Emits only visible,
 non-delete-marked postings; dead-label filtering is the caller's job
-(vec_spann_load_dead_set under the same view).
+(vec_aux_load_dead_set under the same view).
 @param[in] trx      caller's trx (off-page vector reads)
 @param[in] postings postings aux table (opened by the caller)
 @param[in] head_id  the list to scan
@@ -248,7 +240,7 @@ dberr_t vec_spann_posting_delete(trx_t *trx, dict_table_t *postings,
 /** DELETE one _dead row by PK (label) — the tail end of dead-label
 GC, once every copy of the label is swept.
 @return DB_SUCCESS, DB_RECORD_NOT_FOUND, or error */
-dberr_t vec_spann_dead_delete(trx_t *trx, dict_table_t *dead, uint64_t label);
+dberr_t vec_aux_dead_delete(trx_t *trx, dict_table_t *dead, uint64_t label);
 
 /** Enumerate (head_id, label, row_ref, row_ref_len) of every
 non-delete-marked posting record, latest versions — the L2 GC's single
@@ -276,13 +268,13 @@ dberr_t vec_spann_base_probe(dict_table_t *base, const byte *row_ref,
                              bool *orphan);
 
 /** Collect the dead-label set visible under `view` (nullptr = latest)
-from a spann _dead table. Per-reader delete visibility IS this scan:
-each dead row's own hidden DB_TRX_ID decides whether this reader sees
+from a _dead table — shared by both index TYPEs. Per-reader delete visibility IS
+this scan: each dead row's own hidden DB_TRX_ID decides whether this reader sees
 the delete (design §3) — an old view misses young deletes and keeps
 returning the row, RYOW sees its own uncommitted delete.
 @return DB_SUCCESS or error */
-dberr_t vec_spann_load_dead_set(dict_table_t *dead, ReadView *view,
-                                std::unordered_set<uint64_t> *labels);
+dberr_t vec_aux_load_dead_set(dict_table_t *dead, ReadView *view,
+                              std::unordered_set<uint64_t> *labels);
 
 /** Max vec_idx_id over ALL records of the BASE table's clustered index
 (visible or not, delete-marked included — conservative, like the aux
