@@ -168,12 +168,6 @@ bootstrap shapes); any other width mismatch is DB_CORRUPTION.
 dberr_t vec_spann_meta_load_heads(dict_table_t *meta, uint32_t dims,
                                   std::vector<vec_spann_head_t> *heads);
 
-/** Point one aux row's row_ref at a new base-PK image (the base row's
-PRIMARY KEY changed under it; the graph node is untouched).
-@return DB_SUCCESS, DB_RECORD_NOT_FOUND if no such id, or error */
-dberr_t vec_aux_update_row_ref(trx_t *trx, dict_table_t *aux, uint64_t id,
-                               const byte *row_ref, ulint row_ref_len);
-
 /** Load every visible row of a vector aux table under a fresh read view
 (background transaction), for graph reconstruction.
 @param[in]  aux            aux table
@@ -192,8 +186,16 @@ dberr_t vec_aux_update_row_ref(trx_t *trx, dict_table_t *aux, uint64_t id,
 dberr_t vec_aux_load_rows(
     dict_table_t *aux, uint32_t dims, std::vector<vec_loaded_row_t> *rows,
     uint64_t *raw_max_id, bool *saw_invisible,
-    std::vector<uint64_t> *dead_labels = nullptr,
-    std::vector<std::pair<uint64_t, std::string>> *row_refs = nullptr);
+    std::vector<std::pair<uint64_t, std::string>> *row_refs = nullptr,
+    std::vector<std::pair<uint64_t, uint32_t>> *collapsible = nullptr,
+    uint64_t *n_raw_rows = nullptr);
+
+/** DELETE superseded edge-list version rows (H1-4). See the definition
+in vec0dml.cc for the purgability rule and why rows carrying a row_ref
+are excluded from `losers` by the caller. */
+dberr_t vec_aux_collapse_versions(
+    trx_t *trx, dict_table_t *aux,
+    const std::vector<std::pair<uint64_t, uint32_t>> &losers);
 
 class ReadView;
 
@@ -224,8 +226,8 @@ dberr_t vec_spann_scan_list(trx_t *trx, dict_table_t *postings,
 /** DELETE one _meta row by PK (mtype, id) — head retirement (phase
 L): a plain row delete on the maintenance transaction, so old readers
 keep seeing the head via MVCC and purge reclaims it (never a status
-flag). Positioned upd_node with is_delete, same locking discipline as
-vec_aux_update_row_low.
+flag). Positioned upd_node with is_delete — locking discipline is
+documented on vec_spann_delete_by_pk (vec0dml.cc).
 @return DB_SUCCESS, DB_RECORD_NOT_FOUND if no such row, or error */
 dberr_t vec_spann_meta_delete(trx_t *trx, dict_table_t *meta, uint8_t mtype,
                               uint64_t id);

@@ -911,8 +911,36 @@ static dberr_t vec_load_locked(vec_t *vec, THD *thd) {
   uint64_t raw_max_id = 0;
   bool saw_invisible = false;
   std::vector<std::pair<uint64_t, std::string>> row_refs;
+  std::vector<std::pair<uint64_t, uint32_t>> collapsible;
   dberr_t err = vec_aux_load_rows(aux, vec->dims, &rows, &raw_max_id,
-                                  &saw_invisible, nullptr, &row_refs);
+                                  &saw_invisible, &row_refs, &collapsible);
+
+  /* H1-4, reload-time collapse: the scan above already identified every
+  superseded version row, so reclaiming them costs one pass over a list
+  we are holding — no background thread, no second scan. Done on a
+  system transaction: a single actor taking no user locks, so it cannot
+  reintroduce the write-side contention the log removed. Skipped when
+  the scan saw rows it could not resolve (saw_invisible): concurrent
+  writers may still be mid-commit, and a reload that could not see the
+  whole picture should not be the one deciding what is garbage.
+
+  Failure here is deliberately ignored: collapse is opportunistic and
+  the next reload will find the same rows still collapsible. */
+  if (err == DB_SUCCESS && !collapsible.empty() && !saw_invisible) {
+    trx_t *ctrx = trx_allocate_for_background();
+    trx_start_internal(ctrx, UT_LOCATION_HERE);
+    const dberr_t cerr = vec_aux_collapse_versions(ctrx, aux, collapsible);
+    if (cerr == DB_SUCCESS) {
+      trx_commit_for_mysql(ctrx);
+    } else {
+      trx_rollback_for_mysql(ctrx);
+      ib::info() << "vec_load: version collapse deferred for "
+                 << table->name.m_name << " (" << collapsible.size()
+                 << " rows, err=" << static_cast<int>(cerr) << ")";
+    }
+    trx_free_for_background(ctrx);
+  }
+
   vec_aux_close_for_dml(aux, thd, &mdl);
   if (err != DB_SUCCESS) {
     return err;
@@ -1236,7 +1264,58 @@ dberr_t vec_refresh_row_ref(trx_t *trx, dict_table_t *table, THD *thd,
 
   const undo_no_t undo_mark = trx->undo_no;
 
-  dberr_t err = vec_aux_update_row_ref(trx, aux, label, row_ref, row_ref_len);
+  /* H1-3: repointing a node at a moved base row is an APPEND, not an
+  update. The override row carries the new row_ref plus the node's
+  CURRENT neighbors snapshot (keeping the log's neighbors-NOT-NULL
+  invariant), and its version is assigned under the node's link lock so
+  it is ordered against any concurrent rewire of the same node. The
+  loader then takes the latest visible non-NULL row_ref per label.
+
+  An old reader is served for free: it cannot see this row, so it
+  resolves the pre-move row_ref and fetches the base-row version its
+  own snapshot still holds. */
+  dberr_t err = DB_SUCCESS;
+  rw_lock_s_lock(&vec->latch, UT_LOCATION_HERE);
+  if (vec->stale.load() || !vec->loaded) {
+    rw_lock_s_unlock(&vec->latch);
+    err = vec_load(table, thd);
+    if (err != DB_SUCCESS) {
+      vec_aux_close_for_dml(aux, thd, &mdl);
+      return err;
+    }
+    rw_lock_s_lock(&vec->latch, UT_LOCATION_HERE);
+  }
+
+  try {
+    const auto cap = vec->hnsw->captureNodeStateByLabel(label);
+
+    std::vector<std::vector<std::size_t>> nbl;
+    nbl.reserve(cap.neighbors_by_level.size());
+    for (const auto &lvl : cap.neighbors_by_level) {
+      nbl.emplace_back(lvl.begin(), lvl.end());
+    }
+    std::vector<byte> blob;
+    vec_aux_serialize_neighbors(nbl, blob);
+
+    vec_aux_row_t vrow;
+    vrow.id = label;
+    vrow.ver = cap.version;
+    vrow.vec = nullptr;
+    vrow.dims = 0;
+    vrow.row_ref = row_ref;
+    vrow.row_ref_len = row_ref_len;
+    vrow.level = 0;
+    vrow.neighbors = blob.data();
+    vrow.neighbors_len = blob.size();
+
+    err = vec_aux_insert(trx, aux, vrow);
+  } catch (...) {
+    /* Label not in the graph (a reload dropped it, or it was never
+    loaded). Nothing to repoint on disk: the next load rebuilds the map
+    from whatever the log's visible rows say. */
+    err = DB_SUCCESS;
+  }
+  rw_lock_s_unlock(&vec->latch);
 
   if (err == DB_SUCCESS) {
     /* Repoint the in-memory map entry. The undo log restores the aux

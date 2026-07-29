@@ -25,7 +25,7 @@ PASS: inserted id=3
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=3 max_id=3 invisible=0
+count=3 raw=3 max_id=3 invisible=0
 id=1 level=0 ver=0 nb=
 id=2 level=1 ver=0 nb=1|1
 id=3 level=0 ver=0 nb=1:2
@@ -43,7 +43,7 @@ PASS: appended id=1 ver=1
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=3 max_id=3 invisible=0
+count=3 raw=4 max_id=3 invisible=0
 id=1 level=0 ver=1 nb=2:3
 id=2 level=1 ver=0 nb=1|1
 id=3 level=0 ver=0 nb=1:2
@@ -63,7 +63,7 @@ PASS: appended id=1 ver=2
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=3 max_id=3 invisible=0
+count=3 raw=6 max_id=3 invisible=0
 id=1 level=0 ver=3 nb=3
 id=2 level=1 ver=0 nb=1|1
 id=3 level=0 ver=0 nb=1:2
@@ -82,7 +82,7 @@ PASS: appended id=42 ver=1
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=3 max_id=42 invisible=0
+count=3 raw=7 max_id=42 invisible=0
 id=1 level=0 ver=3 nb=3
 id=2 level=1 ver=0 nb=1|1
 id=3 level=0 ver=0 nb=1:2
@@ -92,7 +92,7 @@ id=3 level=0 ver=0 nb=1:2
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=3 max_id=42 invisible=0
+count=3 raw=7 max_id=42 invisible=0
 id=1 level=0 ver=3 nb=3
 id=2 level=1 ver=0 nb=1|1
 id=3 level=0 ver=0 nb=1:2
@@ -111,7 +111,7 @@ PASS: inserted id=7
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t2';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=1 max_id=7 invisible=0
+count=1 raw=1 max_id=7 invisible=0
 id=7 level=0 ver=0 nb=
 
 DROP TABLE t2;

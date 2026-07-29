@@ -1,0 +1,73 @@
+--source include/have_debug.inc
+--source include/have_innodb_16k.inc
+
+--echo #
+--echo # PS-11300 H1-4: reload-time collapse of superseded version rows.
+--echo #
+--echo # The append-only log grows with MUTATIONS, not nodes: every insert
+--echo # appends one edge-list snapshot per rewired neighbour. Those
+--echo # snapshots are garbage as soon as a committed higher version of the
+--echo # same label exists, so the loader — which already resolves the
+--echo # winning version per label during its scan — delete-marks the losers
+--echo # on a system transaction. No background thread is involved.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4),
+                 VECTOR KEY (v) TYPE hnsw WITH (M = 4));
+
+--echo # Enough inserts that early nodes are rewired several times each,
+--echo # so the log holds many superseded snapshots.
+INSERT INTO t1 VALUES
+  (1, STRING_TO_VECTOR('[1,0,0,0]')), (2, STRING_TO_VECTOR('[0,1,0,0]')),
+  (3, STRING_TO_VECTOR('[0,0,1,0]')), (4, STRING_TO_VECTOR('[0,0,0,1]')),
+  (5, STRING_TO_VECTOR('[1,1,0,0]')), (6, STRING_TO_VECTOR('[0,1,1,0]')),
+  (7, STRING_TO_VECTOR('[0,0,1,1]')), (8, STRING_TO_VECTOR('[1,0,0,1]'));
+
+--echo # The dump reports both numbers that matter: count= is the
+--echo # resolved node count, raw= is how many rows the log actually
+--echo # holds. Before any reload raw= is much larger — births plus every
+--echo # snapshot ever appended.
+--echo # The resolved graph, as the loader reconstructs it.
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # A restart forces a reload, which resolves the log AND collapses
+--echo # what it proved superseded. The resolved graph must be identical
+--echo # afterwards — collapse removes only rows nobody can still need.
+--source include/restart_mysqld.inc
+--echo # NOTE: the collapse runs inside the graph load, so the table must
+--echo # actually be OPENED before the log is inspected — dumping the aux
+--echo # directly would report the pre-collapse log and prove nothing.
+SELECT id FROM t1
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 1;
+--echo # raw= must now be smaller: births + one winning snapshot per
+--echo # rewired label, with every superseded snapshot delete-marked.
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # A second reload finds nothing left to collapse (idempotent), and
+--echo # kNN still answers from the collapsed log.
+--source include/restart_mysqld.inc
+SELECT id FROM t1
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 3;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # A PK-only UPDATE's override row must SURVIVE collapse: it carries
+--echo # the label's current base-row reference, and the loader takes the
+--echo # latest visible non-NULL row_ref. Collapsing it because a later
+--echo # neighbours-only version exists would revert the label to its
+--echo # pre-move reference and point the index at a vacated PK.
+UPDATE t1 SET id = 100 WHERE id = 1;
+--echo # More inserts, so label 1 is rewired again AFTER the override row —
+--echo # this is exactly the case a naive purgability rule gets wrong.
+INSERT INTO t1 VALUES (9, STRING_TO_VECTOR('[1,0,0,0]')),
+                      (10, STRING_TO_VECTOR('[1,0,0,0]'));
+--source include/restart_mysqld.inc
+--echo # The moved row must still be reachable through the index at its
+--echo # NEW pk after the collapse pass (this query also triggers the
+--echo # load, hence the collapse, for the override-row case).
+SELECT id FROM t1
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 3;
+
+DROP TABLE t1;

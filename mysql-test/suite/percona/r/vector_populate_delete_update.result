@@ -16,7 +16,7 @@ INSERT INTO t1 VALUES (100, STRING_TO_VECTOR('[1,0,0,0]')),
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=3 max_id=3 invisible=0
+count=3 raw=6 max_id=3 invisible=0
 id=1 level=1 ver=2 nb=2:3|
 id=2 level=0 ver=1 nb=1:3
 id=3 level=0 ver=0 nb=1:2
@@ -33,7 +33,7 @@ id
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=2 max_id=3 invisible=0 dead=2
+count=2 raw=6 max_id=3 invisible=0 dead=2
 id=1 level=1 ver=2 nb=2:3|
 id=3 level=0 ver=0 nb=1:2
 
@@ -50,7 +50,7 @@ id
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=2 max_id=3 invisible=0 dead=2
+count=2 raw=6 max_id=3 invisible=0 dead=2
 id=1 level=1 ver=2 nb=2:3|
 id=3 level=0 ver=0 nb=1:2
 
@@ -60,7 +60,7 @@ UPDATE t1 SET v = STRING_TO_VECTOR('[0,0,0.9,0.1]') WHERE id = 102;
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=2 max_id=5 invisible=0 dead=2:3
+count=2 raw=8 max_id=5 invisible=0 dead=2:3
 id=1 level=1 ver=3 nb=2:3:5|
 id=5 level=0 ver=0 nb=1
 
@@ -71,7 +71,7 @@ UPDATE t1 SET v = STRING_TO_VECTOR('[0.7,0.7,0,0]') WHERE id = 103;
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=3 max_id=6 invisible=0 dead=2:3
+count=3 raw=11 max_id=6 invisible=0 dead=2:3
 id=1 level=1 ver=4 nb=2:3:5:6|
 id=5 level=0 ver=1 nb=1:6
 id=6 level=0 ver=0 nb=5:1
@@ -81,7 +81,7 @@ UPDATE t1 SET v = NULL WHERE id = 103;
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=2 max_id=6 invisible=0 dead=2:3:6
+count=2 raw=11 max_id=6 invisible=0 dead=2:3:6
 id=1 level=1 ver=4 nb=2:3:5:6|
 id=5 level=0 ver=1 nb=1:6
 
@@ -91,13 +91,15 @@ UPDATE t1 SET k = 7 WHERE id = 100;
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=2 max_id=2 invisible=0
+count=2 raw=3 max_id=2 invisible=0
 id=1 level=1 ver=1 nb=2|
 id=2 level=0 ver=0 nb=1
 
-# PK-only UPDATE: same label, row_ref repointed (not visible in
-# the dump, but the statement must succeed and the graph must not
-# churn — same ids before and after).
+# PK-only UPDATE (H1-3): the label and its vector are unchanged,
+# so the node is NOT re-inserted — instead an override row is
+# APPENDED carrying the new row_ref, and the dump shows that
+# label's ver bump. The loader takes the latest visible non-NULL
+# row_ref, so nothing points at the vacated PK.
 UPDATE t1 SET id = 90 WHERE id = 100;
 SELECT id FROM t1 ORDER BY id;
 id
@@ -107,10 +109,38 @@ id
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=2 max_id=2 invisible=0
-id=1 level=1 ver=1 nb=2|
+count=2 raw=4 max_id=2 invisible=0
+id=1 level=1 ver=2 nb=2|
 id=2 level=0 ver=0 nb=1
 
+# The repointing must survive a reload — this is what the
+# override row exists for. After a restart the graph is rebuilt
+# from the log alone, and a kNN hit on the moved node must fetch
+# the NEW pk (90). If the loader took the birth row's row_ref
+# instead, this search would return nothing (or the wrong row).
+# restart
+SELECT id FROM t1
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0.9,0.1,0,0]'), 'EUCLIDEAN')
+LIMIT 1;
+id
+90
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+count=2 raw=3 max_id=2 invisible=0
+id=1 level=1 ver=2 nb=2|
+id=2 level=0 ver=0 nb=1
+
+# And a rolled-back PK-only UPDATE leaves no trace: undo removes
+# the override row, so the label resolves to its pre-move ref.
+BEGIN;
+UPDATE t1 SET id = 91 WHERE id = 90;
+ROLLBACK;
+SELECT id FROM t1 ORDER BY id;
+id
+90
+102
+103
 # ROLLBACK of a vector UPDATE: both halves invert — the fresh
 # label vanishes, the old label comes back to life.
 BEGIN;
@@ -119,8 +149,8 @@ ROLLBACK;
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=2 max_id=2 invisible=0
-id=1 level=1 ver=1 nb=2|
+count=2 raw=3 max_id=2 invisible=0
+id=1 level=1 ver=2 nb=2|
 id=2 level=0 ver=0 nb=1
 
 #
@@ -137,16 +167,16 @@ id
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=2 max_id=2 invisible=0
-id=1 level=1 ver=1 nb=2|
+count=2 raw=3 max_id=2 invisible=0
+id=1 level=1 ver=2 nb=2|
 id=2 level=0 ver=0 nb=1
 
 INSERT INTO t1 VALUES (104, STRING_TO_VECTOR('[0.3,0.3,0.3,0.3]'), 0);
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=3 max_id=5 invisible=0
-id=1 level=1 ver=3 nb=2:5|5
+count=3 raw=7 max_id=5 invisible=0
+id=1 level=1 ver=4 nb=2:5|5
 id=2 level=0 ver=1 nb=1:5
 id=5 level=1 ver=0 nb=1:2|1
 
@@ -172,8 +202,8 @@ id
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
-count=5 max_id=8 invisible=0
-id=1 level=1 ver=5 nb=2:5:7|5:7
+count=5 raw=14 max_id=8 invisible=0
+id=1 level=1 ver=6 nb=2:5:7|5:7
 id=2 level=0 ver=2 nb=1:5:7
 id=5 level=1 ver=3 nb=1:2:7:8|1:7
 id=7 level=1 ver=0 nb=1:2:5|1:5

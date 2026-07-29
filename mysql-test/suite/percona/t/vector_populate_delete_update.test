@@ -61,13 +61,34 @@ UPDATE t1 SET k = 7 WHERE id = 100;
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
 
---echo # PK-only UPDATE: same label, row_ref repointed (not visible in
---echo # the dump, but the statement must succeed and the graph must not
---echo # churn — same ids before and after).
+--echo # PK-only UPDATE (H1-3): the label and its vector are unchanged,
+--echo # so the node is NOT re-inserted — instead an override row is
+--echo # APPENDED carrying the new row_ref, and the dump shows that
+--echo # label's ver bump. The loader takes the latest visible non-NULL
+--echo # row_ref, so nothing points at the vacated PK.
 UPDATE t1 SET id = 90 WHERE id = 100;
 SELECT id FROM t1 ORDER BY id;
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
 SELECT @@session.innodb_interpreter_output;
+
+--echo # The repointing must survive a reload — this is what the
+--echo # override row exists for. After a restart the graph is rebuilt
+--echo # from the log alone, and a kNN hit on the moved node must fetch
+--echo # the NEW pk (90). If the loader took the birth row's row_ref
+--echo # instead, this search would return nothing (or the wrong row).
+--source include/restart_mysqld.inc
+SELECT id FROM t1
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0.9,0.1,0,0]'), 'EUCLIDEAN')
+  LIMIT 1;
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # And a rolled-back PK-only UPDATE leaves no trace: undo removes
+--echo # the override row, so the label resolves to its pre-move ref.
+BEGIN;
+UPDATE t1 SET id = 91 WHERE id = 90;
+ROLLBACK;
+SELECT id FROM t1 ORDER BY id;
 
 --echo # ROLLBACK of a vector UPDATE: both halves invert — the fresh
 --echo # label vanishes, the old label comes back to life.
