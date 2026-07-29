@@ -116,7 +116,7 @@ bool parse_options(const Key_spec &index_def, VectorIndexParam &vip) {
     return true;
   }
 
-  /* SPANN R3: TYPE existence is decided by the registry — rejecting an
+  /* TYPE existence is decided by the registry — rejecting an
   unknown TYPE here at CREATE/ALTER is what lets every later engine
   path assume vec_index_by_name() succeeds. */
   if (vec_index_by_name(index_def.key_create_info.vector_index_type.str,

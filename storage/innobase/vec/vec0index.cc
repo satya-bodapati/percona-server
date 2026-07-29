@@ -26,7 +26,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 *****************************************************************************/
 
 /** @file vec/vec0index.cc
-The HNSW implementation of the Vector_index seam (SPANN plan, R1):
+The HNSW implementation of the Vector_index seam:
 a stateless forwarding shim over the vec0aux free functions. All
 per-index state stays in dict_table_t::vec; rollback tracking stays
 INSIDE vec_insert_point / vec_delete_point — an implementation detail
@@ -98,9 +98,9 @@ class Vec_hnsw_index final : public Vector_index {
 
 const Vec_hnsw_index vec_hnsw_singleton;
 
-/** The TYPE registry (SPANN R3), indexed by Vec_index_type. Adding an
-index TYPE = one enum value + one row here (S1 adds
-{"spann", &vec_spann_singleton}). */
+/** The TYPE registry, indexed by Vec_index_type. Adding an
+index TYPE = one enum value + one row here, e.g.
+{"spann", &vec_spann_singleton} for a future TYPE. */
 struct Vec_type_entry {
   const char *token;
   const Vector_index *impl;

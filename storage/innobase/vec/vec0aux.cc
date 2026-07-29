@@ -143,7 +143,7 @@ bool vec_aux_parse_table_name(const char *name, table_id_t *parent_id_out,
       after_db + strlen(VEC_AUX_PREFIX);  // "<type>_<parent_id>_<index_id>"
 
   /* The type token runs to the next '_' and must resolve in the
-  registry (SPANN R4) — an unknown token means "reserved vec_ name
+  registry — an unknown token means "reserved vec_ name
   that is not an aux table". */
   const char *token_end = strchr(token, '_');
   if (token_end == nullptr || token_end == token) return false;
@@ -622,7 +622,7 @@ unsigned long long vec_hnsw_max_memory;
 uint64_t vec_total_memory() { return vec_mem_total.load(); }
 
 /** The hnsw runtime of `table`, or nullptr. This file allocated it
-(vec_open), so this file alone may interpret the subtype (SPANN R2). */
+(vec_open), so this file alone may interpret the subtype. */
 static inline vec_t *vec_hnsw(const dict_table_t *table) {
   return static_cast<vec_t *>(table->vec);
 }

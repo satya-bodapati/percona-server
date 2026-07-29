@@ -2513,7 +2513,7 @@ detect this and will eventually quit sooner. */
   above. The base type carries only the index's SQL-facing identity
   (index_id, field_no, dims) plus the owning type implementation;
   the concrete subtype (vec_t for TYPE hnsw) is interpreted ONLY by
-  the Vector_index implementation that allocated it (SPANN R2).
+  the Vector_index implementation that allocated it.
   DEVIATION FROM FTS: created LAZILY at first table open (fts_t is
   created eagerly in dict_mem_table_create) — a table that is never
   opened never pays for a runtime. Freed beside fts_free in
