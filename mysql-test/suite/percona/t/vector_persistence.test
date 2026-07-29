@@ -174,8 +174,8 @@ CREATE TABLE t_disc (
 );
 --error ER_NOT_ALLOWED_COMMAND
 ALTER TABLE t_disc DISCARD TABLESPACE;
---echo # Refused, so both .ibd files are still here.
---replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+\.ibd/vec_hnsw_<TID>_<IID>.ibd/
+--echo # Refused, so the aux files are all still here.
+--replace_regex /vec_hnsw_[0-9a-f]+_[0-9a-f]+/vec_hnsw_<TID>_<IID>/
 --list_files $MYSQLD_DATADIR/test vec_*.ibd
 DROP TABLE t_disc;
 

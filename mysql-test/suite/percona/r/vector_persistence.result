@@ -155,7 +155,8 @@ VECTOR KEY (v1) TYPE hnsw
 );
 ALTER TABLE t_disc DISCARD TABLESPACE;
 ERROR 42000: InnoDB: Cannot discard table `test/t_disc` because it has a vector index. DISCARD/IMPORT TABLESPACE is not yet supported for tables with vector indexes.
-# Refused, so both .ibd files are still here.
+# Refused, so the aux files are all still here.
 vec_hnsw_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>_dead.ibd
 DROP TABLE t_disc;
 # After DROP TABLE the aux .ibd files must be gone too — no orphans.

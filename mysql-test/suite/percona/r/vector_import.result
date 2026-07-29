@@ -29,6 +29,7 @@ id
 101
 102
 vec_hnsw_<TID>_<IID>.ibd
+vec_hnsw_<TID>_<IID>_dead.ibd
 SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
 id
 100
