@@ -1,0 +1,100 @@
+#
+# PS-11300: redefining an existing vector index in a single ALTER.
+#
+# `DROP KEY k, ADD VECTOR KEY k ...` does not reach the engine as a
+# drop followed by an add: fill_alter_inplace_info matches keys by
+# NAME, so both halves collapse into one key that is either
+# "modified" or "unchanged". has_index_def_changed() decides which,
+# and it used to compare only algorithm/flags/comment — so a changed
+# TYPE or WITH() compared as UNCHANGED and the entire statement was
+# skipped while reporting success.
+#
+# It now compares both, and the redefinition is served by COPY.
+#
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(4),
+VECTOR KEY vk (v) TYPE hnsw WITH (M = 4));
+INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]')),
+(2, STRING_TO_VECTOR('[0,1,0,0]'));
+# The regression: this must actually change M to 8, not silently
+# leave it at 4.
+ALTER TABLE t1 DROP KEY vk, ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 8);
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` bigint unsigned NOT NULL,
+  `v` vector(4) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `vk` (`v`) TYPE `hnsw` WITH (`M`=8)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+# ...and the rebuilt index must work, with every row in it.
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+id
+1
+2
+# An explicit ALGORITHM=INPLACE is refused rather than silently
+# doing nothing: INPLACE cannot build the new aux while the old one
+# still occupies a name keyed by the same (table_id, index_id).
+ALTER TABLE t1 DROP KEY vk, ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 16),
+ALGORITHM=INPLACE;
+ERROR 0A000: ALGORITHM=INPLACE is not supported. Reason: InnoDB does not support rebuilding a table with a vector index in-place; the vector index contents cannot be carried across a native rebuild. Try ALGORITHM=COPY.
+# Refused, so M is still 8.
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` bigint unsigned NOT NULL,
+  `v` vector(4) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `vk` (`v`) TYPE `hnsw` WITH (`M`=8)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+# ALGORITHM=COPY spelled out works, as does the default.
+ALTER TABLE t1 DROP KEY vk, ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 16),
+ALGORITHM=COPY;
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` bigint unsigned NOT NULL,
+  `v` vector(4) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `vk` (`v`) TYPE `hnsw` WITH (`M`=16)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,1,0,0]'), 'EUCLIDEAN') LIMIT 1;
+id
+2
+# Re-specifying an IDENTICAL definition is still a no-op, and must
+# not force a needless rebuild: same TABLE_ID before and after.
+SELECT TABLE_ID INTO @tid FROM information_schema.INNODB_TABLES
+WHERE NAME = 'test/t1';
+ALTER TABLE t1 DROP KEY vk, ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 16);
+SELECT TABLE_ID = @tid AS same_table_id
+FROM information_schema.INNODB_TABLES WHERE NAME = 'test/t1';
+same_table_id
+1
+# TYPE spelled in a different case is the same type — also no rebuild.
+ALTER TABLE t1 DROP KEY vk, ADD VECTOR KEY vk (v) TYPE HNSW WITH (M = 16);
+SELECT TABLE_ID = @tid AS same_table_id
+FROM information_schema.INNODB_TABLES WHERE NAME = 'test/t1';
+same_table_id
+1
+#
+# The two-statement form is unaffected and remains the way to change
+# a vector index's TYPE: DROP, then ADD. A TYPE change cannot be
+# exercised here because hnsw is the only registered type; when a
+# second one lands, the comparison above is what makes the change
+# visible instead of silently discarded.
+#
+ALTER TABLE t1 DROP KEY vk;
+ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 32);
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` bigint unsigned NOT NULL,
+  `v` vector(4) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  VECTOR KEY `vk` (`v`) TYPE `hnsw` WITH (`M`=32)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+id
+1
+2
+DROP TABLE t1;

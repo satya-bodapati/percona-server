@@ -13127,6 +13127,47 @@ static bool has_index_def_changed(Alter_inplace_info *ha_alter_info,
     return true;
 
   /*
+    A vector key carries two attributes that live outside `algorithm` and
+    the key flags: its TYPE and its WITH() construction parameters. Both
+    define the index structure, so a difference in either is a changed
+    index. Without this, DROP KEY k + ADD VECTOR KEY k in a single ALTER
+    compares as unchanged and the whole statement is skipped: the new
+    TYPE and WITH() are silently discarded while the statement reports
+    success. The same change written as two statements applies normally,
+    which is how the discrepancy shows up (PS-11300).
+
+    Guarded on HA_VECTOR because these two members are only populated
+    for vector keys — a KEY built for a table loaded from the DD leaves
+    them untouched otherwise — so reading them unconditionally yields a
+    spurious "changed" verdict on unrelated indexes, which InnoDB then
+    tries to rebuild (it asserts 0 < n_unique_in_tree). Both keys agree
+    on HA_VECTOR here: a difference in the key flags already returned
+    above.
+  */
+  if ((table_key->flags & HA_VECTOR) && (new_key->flags & HA_VECTOR)) {
+    /* TYPE is a case-insensitive identifier, so differing case is the
+       same index and must not force a rebuild. */
+    const LEX_CSTRING &old_type = table_key->vector_index_type;
+    const LEX_CSTRING &new_type = new_key->vector_index_type;
+    if (old_type.str != nullptr && new_type.str != nullptr) {
+      if (old_type.length != new_type.length ||
+          (old_type.length != 0 &&
+           native_strncasecmp(old_type.str, new_type.str, old_type.length) !=
+               0))
+        return true;
+    }
+
+    const LEX_CSTRING &old_with = table_key->vector_construction_params;
+    const LEX_CSTRING &new_with = new_key->vector_construction_params;
+    if (old_with.str != nullptr && new_with.str != nullptr) {
+      if (old_with.length != new_with.length ||
+          (old_with.length != 0 &&
+           strncmp(old_with.str, new_with.str, old_with.length) != 0))
+        return true;
+    }
+  }
+
+  /*
     If an index comment is added/dropped/changed, then mark it for a
     fast/INPLACE alteration.
   */
