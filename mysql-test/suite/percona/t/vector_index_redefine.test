@@ -1,0 +1,69 @@
+--echo #
+--echo # PS-11300: redefining an existing vector index in a single ALTER.
+--echo #
+--echo # `DROP KEY k, ADD VECTOR KEY k ...` does not reach the engine as a
+--echo # drop followed by an add: fill_alter_inplace_info matches keys by
+--echo # NAME, so both halves collapse into one key that is either
+--echo # "modified" or "unchanged". has_index_def_changed() decides which,
+--echo # and it used to compare only algorithm/flags/comment — so a changed
+--echo # TYPE or WITH() compared as UNCHANGED and the entire statement was
+--echo # skipped while reporting success.
+--echo #
+--echo # It now compares both, and the redefinition is served by COPY.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(4),
+                 VECTOR KEY vk (v) TYPE hnsw WITH (M = 4));
+INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]')),
+                      (2, STRING_TO_VECTOR('[0,1,0,0]'));
+
+--echo # The regression: this must actually change M to 8, not silently
+--echo # leave it at 4.
+ALTER TABLE t1 DROP KEY vk, ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 8);
+SHOW CREATE TABLE t1;
+
+--echo # ...and the rebuilt index must work, with every row in it.
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+
+--echo # An explicit ALGORITHM=INPLACE is refused rather than silently
+--echo # doing nothing: INPLACE cannot build the new aux while the old one
+--echo # still occupies a name keyed by the same (table_id, index_id).
+--error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
+ALTER TABLE t1 DROP KEY vk, ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 16),
+  ALGORITHM=INPLACE;
+--echo # Refused, so M is still 8.
+SHOW CREATE TABLE t1;
+
+--echo # ALGORITHM=COPY spelled out works, as does the default.
+ALTER TABLE t1 DROP KEY vk, ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 16),
+  ALGORITHM=COPY;
+SHOW CREATE TABLE t1;
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,1,0,0]'), 'EUCLIDEAN') LIMIT 1;
+
+--echo # Re-specifying an IDENTICAL definition is still a no-op, and must
+--echo # not force a needless rebuild: same TABLE_ID before and after.
+SELECT TABLE_ID INTO @tid FROM information_schema.INNODB_TABLES
+  WHERE NAME = 'test/t1';
+ALTER TABLE t1 DROP KEY vk, ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 16);
+SELECT TABLE_ID = @tid AS same_table_id
+  FROM information_schema.INNODB_TABLES WHERE NAME = 'test/t1';
+
+--echo # TYPE spelled in a different case is the same type — also no rebuild.
+ALTER TABLE t1 DROP KEY vk, ADD VECTOR KEY vk (v) TYPE HNSW WITH (M = 16);
+SELECT TABLE_ID = @tid AS same_table_id
+  FROM information_schema.INNODB_TABLES WHERE NAME = 'test/t1';
+
+--echo #
+--echo # The two-statement form is unaffected and remains the way to change
+--echo # a vector index's TYPE: DROP, then ADD. A TYPE change cannot be
+--echo # exercised here because hnsw is the only registered type; when a
+--echo # second one lands, the comparison above is what makes the change
+--echo # visible instead of silently discarded.
+--echo #
+ALTER TABLE t1 DROP KEY vk;
+ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 32);
+SHOW CREATE TABLE t1;
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+
+DROP TABLE t1;

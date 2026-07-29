@@ -1481,6 +1481,31 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
       referencing the index, which SHARED lock guarantees. Same
       reasoning FTS documents at ddl0ddl.cc mark_secondary_indexes. */
       if (key->flags & HA_VECTOR) {
+        /* Redefining the EXISTING vector index — a table may hold at
+        most one, so an ADD of a vector key on a table that already has
+        one can only be a redefinition. This is what
+        `DROP KEY k, ADD VECTOR KEY k ... TYPE/WITH ...` looks like by
+        the time it reaches the engine: keys are matched by NAME in
+        fill_alter_inplace_info, so the drop and the add collapse into
+        one MODIFIED key rather than a drop followed by an add.
+
+        INPLACE cannot serve it. The new index needs a new aux table
+        while the old one still exists under a name keyed by the same
+        (table_id, index_id), and the graph would have to be rebuilt
+        with different parameters under a live index. COPY handles it
+        correctly and organically — every row goes through the normal
+        INSERT stamping path into a fresh table — so refuse here and
+        let the server fall back. An explicit ALGORITHM=INPLACE gets a
+        clear refusal instead of the silent no-op this used to be.
+
+        The first ADD after a DROP INDEX is NOT affected: that table
+        has no vector index at this point, so R1's INPLACE build stays
+        available. */
+        if (vec_aux_table_has_vector_index(m_prebuilt->table)) {
+          ha_alter_info->unsupported_reason = innobase_get_err_msg(
+              ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR);
+          return HA_ALTER_INPLACE_NOT_SUPPORTED;
+        }
         online = false;
         break;
       }
