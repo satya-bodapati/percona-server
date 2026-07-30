@@ -265,11 +265,11 @@ change without affecting the read path (and in Phase 2, it does).
 The table's identity is the label, so there is exactly one row per node at all times: no
 history, no versions. Whatever a node's edges are *now* is what the row holds.
 
-`row_ref` is the part of this shape that does not survive contact with MVCC. It makes a delete
-destructive (`NULL = tombstone` erases the only address an old reader had), and it forces a
-resident `label → PK` map to avoid a B-tree dive per candidate, which is one entry per row.
-§3.10 sets out both problems; §3.11 removes the column altogether and indexes the hidden
-`vec_idx_id` on the base table instead.
+`row_ref` is the part of this shape that does not survive contact with MVCC: it makes a delete
+destructive, because `NULL = tombstone` erases the only address an old reader had. It is also a
+second copy of something the base row already holds — the base row knows its label, so an index
+on that label would answer the same question. §3.10 sets out both points; §3.11 removes the
+column altogether and indexes the hidden `vec_idx_id` on the base table instead.
 
 ### 3.5 How the graph drives writes into the aux table
 
@@ -319,22 +319,31 @@ list of what the statement did to the graph.
 
 ### 3.7 How SELECT works
 
-**Queries never read the aux table.** It is storage and reload only.
+**Queries never traverse the graph on disk and never read a `neighbors` blob.** The aux table
+exists for reload; a query touches exactly one of its columns — `row_ref`, to turn a label
+into an address.
 
 ```
-1. traverse the in-memory graph          → k' candidate labels, closest first   (no I/O)
-2. per candidate: fetch the base row by row_ref, under the reader's read view
-3. skip it if that row is invisible, gone, or its vec_idx_id != the candidate label
-4. emit at the candidate's graph distance
-5. short of k? widen (k×2) and resume, excluding what was already returned
+1. traverse the in-memory graph        → k' candidate labels, closest first   (no I/O)
+2. per candidate: read row_ref from the aux, keyed by label               (1 dive)
+3.                fetch the base row by row_ref, under the reader's view   (1 dive)
+4. skip it if that row is invisible, gone, or its vec_idx_id != the candidate label
+5. emit at the candidate's graph distance
+6. short of k? widen (k×2) and resume, excluding what was already returned
 ```
 
-Step 3 is what keeps results correct under MVCC without versioning the graph: the graph
-offers candidates, the **base row decides**. The label-match compare rejects a candidate
-whose row has since moved to a different label, and costs one integer comparison.
+Step 2 is a point lookup on the aux's primary key, which *is* the label. Deliberately not a
+resident `label → row_ref` map: that would be one entry per indexed row, rebuilt by a full aux
+scan on every load (§3.10). It runs after the graph latch is released — it reads a B-tree, and
+no graph state is involved, so holding the latch across it would block writers for the
+duration of the I/O.
 
-The only disk I/O a query performs is the base-row fetch in step 2 — the same lookup any
-secondary index pays to return a row.
+Step 4 is what keeps results correct under MVCC without versioning the graph: the graph offers
+candidates, the **base row decides**. The label-match compare rejects a candidate whose row
+has since moved to a different label, and costs one integer comparison.
+
+So a query pays two dives per candidate. §3.11 does not remove the dive — it moves it off the
+aux and onto an index on the base table, which returns the aux to being read only at reload.
 
 ### 3.8 How reload works
 
@@ -509,29 +518,32 @@ delete.
 
 This works. It is not what §3.11 proposes, for the reason Problem 2 gives.
 
-#### Problem 2: the lookup is O(N) resident memory, not a lookup
+#### Problem 2: `row_ref` is a second copy of what the base row already knows
 
 Search happens in the in-memory graph, which yields a **label**. A label is not an address, so
-something must map `label → base PK`. Today that something is `row_ref_map`, an
-`unordered_map<uint64_t, std::string>` rebuilt from the aux's `row_ref` column on every load.
+something has to answer `label → base PK`.
 
-Counting what a single candidate costs, where a *dive* is one root-to-leaf B-tree traversal:
+This was once a resident `unordered_map<uint64_t, std::string>` rebuilt from the aux's
+`row_ref` column on every load — roughly 64–72 bytes per entry, so **~0.7 GB at 10M rows**,
+held for as long as the table was cached. That was not a scalable answer and the map is gone;
+the read path now does a point lookup on the aux, which is already keyed by label. Counting a
+single candidate, where a *dive* is one root-to-leaf traversal:
 
-| step | today | if `row_ref` were read from the aux instead of cached |
+| step | with the map (removed) | today |
 |---|---|---|
 | `label → PK` | 0 dives — RAM hash lookup | 1 dive — aux `PK(label)` |
 | `PK → row` | 1 dive — clustered, `ROW_SEL_EXACT` | 1 dive |
-| **total** | **1 dive + O(N) memory** | **2 dives, no memory** |
+| **total** | 1 dive **+ O(rows) memory** | **2 dives, no resident state** |
 
-The memory is the problem. For 10M rows the map is roughly 64–72 bytes per entry — an 8-byte
-key, a 32-byte `std::string` (an 8-byte PK fits in SSO), plus bucket — so **~0.7 GB**, held
-for as long as the table is cached, and reconstructed by a full aux scan on every reload.
-`del_trx_id` does not improve this at all: it fixes Problem 1 while leaving the map, and in
-fact adds a second map beside it.
+So the memory objection is already settled, and it is worth being clear that this is *not*
+what §3.11 buys. What remains is smaller but more fundamental: **`row_ref` duplicates
+information the base row already holds.** The base row knows its own label — that is what the
+hidden `vec_idx_id` column is — so an index on that column answers `label → PK` directly, with
+the same two dives, no duplicate, and no column for a delete to destroy.
 
-That is the real objection to this format. Caching one entry per row does not scale, and the
-right question is not "how do we shrink the map" but "why are we keeping a second copy of the
-PK at all, when the base row already holds the label".
+That reframes Problem 1 too. `del_trx_id` (above) keeps the duplicate and adds machinery to
+protect it. Removing the duplicate removes the problem instead: there is nothing for a delete
+to erase, because the mapping lives where the deletion is already recorded.
 
 ### 3.11 The proposed aux format
 
@@ -562,15 +574,19 @@ lookup vec_idx_id = 42 in vec_idx_id_index, UNDER THIS READER'S VIEW   (1 dive)
 fetch clustered row 7                                                  (1 dive)
 ```
 
-**Two dives, no resident map** — the same read cost as reading `row_ref` from the aux, but
-without a second copy of the PK and, as below, without any visibility logic of our own. The
-index is ~16 bytes of payload per entry, so for 10M rows it is about three levels deep with
-the upper levels effectively always resident — a far better memory profile than 0.7 GB of
-hash table, because it pages in and out like any other index.
+**The read cost is unchanged** — two dives, exactly as today (§3.7). This is worth stating
+plainly, because it says what the change is and is not:
 
-Note what does *not* change: the read path still never consults the aux table. The aux stays
-reload-only (§3.4). Only the *place* `label → PK` is kept moves — from a RAM copy to an index
-on the column that already holds the label.
+- **not** a memory win. That was won by deleting the resident map; the aux lookup already
+  costs nothing resident.
+- **not** a dive saved. The first dive moves from the aux to a base-table index — an index of
+  ~16 bytes of payload per entry, about three levels deep at 10M rows, which pages like any
+  other.
+
+What it buys is everything below: both MVCC checks stop being ours to implement, an entire
+write path disappears, and the aux stops referring to the base table at all. A query then
+reads only the base table and its own index, so the aux goes back to being touched solely at
+reload — the property §3.7 had while the map existed, now without the map.
 
 #### 1. Why this is MVCC-friendly
 
@@ -606,15 +622,15 @@ remains there is a garbage-collection role, not a visibility one.
 
 #### 3. What else it makes better
 
-- **The PK-only UPDATE path disappears.** Secondary index entries contain the PK, so InnoDB
-  re-points `(42 → pk)` itself. `vec_aux_update_row_ref`, `refresh_row_ref`, its `REFRESHED`
-  rollback tracking and one interface virtual all cease to exist. Today a PK change writes the
-  aux; afterwards it does not touch the vector index at all.
-- **No tombstone convention.** `row_ref = NULL` is gone, so the aux has no representation of
-  liveness to keep consistent — and §3.4's "the one part of this shape that has to change"
-  is resolved rather than replaced.
-- **Reload gets cheaper and simpler.** The loader feeds geometry to `loadIndex` and stops;
-  there is no map to rebuild, so the scan reads less and produces less.
+- **The PK-only UPDATE path disappears entirely.** Secondary index entries contain the PK, so
+  InnoDB re-points `(42 → pk)` itself. `vec_aux_update_row_ref`, `vec_refresh_row_ref` and one
+  interface virtual all cease to exist. Today a PK change still writes the aux column — the
+  last thing that write is for — and afterwards it does not touch the vector index at all.
+- **No tombstone convention.** `row_ref = NULL` is gone, so the aux holds no representation of
+  liveness to keep consistent, and a DELETE writes nothing to the aux at all.
+- **The loader stops caring about liveness.** It feeds geometry to `loadIndex` and stops: no
+  `row_ref` column to read, no NULL check, no dead-label list. Which rows a reader may use is
+  decided per query at the base table, not filtered once at load time.
 - **The aux becomes purely graph geometry**, which makes the separation the design claims
   literally true: the aux persists the *graph*, the base table owns the *label → row* mapping.
   Nothing in the aux refers to the base table any more.
