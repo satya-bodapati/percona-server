@@ -327,10 +327,17 @@ into an address.
 1. traverse the in-memory graph        → k' candidate labels, closest first   (no I/O)
 2. per candidate: read row_ref from the aux, keyed by label               (1 dive)
 3.                fetch the base row by row_ref, under the reader's view   (1 dive)
-4. skip it if that row is invisible, gone, or its vec_idx_id != the candidate label
+4. skip it if that row is invisible or gone
 5. emit at the candidate's graph distance
 6. short of k? widen (k×2) and resume, excluding what was already returned
 ```
+
+**Step 4 is incomplete as implemented.** It drops a candidate whose row the reader cannot see,
+which is what makes concurrent DELETE and rollback behave, but it does *not* yet compare the
+fetched row's `vec_idx_id` against the candidate label — requirement ① of §3.9. So a candidate
+whose row has since moved to a different label is still returned, at a distance computed from
+the vector that label used to hold. §3.9a makes that comparison structural rather than adding
+it as a step.
 
 Step 2 is a point lookup on the aux's primary key, which *is* the label. Deliberately not a
 resident `label → row_ref` map: that would be one entry per indexed row, rebuilt by a full aux
@@ -338,9 +345,10 @@ scan on every load (§3.10). It runs after the graph latch is released — it re
 no graph state is involved, so holding the latch across it would block writers for the
 duration of the I/O.
 
-Step 4 is what keeps results correct under MVCC without versioning the graph: the graph offers
-candidates, the **base row decides**. The label-match compare rejects a candidate whose row
-has since moved to a different label, and costs one integer comparison.
+The principle step 4 embodies is that the graph offers candidates and the **base row
+decides** — no versioning of the graph, ever. Completing it means adding the label-match
+compare, which is why §3.9 states that as a requirement and §3.9a satisfies it by construction
+rather than by another step.
 
 So a query pays two dives per candidate. §3.11 does not remove the dive — it moves it off the
 aux and onto an index on the base table, which returns the aux to being read only at reload.
@@ -824,9 +832,11 @@ correct but it is a retry loop, and a graph can be briefly incomplete.
 
 ### 4.5 A row deleted after a reader's snapshot is lost to the index path
 
-Of the two read-side checks §3.9 needs, the label-match compare (①) works on this design as it
-stands. View-gated tombstone inclusion (②) does not, because a delete sets `row_ref = NULL`
-and so destroys the address the old reader needs (§3.10).
+Of the two requirements §3.9 states, the label-match compare (①) is *implementable* on this
+format unchanged — it is a comparison on a row the read path already fetches — but it is **not
+implemented** (§3.7). View-gated tombstone inclusion (②) is not even implementable here,
+because a delete sets `row_ref = NULL` and so destroys the address the old reader needs
+(§3.10). Neither holds today.
 
 The consequence is a visible isolation gap: a REPEATABLE READ transaction that could still
 fetch a row by primary key will *not* get it from a `ORDER BY DISTANCE` query if another
