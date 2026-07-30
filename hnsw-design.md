@@ -394,20 +394,113 @@ So the graph is a **versionless candidate generator** and InnoDB's existing read
 visibility oracle. One shared graph serves every snapshot, because nothing is ever removed:
 the current graph is a *superset* of every snapshot's node set, and each reader filters it.
 
-Two read-side checks are all that is required:
+Historically this was expressed as **two read-side checks** we would perform:
 
 ```
 ① after fetching the base row:   row.vec_idx_id == candidate label ?
-     one integer compare. Rejects a candidate whose row has since moved to
-     a different label — e.g. an UPDATE minted a fresh label and this
-     candidate is the retired one, or vice versa.
-
 ② include a deleted label in the search iff the reader's view predates
-   the deletion — so an old reader can still return a row deleted after
-   its snapshot.
+   the deletion.
 ```
 
-#### Check ①: already possible, and why it is needed
+That framing is now obsolete, and §3.9a explains why: with a unique index on `vec_idx_id`,
+neither is a check we perform. Both are outcomes of one ordinary indexed lookup. The two are
+kept here because they name the *requirements* precisely, and the design below has to be
+judged against them.
+
+### 3.9a MVCC with the `vec_idx_id` index — the design
+
+*This is the design this branch (`vec-hnsw-aux-original-mvcc`) implements. It is not yet
+implemented; §3.12 lists what must still be decided.*
+
+#### The read path is one call, not two steps
+
+A unique index on the base table's hidden label column turns `label → row` from something we
+assemble into something InnoDB already does:
+
+```sql
+t ( id PK, v VECTOR(768), vec_idx_id BIGINT UNSIGNED NOT NULL /*hidden*/,
+    UNIQUE KEY vec_idx_id_index (vec_idx_id) /*hidden*/ )
+```
+
+```
+per candidate label L:
+   prebuilt->index = vec_idx_id_index          -- same device as ha_innodb.cc:12470
+   search tuple:    vec_idx_id = L
+   row_search_for_mysql(buf, PAGE_CUR_GE, prebuilt, ROW_SEL_EXACT, 0)
+        └─ InnoDB: secondary lookup → clustered fetch → version build → visibility
+   DB_SUCCESS                        → emit the row at the candidate's graph distance
+   DB_RECORD_NOT_FOUND / END_OF_INDEX → skip this candidate
+```
+
+One call performs both dives. We do not resolve a PK and then fetch it; we **fetch the row
+whose `vec_idx_id` is L**, under this reader's own view, exactly as `SELECT … WHERE
+vec_idx_id = 42` would. `row_search_mvcc` already does the secondary→clustered resolution
+(`row_sel_get_clust_rec_for_mysql`) and the version building
+(`row_vers_build_for_consistent_read`) for every secondary index in the server.
+
+Consequences worth being explicit about: `vec_knn_hit_t` no longer carries a `row_ref` at all —
+search returns labels and distances — and the handler stops building PK search tuples.
+
+#### Why both requirements are then satisfied for free
+
+| situation | what the indexed lookup does | requirement met |
+|---|---|---|
+| another transaction's uncommitted INSERT | entry not visible to this view | skipped |
+| row deleted, deletion visible to me | entry delete-marked, deletion visible | skipped |
+| row deleted **after** my snapshot | delete-marked entry, but visibility resolves through the clustered record and undo | row returned — **②** |
+| vector updated: L retired, M minted | `(L,pk)` delete-marked, `(M,pk)` inserted; an old reader still resolves L, a new reader finds nothing for L and reaches the row under M | both correct — **①** |
+
+Requirement ① was "compare the fetched row's `vec_idx_id` against the candidate label".
+Searching *by* that label makes the comparison structural: there is no branch of ours that can
+be wrong, and no third place where the mapping could disagree.
+
+#### Why it must be this lookup, and not one we write
+
+This is the load-bearing decision of the whole design, so it is worth stating why the obvious
+alternatives are wrong.
+
+- **The FTS precedent does not transfer.** `fts_doc_fetch_by_doc_id()` solves precisely this
+  problem for `FTS_DOC_ID` — and it does so through the **InnoDB SQL interpreter**
+  (`pars_sql`/`que_eval_sql`), which this project forbids: it serializes every call on the
+  global `pars_mutex`, and this runs per candidate per query. So FTS validates the *shape*
+  (a unique index on the hidden column) but not the *mechanism*.
+- **Hand-rolling the lookup forfeits the point.** A private `btr_pcur` walk over the secondary
+  index would have to re-implement delete-marked-entry handling, secondary→clustered
+  resolution and consistent-read version building. Those three things *are* requirements ① and
+  ②. Reimplementing them is not "using InnoDB's MVCC" — it is writing our own and hoping it
+  matches.
+
+Hence `row_search_mvcc` through `prebuilt`, which is the same path a plain indexed `SELECT`
+takes. The correctness argument is then "this is what every secondary index in the server
+does", which is the strongest form available.
+
+#### What the graph contains, and what a DELETE does
+
+A DELETE stops touching the aux table and stops calling `markDelete`. The node stays in the
+graph as a candidate, and the index decides per reader whether it resolves. So:
+
+- the graph holds **every label whose aux row still exists**, live or not
+- dead labels consume candidate slots, so `k` must widen to compensate — the resumable search
+  loop (§3.7) already handles candidates that resolve to nothing
+- nothing in memory or in the aux records liveness any more; there is one place that knows,
+  and it is the base table
+
+#### Isolation levels come for free
+
+Both requirements are evaluated by `row_search_mvcc` against `prebuilt`'s read view, so the
+isolation level is whatever the transaction already has:
+
+- **REPEATABLE READ** — one view per transaction. A row deleted after the snapshot keeps being
+  returned by every query in the transaction, matching what a primary-key lookup returns from
+  undo.
+- **READ COMMITTED** — a fresh view per statement. The same query twice in one transaction may
+  legitimately differ.
+
+That READ COMMITTED needs *no extra machinery* remains a real argument for this design: the
+versioned-graph approach would have needed per-statement cache invalidation, whereas here a
+newer view simply resolves the same shared graph differently.
+
+#### Check ①: why it was needed (retained for the reasoning)
 
 Check ① needs nothing from the aux table — it is the base-row fetch the read path (§3.7)
 already performs, plus one comparison. Concretely, with row `id=7` indexed under label 42:
@@ -427,33 +520,10 @@ reader whose snapshot still shows `vec_idx_id = 42` passes the same check and co
 the row. One integer compare, and the label does all the version bookkeeping.
 
 Check ② is **not** satisfied by the aux format of §3.4, and cannot be — a delete there
-destroys the very thing an old reader needs. §3.10 shows exactly how, and §3.11 gives the
-format that fixes it.
+destroys the very thing an old reader needs. §3.10 shows exactly how; §3.9a is the design that
+removes the problem instead of patching it.
 
-#### Isolation levels
-
-Both checks are evaluated against InnoDB's read view, so the isolation level is decided
-entirely by *which view is asked* — existing engine behaviour, nothing this design adds:
-
-- **REPEATABLE READ** — one view per transaction, created at first read. A row deleted after
-  the snapshot keeps being returned by every query in the transaction, matching what the exact
-  path returns from undo.
-- **READ COMMITTED** — a fresh view per statement. The same query twice in one transaction may
-  legitimately differ: the first statement includes the dead node, the second excludes it.
-
-That READ COMMITTED needs *no extra machinery* is a real argument for this design. The
-versioned-graph approach would have needed per-statement cache invalidation to get it right;
-here a newer view simply filters the same shared graph differently.
-
-**Open question — locking reads.** `SELECT … FOR UPDATE` reads the latest committed version,
-not the view's. Check ① compares the fetched row's `vec_idx_id` against the candidate label,
-so if the vector changed since, the latest row carries a *new* label and ① legitimately fails
-— meaning `SELECT … FOR UPDATE … ORDER BY DISTANCE` could miss a row whose vector was
-updated. This needs a decision, not an assumption, before locking reads are supported on the
-index path.
-
-**Isolation targeted:** READ COMMITTED and REPEATABLE READ. Reached today only for inserts
-and updates — deletes need check ②, which needs the format change of §3.11 (§4.5).
+**Isolation targeted:** READ COMMITTED and REPEATABLE READ (§3.9a).
 **Not reachable, by design:** SERIALIZABLE on the index path — phantom prevention needs
 predicate locks over "the k nearest neighbours of q", and ℝᵈ has no key order for gap locks
 to hang from. Sessions needing it fall back to the exact path.
@@ -545,7 +615,7 @@ That reframes Problem 1 too. `del_trx_id` (above) keeps the duplicate and adds m
 protect it. Removing the duplicate removes the problem instead: there is nothing for a delete
 to erase, because the mapping lives where the deletion is already recorded.
 
-### 3.11 The proposed aux format
+### 3.11 The aux format it needs
 
 Drop `row_ref` entirely, and index the hidden column instead — the `FTS_DOC_ID_INDEX`
 analogue this design knowingly went without:
@@ -651,6 +721,47 @@ Costs, stated plainly:
   a live reader could need. This is more work than reading a `del_trx_id`, and it is the one
   place this format is harder than the column.
 
+### 3.12 Decisions still open
+
+The design of §3.9a is settled in shape. These five are not, and each one changes code, so they
+are listed rather than resolved by whoever implements first.
+
+**1. Reclaiming aux rows for labels that are gone for good.** With liveness owned by the base
+table, an aux row is removable only when no reader can ever resolve its label again. The rule
+that follows from the design is short:
+
+> label L is prunable iff a lookup of `vec_idx_id = L` finds **nothing at all** — not even a
+> delete-marked entry
+
+because purge removes a delete-marked entry only once no active view needs it, so its absence
+*is* purge's own verdict. Two properties make it safe: labels are never reused, so a negative
+answer is permanent and there is no probe/delete race; and the rule errs toward keeping, so a
+mistake costs space rather than a row. **Open:** where the sweep runs (reload-time, as
+collapse does today, or on demand), and how the probe sees delete-marked entries — that is not
+an ordinary MVCC read.
+
+**2. Do rolled-back INSERTs still need in-memory `markDelete`?** Today `ADDED` tracking marks
+the node deleted on rollback. Under §3.9a the rolled-back row's index entry is gone, so the
+label resolves to nothing and the candidate is skipped anyway — correctness no longer depends
+on it. Keeping it stops a dead node occupying candidate slots until the next reload; dropping
+it removes the last reason `vec_trx_op_type` exists. **Open:** which.
+
+**3. What bounds dead-node accumulation.** Nothing calls `markDelete` for DELETEs any more, so
+deleted nodes stay candidates and `k` widens to compensate. The resumable loop absorbs it, but
+a table with a high delete rate degrades until something reclaims. **Open:** whether that is
+acceptable for phase 1, and what the operator-visible signal is.
+
+**4. Locking reads.** `SELECT … FOR UPDATE` reads the latest committed version, not the view's,
+so a candidate whose vector changed since resolves to a row carrying a *different* label — and
+the lookup correctly finds nothing for the old label. A locking `ORDER BY DISTANCE` could
+therefore miss a row whose vector was updated. **Open:** refuse locking reads on the index
+path, fall back to the exact path, or define the semantics deliberately.
+
+**5. Whether the index is unconditional.** FTS creates `FTS_DOC_ID_INDEX` whenever the hidden
+column exists. Doing the same is simpler and means the read path can assume the index; making
+it conditional saves write cost on tables that never run a kNN query. **Open:** which, though
+unconditional is the safer default and matches FTS.
+
 ---
 
 ## 4. Limitations and restrictions
@@ -721,10 +832,10 @@ The consequence is a visible isolation gap: a REPEATABLE READ transaction that c
 fetch a row by primary key will *not* get it from a `ORDER BY DISTANCE` query if another
 session deleted it after the snapshot. One transaction, two answers, depending on the plan.
 
-The fix is decided and scoped: drop `row_ref` from the aux and index the hidden `vec_idx_id`
-on the base table, so resolution goes through a normal secondary index and both checks fall
-out of InnoDB's existing visibility machinery (§3.11). Until it lands, this is the one
-isolation property the index path does not honour.
+The fix is designed (§3.9a): drop `row_ref` from the aux and index the hidden `vec_idx_id` on
+the base table, so a candidate is resolved by one ordinary indexed lookup and both requirements
+fall out of InnoDB's existing visibility machinery. Until it lands, this is the one isolation
+property the index path does not honour.
 
 ---
 
