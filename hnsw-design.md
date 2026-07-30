@@ -407,10 +407,38 @@ neither is a check we perform. Both are outcomes of one ordinary indexed lookup.
 kept here because they name the *requirements* precisely, and the design below has to be
 judged against them.
 
+#### Requirement ①: why it is needed
+
+Check ① needs nothing from the aux table — it is the base-row fetch the read path (§3.7)
+already performs, plus one comparison. Concretely, with row `id=7` indexed under label 42:
+
+```
+UPDATE t SET v = [0,1] WHERE id = 7;    -- mints label 99, retires 42
+
+aux:   42 → vec=[1,0], row_ref=pk 7     -- the old value, still a node
+       99 → vec=[0,1], row_ref=pk 7     -- the new one
+base:  row 7 now carries vec_idx_id = 99
+```
+
+A reader searching near `[1,0]` still gets label 42 as a candidate — nothing removed it — and
+following its `row_ref` fetches the *current* row 7, whose vector is `[0,1]`. Returning it
+would answer "nearest to `[1,0]`" with a row that is not. Check ① rejects it: `99 != 42`. A
+reader whose snapshot still shows `vec_idx_id = 42` passes the same check and correctly gets
+the row. One integer compare, and the label does all the version bookkeeping.
+
+Check ② is **not** satisfied by the aux format of §3.4, and cannot be — a delete there
+destroys the very thing an old reader needs. §3.10 shows exactly how; §3.9a is the design that
+removes the problem instead of patching it.
+
+**Isolation targeted:** READ COMMITTED and REPEATABLE READ (§3.9a).
+**Not reachable, by design:** SERIALIZABLE on the index path — phantom prevention needs
+predicate locks over "the k nearest neighbours of q", and ℝᵈ has no key order for gap locks
+to hang from. Sessions needing it fall back to the exact path.
+
 ### 3.9a MVCC with the `vec_idx_id` index — the design
 
 *This is the design this branch (`vec-hnsw-aux-original-mvcc`) implements. It is not yet
-implemented; §3.12 lists what must still be decided.*
+implemented, and the closing subsection lists what must still be decided.*
 
 #### The read path is one call, not two steps
 
@@ -500,33 +528,46 @@ That READ COMMITTED needs *no extra machinery* remains a real argument for this 
 versioned-graph approach would have needed per-statement cache invalidation, whereas here a
 newer view simply resolves the same shared graph differently.
 
-#### Check ①: why it was needed (retained for the reasoning)
+#### Decisions still open
 
-Check ① needs nothing from the aux table — it is the base-row fetch the read path (§3.7)
-already performs, plus one comparison. Concretely, with row `id=7` indexed under label 42:
+The design of §3.9a is settled in shape. These five are not, and each one changes code, so they
+are listed rather than resolved by whoever implements first.
 
-```
-UPDATE t SET v = [0,1] WHERE id = 7;    -- mints label 99, retires 42
+**1. Reclaiming aux rows for labels that are gone for good.** With liveness owned by the base
+table, an aux row is removable only when no reader can ever resolve its label again. The rule
+that follows from the design is short:
 
-aux:   42 → vec=[1,0], row_ref=pk 7     -- the old value, still a node
-       99 → vec=[0,1], row_ref=pk 7     -- the new one
-base:  row 7 now carries vec_idx_id = 99
-```
+> label L is prunable iff a lookup of `vec_idx_id = L` finds **nothing at all** — not even a
+> delete-marked entry
 
-A reader searching near `[1,0]` still gets label 42 as a candidate — nothing removed it — and
-following its `row_ref` fetches the *current* row 7, whose vector is `[0,1]`. Returning it
-would answer "nearest to `[1,0]`" with a row that is not. Check ① rejects it: `99 != 42`. A
-reader whose snapshot still shows `vec_idx_id = 42` passes the same check and correctly gets
-the row. One integer compare, and the label does all the version bookkeeping.
+because purge removes a delete-marked entry only once no active view needs it, so its absence
+*is* purge's own verdict. Two properties make it safe: labels are never reused, so a negative
+answer is permanent and there is no probe/delete race; and the rule errs toward keeping, so a
+mistake costs space rather than a row. **Open:** where the sweep runs (reload-time, as
+collapse does today, or on demand), and how the probe sees delete-marked entries — that is not
+an ordinary MVCC read.
 
-Check ② is **not** satisfied by the aux format of §3.4, and cannot be — a delete there
-destroys the very thing an old reader needs. §3.10 shows exactly how; §3.9a is the design that
-removes the problem instead of patching it.
+**2. Do rolled-back INSERTs still need in-memory `markDelete`?** Today `ADDED` tracking marks
+the node deleted on rollback. Under §3.9a the rolled-back row's index entry is gone, so the
+label resolves to nothing and the candidate is skipped anyway — correctness no longer depends
+on it. Keeping it stops a dead node occupying candidate slots until the next reload; dropping
+it removes the last reason `vec_trx_op_type` exists. **Open:** which.
 
-**Isolation targeted:** READ COMMITTED and REPEATABLE READ (§3.9a).
-**Not reachable, by design:** SERIALIZABLE on the index path — phantom prevention needs
-predicate locks over "the k nearest neighbours of q", and ℝᵈ has no key order for gap locks
-to hang from. Sessions needing it fall back to the exact path.
+**3. What bounds dead-node accumulation.** Nothing calls `markDelete` for DELETEs any more, so
+deleted nodes stay candidates and `k` widens to compensate. The resumable loop absorbs it, but
+a table with a high delete rate degrades until something reclaims. **Open:** whether that is
+acceptable for phase 1, and what the operator-visible signal is.
+
+**4. Locking reads.** `SELECT … FOR UPDATE` reads the latest committed version, not the view's,
+so a candidate whose vector changed since resolves to a row carrying a *different* label — and
+the lookup correctly finds nothing for the old label. A locking `ORDER BY DISTANCE` could
+therefore miss a row whose vector was updated. **Open:** refuse locking reads on the index
+path, fall back to the exact path, or define the semantics deliberately.
+
+**5. Whether the index is unconditional.** FTS creates `FTS_DOC_ID_INDEX` whenever the hidden
+column exists. Doing the same is simpler and means the read path can assume the index; making
+it conditional saves write cost on tables that never run a kNN query. **Open:** which, though
+unconditional is the safer default and matches FTS.
 
 ### 3.10 MVCC problems with the current aux format
 
@@ -720,47 +761,6 @@ Costs, stated plainly:
   aux row is removable means asking whether any version with `vec_idx_id = L` still exists that
   a live reader could need. This is more work than reading a `del_trx_id`, and it is the one
   place this format is harder than the column.
-
-### 3.12 Decisions still open
-
-The design of §3.9a is settled in shape. These five are not, and each one changes code, so they
-are listed rather than resolved by whoever implements first.
-
-**1. Reclaiming aux rows for labels that are gone for good.** With liveness owned by the base
-table, an aux row is removable only when no reader can ever resolve its label again. The rule
-that follows from the design is short:
-
-> label L is prunable iff a lookup of `vec_idx_id = L` finds **nothing at all** — not even a
-> delete-marked entry
-
-because purge removes a delete-marked entry only once no active view needs it, so its absence
-*is* purge's own verdict. Two properties make it safe: labels are never reused, so a negative
-answer is permanent and there is no probe/delete race; and the rule errs toward keeping, so a
-mistake costs space rather than a row. **Open:** where the sweep runs (reload-time, as
-collapse does today, or on demand), and how the probe sees delete-marked entries — that is not
-an ordinary MVCC read.
-
-**2. Do rolled-back INSERTs still need in-memory `markDelete`?** Today `ADDED` tracking marks
-the node deleted on rollback. Under §3.9a the rolled-back row's index entry is gone, so the
-label resolves to nothing and the candidate is skipped anyway — correctness no longer depends
-on it. Keeping it stops a dead node occupying candidate slots until the next reload; dropping
-it removes the last reason `vec_trx_op_type` exists. **Open:** which.
-
-**3. What bounds dead-node accumulation.** Nothing calls `markDelete` for DELETEs any more, so
-deleted nodes stay candidates and `k` widens to compensate. The resumable loop absorbs it, but
-a table with a high delete rate degrades until something reclaims. **Open:** whether that is
-acceptable for phase 1, and what the operator-visible signal is.
-
-**4. Locking reads.** `SELECT … FOR UPDATE` reads the latest committed version, not the view's,
-so a candidate whose vector changed since resolves to a row carrying a *different* label — and
-the lookup correctly finds nothing for the old label. A locking `ORDER BY DISTANCE` could
-therefore miss a row whose vector was updated. **Open:** refuse locking reads on the index
-path, fall back to the exact path, or define the semantics deliberately.
-
-**5. Whether the index is unconditional.** FTS creates `FTS_DOC_ID_INDEX` whenever the hidden
-column exists. Doing the same is simpler and means the read path can assume the index; making
-it conditional saves write cost on tables that never run a kNN query. **Open:** which, though
-unconditional is the safer default and matches FTS.
 
 ---
 
