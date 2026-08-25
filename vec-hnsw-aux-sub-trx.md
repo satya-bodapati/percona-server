@@ -206,9 +206,29 @@ using VectorIndexParam = std::variant<std::monostate, HnswParam>;
 
 Adding a second index type there is adding an alternative to the variant. The registry above is
 about *behaviour* dispatch rather than parameters, so the two are not in conflict — but the
-parameter half must be `VectorIndexParam`, not a parallel structure of our own. `parse_options()`
-already fills it and currently has **no callers**; only `validate_options()` is wired, at
-`ha_innodb.cc:4821`. Calling `parse_options` and storing the result on the runtime is our work.
+parameter half must be `VectorIndexParam`, not a parallel structure of our own. `parse_options()` already
+runs on every `CREATE TABLE` / `ALTER` carrying a vector key — `sql_table.cc:20694` reaches the
+handlerton's `validate_engine_attributes` hook, which is
+`innobase_validate_engine_attributes()` (`ha_innodb.cc:4815`), which calls `validate_options()`.
+But that wrapper is two lines:
+
+```c
+bool validate_options(const Key_spec &index_def) {
+  VectorIndexParam vip;
+  return parse_options(index_def, vip);     // vip is a stack local, then discarded
+}
+```
+
+So the parameters are parsed for their error side-effects and thrown away. What is missing is not
+a caller but a *retaining* one: nothing carries `M` or `metric` from the parse into the
+dictionary or into any runtime. Providing that is our work.
+
+Two things about the current parser matter to us. `ef_construction` and `max_elements` are
+**fields of `HnswParam` that the parser never sets** — the loop recognises only `M` and `metric`,
+and anything else raises `ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER`. Both are unreachable
+defaults today. And `innobase_validate_engine_attributes()` `return`s from inside its loop on the
+first `KEYTYPE_VECTOR` key it meets, so a second vector key would never be validated — harmless
+while §22 holds, and a trap the moment it is lifted.
 
 Two rules keep the seam honest:
 
@@ -1007,8 +1027,8 @@ virtual generated column, on a partitioned table, or on a temporary table. `sql_
 `ER_INDEX_MUST_HAVE_COMPATIBLE_COLUMN` for the first and `ER_NOT_SUPPORTED_YET` for the other
 two, so none of them reach the aux code.
 
-**`max_elements` is unread.** `HnswParam` carries a default of 10000 and nothing in the tree
-looks at it — not the HNSW class, not the arena. Whether it is a hard cap or a sizing hint is
+**`max_elements` is unread and unsettable.** `HnswParam` carries a default of 10000, the parser
+never assigns it (§5), and nothing in the tree looks at it — not the HNSW class, not the arena. Whether it is a hard cap or a sizing hint is
 open, and it matters here: the arena has no per-block free (§16), so a cap that is actually
 enforced would need an answer for the insert that exceeds it.
 
