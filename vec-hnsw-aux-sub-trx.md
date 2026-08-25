@@ -49,7 +49,7 @@ graph from it on demand.**
 | Term | Meaning |
 |---|---|
 | **node** | One vector in the graph. The unit HNSW inserts, links and searches. |
-| **label** | A node's identity — the `id` the HNSW class takes. A `BIGINT UNSIGNED` from a per-table counter. Never reused, never zero (0 is the class's empty-slot sentinel). |
+| **label** | A node's identity — the `id` the HNSW class takes. A `BIGINT UNSIGNED` from a per-index counter. Never reused, never zero (0 is the class's empty-slot sentinel). |
 | **base_pk** | The PRIMARY KEY of the base-table row a node describes. |
 | **layer / level** | How many HNSW layers a node participates in. Assigned randomly at insert; geometrically distributed, so high layers are rare. |
 | **neighbours** | A node's outgoing edges, one list per layer. The graph *is* these lists. |
@@ -67,27 +67,66 @@ Three layers, each owning one thing.
 ```
    dict_table_t  (the user's table)
         │
-        ├── dict_index_t  ── the vector index: its id, its TYPE
-        │
-        └── Vec_runtime *vec ─────────┐   per-table, created on first use
-                                      │
-                            ┌─────────┴─────────┐
-                            │  the HNSW graph   │   in memory
-                            │  + arena          │
-                            │  + Persistor      │
-                            └───────────────────┘
-                                      │  callbacks
-                                      ▼
-                            vec_hnsw_<tid>_<iid>    on disk
+        └── dict_index_t  ── the vector index: its id, its TYPE
+                 │
+                 └── Vec_runtime *vec ──┐   per-index, created on first use
+                                        │
+                              ┌─────────┴─────────┐
+                              │  the HNSW graph   │   in memory
+                              │  + arena          │
+                              │  + Persistor      │
+                              └───────────────────┘
+                                        │  callbacks
+                                        ▼
+                              vec_hnsw_<tid>_<iid>    on disk
 ```
 
-**`dict_index_t`** is the index itself, as the dictionary knows it: its `id`, and the fact that
-it is a vector index. It carries no graph.
+**`dict_index_t::vec`** is a pointer to the runtime. It is `nullptr` until something first opens
+the index, and it owns the `HNSW` object, the arena its nodes are allocated from, the persistor,
+and the index parameters read back from the DD.
 
-**`dict_table_t::vec`** is a pointer to the per-table runtime — the analogue of
-`dict_table_t::fts`. It is `nullptr` until something first opens the index, and it owns the
-`HNSW` object, the arena its nodes are allocated from, the persistor, and the index parameters
-read back from the DD.
+### Why the runtime hangs off the index, not the table
+
+Everything the runtime holds is a property of one index, not of the table: the dimension, the
+distance metric, `M` and `ef_construction`, the entry point, the label space, the graph itself.
+Two vector indexes on the same table share none of it. The aux table name settles the argument
+on its own — `vec_hnsw_<table_id>_<index_id>` is keyed by index, so a table-level pointer would
+have needed a lookup to find the right graph anyway. Lifetime lines up too: `DROP INDEX`
+destroys exactly one runtime, and `dict_mem_index_free()` is the natural place to release it.
+
+FTS is the obvious counter-example, and it is worth being precise about why it differs rather
+than copying it. InnoDB splits FTS aux tables into two kinds — the enum says so outright:
+
+```c
+enum fts_table_type_t {
+  FTS_INDEX_TABLE,   // specific to a particular FTS index on a table
+  FTS_COMMON_TABLE,  // common for all FTS indexes on a table
+  ...
+};
+```
+
+`FTS_COMMON_TABLE` covers `DELETED`, `BEING_DELETED`, `CONFIG` and their caches — one set per
+*table*, shared by every FULLTEXT index on it. And `fts_t` holds exactly the matching things:
+
+```c
+struct fts_t {
+  fts_cache_t *cache;      // one shared in-memory cache
+  ulint        doc_col;    // the FTS_DOC_ID column number in the clustered index
+  ib_vector_t *indexes;    // ...and a LIST of the FULLTEXT indexes
+  ...
+};
+```
+
+So `table->fts` is not "one index's runtime parked at table scope". It is the genuinely
+table-scoped state — one shared `FTS_DOC_ID` column, one doc-id counter, one delete list —
+*plus a list* of the indexes that share it. The per-index state lives in the six
+`FTS_INDEX_TABLE` aux tables, keyed by index id.
+
+Vector has no equivalent shared machinery. There is no shared cache, no shared delete list, and
+no shared configuration. The one thing that is table-scoped is the hidden `vec_idx_id` column
+below — and that is precisely the thing that decides how many vector indexes a table may have,
+which is why it gets its own treatment in §22 rather than being buried in a pointer's
+placement.
 
 **The aux table** is named `vec_hnsw_<table_id>_<index_id>`, hidden from `SHOW TABLES` and
 `INFORMATION_SCHEMA.TABLES`, visible in `INNODB_TABLES`. The `vec_` prefix is reserved, so a
@@ -123,8 +162,8 @@ const Vec_type_entry vec_type_registry[] = {
 Two rules keep the seam honest:
 
 - **Implementations are stateless.** All per-index state lives in the runtime hanging off
-  `dict_table_t`, so there is no object lifetime to manage and no per-table singleton.
-- **The runtime is typed as a generic base.** `dict_table_t::vec` is a `Vec_runtime *`;
+  `dict_index_t`, so there is no object lifetime to manage and no per-index singleton.
+- **The runtime is typed as a generic base.** `dict_index_t::vec` is a `Vec_runtime *`;
   hnsw's own struct derives from it, and only the implementation that allocated a runtime may
   interpret the subtype. The downcast is file-local to the hnsw implementation, so the
   compiler enforces the boundary.
@@ -133,7 +172,7 @@ Dispatch has exactly two sources, and neither guesses:
 
 | situation | resolved by |
 |---|---|
-| a runtime is open | `table->vec->impl` — an open runtime records the implementation that created it |
+| a runtime is open | `index->vec->impl` — an open runtime records the implementation that created it |
 | no runtime yet (open, build) | the `TYPE` token from the KEY definition, resolved through the registry |
 
 An unresolvable token is an error, never a default. A resolver that guesses would hand one
@@ -289,7 +328,7 @@ We copy into the row we are about to write, so this falls out naturally.
 ### The graph object lives in the runtime
 
 ```c
-struct vec_t : Vec_runtime {       // hangs off dict_table_t::vec
+struct vec_t : Vec_runtime {       // hangs off dict_index_t::vec
   Vec_arena   arena;               // owns all node memory
   Vec_hnsw   *hnsw;                // constructed with dims/M/ef from the DD
   rw_lock_t   latch;               // serialises writers (§17)
@@ -331,10 +370,89 @@ static dberr_t aux_insert(Context *ctx, uint64_t id, uint64_t base_pk,
 }
 ```
 
-`aux_update_neighbors` is the same shape with `row_create_update_node_for_mysql`, a cursor
-positioned directly on the primary key, a single-field `upd_t`, and `row_upd_step`. Because we
-already know the key, we skip the search a normal UPDATE would perform — but we take the locks
-it would have taken: IX on the table, X on the record.
+### `vec_aux_update_neighbors`
+
+An UPDATE normally runs a search first, which positions the cursor *and* takes the locks. We
+already know the key, so we skip the search — and must therefore take those locks ourselves.
+
+```c
+static dberr_t vec_aux_update_neighbors(Context *ctx, uint64_t id,
+                                        const std::vector<byte> &nbrs) {
+  mem_heap_t   *heap  = mem_heap_create(1024, UT_LOCATION_HERE);
+  dict_index_t *clust = ctx->aux->first_index();
+  upd_node_t   *node  = row_create_update_node_for_mysql(ctx->aux, heap);
+
+  dtuple_t *ref = dtuple_create(heap, 1);          // the PK we are updating
+  dict_index_copy_types(ref, clust, 1);
+  byte key[8];
+  mach_write_to_8(key, id);
+  dfield_set_data(dtuple_get_nth_field(ref, 0), key, sizeof key);
+
+  upd_t       *upd = node->update;                 // a one-field update
+  upd_field_t *uf  = upd_get_nth_field(upd, 0);
+  upd_field_set_field_no(
+      uf, dict_col_get_clust_pos(ctx->aux->get_col(COL_NEIGHBORS), clust), clust);
+  dfield_set_data(&uf->new_val, nbrs.data(), nbrs.size());
+  upd->n_fields = 1;
+
+  que_thr_t *thr = pars_complete_graph_for_exec(node, ctx->trx, heap, nullptr);
+  que_thr_move_to_run_state_for_mysql(thr, ctx->trx);
+
+  mtr_t mtr;
+  mtr_start(&mtr);
+  node->pcur->open_no_init(clust, ref, PAGE_CUR_LE, BTR_SEARCH_LEAF, 0, &mtr,
+                           UT_LOCATION_HERE);
+
+  const rec_t *rec = node->pcur->get_rec();
+  if (!page_rec_is_user_rec(rec) ||
+      node->pcur->get_low_match() < dict_index_get_n_unique(clust)) {
+    mtr_commit(&mtr);  mem_heap_free(heap);
+    return DB_RECORD_NOT_FOUND;
+  }
+
+  dberr_t err = lock_table(0, ctx->aux, LOCK_IX, thr);            // table IX
+  if (err == DB_SUCCESS)
+    err = lock_clust_rec_read_check_and_lock(                     // record X
+        {}, node->pcur->get_block(), rec, clust, offsets,
+        SELECT_ORDINARY, LOCK_X, LOCK_REC_NOT_GAP, thr);
+
+  if (err == DB_SUCCESS) node->pcur->store_position(&mtr);        // AFTER the lock
+  mtr_commit(&mtr);
+
+  if (err == DB_SUCCESS) err = run_dml(thr, node, ctx->trx, row_upd_step);
+  mem_heap_free(heap);
+  return err;
+}
+```
+
+Two details in there are not obvious and were each found the hard way.
+
+The record lock must be taken with `lock_clust_rec_read_check_and_lock(… LOCK_X,
+LOCK_REC_NOT_GAP …)` — the lock a searched UPDATE's *read* would have acquired. Reaching for
+`lock_clust_rec_modify_check_and_lock` instead trips an assertion inside `row_upd_clust_step`,
+which expects the transaction to already hold an explicit record X lock.
+
+And `store_position()` must come **after** the lock succeeds. Storing it first and then waiting
+on the lock leaves the cursor pointing at a position that may have moved by the time the wait
+returns.
+
+### `vec_aux_update_entry_point`
+
+The same positioned update, against record 0 and column `base_pk` instead — plus the insert
+fallback that makes it an upsert:
+
+```c
+void update_entry_point_cb(Context *ctx, uint64_t id) {
+  if (ctx->err != DB_SUCCESS) return;
+  dberr_t e = vec_aux_update_col(ctx, /*id=*/0, COL_BASE_PK, id);
+  if (e == DB_RECORD_NOT_FOUND)                    // no record 0 yet — first node
+    e = vec_aux_insert_meta(ctx, /*entry=*/id);    // vec_aux_insert with empty blobs
+  ctx->err = e;
+}
+```
+
+Update-then-insert rather than insert-then-catch-duplicate: after the first write, update is the
+common case, and this fires at most a couple of hundred times over an index's life anyway.
 
 Both share the run loop that `row0mysql.cc` uses for user DML:
 
@@ -610,6 +728,66 @@ void load_node_cb(Context *ctx, HNSW &h, LoadNodeHandle handle) {
 }
 ```
 
+The read behind that callback is a single point lookup:
+
+```c
+static dberr_t vec_aux_load_node(Context *ctx, Vec_hnsw &h,
+                                 Vec_hnsw::LoadNodeHandle handle) {
+  const uint64_t id    = h.load_node_id(handle);
+  dict_index_t  *clust = ctx->aux->first_index();
+  mem_heap_t    *heap  = mem_heap_create(512, UT_LOCATION_HERE);
+
+  dtuple_t *ref = dtuple_create(heap, 1);
+  dict_index_copy_types(ref, clust, 1);
+  byte key[8];
+  mach_write_to_8(key, id);
+  dfield_set_data(dtuple_get_nth_field(ref, 0), key, sizeof key);
+
+  mtr_t mtr;
+  mtr_start(&mtr);
+  btr_pcur_t pcur;
+  pcur.open_no_init(clust, ref, PAGE_CUR_LE, BTR_SEARCH_LEAF, 0, &mtr,
+                    UT_LOCATION_HERE);
+
+  const rec_t *rec = pcur.get_rec();
+  if (!page_rec_is_user_rec(rec) ||
+      pcur.get_low_match() < dict_index_get_n_unique(clust)) {
+    mtr_commit(&mtr);  mem_heap_free(heap);
+    return DB_RECORD_NOT_FOUND;                    // no such node
+  }
+
+  ulint *offsets = rec_get_offsets(rec, clust, nullptr, ULINT_UNDEFINED,
+                                   UT_LOCATION_HERE, &heap);
+
+  // field positions in the RECORD, not user-column ordinals
+  const ulint p_pk  = dict_col_get_clust_pos(ctx->aux->get_col(COL_BASE_PK),   clust);
+  const ulint p_vec = dict_col_get_clust_pos(ctx->aux->get_col(COL_VEC),       clust);
+  const ulint p_lvl = dict_col_get_clust_pos(ctx->aux->get_col(COL_LEVEL),     clust);
+  const ulint p_nb  = dict_col_get_clust_pos(ctx->aux->get_col(COL_NEIGHBORS), clust);
+
+  h.load_set_layer  (handle, read_u8 (rec, offsets, p_lvl));
+  h.load_set_vec    (handle, read_blob(rec, offsets, p_vec));
+  h.load_set_base_pk(handle, read_u64(rec, offsets, p_pk));
+  h.load_node_neighbors(handle, deserialize_ids(read_blob(rec, offsets, p_nb)));
+
+  mtr_commit(&mtr);  mem_heap_free(heap);
+  return DB_SUCCESS;
+}
+```
+
+The `load_set_*` calls must happen **in that order**, with `load_node_neighbors` last — it
+allocates the neighbour storage, which is sized from the layer set by the first call.
+
+A trap worth naming: a column's position in a clustered-index *record* is not its user-column
+ordinal. The record is the primary key, then `DB_TRX_ID` and `DB_ROLL_PTR`, then everything
+else — so `dict_col_get_clust_pos()` is required. Using the ordinal directly reads
+`DB_ROLL_PTR`, which is seven bytes rather than eight and fails silently downstream.
+
+**No read view is taken.** The graph is shared by every transaction rather than being
+per-transaction state, so there is no snapshot for it to belong to; it always loads the latest
+row. If a node loaded this way turns out to belong to a statement that later rolls back, it
+becomes an orphan — and the read path filters orphans already (§14).
+
 Loading a node creates **stubs** for each of its neighbours — nodes that exist by id but hold
 no data. A stub is filled the first time a traversal actually reaches it. A search therefore
 descends one path from the entry point to layer 0, faulting roughly one node per layer plus the
@@ -777,3 +955,20 @@ rolled-back insert) leaves no trace anywhere else in the engine.
 not equal a count of base rows, and that is correct behaviour rather than corruption.
 
 **One vector index per table**, and a single-column integer primary key.
+
+The restriction is about the hidden `vec_idx_id` column, not about the runtime — §4 already puts
+the graph on `dict_index_t`, so a second index needs no structural change there. What a second
+index needs is a second *label*, because check ① compares a row's label against a node's id and
+each graph numbers its nodes independently. That leaves two ways forward, and they are not
+equally good:
+
+| | how it works | cost |
+|---|---|---|
+| a column per vector index | `vec_idx_id_1`, `vec_idx_id_2`, … each moving independently | one more hidden column per index; `ADD VECTOR KEY` is already COPY-only (§19), so adding one is free |
+| one shared column, FTS-style | a single label meaning "this version of this row", every aux keying on it | an UPDATE to *one* index's vector bumps the shared label, invalidating this row's nodes in **every** vector index — each must then insert a fresh node or the row silently vanishes from its results |
+
+FTS chose the shared column and pays that cost: a new `FTS_DOC_ID` on UPDATE re-indexes the row
+in every FULLTEXT index. For vectors the cost is worse, because re-inserting a node means
+re-running graph insertion — a search plus neighbour rewiring — for an index whose vector did
+not change. So a column per index is the direction, and MVP simply rejects the second index
+rather than half-building it.
