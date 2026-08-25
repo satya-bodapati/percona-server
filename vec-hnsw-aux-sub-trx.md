@@ -128,6 +128,26 @@ below — and that is precisely the thing that decides how many vector indexes a
 which is why it gets its own treatment in §22 rather than being buried in a pointer's
 placement.
 
+Counting the dereferences outside `fts0*` makes the split concrete: `->fts->cache` appears 109
+times and `->fts->doc_col` 22, against 12 for `->fts->indexes` — most of which are
+`ib_vector_getp(…, 0)` or an is-empty test. The list is a convenience; the shared cache and the
+shared doc column are the reason the struct is where it is.
+
+Vector has no equivalent shared machinery, and going per-index is also the *smaller* change.
+Everything a table-level container would buy already exists more cheaply: the O(1) "does this
+table have one" test is a flag bit in FTS (`DICT_TF2_FTS`), not the pointer; iterating vector
+indexes is `table->indexes` filtered by the already-existing `dict_index_t::is_vector()`; and
+`dict_mem_index_free()` is already the release point. A container would instead add a struct, an
+allocator, a free path in `dict_mem_table_free`, and a list to keep in sync across every
+ADD/DROP INDEX — a sync upstream already has to assert about, in `fts_check_cached_index()`.
+
+One constraint follows from where the pointer lands. `dict_index_t` is never constructed or
+destructed — the memory is zeroed and `dict_mem_fill_index_struct()` acts as the constructor, so
+`dict_mem_index_free()` has to "destruct" members by hand. `Vec_runtime *vec` must therefore be a
+raw pointer, zero-initialised by that memset, assigned on open and released in
+`dict_mem_index_free()`, exactly as `destroy_fields_array()` does today. No smart pointer, no
+non-POD member.
+
 **The aux table** is named `vec_hnsw_<table_id>_<index_id>`, hidden from `SHOW TABLES` and
 `INFORMATION_SCHEMA.TABLES`, visible in `INNODB_TABLES`. The `vec_` prefix is reserved, so a
 user cannot create a table that collides with a computed aux name.
