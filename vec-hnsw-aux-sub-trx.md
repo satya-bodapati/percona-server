@@ -204,7 +204,30 @@ Three consequences follow from that being compile-time rather than runtime:
   `Context`, which the class passes through untouched.
 - **`Context` is ours to define** — the class only knows it as `typename Persistor::Context`.
 
-### The persistor
+### How a call reaches our function
+
+Nothing is looked up at run time. The chain is entirely compile-time:
+
+```
+using Vec_hnsw = HNSW<Vec_arena, Vec_persistor>;     ← this line is the registration
+
+  1. the compiler substitutes Vec_persistor for the Persistor parameter
+  2. the member `Persistor m_persistor;` becomes a real Vec_persistor object
+  3. inside insert(), the class writes
+         m_persistor.update_neighbors_cb(ctx, neighbor->id(), neighbor_ids(neighbor));
+     which is an ordinary member call on that object, resolved by name
+```
+
+If `Vec_persistor` has no method of that name with compatible parameters, **the code does not
+compile**. That failure is the only "registration check" there is — no vtable, no function
+pointer, no registry, and nothing to forget to wire up at run time.
+
+### What the functions must look like
+
+There is one wrinkle. The neighbour range the class passes is `HNSW<A,P>::NeighborIdRange` — a
+type nested inside the very instantiation that needs our persistor. Naming it in our signature
+would be circular. The class resolves this by making the callbacks **member templates**, so the
+persistor never names the HNSW type at all:
 
 ```c
 struct Vec_persistor {
@@ -215,40 +238,53 @@ struct Vec_persistor {
     dberr_t       err;    // callbacks return void — the first failure lands here
   };
 
+  // NeighborIds is deduced as HNSW<...>::NeighborIdRange — a range of uint64_t,
+  // 0 meaning an empty slot. Templated to avoid naming the instantiation.
+  template <typename NeighborIds>
   void insert_cb(Context *ctx, uint64_t id, uint64_t base_pk, const char *q,
-                 uint8_t layer, NeighborIdRange nbrs) {
-    if (ctx->err != DB_SUCCESS) return;              // an earlier callback failed
-    std::vector<byte> blob;
-    serialize_neighbors(nbrs, blob);
-    ctx->err = aux_insert(ctx, id, base_pk, q, layer, blob);
+                 uint8_t layer, NeighborIds nbrs) {
+    if (ctx->err != DB_SUCCESS) return;               // an earlier callback failed
+    ctx->err = vec_aux_insert(ctx, id, base_pk, q, layer, serialize(nbrs));
   }
 
-  void update_neighbors_cb(Context *ctx, uint64_t id, NeighborIdRange nbrs) {
+  template <typename NeighborIds>
+  void update_neighbors_cb(Context *ctx, uint64_t id, NeighborIds nbrs) {
     if (ctx->err != DB_SUCCESS) return;
-    std::vector<byte> blob;
-    serialize_neighbors(nbrs, blob);
-    ctx->err = aux_update_neighbors(ctx, id, blob);  // UPDATE … WHERE id = ?
+    ctx->err = vec_aux_update_neighbors(ctx, id, serialize(nbrs));
   }
 
+  // no template needed — plain scalar arguments
   void update_entry_point_cb(Context *ctx, uint64_t id) {
     if (ctx->err != DB_SUCCESS) return;
-    dberr_t e = aux_update_entry_point(ctx, id);     // UPDATE record 0
-    if (e == DB_RECORD_NOT_FOUND)                    // first ever — create it
-      e = aux_insert_entry_point(ctx, id);
+    dberr_t e = vec_aux_update_entry_point(ctx, id);  // UPDATE record 0
+    if (e == DB_RECORD_NOT_FOUND)                     // first ever — create it
+      e = vec_aux_insert_entry_point(ctx, id);
     ctx->err = e;
   }
 
-  void load_node_cb(Context *ctx, Vec_hnsw &h, Vec_hnsw::LoadNodeHandle handle);
+  template <typename Hnsw>
+  void load_node_cb(Context *ctx, Hnsw &h, typename Hnsw::LoadNodeHandle handle) {
+    if (ctx->err != DB_SUCCESS) return;
+    ctx->err = vec_aux_load_node(ctx, h, handle);
+  }
 };
+
+using Vec_hnsw = HNSW<Vec_arena, Vec_persistor>;
 ```
 
-Each callback is a thin adapter: check whether we have already failed, turn the neighbour range
-into the on-disk blob format, and issue one row operation. All the interesting behaviour is in
-the row operations themselves and in when the transaction commits.
+Being member templates has one practical consequence: their bodies must live in a header. So
+each is a **thin shim that forwards immediately to a plain function** — `vec_aux_insert`,
+`vec_aux_update_neighbors`, `vec_aux_load_node` — which are ordinary non-template functions
+compiled in a `.cc` file. The shim does only two things: short-circuit if an earlier callback
+already failed, and convert the neighbour range into the on-disk blob. Everything else is §8.
 
-The `NeighborIdRange` and the vector pointer are **valid only for the duration of the call** —
-the class is explicit about that — so anything we keep must be copied before returning. We copy
-into the row we are about to insert, so this falls out naturally.
+That `if (ctx->err != DB_SUCCESS) return;` in every shim is how a `void` callback reports
+failure. The class keeps going through the rest of its callbacks; they all no-op; and the caller
+inspects `ctx->err` once `insert()` returns.
+
+The `NeighborIds` range and the vector pointer `q` are **valid only for the duration of the
+call** — the class is explicit about that — so anything we keep must be copied before returning.
+We copy into the row we are about to write, so this falls out naturally.
 
 ### The graph object lives in the runtime
 
