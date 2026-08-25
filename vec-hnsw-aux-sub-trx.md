@@ -263,9 +263,24 @@ void load_node_cb(Context *ctx, HNSW &h, LoadNodeHandle handle) {
 }
 ```
 
-Consequences worth stating: there is no multi-second warm-up on first access, memory tracks
-what is actually queried rather than table size, and **dict-cache eviction needs no special
-handling** — a lost graph is refaulted node by node, so nothing has to pin the table.
+**The point of this is startup latency, not memory.** There is no full aux scan before the
+first query after a restart — the cost of warming up is spread across the queries that
+actually need each node. Memory is barely affected: the stub constructor allocates
+`ALIGN_SIZE(sizeof(Node)) + ALIGN_SIZE(vec_size)` whether or not the node is ever loaded, so
+only the `(layer+2)*M` neighbour array is deferred — well under 10% of a node at high
+dimensions. And loading one node creates a stub for each of its neighbours, so the stub
+frontier around a hot region is itself substantial.
+
+Nothing shrinks, either: `m_loaded` only ever goes false → true, there is no unload path, and
+the arena has no per-block free. Bounding graph memory is upstream's `@todo 6` (memory limits
+/ expulsion), and it needs both of those things before it is possible.
+
+What does follow is that **dict-cache eviction needs no special handling**: eviction destroys
+the runtime, the `HNSW` object and its arena together, reclaiming everything at once, and
+recovery costs one entry-point load plus on-demand faulting rather than a full scan. That is
+why nothing pins the table. Teardown order matters — the class states that it "does not
+destroy Nodes and must not outlive the allocator", so the graph must be destroyed before the
+arena that owns its nodes.
 
 ---
 
