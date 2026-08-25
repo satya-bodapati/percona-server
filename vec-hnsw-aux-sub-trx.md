@@ -175,48 +175,162 @@ after the node it names**, since it is a reference like any neighbour list (§19
 
 ---
 
-## 7. The persistence callbacks
+## 7. Wiring the persistor
 
-The HNSW class calls out to a `Persistor` we supply. `Context` is ours to define and is passed
-through every call; the class treats it as opaque.
+**There is no registration call.** The class takes the persistor as a *template parameter* and
+holds one as a member:
 
 ```c
-struct Vec_persistor::Context {
-  trx_t        *trx;    // the sub-transaction the aux writes ride
-  dict_table_t *aux;    // opened once, MDL held
-  THD          *thd;
-  dberr_t       err;    // callbacks return void — the first failure is recorded here
+template <typename ArenaAllocator, typename Persistor>
+class HNSW {
+  using PersistorContext = typename Persistor::Context;
+  ...
+  ArenaAllocator m_allocator;
+  Persistor      m_persistor;      // default-constructed
 };
 ```
 
-| Callback | When it fires | What we do |
-|---|---|---|
-| `insert_cb(ctx, id, base_pk, q, layer, nbrs)` | once, for the newly inserted node | INSERT its aux row |
-| `update_neighbors_cb(ctx, id, nbrs)` | once per node whose edges the insert changed | UPDATE that row's `neighbors` |
-| `update_entry_point_cb(ctx, id)` | when a node lands on a new topmost layer | upsert record 0 |
-| `load_node_cb(ctx, hnsw, handle)` | when a search or insert touches a node that is not in memory | read its aux row and fill the node |
+So "registering the callbacks" is simply instantiating the template:
 
-`update_entry_point_cb` is rare: at most 255 times over an index's lifetime — the layer cap —
-and far fewer in practice, since layer assignment is geometric.
+```c
+using Vec_hnsw = HNSW<Vec_arena, Vec_persistor>;
+```
+
+Three consequences follow from that being compile-time rather than runtime:
+
+- **No function pointers and no virtual dispatch.** The calls inline.
+- **The persistor must be stateless.** It is default-constructed and shared by every call, so it
+  can hold nothing per-call, per-transaction or per-thread. Everything of that kind travels in
+  `Context`, which the class passes through untouched.
+- **`Context` is ours to define** — the class only knows it as `typename Persistor::Context`.
+
+### The persistor
+
+```c
+struct Vec_persistor {
+  struct Context {
+    trx_t        *trx;    // the sub-transaction the aux writes ride
+    dict_table_t *aux;    // opened once per statement, MDL held
+    THD          *thd;
+    dberr_t       err;    // callbacks return void — the first failure lands here
+  };
+
+  void insert_cb(Context *ctx, uint64_t id, uint64_t base_pk, const char *q,
+                 uint8_t layer, NeighborIdRange nbrs) {
+    if (ctx->err != DB_SUCCESS) return;              // an earlier callback failed
+    std::vector<byte> blob;
+    serialize_neighbors(nbrs, blob);
+    ctx->err = aux_insert(ctx, id, base_pk, q, layer, blob);
+  }
+
+  void update_neighbors_cb(Context *ctx, uint64_t id, NeighborIdRange nbrs) {
+    if (ctx->err != DB_SUCCESS) return;
+    std::vector<byte> blob;
+    serialize_neighbors(nbrs, blob);
+    ctx->err = aux_update_neighbors(ctx, id, blob);  // UPDATE … WHERE id = ?
+  }
+
+  void update_entry_point_cb(Context *ctx, uint64_t id) {
+    if (ctx->err != DB_SUCCESS) return;
+    dberr_t e = aux_update_entry_point(ctx, id);     // UPDATE record 0
+    if (e == DB_RECORD_NOT_FOUND)                    // first ever — create it
+      e = aux_insert_entry_point(ctx, id);
+    ctx->err = e;
+  }
+
+  void load_node_cb(Context *ctx, Vec_hnsw &h, Vec_hnsw::LoadNodeHandle handle);
+};
+```
+
+Each callback is a thin adapter: check whether we have already failed, turn the neighbour range
+into the on-disk blob format, and issue one row operation. All the interesting behaviour is in
+the row operations themselves and in when the transaction commits.
+
+The `NeighborIdRange` and the vector pointer are **valid only for the duration of the call** —
+the class is explicit about that — so anything we keep must be copied before returning. We copy
+into the row we are about to insert, so this falls out naturally.
+
+### The graph object lives in the runtime
+
+```c
+struct vec_t : Vec_runtime {       // hangs off dict_table_t::vec
+  Vec_arena   arena;               // owns all node memory
+  Vec_hnsw   *hnsw;                // constructed with dims/M/ef from the DD
+  rw_lock_t   latch;               // serialises writers (§17)
+};
+```
+
+Order matters on teardown: the graph is destroyed before the arena its nodes live in (§16).
 
 ---
 
-## 8. How we write to the aux table
+## 8. How the callbacks write to the aux table
 
-Two mechanisms, both chosen for specific reasons.
+Every callback ends in one row operation, built with InnoDB's query-graph C API.
 
-**The query-graph C API, not the SQL parser.** Aux DML is built directly:
-`ins_node_create` + `row_ins_step` for inserts, `row_create_update_node_for_mysql` with a
-hand-positioned cursor + `row_upd_step` for updates. This gives full redo, undo, and row
-locking — including the standard lock-wait and deadlock handling via
-`row_mysql_handle_errors`, so an aux write behaves like any other DML under contention.
-InnoDB's internal SQL parser (`pars_sql` / `que_eval_sql`) is **not** used: it serialises every
-statement on the global `pars_mutex`, and this path runs once per rewired neighbour on every
-insert.
+```c
+static dberr_t aux_insert(Context *ctx, uint64_t id, uint64_t base_pk,
+                          const char *q, uint8_t layer,
+                          const std::vector<byte> &nbrs) {
+  mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
+  ins_node_t *node = ins_node_create(INS_DIRECT, ctx->aux, heap);
 
-**A sub-transaction, not the user's.** Aux writes run on their own transaction, which commits
-independently of the statement that triggered it. §13 explains why, and §19 states the rules
-that make it safe.
+  dtuple_t *row = dtuple_create(heap, ctx->aux->get_n_cols());
+  dict_table_copy_types(row, ctx->aux);
+  ins_node_set_new_row(node, row);
+
+  set_int (row, COL_ID,        id,                        heap);
+  set_int (row, COL_BASE_PK,   base_pk,                   heap);
+  set_blob(row, COL_VEC,       q, dims * sizeof(float),   heap);
+  set_int (row, COL_LEVEL,     layer,                     heap);
+  set_blob(row, COL_NEIGHBORS, nbrs.data(), nbrs.size(),  heap);
+
+  // builds the query-graph fork only — despite the name, parses nothing
+  que_thr_t *thr = pars_complete_graph_for_exec(node, ctx->trx, heap, nullptr);
+  node->state = INS_NODE_SET_IX_LOCK;
+
+  dberr_t err = run_dml(thr, node, ctx->trx, row_ins_step);
+  mem_heap_free(heap);
+  return err;
+}
+```
+
+`aux_update_neighbors` is the same shape with `row_create_update_node_for_mysql`, a cursor
+positioned directly on the primary key, a single-field `upd_t`, and `row_upd_step`. Because we
+already know the key, we skip the search a normal UPDATE would perform — but we take the locks
+it would have taken: IX on the table, X on the record.
+
+Both share the run loop that `row0mysql.cc` uses for user DML:
+
+```c
+static dberr_t run_dml(que_thr_t *thr, void *node, trx_t *trx, step_fn step) {
+  trx_savept_t savept = trx_savept_take(trx);
+  que_thr_move_to_run_state_for_mysql(thr, trx);
+  for (;;) {
+    thr->run_node = thr->prev_node = node;
+    step(thr);                                   // row_ins_step / row_upd_step
+    dberr_t err = trx->error_state;
+    if (err == DB_SUCCESS) return DB_SUCCESS;
+
+    que_thr_stop_for_mysql(thr);
+    thr->lock_state = QUE_THR_LOCK_ROW;
+    bool was_lock_wait = row_mysql_handle_errors(&err, trx, thr, &savept);
+    thr->lock_state = QUE_THR_LOCK_NOLOCK;
+    if (!was_lock_wait) return err;              // real error — give up
+  }                                              // lock wait — retry the step
+}
+```
+
+That loop is why aux writes behave like ordinary DML under contention: lock waits block and
+retry, deadlocks pick a victim, and errors propagate. We get all of it by driving the same
+machinery the server drives, rather than reimplementing any of it.
+
+**InnoDB's internal SQL parser is deliberately not used.** `pars_sql` / `que_eval_sql` would be
+far less code, but they serialise every statement on the global `pars_mutex` — and this path
+runs once per rewired neighbour on every insert.
+
+**The transaction is a sub-transaction, not the user's.** §13 explains why, and §21 states the
+rules that make it safe.
 
 ---
 
@@ -241,7 +355,8 @@ hnsw.insert(/*id=*/10, /*base_pk=*/7, vector_bytes, &ctx);
 
 **3. The class does its work, then calls us back.** It picks a layer for the new node, searches
 for its nearest neighbours, links them mutually, and prunes each affected neighbour's edge list
-back to `M`. Only when all of that is done does it fire callbacks:
+back to `M`. Only when all of that is done — the graph fully mutated — does it fire the
+callbacks of §7, in this order:
 
 ```
 insert_cb(ctx, 10, 7, [1,0,0,0], layer, nbrs)   →  INSERT INTO aux VALUES (10, 7, …)
@@ -251,7 +366,9 @@ update_neighbors_cb(ctx, 12, nbrs_of_12)        →  UPDATE aux SET neighbors=�
 update_entry_point_cb(ctx, 10)                  →  upsert record 0   (only if layer is new)
 ```
 
-So one INSERT produces **one aux insert plus roughly M aux updates**.
+So one INSERT produces **one aux insert plus roughly M aux updates**, each of them a row
+operation on `ctx->trx` as shown in §8. Note the callbacks fire *after* all graph mutations, not
+at each one, so the neighbour list we serialise is that node's final state for this insert.
 
 **4. We commit the sub-transaction**, before the user's statement completes.
 
