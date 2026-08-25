@@ -1,418 +1,626 @@
-# HNSW Aux Storage — the sub-transaction design
+# Persisting the HNSW Vector Index
 
-*Percona Server · InnoDB · `VECTOR KEY … TYPE hnsw` · branch `vector-mvp-syntax-aux`*
+*Percona Server · InnoDB · `VECTOR KEY … TYPE hnsw`*
 
-How an HNSW index is persisted, reloaded, and used to serve `ORDER BY DISTANCE(v, ?) LIMIT k`.
-Written against the upstream HNSW class (`vector-common/hnsw.h`, PS-11266 + PS-11267), which
-owns the graph algorithm and deliberately leaves storage, identity and transactions to its
-user. This document is that user's half.
+---
 
-Everything below follows from **two decisions**:
+## 1. What already exists
 
-1. **The aux table stores the base row's primary key** (`base_pk`), rather than the base table
-   carrying an index on the hidden label column.
-2. **Aux writes ride a sub-transaction that commits on its own**, and are *not* rolled back
-   when the user's statement rolls back.
+This design builds on work that is already done or in flight. None of it is restated here
+beyond what a reader needs.
 
-## Upstream dependencies
-
-Three things the class does not do yet. All are in progress, and this design assumes them:
-
-| | why we need it |
+| Component | What it provides |
 |---|---|
-| **search returns the node id** alongside `base_pk` | without it check ① is impossible, and one vector `UPDATE` silently mis-ranks results (§3.8) |
-| **`load_node_cb` can report a missing node** | lets a purge actually delete rows — edges to reclaimed nodes get pruned instead of yielding an uninitialised node (§5) |
-| **thread safety** | we serialise writers until it lands. §3.10 states the property its design must give us, which is *not* automatic |
+| **Vector data type** | `VECTOR(n)` columns, `STRING_TO_VECTOR()`, `DISTANCE()` |
+| **Distance functions** (`vector-common/vector_distance.*`) | L2 / inner-product kernels, with AVX-512 paths |
+| **Index syntax** (PS-11203) | `VECTOR KEY (v) TYPE hnsw WITH (M = 16, ef_construction = 200)`, its validation and error codes |
+| **Data dictionary** (PS-11264) | the index `TYPE` and its `WITH (…)` parameters are stored in, and restored from, the DD |
+| **The HNSW class** (PS-11266) | `vector-common/hnsw.h` — the graph algorithm: insert, k-NN search, streaming search |
+| **Persistence APIs** (PS-11267) | the `Persistor` callback concept, lazy per-node loading, and cold start from a persisted entry point |
+
+The HNSW class owns the algorithm and nothing else. It has no on-disk representation, no
+opinion about storage, and it does not even persist its own parameters:
+
+> *Index metadata is not persisted by HNSW itself. The class users must store it alongside the
+> graph (at minimum: vector dimensions, M, distance kind).*
+
+Three additions to that class are in progress and this design depends on them: search
+returning the **node id** alongside `base_pk` (§9), `load_node_cb` being able to report a
+**missing node** (§16), and **thread safety** (§17).
 
 ---
 
-## 1. What the base provides
+## 2. Goal
 
-| | |
-|---|---|
-| `vector-common/hnsw.h` | `insert`, `k_nn_search`, streaming search, lazy per-node loading, the `Persistor` callback concept |
-| PS-11264 (DD) | index options — `TYPE` and `WITH (…)` — stored in and restored from the data dictionary |
-| PS-11203 (syntax) | `VECTOR KEY (v) TYPE hnsw WITH (M = 16, ef_construction = 200)`, validation, error codes |
+The graph lives in memory. This design gives it a home on disk, so that:
 
-The class keeps **no state on disk and no opinion about storage**. It persists no metadata
-either: *"users must store dimensions, M and distance kind alongside the graph … mismatches
-corrupt the graph or yield wrong search results."* For us that is the DD, via `WITH()`.
+- a vector index survives server restart without re-inserting every row;
+- the graph is crash-safe to the same standard as any InnoDB index;
+- queries served from the graph obey MySQL's transaction and isolation rules;
+- every DDL operation leaves the index consistent.
 
----
-
-## 2. What the user sees, and what lands on disk
-
-The SQL surface is the base's. Two things appear that the user did not declare:
-
-**A hidden column on the base table.** `vec_idx_id BIGINT UNSIGNED`, invisible to `SELECT *`
-and `SHOW COLUMNS`, holding this row's **label** — the graph's name for it. The `FTS_DOC_ID`
-device, with one deliberate difference: **there is no index on it.**
-
-**One auxiliary table per vector index**, `vec_hnsw_<table_id>_<index_id>`, hidden from
-`SHOW TABLES` and `INFORMATION_SCHEMA.TABLES`, visible in `INNODB_TABLES`. The `vec_` prefix
-is reserved.
+Concretely: **store what the HNSW class holds in memory into an InnoDB table, and rebuild the
+graph from it on demand.**
 
 ---
 
-## 3. Specification
-
-### 3.1 Terminology
+## 3. Terminology
 
 | Term | Meaning |
 |---|---|
-| **label** | A node's identity, and the `id` the class takes. From a per-table counter, stored in the base row's hidden `vec_idx_id`. **Never reused, never zero** — 0 is the class's empty-slot sentinel. |
-| **base_pk** | The base row's PRIMARY KEY, held on the node and in its aux row. Single-column `BIGINT UNSIGNED`. Several nodes may share one. |
-| **fresh label** | Changing a vector mints a **new** label rather than editing the node, so a `(label, vector)` pair is immutable. |
-| **orphan** | A node no visible base row claims — from a rolled-back statement, a delete, or a superseded vector. Filtered at read time; reclaimed only by §5. |
+| **node** | One vector in the graph. The unit HNSW inserts, links and searches. |
+| **label** | A node's identity — the `id` the HNSW class takes. A `BIGINT UNSIGNED` from a per-table counter. Never reused, never zero (0 is the class's empty-slot sentinel). |
+| **base_pk** | The PRIMARY KEY of the base-table row a node describes. |
+| **layer / level** | How many HNSW layers a node participates in. Assigned randomly at insert; geometrically distributed, so high layers are rare. |
+| **neighbours** | A node's outgoing edges, one list per layer. The graph *is* these lists. |
+| **entry point** | The node searches start from — the first node inserted on the topmost layer. The analogue of a B-tree root. |
+| **aux table** | The InnoDB table holding one row per node. |
+| **fresh label** | Changing a row's vector mints a *new* label rather than editing the existing node. |
+| **orphan** | A node that no visible base row claims. |
 
-### 3.2 The aux table
+---
 
-**One row per graph node, updated in place.**
+## 4. Where the objects live
 
-```sql
-CREATE TABLE vec_hnsw_<tid>_<iid> (
-  id        BIGINT UNSIGNED PRIMARY KEY,  -- the label = HNSW node id
-  base_pk   BIGINT UNSIGNED NOT NULL,     -- the base row this node describes
-  vec       BLOB NOT NULL,                -- dims * 4 bytes
-  level     TINYINT NOT NULL,
-  neighbors BLOB NOT NULL                 -- node ids, 0 = empty slot
-)
-```
-
-No version column, no sequence, no tombstone, no `_dead` companion.
-
-`PRIMARY KEY(id)` is load-bearing, not incidental: `load_node_cb` is a point lookup by node
-id, so the label must lead the key. An append-only `PK(seq)` log would give sequential writes
-but turn every node fault into a scan — the wrong trade once loading is lazy.
-
-**Record 0 holds the entry point.** The entry point is the node the graph is reached through —
-the first node inserted on the topmost layer, the analogue of a B-tree root. `id = 0` can
-never collide with a node (the class asserts `id != 0`; our counter starts at 1), so:
+Three layers, each owning one thing.
 
 ```
-id = 0    base_pk = <entry point node id>   ← the payload
-          vec = ''   level = 0   neighbors = ''
+   dict_table_t  (the user's table)
+        │
+        ├── dict_index_t  ── the vector index: its id, its TYPE
+        │
+        └── Vec_runtime *vec ─────────┐   per-table, created on first use
+                                      │
+                            ┌─────────┴─────────┐
+                            │  the HNSW graph   │   in memory
+                            │  + arena          │
+                            │  + Persistor      │
+                            └───────────────────┘
+                                      │  callbacks
+                                      ▼
+                            vec_hnsw_<tid>_<iid>    on disk
 ```
 
-Empty blobs are not NULL, so this fits the schema unchanged, and finding it is a PK lookup on
-the leftmost record of the clustered index.
+**`dict_index_t`** is the index itself, as the dictionary knows it: its `id`, and the fact that
+it is a vector index. It carries no graph.
 
-It is **not** written once: `update_entry_point_cb` fires whenever a node lands on a new
-topmost layer — at most 255 times per index (the layer cap), far fewer in practice since layer
-assignment is geometric. So the write is an **upsert**.
+**`dict_table_t::vec`** is a pointer to the per-table runtime — the analogue of
+`dict_table_t::fts`. It is `nullptr` until something first opens the index, and it owns the
+`HNSW` object, the arena its nodes are allocated from, the persistor, and the index parameters
+read back from the DD.
 
-Four consequences:
+**The aux table** is named `vec_hnsw_<table_id>_<index_id>`, hidden from `SHOW TABLES` and
+`INFORMATION_SCHEMA.TABLES`, visible in `INNODB_TABLES`. The `vec_` prefix is reserved, so a
+user cannot create a table that collides with a computed aux name.
 
-- **Absent means empty, not broken.** No record 0 ⇒ no nodes yet ⇒ do *not* call
-  `init_from_entry_point`; build an empty `HNSW` and let the first `insert()` establish it.
-- **It names a node**, so §3.5's ordering rule covers it. A record 0 pointing at a node with no
-  row leaves `init_from_entry_point` failing its own `assert(m_entry_point->loaded())`.
-- **It must never be reclaimed** (§5). The entry-point node will usually *become* an orphan —
-  its row deleted, or its vector superseded — so a naive reclaim-orphans sweep would delete the
-  one node the graph is entered through.
-- **A dangling entry point needs a recovery path**: scan the aux for the highest-`level` node
-  and adopt it. That defeats lazy loading exactly once, and beats an unopenable index.
+**A hidden column on the base table** carries the label: `vec_idx_id BIGINT UNSIGNED`,
+invisible to `SELECT *` and `SHOW COLUMNS`. This is the same device FTS uses with
+`FTS_DOC_ID`. It is what lets a row and its node find each other.
 
-`base_pk` means something different on record 0 than on every other row. The alternative — a
-dedicated column — costs 8 bytes on every node row to serve one record. The overload stays,
-documented; the only code that must skip record 0 is the recovery scan, since nothing else
-ever scans the aux.
+---
 
-### 3.3 The label counter
+## 5. The `Vector_index` seam
 
-The class requires a non-zero `id` that does not already exist. We allocate from a per-table
-counter and stamp it into the base row's hidden column at INSERT.
-
-**A label must never be reissued**, including after a crash following a rolled-back statement —
-a reissued label would alias two rows in one graph. The counter is persisted as a watermark
-ahead of what has been handed out, and restored at startup.
-
-### 3.4 The persistor
-
-`Context` is ours to define. It carries the sub-transaction and an error slot, because
-callbacks return `void`:
+HNSW will not be the only vector index type. The engine is therefore structured so that adding
+a second type is an addition rather than an edit — no call site outside the implementation
+changes when one arrives.
 
 ```c
-struct Vec_persistor::Context {
-  trx_t        *trx;    // the sub-transaction — never the user's
-  dict_table_t *aux;    // opened once, MDL held
-  THD          *thd;
-  dberr_t       err;    // first failure wins; later callbacks short-circuit
+class Vector_index {                       // stateless singleton, one per TYPE
+  virtual Vec_index_type type() const = 0;
+  virtual void    open(dict_table_t *, field_no, dims, M, ef) const = 0;
+  virtual dberr_t insert(trx, table, thd, label, base_pk, vec) const = 0;
+  virtual dberr_t knn(table, thd, query, dims, k, ef, hits) const = 0;
+  virtual dberr_t load(dict_table_t *, THD *) const = 0;
+  virtual void    close(dict_table_t *) const = 0;
+};
+
+const Vec_type_entry vec_type_registry[] = {
+    {"hnsw", &vec_hnsw_singleton},         // adding a TYPE is one row here
 };
 ```
 
-| callback | aux operation |
+Two rules keep the seam honest:
+
+- **Implementations are stateless.** All per-index state lives in the runtime hanging off
+  `dict_table_t`, so there is no object lifetime to manage and no per-table singleton.
+- **The runtime is typed as a generic base.** `dict_table_t::vec` is a `Vec_runtime *`;
+  hnsw's own struct derives from it, and only the implementation that allocated a runtime may
+  interpret the subtype. The downcast is file-local to the hnsw implementation, so the
+  compiler enforces the boundary.
+
+Dispatch has exactly two sources, and neither guesses:
+
+| situation | resolved by |
 |---|---|
-| `insert_cb(ctx, id, base_pk, q, layer, nbrs)` | INSERT one row |
-| `update_neighbors_cb(ctx, id, nbrs)` | UPDATE `neighbors` by PK — the row always exists, `insert_cb` ran first |
-| `update_entry_point_cb(ctx, id)` | upsert record 0: UPDATE, and INSERT on `DB_RECORD_NOT_FOUND` |
-| `load_node_cb(ctx, hnsw, handle)` | one PK lookup, then `load_set_layer` / `load_set_vec` / `load_set_base_pk` / `load_node_neighbors` |
+| a runtime is open | `table->vec->impl` — an open runtime records the implementation that created it |
+| no runtime yet (open, build) | the `TYPE` token from the KEY definition, resolved through the registry |
 
-All of it goes through InnoDB's C API — `ins_node_create` + `row_ins_step` for inserts,
-`row_create_update_node_for_mysql` + a hand-positioned `btr_pcur` + `row_upd_step` for
-updates. **Never the internal SQL parser**: `pars_sql`/`que_eval_sql` serialise on the global
-`pars_mutex`, and this path runs once per rewired neighbour per insert.
-`pars_complete_graph_for_exec` is used despite its name — it builds the query-graph fork only
-and parses nothing.
+An unresolvable token is an error, never a default. A resolver that guesses would hand one
+implementation's table to another as soon as a second type exists.
 
-**Errors.** The first failure sets `ctx->err`; subsequent callbacks return immediately. The
-caller checks after `insert()` returns, rolls the sub-transaction back, and fails the
-statement.
+---
 
-### 3.5 The sub-transaction rule
+## 6. The aux table
 
-One sub-transaction per `insert()` call, all callbacks writing into it, committed after
-`insert()` returns:
+**One row per node, updated in place.**
+
+```sql
+CREATE TABLE vec_hnsw_<tid>_<iid> (
+  id        BIGINT UNSIGNED PRIMARY KEY,  -- the label
+  base_pk   BIGINT UNSIGNED NOT NULL,     -- the base row this node describes
+  vec       BLOB NOT NULL,                -- dims * 4 bytes
+  level     TINYINT NOT NULL,             -- top layer for this node
+  neighbors BLOB NOT NULL                 -- neighbour ids, 0 = empty slot
+)
+```
+
+`PRIMARY KEY(id)` is load-bearing. Nodes are fetched one at a time, by label (§15), so the
+label must lead the key.
+
+**Record 0 holds the entry point.** Since 0 is never a real label, that row is free to use as
+index metadata:
+
+```
+id = 0    base_pk = <entry point node id>      ← the payload
+          vec = ''    level = 0    neighbors = ''
+```
+
+Empty blobs are not NULL, so this needs no schema change, and reading it is a lookup of the
+leftmost record of the clustered index.
+
+Two things follow. **No record 0 means the index is empty**, not broken — a freshly created
+index has no nodes and no entry point until the first insert. And **record 0 must be written
+after the node it names**, since it is a reference like any neighbour list (§19).
+
+---
+
+## 7. The persistence callbacks
+
+The HNSW class calls out to a `Persistor` we supply. `Context` is ours to define and is passed
+through every call; the class treats it as opaque.
+
+```c
+struct Vec_persistor::Context {
+  trx_t        *trx;    // the sub-transaction the aux writes ride
+  dict_table_t *aux;    // opened once, MDL held
+  THD          *thd;
+  dberr_t       err;    // callbacks return void — the first failure is recorded here
+};
+```
+
+| Callback | When it fires | What we do |
+|---|---|---|
+| `insert_cb(ctx, id, base_pk, q, layer, nbrs)` | once, for the newly inserted node | INSERT its aux row |
+| `update_neighbors_cb(ctx, id, nbrs)` | once per node whose edges the insert changed | UPDATE that row's `neighbors` |
+| `update_entry_point_cb(ctx, id)` | when a node lands on a new topmost layer | upsert record 0 |
+| `load_node_cb(ctx, hnsw, handle)` | when a search or insert touches a node that is not in memory | read its aux row and fill the node |
+
+`update_entry_point_cb` is rare: at most 255 times over an index's lifetime — the layer cap —
+and far fewer in practice, since layer assignment is geometric.
+
+---
+
+## 8. How we write to the aux table
+
+Two mechanisms, both chosen for specific reasons.
+
+**The query-graph C API, not the SQL parser.** Aux DML is built directly:
+`ins_node_create` + `row_ins_step` for inserts, `row_create_update_node_for_mysql` with a
+hand-positioned cursor + `row_upd_step` for updates. This gives full redo, undo, and row
+locking — including the standard lock-wait and deadlock handling via
+`row_mysql_handle_errors`, so an aux write behaves like any other DML under contention.
+InnoDB's internal SQL parser (`pars_sql` / `que_eval_sql`) is **not** used: it serialises every
+statement on the global `pars_mutex`, and this path runs once per rewired neighbour on every
+insert.
+
+**A sub-transaction, not the user's.** Aux writes run on their own transaction, which commits
+independently of the statement that triggered it. §13 explains why, and §19 states the rules
+that make it safe.
+
+---
+
+## 9. INSERT
+
+A user runs:
+
+```sql
+INSERT INTO t (id, v) VALUES (7, STRING_TO_VECTOR('[1,0,0,0]'));
+```
+
+**1. The server assigns a label.** Before the base row is written, the counter hands out the
+next label — say 10 — and it is stamped into the row's hidden `vec_idx_id` column. The row is
+inserted by the ordinary InnoDB path, on the user's transaction.
+
+**2. We start a sub-transaction and call the graph.**
 
 ```c
 Context ctx{ trx_allocate_for_background(), aux, thd, DB_SUCCESS };
-trx_start_if_not_started(ctx.trx, true, UT_LOCATION_HERE);
+hnsw.insert(/*id=*/10, /*base_pk=*/7, vector_bytes, &ctx);
+```
 
-hnsw.insert(label, base_pk, vec_bytes, &ctx);      // fires the callbacks
+**3. The class does its work, then calls us back.** It picks a layer for the new node, searches
+for its nearest neighbours, links them mutually, and prunes each affected neighbour's edge list
+back to `M`. Only when all of that is done does it fire callbacks:
 
+```
+insert_cb(ctx, 10, 7, [1,0,0,0], layer, nbrs)   →  INSERT INTO aux VALUES (10, 7, …)
+update_neighbors_cb(ctx, 5,  nbrs_of_5)         →  UPDATE aux SET neighbors=… WHERE id=5
+update_neighbors_cb(ctx, 12, nbrs_of_12)        →  UPDATE aux SET neighbors=… WHERE id=12
+      … one per neighbour whose edges changed …
+update_entry_point_cb(ctx, 10)                  →  upsert record 0   (only if layer is new)
+```
+
+So one INSERT produces **one aux insert plus roughly M aux updates**.
+
+**4. We commit the sub-transaction**, before the user's statement completes.
+
+```c
 if (ctx.err != DB_SUCCESS) { trx_rollback_for_mysql(ctx.trx); /* fail the statement */ }
-else                         trx_commit_for_mysql(ctx.trx);   // BEFORE the user commits
-trx_free_for_background(ctx.trx);
+else                         trx_commit_for_mysql(ctx.trx);
 ```
 
-Why not ride the user's transaction: **the class has no delete**, so on rollback we cannot
-remove the node from memory. If the aux rolled back while memory kept the node, disk and
-memory would disagree and a restart would silently change the graph. Not rolling back keeps
-them telling the same story.
+If any aux write failed, the first failure is in `ctx.err`, later callbacks short-circuit, the
+sub-transaction rolls back and the statement fails — taking the base row with it.
 
-Everything else follows from one invariant:
+A `NULL` vector is not indexed at all: no node, no aux row. It still consumes a label.
 
-> **The aux is a superset of committed base rows.**
+---
 
-Extra nodes are harmless — the read path filters them. A *missing* node is not: the row
-exists, kNN never returns it, and nothing reports the gap. So the failure direction must
-always be "extra", which pins two rules:
+## 10. UPDATE
 
-- **the sub-transaction commits before the user's** — a crash in that window leaves an orphan,
-  never a gap;
-- **a node's own row commits no earlier than anything that names it** — neighbour blobs and
-  record 0 alike. Putting every callback of one `insert()` into a single transaction satisfies
-  this by construction, since they commit atomically. It is what makes a dangling node id
-  impossible.
+**Changing the vector** does not edit the node. Nodes are immutable: HNSW cannot safely move a
+point once its neighbours are linked to it. So a new label is minted and inserted, and the old
+node is left alone.
 
-What this buys beyond rollback coherence: the M neighbour row locks are held for the aux write
-rather than for the user's transaction, so insert-insert deadlocks on shared neighbours and
-serialisation behind hot hub nodes largely disappear — and the user's undo does not carry M
-neighbour updates. There is no deadlock risk against the user's transaction, because the
-user's transaction never touches aux rows.
+```sql
+UPDATE t SET v = STRING_TO_VECTOR('[0,1,0,0]') WHERE id = 7;
+```
 
-### 3.6 Write paths
+```
+base row 7:  vec_idx_id  10 → 20
+graph:       node 10 stays (vector [1,0,0,0])
+             node 20 added (vector [0,1,0,0])
+aux:         row 10 untouched; row 20 inserted; ~M neighbour rows updated
+```
 
-| statement | graph | aux |
+Both nodes now carry `base_pk = 7`. §14 explains how a query tells them apart.
+
+**Changing only the primary key** does not touch the graph at all — the vector has not moved.
+It does need the row's *current* node to be re-pointed:
+
+```sql
+UPDATE aux SET base_pk = <new pk> WHERE id = <current label>
+```
+
+Older nodes for the same row keep the stale `base_pk`; §14 shows why that is harmless.
+
+---
+
+## 11. DELETE
+
+```sql
+DELETE FROM t WHERE id = 7;
+```
+
+**Nothing happens to the graph, and nothing is written to the aux table.**
+
+That is not an omission. A transaction that started before this delete is still entitled to see
+row 7, and the only way it can reach the row through the index is via node 10 — so the node
+must stay. Removing it would break isolation, not tidy up.
+
+Deleted nodes are filtered at read time (§14), so they can never be *returned*; they simply
+remain as part of the graph's structure, still usable as routers during traversal.
+
+The cost is that dead nodes accumulate; §20 covers what that means and how it is eventually
+reclaimed.
+
+---
+
+## 12. SELECT
+
+```sql
+SELECT id FROM t ORDER BY DISTANCE(v, '[1,0,0,0]', 'EUCLIDEAN') LIMIT 5;
+```
+
+```
+1. k_nn_search(query, k, ef_search, &ctx)  →  (node_id, base_pk) pairs, closest first
+2. for each candidate:
+       fetch the base row by base_pk, under this reader's own read view
+       row not visible?              → skip
+       row.vec_idx_id != node_id?    → skip
+       otherwise return it, at the candidate's graph distance
+3. short of k? widen the search and resume, excluding what was already returned
+```
+
+The graph search is pure memory (plus any node faults, §15). The only disk access per candidate
+is the base-row fetch — the same lookup any secondary index performs to return a row.
+
+The two skip conditions are what make the index correct under concurrency, and §14 explains
+them.
+
+---
+
+## 13. Rollback, and why orphans are acceptable
+
+If the statement in §9 rolls back, the base row disappears — but **the aux rows stay**, because
+they were committed on their own transaction. Node 10 remains in the graph and in the aux, now
+describing a row that does not exist. That is an *orphan*.
+
+This is deliberate. The HNSW class has no delete operation, so on rollback we **cannot** remove
+the node from memory. If the aux rolled back while memory kept the node, disk and memory would
+disagree, and the graph would silently change shape at the next restart. Leaving both in place
+keeps them consistent.
+
+Orphans are harmless because the read path already filters them: a candidate whose `base_pk`
+resolves to no visible row is skipped (§12). The same filter handles deleted rows and
+superseded vectors, so orphans need no special case.
+
+The direction of the failure is what matters. An **extra** node costs a wasted candidate slot.
+A **missing** node would mean a committed row that the index never returns — a wrong answer
+with nothing to report it. §19 states the rules that keep the error always on the harmless side.
+
+---
+
+## 14. How MVCC works
+
+There is no vector-specific visibility machinery. The graph is a **candidate generator** and
+the base table is the authority: the graph proposes, the row decides.
+
+This works because of four properties that each exist for their own reason:
+
+| Property | Why it exists | What it also gives |
 |---|---|---|
-| **INSERT** | `insert(label, pk, vec, &ctx)` | 1 INSERT + 1 UPDATE per rewired neighbour (+ record 0, rarely) |
-| **UPDATE** (vector changed) | `insert(fresh_label, pk, new_vec, &ctx)` — the old node stays | as INSERT, for the new label |
-| **UPDATE** (PK only) | nothing | `UPDATE aux SET base_pk = ? WHERE id = <current label>` |
-| **DELETE** | nothing | nothing |
+| a vector change mints a fresh label | nodes are immutable | every historical vector is a distinct node — in effect, a version |
+| nodes are never removed | HNSW cannot delete safely | that version history is retained |
+| `vec_idx_id` is an ordinary column | it is the `FTS_DOC_ID` device | it is **versioned by undo**, so the row version a reader sees names the node that represents it |
+| edges are navigation, not data | HNSW rewires freely | the path taken to a candidate never affects what may be returned |
 
-A NULL vector is not indexed: no node, no aux row. It still consumes a label.
+So one shared graph serves every transaction. It is a *superset* of what any reader should see,
+and each reader narrows it with its own read view. Two checks do that.
 
-**DELETE writes nothing**, and that is not a shortcut. Check ② requires a reader whose snapshot
-predates the delete to still reach the row, so the node *must* stay. The class's missing delete
-support and MVCC's requirement coincide.
-
-**PK-only UPDATE** touches only the row's current node. Stale nodes may keep the old
-`base_pk`; check ① rejects them anyway.
-
-### 3.7 Read path
+**Check ① — `row.vec_idx_id == node_id`.** Consider the update from §10, and a query for the
+*old* vector:
 
 ```
-hits = k_nn_search(q, k, ef_search, &ctx)     → (node_id, base_pk), closest first
+graph:   node 10 → [1,0,0,0], base_pk 7      (stale — that vector is gone)
+         node 20 → [0,1,0,0], base_pk 7      (current)
+base:    row 7 now carries vec_idx_id = 20
 
-per candidate:
-    fetch the base row by base_pk, under this reader's own view
-    not visible?                → skip
-    row.vec_idx_id != node_id?  → skip                    ← check ①
-    else emit at the candidate's graph distance
-
-short of k? widen and resume, excluding what was already returned
+SELECT … ORDER BY DISTANCE(v,'[1,0,0,0]') LIMIT 1
+    node 10 is an exact match → distance 0 → base_pk 7
+    but row 7's vector today is [0,1,0,0], which is far from the query
 ```
 
-**One dive per candidate.** `base_pk` comes straight from the graph, so the only disk access is
-the clustered fetch any index pays to return a row.
+Returning row 7 here would rank it at a distance belonging to a vector it no longer has —
+placing it ahead of rows that genuinely are near the query. Not a duplicate, not a missing row:
+a wrongly ordered one, with nothing to signal it. Check ① rejects it, because `20 != 10`, and
+node 20 later returns row 7 at its true distance.
 
-### 3.8 How MVCC works — nothing special
+The same check handles a recycled primary key: if row 7 is deleted and a different row is
+inserted with `id = 7`, the stale node still points at PK 7 — but the new row's `vec_idx_id` is
+not 10.
 
-There is no vector-specific visibility machinery. The graph is a **versionless candidate
-generator**; the base row decides. Four properties, each present for its own reason, add up to
-a multi-version store:
+**Check ② — a row deleted after the reader's snapshot.** This one needs no code. The node is
+still in the graph, its `base_pk` was never touched by the delete, and the fetch under an older
+read view returns the pre-delete version of the row from undo — whose `vec_idx_id` still reads
+10, so check ① passes as well.
 
-| property | why it exists | what it also gives |
-|---|---|---|
-| fresh label per vector change | counter crash-safety | every historical vector is a distinct, immutable node — *a version* |
-| nodes are never removed | the class has no delete | version history is retained |
-| `vec_idx_id` is an ordinary column | it is the `FTS_DOC_ID` analogue | it is **versioned by undo**, so the row version a reader sees names the label representing it |
-| edges are navigation, not data | HNSW rewires freely | the path to a candidate never affects what may be returned |
+Every case a concurrent workload produces:
 
-One shared graph therefore serves every snapshot: it is a superset of every reader's node set,
-and each reader filters it with its own read view. Two checks, and only the first is ours.
-
-**① `row.vec_idx_id == node_id`.** One integer compare on a row the read path already fetched.
-One `UPDATE` shows why it is not optional:
-
-```
-row 7:  v=[1,0] → label 10
-UPDATE t SET v='[0,1]' WHERE id=7   → label 20; node 10 remains
-
-graph:  node 10 → [1,0], base_pk 7      (stale)
-        node 20 → [0,1], base_pk 7      (current)
-base:   row 7 now carries vec_idx_id = 20
-
-SELECT … ORDER BY DISTANCE(v,'[1,0]') LIMIT 1
-   node 10 matches exactly → distance 0 → base_pk 7
-   but row 7's vector is now [0,1], far from the query
-```
-
-Without ①, row 7 is returned **at the wrong distance** and sorts ahead of rows genuinely near
-the query. Not a duplicate and not a missing row — a wrongly ranked one, invisible to the
-caller. With ①, `20 != 10` skips the stale node, and node 20 later returns row 7 at its true
-distance.
-
-① also covers PK reuse: `DELETE` row 7, then `INSERT` a new row taking PK 7. The stale node
-still points at 7; existence proves nothing about identity, but `vec_idx_id` does.
-
-**② include a row deleted after the reader's snapshot.** Free. The node is still in the graph,
-`base_pk` is untouched by DELETE, and the fetch under an old view returns the pre-delete
-version from undo — whose `vec_idx_id` still reads 10, so ① passes too.
-
-| situation | base fetch | ① | outcome |
+| Situation | base-row fetch | check ① | Result |
 |---|---|---|---|
 | another transaction's uncommitted insert | not visible | — | skipped |
-| deleted, deletion visible to me | not visible | — | skipped |
-| deleted **after** my snapshot | visible via undo | passes | **returned — ②** |
-| vector updated, stale node | visible | `20 != 10` | skipped |
-| PK reused by a different row | visible | `50 != 10` | skipped |
-| statement rolled back (orphan) | not found | — | skipped |
+| deleted, and the delete is visible to me | not visible | — | skipped |
+| deleted **after** my snapshot | visible, from undo | passes | **returned** |
+| vector updated; this is the stale node | visible | `20 != 10` | skipped |
+| primary key reused by a different row | visible | fails | skipped |
+| the inserting statement rolled back | not found | — | skipped |
 
-**Isolation** is whatever the transaction already has: REPEATABLE READ asks one view for the
-transaction, READ COMMITTED a fresh one per statement. Neither needs anything from us — which
-is the real argument for this design over versioning the graph.
+**Isolation levels need nothing from us.** REPEATABLE READ asks one read view for the whole
+transaction; READ COMMITTED asks a fresh one per statement. Both simply filter the same shared
+graph differently.
 
-**Not reachable, by design:** SERIALIZABLE on the index path. Phantom prevention needs
-predicate locks over "the k nearest neighbours of q", and ℝᵈ has no key order for gap locks to
-hang from. Sessions needing it fall back to the exact path.
+SERIALIZABLE is not reachable on the index path: phantom prevention would need predicate locks
+over "the k nearest neighbours of q", and there is no key order in ℝᵈ for gap locks to attach
+to. Such sessions fall back to the exact path.
 
-### 3.9 Load path
+---
 
-The graph is never loaded wholesale. Cold start reads dims/M/ef from the DD, constructs the
-`HNSW`, reads record 0, and calls `init_from_entry_point()`. From there nodes fault in as
-searches and inserts touch them:
+## 15. Lazy loading
+
+**The graph is never loaded in one go.** The intention is startup latency: without this, the
+first query on an index after a restart would pay for reading every node before returning a
+single row.
+
+Cold start does the minimum:
+
+```
+1. read dims, M, ef_construction from the DD
+2. construct an empty HNSW with exactly those parameters
+3. read record 0 → the entry point label
+       absent?  → the index is empty; stop here
+4. init_from_entry_point(entry_label, &ctx)   → loads exactly ONE node
+```
+
+The entry point is the graph's root, so that single node is enough to start traversing.
+Everything else arrives on demand:
 
 ```c
 void load_node_cb(Context *ctx, HNSW &h, LoadNodeHandle handle) {
-  uint64_t id = h.load_node_id(handle);
-  //  SELECT base_pk, vec, level, neighbors FROM aux WHERE id = ?     (one seek)
+  uint64_t id = h.load_node_id(handle);            // which node is wanted
+  //  SELECT base_pk, vec, level, neighbors FROM aux WHERE id = ?      one PK lookup
   h.load_set_layer(handle, level);
   h.load_set_vec(handle, vec);
   h.load_set_base_pk(handle, base_pk);
-  h.load_node_neighbors(handle, ids);     // 0 = empty; stubs for unloaded neighbours
+  h.load_node_neighbors(handle, ids);              // creates stubs for unloaded neighbours
 }
 ```
 
-**The point of this is startup latency, not memory.** There is no full aux scan before the
-first query after a restart; warm-up is spread across the queries that need each node. Memory
-barely moves: the stub constructor allocates `ALIGN_SIZE(sizeof(Node)) + ALIGN_SIZE(vec_size)`
-whether or not the node is ever loaded, so only the `(layer+2)*M` neighbour array is deferred —
-under 10% of a node at high dimensions. Loading one node also creates a stub per neighbour id,
-so the frontier around a hot region is itself substantial.
+Loading a node creates **stubs** for each of its neighbours — nodes that exist by id but hold
+no data. A stub is filled the first time a traversal actually reaches it. A search therefore
+descends one path from the entry point to layer 0, faulting roughly one node per layer plus the
+neighbourhood it examines at the bottom — for ten million rows at `M = 16`, on the order of six
+nodes, not ten million.
 
-Nothing shrinks either: `m_loaded` only goes false → true, there is no unload path, and the
-arena has no per-block free. Bounding graph memory is upstream's memory-limits work and needs
-both.
+Two properties worth knowing:
 
-**Dict-cache eviction therefore needs no special handling**: it destroys the runtime, the
-`HNSW` and its arena together, reclaiming everything at once, and recovery costs one
-entry-point load plus faulting rather than a full scan. That is why nothing pins the table.
-Teardown order matters — the class *"does not destroy Nodes and must not outlive the
-allocator"* — so the graph is destroyed before the arena owning its nodes.
-
-### 3.10 Concurrency
-
-Until upstream thread safety lands, writers are serialised by a per-index latch held across
-`insert()`. That is a throughput ceiling, and it is also why **no version column is needed**:
-concurrent rewires of the same node cannot happen, so the stale-snapshot race that would demand
-one is structurally absent.
-
-When it does land, one property decides whether that stays true:
-
-> A neighbour snapshot handed to `update_neighbors_cb` must be **atomic with the mutation it
-> describes** — captured under whatever lock serialises changes to that node's edge list.
-
-If callbacks fire outside that lock, two transactions rewiring the same node can capture
-snapshots in one order and reach the aux row in the other, so an older edge list overwrites a
-newer one. Memory stays correct; the loss appears only at the next reload, as silent recall
-erosion. Recovering from that needs a mutation-order stamp — a per-node counter incremented
-under the same lock, compared under the aux row's X lock, stored in a `ver` column.
-
-**We would rather not need that**, so the requirement belongs in the concurrency design rather
-than as a repair afterwards. The class already captures *once per touched node at end of
-insert* rather than at each mutation site, which is the better shape — it is simply not yet
-ordered against other writers.
+- **This bounds latency, not memory.** A stub already allocates its node block including vector
+  space; only the neighbour array is deferred. Nor does anything shrink: a node never returns to
+  the unloaded state, and the arena has no per-block free.
+- **The parameters must match** what the index was built with. The class is explicit that a
+  mismatch in dimensions or `M` corrupts the graph or yields wrong results, which is why they
+  come from the DD rather than from a default.
 
 ---
 
-## 4. Limitations and impacts
+## 16. Dictionary cache eviction
 
-**Orphans accumulate; the index grows with mutations, not rows.** A rolled-back statement, a
-deleted row and a superseded vector all leave a node that MVP never removes. A traversed orphan
-costs a full node block in memory, reclaimed only by dropping the index or restarting. §5 is
-the answer and is explicitly out of MVP scope.
+A `dict_table_t` can be evicted when nothing references it. For a vector-indexed table that
+means the runtime, the `HNSW` object and its arena are all destroyed together, and every node's
+memory is reclaimed in a single step.
 
-**Aux state is not transactional with base data.** By design. The aux is durable state
-converging on the base table, and the base table is the sole authority on what is real.
-`SELECT COUNT(*)` on the aux will not match the base table, and that is correct behaviour.
+Nothing needs to be saved first — everything in the graph is already in the aux table. The next
+statement that touches the table opens the runtime again and starts from the entry point, as in
+§15. Because recovery is one node load rather than a full scan, eviction is cheap enough that
+vector-indexed tables need no special protection from it.
 
-**Writers are serialised** (§3.10) until upstream threading lands.
-
-**A failed aux write fails the statement** — committing a base row whose node never landed
-would violate the superset invariant in the unsafe direction.
-
-**INSTANT ADD/DROP COLUMN, IMPORT and DISCARD** are refused on vector-indexed tables;
-`ADD VECTOR INDEX` is COPY-only; a vector index's TYPE cannot be changed in place.
+The one constraint is teardown order. The class states that it *"does not destroy Nodes and must
+not outlive the allocator"*, so the graph must be destroyed before the arena its nodes live in.
 
 ---
 
-## 5. Post-MVP: reclaiming orphans
+## 17. Concurrency
 
-Not in MVP, but the shape is decided, because "never delete" is not shippable long term.
+The HNSW class is not yet thread-safe, so writers are serialised: a per-index latch is held
+across `insert()`. Reads are unaffected by this except that they may wait behind a writer.
 
-A label is reclaimable once **no active read view can see any row version carrying it** — the
-exact negation of the condition ② needs, so a correct purge preserves ② with no separate rule.
+That serialisation is also why the aux needs no version or sequence column. When two
+transactions rewire the same node concurrently, their aux writes can reach the row in the
+opposite order from the in-memory mutations, so an older edge list can overwrite a newer one —
+losing an edge on disk that memory still has, and surfacing only at the next reload as slightly
+degraded recall. Serialised writers make that race impossible.
 
-The three retirement events are ours to observe, and only we see all of them:
+When thread safety does land, one property decides whether that remains true:
 
-| event | who knows |
+> A neighbour list handed to `update_neighbors_cb` must be captured **atomically with the
+> mutation it describes**, under whatever lock serialises changes to that node's edges.
+
+If it is, ordering is preserved and nothing more is needed. If callbacks fire outside that lock,
+the aux needs a mutation-order stamp: a per-node counter incremented under the same lock, stored
+in the row, and compared before overwriting.
+
+---
+
+## 18. DDL
+
+| Operation | Effect on the index |
 |---|---|
-| DELETE | us, at delete time |
-| vector UPDATE — old label retired | us, when we mint the fresh label |
-| **INSERT rolled back** | **us, at rollback — nothing else ever knows** |
+| `CREATE TABLE … VECTOR KEY` | adds the hidden `vec_idx_id` column, creates the aux table, registers it in the DD |
+| `DROP TABLE` | drops the aux table with the parent |
+| `TRUNCATE TABLE` | drop and recreate — the aux is re-created empty, and the label counter restarts |
+| `RENAME TABLE` | same schema: nothing to do. Cross-schema: the aux moves with the parent |
+| `DROP INDEX` | drops that index's aux table; the hidden column is retained |
+| `ALTER TABLE … ADD VECTOR KEY` | see below |
+| `IMPORT` / `DISCARD TABLESPACE` | refused on vector-indexed tables |
+| `ALTER … ALGORITHM=INSTANT` (ADD/DROP COLUMN) | refused on vector-indexed tables |
 
-That last row rules out piggybacking on InnoDB purge: purge is driven by the *update* undo
-history, and insert undo is discarded at commit and at rollback (*"knowledge of inserts is not
-needed after a commit or rollback"*), so a rolled-back INSERT produces no purge event at all —
-and that is precisely the orphan class this design manufactures deliberately. Purge also
-materialises only a partial row of *indexed* fields, and `vec_idx_id` is in no index.
+Aux tables are hidden from user-facing catalogue views but registered in the DD like any table,
+so they participate normally in crash recovery and DDL logging.
 
-So: a `_dead(label, retired_trx_id)` work-list written at all three points, reclaimed when
-`retired_trx_id` predates the oldest active view. It is a **hint, never an authority** —
-visibility stays with the base row and ① — so being stale in either direction costs a wasted
-probe or a delayed reclaim, never a wrong row.
+**`IMPORT` is refused** because an imported tablespace carries base rows that no aux table
+describes. The alternatives were an index that silently omits every imported row, or a rebuild
+the user did not ask for inside a metadata-only statement. Refusing keeps the aux and the base
+rows from ever disagreeing.
 
-Two upstream dependencies: `load_node_cb` must be able to report a missing node (else deleting
-rows re-creates dangling references), and delete support would stop purged nodes from being
-re-referenced by later rewires. And record 0's node must be pinned against reclamation.
+**A vector index's `TYPE` cannot be changed in place.** Changing it means dropping the index and
+adding it back, which rebuilds the graph — the stored aux contents belong to the old
+implementation.
 
 ---
 
-## 6. What this deliberately does not do
+## 19. `ALTER TABLE … ADD VECTOR KEY`
 
-- **No on-disk traversal.** The graph stays resident; disk reconstructs it, one node at a time.
-- **No version or sequence column** — see §3.10 for the condition that keeps this true.
-- **No `_dead` table, no tombstones** in MVP. DELETE writes nothing.
-- **No dict-cache pinning.** Lazy loading makes eviction cheap enough to ignore.
-- **One vector index per table**, and a single-column integer PRIMARY KEY.
+Adding a vector index to a table with existing rows is performed by **table copy**, not
+in-place.
+
+```sql
+ALTER TABLE t ADD VECTOR KEY vk (v) TYPE hnsw WITH (M = 16);
+```
+
+The copy path already rewrites every row into a new table, and each of those rows travels the
+ordinary INSERT path of §9 — a label is assigned, `hnsw.insert()` is called, callbacks populate
+the aux. So the graph is built as a side effect of the copy, with no separate build phase and no
+second code path to keep correct.
+
+In-place is refused deliberately. It would have to build the graph while concurrent writers
+mutate the table, and reconcile a partially built index with changes arriving behind it. The
+copy is slower and obviously correct.
+
+---
+
+## 20. Durability and crash recovery
+
+**The aux table is an ordinary InnoDB table.** Its writes are redo-logged and undo-logged like
+any other, so recovery restores it with no vector-specific machinery. There is no separate log,
+no checkpoint of the graph, and nothing to replay by hand.
+
+**The graph itself is never persisted as such** — only the rows it can be rebuilt from. After a
+crash there is no graph in memory; the first statement to touch the index rebuilds it from the
+entry point (§15).
+
+**The label counter** is persisted as a watermark that runs ahead of the labels actually handed
+out, so a crash can never cause a label to be reissued. A reissued label would give two rows the
+same identity in one graph.
+
+**A crash between the two commits** — the aux sub-transaction and the user's transaction — is
+the interesting window, and the ordering rule in §21 makes it safe: the sub-transaction commits
+first, so a crash in between leaves an orphan node, never a committed row without one.
+
+---
+
+## 21. The rules
+
+Three invariants. Everything above is arranged so that they hold.
+
+**1. The aux is a superset of committed base rows.**
+Extra nodes are filtered at read time and cost only a wasted candidate. A missing node is a
+committed row the index never returns — a wrong answer with nothing to report it. Every choice
+in this design puts the error on the harmless side.
+
+**2. The sub-transaction commits before the user's transaction.**
+This is what keeps rule 1 true across a crash. One sub-transaction is used per `insert()` call,
+covering the node's own row, every neighbour update, and record 0. They therefore commit
+atomically, which also satisfies the ordering requirement that **a node's row must exist before
+anything references it** — neighbour lists and record 0 alike. A dangling reference is
+impossible by construction.
+
+One transaction per `insert()` rather than one per callback: while writers are serialised (§17)
+there is no contention to relieve by committing sooner, and a single transaction gives
+atomicity for free. This is worth revisiting when the class becomes thread-safe.
+
+**3. Aux writes never touch the parent table.**
+The sub-transaction reads and writes the aux table only. The user's transaction never locks an
+aux row, and the sub-transaction never locks a base row, so the two can never deadlock against
+each other.
+
+---
+
+## 22. Limitations
+
+**Dead nodes accumulate.** A deleted row, a superseded vector and a rolled-back insert all leave
+a node behind, and MVP never removes them. The index therefore grows with the number of
+*mutations* rather than the number of rows. They are reclaimed today only by dropping the index
+or rebuilding it.
+
+Reclaiming them properly is a later phase. The rule is known — a label may be removed once no
+active read view can see any row version carrying it, which is exactly the negation of the
+condition check ② depends on — and it needs a record of retirement events, since one of them (a
+rolled-back insert) leaves no trace anywhere else in the engine.
+
+**Writers are serialised** until the class becomes thread-safe (§17).
+
+**The aux is not transactional with the base table.** By design (§13). A count of aux rows will
+not equal a count of base rows, and that is correct behaviour rather than corruption.
+
+**One vector index per table**, and a single-column integer primary key.
