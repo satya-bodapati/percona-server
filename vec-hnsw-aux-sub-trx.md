@@ -77,9 +77,36 @@ written once and rewritten whenever its edges change.
 is a point lookup by node id, so the label must lead the key. (An append-only `PK(seq)` log
 would give sequential writes but turn every node fault into a scan.)
 
-**Entry point.** `update_entry_point_cb` must be persisted somewhere, because cold start
-begins with `init_from_entry_point()`. It is a single value per index — a reserved metadata
-row in the aux, since label 0 is never a real node id.
+**The entry point** is the node the whole graph hangs from — the first node inserted on the
+topmost layer, the analogue of a B-tree root. `init_from_entry_point(id, ctx)` is where cold
+start begins, so its id must be persisted. It lives in a reserved record with `id = 0`, which
+is free because 0 is the class's empty-slot sentinel and never a real node id.
+
+It is **not** written once. `update_entry_point_cb` fires whenever a node is inserted at a new
+topmost layer — at most 255 times over an index's life (the layer cap), and in practice far
+fewer, since layer assignment is geometric. So the write is an **upsert**: an INSERT the first
+time, an UPDATE thereafter.
+
+Four consequences, none of them optional:
+
+- **Absent means empty, not broken.** No record 0 ⇒ the index has no nodes yet ⇒ do *not* call
+  `init_from_entry_point`; construct an empty `HNSW` and let the first `insert()` establish the
+  entry point.
+- **It is a referencing structure**, so §3.5's ordering rule covers it: record 0 must commit no
+  earlier than the row of the node it names. Violate that and cold start faults a node with no
+  aux row — `init_from_entry_point` ends in `assert(m_entry_point->loaded())`, which asserts in
+  debug and yields an uninitialised node in release.
+- **It must never be reclaimed.** Any future GC (§5) has to pin the current entry-point node
+  even when it is an orphan — and it usually will be one eventually, since its base row may be
+  deleted or its vector superseded. A naive "reclaim orphans" sweep would delete precisely the
+  node the graph is reached through.
+- **A dangling entry point needs a recovery path.** If record 0 names a node with no row, the
+  index is unusable, so the fallback is a scan of the aux for the highest-`level` node and
+  adopting it. That defeats lazy loading exactly once and beats an unopenable index.
+
+Pre-loading the upper layers is not worth it. The first search descends a single path from the
+top to layer 0, so it faults roughly one node per layer plus the layer-0 neighbourhood — with
+layers ≈ log_M(N), about six for 10M rows at M = 16.
 
 ### 3.3 The label counter
 
@@ -134,9 +161,11 @@ always be "extra", which pins two ordering rules:
 
 - **the sub-transaction commits before the user transaction commits** — a crash in that window
   leaves an orphan, never a gap;
-- **a node's own row commits no later than any neighbour blob referencing it** — `insert_cb`
-  fires before `update_neighbors_cb`, so this holds naturally. It is what makes a dangling
-  neighbour id impossible, and therefore why `load_node_cb` never has to report "gone".
+- **a node's own row commits no earlier than anything that names it** — neighbour blobs and
+  the entry-point record alike. `insert_cb` fires before `update_neighbors_cb`, so the
+  neighbour case holds naturally; the entry-point record needs the same care. This is what
+  makes a dangling node id impossible, and therefore why `load_node_cb` never has to report
+  "gone".
 
 What this buys, beyond rollback coherence: the M neighbour row locks are held for the duration
 of the aux write instead of the user's transaction. Insert-insert deadlocks on shared
