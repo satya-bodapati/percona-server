@@ -148,6 +148,20 @@ raw pointer, zero-initialised by that memset, assigned on open and released in
 `dict_mem_index_free()`, exactly as `destroy_fields_array()` does today. No smart pointer, no
 non-POD member.
 
+The dictionary already agrees with this placement. `DICT_VECTOR` is a bit in
+`dict_index_t::type` — the index-type family beside `DICT_FTS` and `DICT_SPATIAL` — not a table
+flag; there is no `DICT_TF2_VECTOR`, and no table-level "has a vector index" test exists anywhere
+in the tree. Six of its call sites use the paired form `(DICT_FTS | DICT_VECTOR)`, which is the
+*this index has no real B-tree* family, and `dict0dd.cc:2989` states the invariant directly:
+
+```c
+ut_ad(!!(type & (DICT_FTS | DICT_VECTOR)) == (n_uniq == 0));
+```
+
+with the root page permitted to be `FIL_NULL`. A vector `dict_index_t` is therefore a dictionary
+placeholder with no key and possibly no tree — which is exactly why it has room to own the
+runtime, and why nothing else in that struct competes for the role.
+
 **The aux table** is named `vec_hnsw_<table_id>_<index_id>`, hidden from `SHOW TABLES` and
 `INFORMATION_SCHEMA.TABLES`, visible in `INNODB_TABLES`. The `vec_` prefix is reserved, so a
 user cannot create a table that collides with a computed aux name.
@@ -178,6 +192,23 @@ const Vec_type_entry vec_type_registry[] = {
     {"hnsw", &vec_hnsw_singleton},         // adding a TYPE is one row here
 };
 ```
+
+Upstream already has the beginning of this seam, and it is not a vtable. `vec0vec.h` defines
+the parameter side as a variant:
+
+```c
+struct HnswParam {
+  int M{25};  int max_elements{10000};  int ef_construction{200};
+  std::string_view metric{"euclidean"};
+};
+using VectorIndexParam = std::variant<std::monostate, HnswParam>;
+```
+
+Adding a second index type there is adding an alternative to the variant. The registry above is
+about *behaviour* dispatch rather than parameters, so the two are not in conflict — but the
+parameter half must be `VectorIndexParam`, not a parallel structure of our own. `parse_options()`
+already fills it and currently has **no callers**; only `validate_options()` is wired, at
+`ha_innodb.cc:4821`. Calling `parse_options` and storing the result on the runtime is our work.
 
 Two rules keep the seam honest:
 
@@ -970,6 +1001,16 @@ condition check ② depends on — and it needs a record of retirement events, s
 rolled-back insert) leaves no trace anywhere else in the engine.
 
 **Writers are serialised** until the class becomes thread-safe (§17).
+
+**Rejected at DDL by the layer above**, independently of anything here: a vector index on a
+virtual generated column, on a partitioned table, or on a temporary table. `sql_table.cc` raises
+`ER_INDEX_MUST_HAVE_COMPATIBLE_COLUMN` for the first and `ER_NOT_SUPPORTED_YET` for the other
+two, so none of them reach the aux code.
+
+**`max_elements` is unread.** `HnswParam` carries a default of 10000 and nothing in the tree
+looks at it — not the HNSW class, not the arena. Whether it is a hard cap or a sizing hint is
+open, and it matters here: the arena has no per-block free (§16), so a cap that is actually
+enforced would need an answer for the insert that exceeds it.
 
 **The aux is not transactional with the base table.** By design (§13). A count of aux rows will
 not equal a count of base rows, and that is correct behaviour rather than corruption.
