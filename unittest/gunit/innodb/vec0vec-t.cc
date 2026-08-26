@@ -79,6 +79,56 @@ TEST_F(Vec0VecTest, HnswWithM) {
   EXPECT_EQ(16, get<HnswParam>(m_vip).M);
 }
 
+TEST_F(Vec0VecTest, HnswWithEfConstruction) {
+  EXPECT_FALSE(
+      parse("CREATE TABLE t1 ("
+            "  id BIGINT UNSIGNED PRIMARY KEY,"
+            "  v1 VECTOR(128) NOT NULL,"
+            "  KEY(v1) TYPE hnsw WITH (ef_construction = 300)"
+            ")"));
+  ASSERT_TRUE(holds_alternative<HnswParam>(m_vip));
+  EXPECT_EQ(300, get<HnswParam>(m_vip).ef_construction);
+}
+
+TEST_F(Vec0VecTest, HnswAllParams) {
+  EXPECT_FALSE(
+      parse("CREATE TABLE t1 ("
+            "  id BIGINT UNSIGNED PRIMARY KEY,"
+            "  v1 VECTOR(128) NOT NULL,"
+            "  KEY(v1) TYPE hnsw"
+            "    WITH (M = 8, ef_construction = 64, metric = euclidean)"
+            ")"));
+  ASSERT_TRUE(holds_alternative<HnswParam>(m_vip));
+  EXPECT_EQ(8, get<HnswParam>(m_vip).M);
+  EXPECT_EQ(64, get<HnswParam>(m_vip).ef_construction);
+  EXPECT_EQ("euclidean"s, get<HnswParam>(m_vip).metric);
+}
+
+/* No WITH(...) at all: every parameter keeps its default. Worth its own
+case because the open-time overload reaches the parser with a NULL
+Construction_params pointer, where Key_spec always supplies an array. */
+TEST_F(Vec0VecTest, HnswNoWithClause) {
+  EXPECT_FALSE(
+      parse("CREATE TABLE t1 ("
+            "  id BIGINT UNSIGNED PRIMARY KEY,"
+            "  v1 VECTOR(128) NOT NULL,"
+            "  KEY(v1) TYPE hnsw"
+            ")"));
+  ASSERT_TRUE(holds_alternative<HnswParam>(m_vip));
+  EXPECT_EQ(25, get<HnswParam>(m_vip).M);
+  EXPECT_EQ(200, get<HnswParam>(m_vip).ef_construction);
+}
+
+/* The core overload is what table open uses; exercise it directly with a
+NULL params pointer, which no Key_spec path can produce. */
+TEST_F(Vec0VecTest, ParseFieldsNullParams) {
+  VectorIndexParam vip;
+  LEX_CSTRING hnsw{STRING_WITH_LEN("hnsw")};
+  EXPECT_FALSE(parse_options(hnsw, nullptr, vip));
+  ASSERT_TRUE(holds_alternative<HnswParam>(vip));
+  EXPECT_EQ(25, get<HnswParam>(vip).M);
+}
+
 TEST_F(Vec0VecTest, HnswMetricEuclidean) {
   EXPECT_FALSE(
       parse("CREATE TABLE t1 ("
