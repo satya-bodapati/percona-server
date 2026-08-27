@@ -1,0 +1,63 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # PS-11300: concurrent INSERTs into one vector index.
+--echo #
+--echo # Today these serialise on vec_t::graph_latch, because the HNSW
+--echo # class is not thread-safe and Vec_arena is unsynchronised. That
+--echo # latch is temporary — marked TODO REMOVE — and the intended end
+--echo # state is that concurrent INSERTs mutate the graph concurrently.
+--echo #
+--echo # This test is written to stay meaningful either way: it asserts
+--echo # the RESULT, not the serialisation. Every committed row must have
+--echo # exactly one node, every node must name a real row, and the label
+--echo # counter must have issued each label once.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(4) NOT NULL,
+                 KEY (v) TYPE hnsw WITH (M = 4));
+
+--connect (c1,localhost,root,,test)
+--connect (c2,localhost,root,,test)
+--connect (c3,localhost,root,,test)
+--connect (c4,localhost,root,,test)
+
+--connection c1
+--send INSERT INTO t1 VALUES (1,STRING_TO_VECTOR('[1,0,0,0]')),(5,STRING_TO_VECTOR('[0.9,0.1,0,0]')),(9,STRING_TO_VECTOR('[0.8,0,0.2,0]'))
+--connection c2
+--send INSERT INTO t1 VALUES (2,STRING_TO_VECTOR('[0,1,0,0]')),(6,STRING_TO_VECTOR('[0.1,0.9,0,0]')),(10,STRING_TO_VECTOR('[0,0.8,0.2,0]'))
+--connection c3
+--send INSERT INTO t1 VALUES (3,STRING_TO_VECTOR('[0,0,1,0]')),(7,STRING_TO_VECTOR('[0,0.1,0.9,0]')),(11,STRING_TO_VECTOR('[0.2,0,0.8,0]'))
+--connection c4
+--send INSERT INTO t1 VALUES (4,STRING_TO_VECTOR('[0,0,0,1]')),(8,STRING_TO_VECTOR('[0,0,0.1,0.9]')),(12,STRING_TO_VECTOR('[0,0.2,0,0.8]'))
+
+--connection c1
+--reap
+--connection c2
+--reap
+--connection c3
+--reap
+--connection c4
+--reap
+
+--connection default
+--echo # 12 rows committed.
+SELECT COUNT(*) AS rows_committed FROM t1 FORCE INDEX (PRIMARY);
+
+--echo # Invariants that must hold whatever order the four INSERTs
+--echo # interleaved in: one node per row, every label issued exactly
+--echo # once, and no two nodes naming the same row.
+--echo #
+--echo # This deliberately does NOT dump per-node detail — the id to
+--echo # base_pk mapping depends on the interleaving, so recording it
+--echo # would make the test flake.
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--disconnect c1
+--disconnect c2
+--disconnect c3
+--disconnect c4
+--connection default
+DROP TABLE t1;

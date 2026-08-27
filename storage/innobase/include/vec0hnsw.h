@@ -26,6 +26,7 @@ vector index keeps in memory.
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 #include "db0err.h"
@@ -197,11 +198,30 @@ struct vec_t : public Vec_runtime {
 
   /** The graph. Owns its arena and its persistor by value. */
   Vec_hnsw *hnsw{nullptr};
-  /* No latch yet. The class is not thread-safe, so writers will have to
-  be serialised (design section 17) — but nothing calls insert() until
-  the DML hooks land, and a latch here would be an unused field with
-  four points of PFS registration behind it. It arrives with the first
-  caller that can race. */
+  /** Serialises the one-time build of the graph from the aux table.
+
+  KEEP THIS. It is not a thread-safety workaround and does not go away
+  with graph_latch below: `loaded` is a plain bool, and two threads
+  arriving on a cold index must not both build the graph. A thread-safe
+  HNSW does not solve that — the duplicate work is ours, above the
+  class. Held only until `loaded` is true, so it costs nothing after the
+  first access. */
+  std::mutex load_latch;
+
+  /** TODO REMOVE — delete this latch and every lock_guard on it once
+  HNSW is thread-safe on its own (hnsw.h @todo 1). It exists only to
+  work around that gap and has no other purpose. Removing it is what
+  lets concurrent INSERTs mutate the graph concurrently, which is the
+  intended end state; nothing above this class needs to serialise them.
+
+  Why a plain mutex and not an rw_lock: k_nn_search() also mutates the
+  graph — it faults unloaded stubs in through load_node_cb while
+  traversing — so readers race with writers and with each other, and a
+  shared mode would be unsound. Vec_arena is unsynchronised too, so two
+  concurrent inserts can be handed the same block. Every entry into the
+  graph therefore takes this exclusively, which serialises all searches
+  on an index. That cost is the reason this is temporary. */
+  std::mutex graph_latch;
   /** The index this runtime belongs to. */
   space_index_t index_id{0};
   /** Base table, for opening the aux and reading the label counter. */

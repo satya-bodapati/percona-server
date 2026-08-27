@@ -280,14 +280,6 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
   dict_table_t *aux = vec_aux_open_for_dml(table, vec->index_id, thd, &mdl);
   if (aux == nullptr) return DB_TABLE_NOT_FOUND;
 
-  if (!vec->loaded) {
-    const dberr_t lerr = vec_runtime_load(vec, aux, thd);
-    if (lerr != DB_SUCCESS) {
-      vec_aux_close_for_dml(aux, thd, &mdl);
-      return lerr;
-    }
-  }
-
   /* The sub-transaction. Aux writes must not roll back with the
   statement: the graph is an in-memory cache whose only durable form is
   the aux, and a node surviving in memory while its rows rolled back
@@ -303,7 +295,32 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
   ctx.vec_bytes = vec->dims * sizeof(float);
   ctx.err = DB_SUCCESS;
 
-  vec->hnsw->insert(label, base_pk, q, &ctx);
+  /* KEEP. Not a thread-safety workaround: it stops two threads on a cold
+  index from both building the graph, which a thread-safe HNSW would not
+  prevent. Held only while `loaded` is false. */
+  {
+    std::lock_guard<std::mutex> load_guard(vec->load_latch);
+
+    if (!vec->loaded) {
+      const dberr_t lerr = vec_runtime_load(vec, aux, thd);
+      if (lerr != DB_SUCCESS) {
+        trx_rollback_for_mysql(aux_trx);
+        trx_free_for_background(aux_trx);
+        vec_aux_close_for_dml(aux, thd, &mdl);
+        return lerr;
+      }
+    }
+  }
+
+  {
+    /* TODO REMOVE — drop this lock_guard together with vec_t::graph_latch
+    once HNSW is thread-safe on its own, so that concurrent INSERTs
+    mutate the graph concurrently. Released before the commit below:
+    committing touches the aux, not the graph. */
+    std::lock_guard<std::mutex> graph_guard(vec->graph_latch);
+
+    vec->hnsw->insert(label, base_pk, q, &ctx);
+  }
 
   if (ctx.err == DB_SUCCESS) {
     trx_commit_for_mysql(aux_trx);
