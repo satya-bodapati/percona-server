@@ -68,10 +68,10 @@ t1	CREATE TABLE `t1` (
 SHOW INDEXES FROM t1;
 Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_part	Packed	Null	Index_type	Comment	Index_comment	Visible	Expression
 t1	0	PRIMARY	1	id	A	0	NULL	NULL		BTREE			YES	NULL
-t1	1	v1	1	v1	A	0	1	NULL		VECTOR			YES	NULL
+t1	1	v1	1	v1	NULL	0	1	NULL		VECTOR			YES	NULL
 SHOW INDEXES FROM t1 WHERE Index_type = 'VECTOR';
 Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_part	Packed	Null	Index_type	Comment	Index_comment	Visible	Expression
-t1	1	v1	1	v1	A	0	1	NULL		VECTOR			YES	NULL
+t1	1	v1	1	v1	NULL	0	1	NULL		VECTOR			YES	NULL
 SET sql_mode='ANSI';
 SHOW CREATE TABLE t1;
 Table	Create Table
@@ -218,7 +218,7 @@ t1	CREATE TABLE `t1` (
 SHOW INDEXES FROM t1;
 Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_part	Packed	Null	Index_type	Comment	Index_comment	Visible	Expression
 t1	0	PRIMARY	1	id	A	0	NULL	NULL		BTREE			YES	NULL
-t1	1	vx	1	v1	A	0	1	NULL		VECTOR			YES	NULL
+t1	1	vx	1	v1	NULL	0	1	NULL		VECTOR			YES	NULL
 DROP TABLE t1;
 CREATE TABLE t1 (
 id BIGINT UNSIGNED PRIMARY KEY,
@@ -243,7 +243,7 @@ t1	CREATE TABLE `t1` (
 SHOW INDEXES FROM t1;
 Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_part	Packed	Null	Index_type	Comment	Index_comment	Visible	Expression
 t1	0	PRIMARY	1	id	A	0	NULL	NULL		BTREE			YES	NULL
-t1	1	v1	1	v1	A	0	1	NULL		VECTOR		abc	YES	NULL
+t1	1	v1	1	v1	NULL	0	1	NULL		VECTOR		abc	YES	NULL
 DROP TABLE t1;
 CREATE TABLE t1 (
 id BIGINT UNSIGNED PRIMARY KEY,
@@ -336,7 +336,7 @@ CREATE INDEX ix ON t1(v1) TYPE Hnsw WITH ( m = 6 );
 SHOW INDEXES FROM t1;
 Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_part	Packed	Null	Index_type	Comment	Index_comment	Visible	Expression
 t1	0	PRIMARY	1	id	A	0	NULL	NULL		BTREE			YES	NULL
-t1	1	ix	1	v1	A	0	1	NULL		VECTOR			YES	NULL
+t1	1	ix	1	v1	NULL	0	1	NULL		VECTOR			YES	NULL
 SHOW CREATE TABLE t1;
 Table	Create Table
 t1	CREATE TABLE `t1` (
@@ -362,7 +362,7 @@ CREATE INDEX ix ON t1(v1) TYPE Hnsw WITH ( m = 6, metric = Euclidean );
 SHOW INDEXES FROM t1;
 Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_part	Packed	Null	Index_type	Comment	Index_comment	Visible	Expression
 t1	0	PRIMARY	1	id	A	0	NULL	NULL		BTREE			YES	NULL
-t1	1	ix	1	v1	A	0	1	NULL		VECTOR			YES	NULL
+t1	1	ix	1	v1	NULL	0	1	NULL		VECTOR			YES	NULL
 SHOW CREATE TABLE t1;
 Table	Create Table
 t1	CREATE TABLE `t1` (
@@ -376,7 +376,7 @@ CREATE INDEX ix ON t1(v1) TYPE Hnsw WITH ( metric = Euclidean, m = 6 );
 SHOW INDEXES FROM t1;
 Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_part	Packed	Null	Index_type	Comment	Index_comment	Visible	Expression
 t1	0	PRIMARY	1	id	A	0	NULL	NULL		BTREE			YES	NULL
-t1	1	ix	1	v1	A	0	1	NULL		VECTOR			YES	NULL
+t1	1	ix	1	v1	NULL	0	1	NULL		VECTOR			YES	NULL
 SHOW CREATE TABLE t1;
 Table	Create Table
 t1	CREATE TABLE `t1` (
@@ -451,7 +451,7 @@ t1	CREATE TABLE `t1` (
 SHOW INDEXES FROM t1;
 Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_part	Packed	Null	Index_type	Comment	Index_comment	Visible	Expression
 t1	0	u_id	1	id	A	0	NULL	NULL		BTREE			YES	NULL
-t1	1	v1	1	v1	A	0	1	NULL		VECTOR			YES	NULL
+t1	1	v1	1	v1	NULL	0	1	NULL		VECTOR			YES	NULL
 DROP TABLE t1;
 CREATE TABLE t1 (
 id BIGINT UNSIGNED PRIMARY KEY,
@@ -518,5 +518,5 @@ t1	CREATE TABLE `t1` (
 SHOW KEYS FROM t1;
 Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_part	Packed	Null	Index_type	Comment	Index_comment	Visible	Expression
 t1	0	PRIMARY	1	id	A	0	NULL	NULL		BTREE			YES	NULL
-t1	1	v1	1	v1	A	0	1	NULL		VECTOR			YES	NULL
+t1	1	v1	1	v1	NULL	0	1	NULL		VECTOR			YES	NULL
 DROP TABLE t1;
