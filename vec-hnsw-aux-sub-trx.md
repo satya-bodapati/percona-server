@@ -829,6 +829,30 @@ copy is slower and obviously correct.
 
 ---
 
+### Locking, and why LOCK=NONE is not supported
+
+`ADD VECTOR INDEX` requires at least `LOCK=SHARED`; `LOCK=NONE` is refused. Two independent
+reasons, either sufficient:
+
+1. The rollback path (`ddl::mark_secondary_indexes`) drops an uncommitted vector index and its
+   aux from the cache immediately, which is safe only if no concurrent thread holds a prebuilt
+   `ins_node` entry referencing the index.
+2. `vec_build_index()` scans the clustered index *after* `ddl::Builder`, outside the online
+   machinery. Under `LOCK=NONE` a concurrent INSERT would land in the row log, be applied to the
+   new index by `row_log_apply`, and never reach the graph — the row would be in the table and
+   not in the index.
+
+This is **FTS parity, and a deliberate non-goal rather than a gap.** Upstream describes exactly
+this trade for FULLTEXT — *"we could do without a lock if the table already contains an
+FTS_DOC_ID column, but in that case we would have to apply the modification log to the full-text
+indexes"* — and never built it, so `ADD FULLTEXT` sets `online = false` unconditionally too.
+Supporting `LOCK=NONE` here would be a deviation *beyond* FTS and would need justifying as one.
+
+With `online = false` there is no row log for this ALTER at all, which is what makes
+`vec_base_collect_rows()` correct in reading records directly: no concurrent writer can exist, so
+there is nothing for a read view to hide and delete-marked records are committed deletes awaiting
+purge.
+
 ## 20. Foreign keys, and why CASCADE is refused
 
 Every rule in §9–§12 assumes DML arrives through the handler. Cascaded DML does not. When a
