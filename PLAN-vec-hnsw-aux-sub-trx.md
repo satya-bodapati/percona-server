@@ -140,7 +140,7 @@ consulted. P4 therefore splits across two owners.
 
 #### P4a — server layer
 
-1. **Optimizer.** Recognise `ORDER BY DISTANCE(col, <const>, <metric>) LIMIT k` where `col`
+1. **Optimizer.** Recognise `ORDER BY DISTANCE(col, <const vector>, <metric>) LIMIT k` where `col`
    carries a vector index, and choose that index. Rule-based is enough for the MVP; there is no
    cardinality to cost against, since `dict_stats_should_ignore_index()` skips vector indexes.
 2. **Handler API.** New virtuals, shaped like the FT family and mapping onto the class's

@@ -444,7 +444,9 @@ reclaimed.
 ## 12. SELECT
 
 ```sql
-SELECT id FROM t ORDER BY DISTANCE(v, '[1,0,0,0]', 'EUCLIDEAN') LIMIT 5;
+SELECT id FROM t
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN')
+  LIMIT 5;
 ```
 
 The point of the read path is to answer this **from the index instead of scanning the table**.
@@ -457,8 +459,12 @@ Nothing about `DISTANCE()` is special to the optimizer today: it is an ordinary 
 so `ORDER BY DISTANCE(...)` is just an expression to sort by, and a sort needs all the rows. The
 recognition rule has to fire on the whole shape at once:
 
-> an `ORDER BY` over `DISTANCE(col, <constant>, <metric>)`, ascending, with a `LIMIT`, where
+> an `ORDER BY` over `DISTANCE(col, <constant vector>, <metric>)`, ascending, with a `LIMIT`, where
 > `col` carries a vector index and the metric matches the one the index was built with.
+
+The query vector is a `VECTOR` value, not a string: `DISTANCE()` takes three arguments and
+rejects a bare literal with `ER_WRONG_ARGUMENTS`, so it is written
+`STRING_TO_VECTOR('[...]')` or supplied as a parameter.
 
 All four parts are load-bearing. A non-constant query vector cannot be handed to the graph; a
 descending order asks for the *farthest* neighbours, which HNSW does not answer; a missing
@@ -602,7 +608,7 @@ graph:   node 10 → [1,0,0,0], base_pk 7      (stale — that vector is gone)
          node 20 → [0,1,0,0], base_pk 7      (current)
 base:    row 7 now carries percona_vec_aux_id = 20
 
-SELECT … ORDER BY DISTANCE(v,'[1,0,0,0]') LIMIT 1
+SELECT … ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 1
     node 10 is an exact match → distance 0 → base_pk 7
     but row 7's vector today is [0,1,0,0], which is far from the query
 ```
