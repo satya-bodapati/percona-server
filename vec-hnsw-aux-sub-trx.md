@@ -160,9 +160,9 @@ SELECT id FROM t ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN'
 | `CREATE TABLE … KEY (v) TYPE hnsw` | adds the hidden label column, creates the aux table, registers it in the DD |
 | `ALTER TABLE … ADD KEY (v) TYPE hnsw` | COPY only; builds the graph from a clustered scan (§11) |
 | `DROP INDEX` | drops that index's aux table; the hidden column is **retained** |
-| `DROP TABLE` | drops the aux table with the parent |
+| `DROP TABLE` | drops the aux table with the parent, under an exclusive MDL taken on each aux first |
 | `TRUNCATE TABLE` | drop and recreate — the aux comes back empty and the label counter restarts |
-| `RENAME TABLE` | same schema: nothing to do. Cross-schema: the aux moves with the parent |
+| `RENAME TABLE` | same schema: nothing to do. Cross-schema: the aux moves with the parent. Renaming *onto* an aux name is refused |
 | `OPTIMIZE` / rebuilding `ALTER` | the base table is rebuilt and the graph rebuilt with it; labels are carried forward, not reissued |
 
 ### What is refused, and why
@@ -183,7 +183,12 @@ Each of these is refused because the alternative is an index that is silently wr
 
 Nothing about the aux table's name is reserved from users: a table that merely begins with
 `percona_vec_` is not mistaken for one, because the name is recognised by parsing its whole
-shape — the prefix, a known index-type token, then two object ids.
+shape — the prefix, a known index-type token, then exactly two object ids, the second ending
+the string. `percona_vec_data` is an ordinary table anyone may create; `percona_vec_hnsw_1_2`
+is ours, and both `CREATE TABLE` and `RENAME TABLE … TO` refuse it with
+`ER_WRONG_TABLE_NAME`. Refusing it on rename matters as much as on create: the aux is addressed
+by name, so a user table parked on one of those names is a table InnoDB would later try to drop
+as an aux.
 
 ## 4. What appears on disk
 
@@ -208,6 +213,21 @@ undo like any other, which is precisely what makes it usable for visibility deci
 carries **no unique index** — nothing looks a row up by label, only ever the reverse — and it is
 retained when the vector index is dropped, so re-adding an index does not have to rebuild the
 table.
+
+Retention is unconditional, and that is a constraint on every rebuild. The commit path copies
+`percona_vec_aux_id` into the rebuilt table's `dd::Table` whatever the `ALTER` was, so the
+`dict_table_t` the rebuild constructs has to carry the column too — otherwise the data
+dictionary claims one more column than the tablespace holds. The trigger for a rebuild is
+therefore the wrong thing to key on: `ADD FULLTEXT` rebuilds because it adds `FTS_DOC_ID`, a
+new `PRIMARY KEY` rebuilds because the key changed, and neither shows up in the SQL layer's
+"needs rebuild" flags. What the rebuild path keys on instead is the table: if it is building a
+fresh clustered index for a table that has the column, it materialises the column.
+
+Both hidden columns can be present at once, and their order is fixed: `FTS_DOC_ID` then
+`percona_vec_aux_id`, after the user columns and before the system columns. A rebuild's column
+map walks the old table's hidden columns and maps each onto its slot in the *new* table, which
+is not the same set — a vector table gaining a `FULLTEXT` index has a slot in the new table that
+nothing in the old one maps onto.
 
 ---
 
@@ -1262,6 +1282,18 @@ vector-indexed tables need no special protection from it.
 The one constraint is teardown order. The class states that it *"does not destroy Nodes and must
 not outlive the allocator"*, so the graph must be destroyed before the arena its nodes live in.
 
+### Locking the aux before dropping it
+
+Hidden tables get no metadata lock for free. When the server locks `t` for `DROP TABLE` it has
+never heard of `percona_vec_hnsw_<tid>_<iid>`, so nothing stands between the drop and a session
+that still has the aux open — a scan faulting nodes in (§11), or a reader of
+`INFORMATION_SCHEMA.INNODB_TABLES` holding a reference to the `dict_table_t`.
+
+So the drop takes the lock itself: one exclusive table MDL per vector aux table, taken in
+`row_drop_table_for_mysql` just after the parent is opened and before anything is torn down,
+with the `dict_sys` mutex released across the call because the MDL layer can wait. This is
+`fts_lock_all_aux_tables` under another name, called from the same place for the same reason.
+
 ---
 
 ## 23. Concurrency
@@ -1353,9 +1385,9 @@ statement. A resource ceiling is not a corrupt engine.
 
 ## 25. The commits
 
-What is on this branch, in order, and what each one is for. This document is the last commit on the branch, so every hash below is accurate as written;
-only this commit's own cannot appear. They still **change whenever the branch is rebased** — the
-subjects are the stable identifier.
+What is on this branch, in order, and what each one is for. This document is the last commit on
+the branch, so every hash below is accurate as written; only this commit's own cannot appear.
+They still **change whenever the branch is rebased** — the subjects are the stable identifier.
 
 | commit | what it achieves |
 |---|---|
@@ -1375,7 +1407,20 @@ subjects are the stable identifier.
 | `85899e38df8` | `innodb_hnsw_max_memory`: a server-wide byte budget, refused at the entry to an insert and at each step of a build rather than inside the arena. |
 | `18b4efd99ae` | Regression test for `SELECT COUNT(*)` returning 0 when the optimizer picked the vector index. The fix itself is upstream's; this keeps it from coming back. |
 | `ec0e164a9d5` | `ORDER BY DISTANCE(...) LIMIT k` served from the graph — optimizer recognition, the `vec_init` / `vec_read_first` / `vec_read_next` handler family, a streaming scan of the graph, and `innodb_hnsw_ef_search`. Both MVCC checks of §12: ② is the primary-key read under the session's own view, ① compares the node id against the label `row_sel_store_mysql_rec` lifts off the visible record into `prebuilt->vec_aux_id`, the way it already lifts `fts_doc_id`. |
-| *(this commit)* | This design document. Last on the branch so the table above can name every commit accurately; only its own hash cannot appear. |
+| `46178fe63e5` | This design document, in its first form. |
+| `eb5d7888f0b` | `rec_set_nth_field_low` asserts its memcpy source is non-null, with the repro that found it. |
+| `1905dd1daf5` | Fixes three leaks — `entry_sys_heap`, the update node's `pcur`, and `node->heap` — by freeing the aux DML graphs through `que_graph_free`. |
+| `d912461d532` | `vec_runtime_open()` logs why it failed instead of failing silently. |
+| `c27bae23397` | The INPLACE index build stays on one transaction: `Vec_ctx::commit_steps` is false for `vec_build_index`, so the per-callback commit that makes DML deadlock-free does not commit the DDL a node at a time. |
+| `81ae2331a3c` | Merge of the five review fixes below, each authored on `64e15e3e0e9` — the commit whose code it corrects — so the reviewed history stays readable: aux names must parse whole (`percona_vec_hnsw_1_2xyz` was accepted); `RENAME TABLE` reserves aux names; the 5.7 FTS nullability path goes back to `is_fts_aux()`; the rebuild column map maps both hidden columns onto the *new* table's layout; `DROP TABLE` takes an MDL on each aux. |
+| `51ca2c9dd5d` | Two assertions and two MTR tests searched for `vec_` where the name is `percona_vec_`; the assertions could never hold and the tests could never fail. |
+| `c689fb33e50` | Naming and style: the aux helpers shared with FTS lose their `fts` names, `Vec_index_type::HNSW` is 1 so zero is not a valid type, `[[nodiscard]]` on everything that reports through its return value. |
+| `cb6d435dc88` | Comment fixes: the aux column order, no em-dashes or arrows in the code, and several comments that had aged out of being true. |
+| `973ecdb97e3` | `percona_vec_aux_id` is materialised on every rebuild rather than only when the SQL layer asked for one — `ALTER TABLE … ADD FULLTEXT` on a vector table asserted, because it rebuilds through `add_fts_doc_id`, which `innobase_need_rebuild()` does not report. |
+| `1c0de9087e6` | Recorded results for the tests the fixes above added. |
+| `e9bd020ff30` | The third DD helper shared with FTS, `dd_rename_fts_table`, becomes `dd_rename_aux_table`. |
+| `fbe4797dc5d` | Merge of one commit authored on `baccd1f249b`: `dict_table_add_to_cache` checks that `DICT_TF2_HAS_VEC_AUX_COL` and `vec_aux_col` agree, so a construction path that materialises the hidden column without setting its ordinal fails where it is built rather than at the first vector operation. |
+| *(this commit)* | This design document, updated for the review fixes: how an aux name is recognised and where it is reserved, why retention of the hidden column constrains every rebuild, and the MDL the drop path takes. Last on the branch, so the table above can name every commit accurately; only its own hash cannot appear. |
 ---
 
 # Part VI — Open items
