@@ -943,10 +943,11 @@ dberr_t vec_insert_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
   return DB_SUCCESS;
 }
 
-dberr_t vec_check_aux_refs(dict_index_t *vec_index, THD *thd, ulint *n_bad) {
+dberr_t vec_check_aux_refs(dict_index_t *vec_index, trx_t *trx, ulint *n_bad) {
   ut_ad(vec_index->is_vector());
   *n_bad = 0;
 
+  THD *thd = trx->mysql_thd;
   dict_table_t *base = vec_index->table;
   dict_index_t *clust = base->first_index();
 
@@ -964,7 +965,19 @@ dberr_t vec_check_aux_refs(dict_index_t *vec_index, THD *thd, ulint *n_bad) {
     mtr_start(&mtr);
     btr_pcur_t pcur;
     pcur.open_at_side(true, clust, BTR_SEARCH_LEAF, true, 0, &mtr);
+    ulint cnt = 1000;
     while (pcur.move_to_next_user_rec(&mtr) == DB_SUCCESS) {
+      /* Check thd->killed every 1,000 scanned rows, same cadence as
+      the non-vector scan below in row_scan_index_for_mysql. */
+      if (--cnt == 0) {
+        if (trx_is_interrupted(trx)) {
+          pcur.close();
+          mtr_commit(&mtr);
+          return DB_INTERRUPTED;
+        }
+        cnt = 1000;
+      }
+
       const rec_t *rec = pcur.get_rec();
       if (rec_get_deleted_flag(rec, dict_table_is_comp(base))) {
         continue;
@@ -989,7 +1002,16 @@ dberr_t vec_check_aux_refs(dict_index_t *vec_index, THD *thd, ulint *n_bad) {
   same row (vec_update_row), not corruption. */
   mem_heap_t *heap = mem_heap_create(256, UT_LOCATION_HERE);
   dberr_t err = DB_SUCCESS;
+  ulint cnt = 1000;
   for (uint64_t label : labels) {
+    if (--cnt == 0) {
+      if (trx_is_interrupted(trx)) {
+        err = DB_INTERRUPTED;
+        break;
+      }
+      cnt = 1000;
+    }
+
     mem_heap_empty(heap);
     vec_aux_read_t node;
     const dberr_t rerr = vec_aux_read_node(aux, label, heap, &node);
