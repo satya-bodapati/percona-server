@@ -86,6 +86,20 @@ struct Vec_ctx {
   gained either, because an index under construction is invisible, so
   there is no second writer to deadlock against. */
   bool commit_steps{true};
+  /** True only around the cold-start entry-point load
+  (init_from_entry_point, called from vec_runtime_load). That load is
+  required to succeed - the graph has no other way in - so its
+  load_node_cb failure must reach ctx->err and fail the caller.
+
+  False everywhere else, including every lazy neighbor-stub load a
+  search or insert triggers while walking the graph. A missing row
+  there is the documented, expected NODE_LOST case (hnsw.h: an insert
+  that crashed before insert_cb, after a concurrent insert already
+  referenced it as a neighbor) - HNSW itself already treats that
+  load_node_cb failure as "skip this neighbor", so ctx->err must stay
+  untouched or the whole statement fails over a node the caller was
+  going to route around anyway. */
+  bool loading_entry_point{false};
 };
 
 /* The persistor's shims forward here. Ordinary functions, so their
@@ -208,8 +222,18 @@ struct Vec_persistor {
   }
 
   /** Returns false on failure, which marks the node NODE_LOST rather than
-  leaving a half-filled COMPLETE one. The first error is kept in ctx->err
-  so the statement fails rather than answering from a partial graph. */
+  leaving a half-filled COMPLETE one - HNSW's own callers already treat
+  that as "skip this neighbor" (hnsw.h: search/insert continue past a
+  LOST or failed-to-load candidate).
+
+  Whether the failure also reaches ctx->err - and so fails the caller's
+  whole statement - depends on ctx->loading_entry_point: true only
+  during the cold-start entry-point load, which has no fallback and
+  must fail loudly; false for every ordinary lazy neighbor-stub load,
+  where a missing row is the expected NODE_LOST crash artifact
+  (hnsw.h) and HNSW is already routing around it. DB_CORRUPTION - the
+  row was found but its own shape disagrees with the index - stays
+  fatal either way: unlike a missing row, that is never expected. */
   template <typename Hnsw>
   bool load_node_cb(Context *ctx, Hnsw &hnsw,
                     typename Hnsw::LoadNodeHandle handle) {
@@ -235,7 +259,9 @@ struct Vec_persistor {
 
     const dberr_t err = vec_persist_load_node(ctx, hnsw, handle);
     if (err != DB_SUCCESS) {
-      ctx->err = err;
+      if (ctx->loading_entry_point || err != DB_RECORD_NOT_FOUND) {
+        ctx->err = err;
+      }
       return false;
     }
     return true;

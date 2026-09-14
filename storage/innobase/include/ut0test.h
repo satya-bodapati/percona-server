@@ -280,6 +280,24 @@ struct Tester {
   @return the status */
   [[nodiscard]] Ret_t vec_next_id(std::vector<std::string> &tokens) noexcept;
 
+  /** Overwrite slot 0 of the entry point's own neighbor blob with an id
+  that has no aux row, simulating the crash artifact documented for
+  NODE_LOST in vector-common/hnsw.h (an insert that crashed before
+  insert_cb, after a concurrent insert had already referenced it as a
+  neighbor). Every other slot -- the entry point's real neighbors -- is
+  left untouched, so a fixed server still answers from the rest of the
+  graph instead of just the entry point. Reads the entry point id and
+  its existing neighbor blob from the aux table itself, so the caller
+  does not need either -- the layer draw is non-reproducible across
+  runs (hnsw.h: "no test may record per-node level or nb"). Requires
+  the index runtime already loaded (any prior DML/DQL against the
+  table in this session loads it).
+  Usage: vec_poison_entry_neighbor db/table bogus_id
+  @param[in]  tokens  the command
+  @return the status */
+  [[nodiscard]] Ret_t vec_poison_entry_neighbor(
+      std::vector<std::string> &tokens) noexcept;
+
   /** Print a vector index runtime's parameters.
   Usage: vec_runtime_info db/table
   @param[in]  tokens  the command

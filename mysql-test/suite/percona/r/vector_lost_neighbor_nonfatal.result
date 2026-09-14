@@ -1,0 +1,59 @@
+#
+# A crash-created missing neighbor -- the main NODE_LOST scenario
+# documented in vector-common/hnsw.h: an insert that crashed before
+# insert_cb, after a concurrent insert had already referenced it as
+# a neighbor -- fails the whole statement on the FIRST query that
+# touches the now-missing node, even though HNSW's own traversal
+# already treats a failed lazy load as "skip this neighbor" (see
+# hnsw.h:389, 392, 1457, 1611). Once the node is cached NODE_LOST in
+# memory, every LATER query skips it silently and succeeds -- same
+# underlying condition, inconsistent outcome.
+#
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(2) NOT NULL,
+KEY vk (v) TYPE hnsw WITH (M = 4));
+INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[0,0]')),
+(2, STRING_TO_VECTOR('[1,0]')),
+(3, STRING_TO_VECTOR('[2,0]')),
+(4, STRING_TO_VECTOR('[3,0]')),
+(5, STRING_TO_VECTOR('[4,0]')),
+(6, STRING_TO_VECTOR('[5,0]'));
+# Simulate the crash artifact: overwrite slot 0 of the entry
+# point's own neighbor list to name an id with no aux row. Every
+# OTHER real neighbor of the entry point is left untouched, so the
+# rest of the graph stays reachable -- this is the same on-disk
+# shape an actual crash would leave; it just skips needing one.
+SET SESSION innodb_interpreter = 'vec_poison_entry_neighbor test/t1 999999999';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+PASS: poisoned entry point's neighbor slot 0, bogus_id=999999999
+# Force a cold reload: without a restart the entry point node is
+# already NODE_COMPLETE in memory and the on-disk edit above is
+# never looked at again.
+# restart
+# The insert path lazily loads neighbor stubs the same way search
+# does (hnsw.h:392, 1457), through the same ctx that now defaults
+# loading_entry_point to false -- so it must not fail here either.
+INSERT INTO t1 VALUES (7, STRING_TO_VECTOR('[0.5,0]'));
+# Both queries must behave the same way: the missing neighbor is
+# skipped, not fatal, whether this is the first touch (which faults
+# it in and marks it NODE_LOST) or a later one (which finds it
+# already NODE_LOST). Before the fix, the first of these two
+# identical queries fails with ER_KEY_NOT_FOUND and only the second
+# succeeds. The row count is checked, not specific ids -- HNSW's
+# random layer draw picks a different entry point each run, so
+# which node is skipped (and where it sat in the search order)
+# varies, but the real, undamaged rest of the graph always yields
+# the full LIMIT once the missing neighbor is correctly skipped
+# instead of aborting the statement.
+SELECT COUNT(*) AS rows_found FROM (
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3
+) first_query;
+rows_found
+3
+SELECT COUNT(*) AS rows_found FROM (
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3
+) second_query;
+rows_found
+3
+DROP TABLE t1;

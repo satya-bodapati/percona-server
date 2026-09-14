@@ -83,6 +83,7 @@ Tester::Tester() noexcept {
   DISPATCH(vec_aux_verify);
   DISPATCH(vec_knn);
   DISPATCH(vec_next_id);
+  DISPATCH(vec_poison_entry_neighbor);
   DISPATCH(vec_runtime_info);
   DISPATCH(print_dblwr_has_encrypted_pages);
   DISPATCH(print_tree);
@@ -716,6 +717,110 @@ Ret_t Tester::vec_next_id(std::vector<std::string> &tokens) noexcept {
 
   const uint64_t id = vec_assign_next_aux_id(tt.base);
   XLOG("id=" << id);
+  set_output(sout);
+  return RET_PASS;
+}
+
+Ret_t Tester::vec_poison_entry_neighbor(
+    std::vector<std::string> &tokens) noexcept {
+  TLOG("Tester::vec_poison_entry_neighbor()");
+  ut_ad(tokens[0] == "vec_poison_entry_neighbor");
+  std::ostringstream sout;
+  if (tokens.size() != 3) {
+    XLOG("FAIL: usage: vec_poison_entry_neighbor db/table bogus_id");
+    set_output(sout);
+    return RET_FAIL;
+  }
+
+  vec_test_tables_t tt;
+  if (!vec_test_open_aux(tokens[1], tt, nullptr)) {
+    XLOG("FAIL: no vector aux for " << tokens[1]);
+    set_output(sout);
+    return RET_FAIL;
+  }
+  dict_table_t *aux = tt.aux;
+  auto guard = create_scope_guard([&]() { vec_test_close_aux(tt); });
+
+  uint64_t bogus_id;
+  try {
+    bogus_id = std::stoull(tokens[2]);
+  } catch (...) {
+    XLOG("FAIL: bad bogus_id");
+    set_output(sout);
+    return RET_FAIL;
+  }
+
+  const dict_index_t *vindex = nullptr;
+  for (const dict_index_t *idx = tt.base->first_index(); idx != nullptr;
+       idx = idx->next()) {
+    if (idx->is_vector()) {
+      vindex = idx;
+      break;
+    }
+  }
+  if (vindex == nullptr || vindex->vec == nullptr) {
+    XLOG("FAIL: no vector runtime loaded for " << tokens[1]);
+    set_output(sout);
+    return RET_FAIL;
+  }
+  const uint32_t m = static_cast<const vec_t *>(vindex->vec)->m;
+
+  mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
+  vec_aux_read_t meta;
+  dberr_t err = vec_aux_read_node(aux, 0, heap, &meta);
+  if (err != DB_SUCCESS) {
+    mem_heap_free(heap);
+    XLOG("FAIL: no entry point, err=" << static_cast<int>(err));
+    set_output(sout);
+    return RET_FAIL;
+  }
+  const uint64_t entry_id = meta.base_pk;
+
+  vec_aux_read_t entry;
+  err = vec_aux_read_node(aux, entry_id, heap, &entry);
+  if (err != DB_SUCCESS) {
+    mem_heap_free(heap);
+    XLOG("FAIL: entry point row " << entry_id
+                                  << " missing, err=" << static_cast<int>(err));
+    set_output(sout);
+    return RET_FAIL;
+  }
+  if (entry.neighbors_len != vec_aux_neighbors_blob_len(entry.level, m) ||
+      entry.neighbors_len < 8) {
+    mem_heap_free(heap);
+    XLOG("FAIL: entry point has no neighbor slots to poison");
+    set_output(sout);
+    return RET_FAIL;
+  }
+
+  /* Copy the real blob and overwrite slot 0 only, so every OTHER real
+  neighbor of the entry point stays reachable. Wiping the whole blob
+  (an earlier version of this command did) would collapse the graph to
+  the entry point alone, and "1 row back" is too weak a signal: it
+  would look identical whether the fix works or search is broken in
+  some unrelated way. Leaving the rest of the graph intact means a
+  fixed server answers with the real, multi-row k-NN result. */
+  std::vector<byte> nb_blob(entry.neighbors,
+                            entry.neighbors + entry.neighbors_len);
+  mem_heap_free(heap);
+  mach_write_to_8(nb_blob.data(), bogus_id);
+
+  trx_t *trx = trx_allocate_for_background();
+  trx_start_internal(trx, UT_LOCATION_HERE);
+  err =
+      ::vec_aux_update_row(trx, aux, entry_id, nb_blob.data(), nb_blob.size());
+  trx_commit_for_mysql(trx);
+  trx_free_for_background(trx);
+
+  if (err != DB_SUCCESS) {
+    XLOG("FAIL: vec_aux_update_row err=" << static_cast<int>(err));
+    set_output(sout);
+    return RET_FAIL;
+  }
+  /* entry_id/level are HNSW's random layer draw and not reproducible
+  across runs (hnsw.h: "no test may record per-node level or nb"), so
+  the PASS line reports only what the caller itself supplied. */
+  XLOG("PASS: poisoned entry point's neighbor slot 0, bogus_id=" << bogus_id);
   set_output(sout);
   return RET_PASS;
 }

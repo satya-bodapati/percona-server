@@ -370,6 +370,7 @@ static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
   ctx.m = vec->m;
   ctx.vec_bytes = vec->dims * sizeof(float);
   ctx.err = DB_SUCCESS;
+  ctx.loading_entry_point = true;
 
   vec->hnsw->init_from_entry_point(entry_point, &ctx);
   if (ctx.err != DB_SUCCESS) {
