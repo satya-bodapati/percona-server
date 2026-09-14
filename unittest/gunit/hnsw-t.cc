@@ -871,4 +871,71 @@ TEST(HnswDeathTest, MTooSmallAsserts) {
 }
 #endif  // NDEBUG
 
+// Not gated by NDEBUG: unlike the asserts above, this is a real memory-safety
+// bug (wild-pointer read), not an assert firing, so it must be demonstrated
+// in release builds too.
+TEST(HnswDeathTest, MalformedUpperLayerEdgeUnderflowsNeighborPointers) {
+  // neighbors_begin()/neighbors_end() (vector-common/hnsw.h) compute
+  // (m_layer - layer) * M with no check that layer <= m_layer. If a node is
+  // referenced as a neighbor at some layer L but its own persisted layer is
+  // < L (a malformed/corrupted edge), the subtraction goes negative and
+  // converts to a huge size_t on the multiply: neighbors_begin() returns a
+  // wild Node** pointer. std::copy() at the call site then reads through
+  // it, and the garbage "Node*" values it copies get dereferenced (state(),
+  // dist()) a few lines later - crashing the process.
+  constexpr size_t kDimsLocal = 2;
+  constexpr size_t kMLocal = 4;
+  constexpr size_t kEfConstructionLocal = 16;
+  constexpr size_t kNumPoints = 300;
+  constexpr uint64_t kSeed = 42;
+
+  RoundTripFixture fixture =
+      make_random_round_trip_fixture(kDimsLocal, kNumPoints, kSeed);
+  LoadTestHnsw built(kDimsLocal, euclidean, kMLocal, kEfConstructionLocal);
+  populate_round_trip_index(built, &fixture);
+
+  const uint64_t ep_id = fixture.store.entry_point;
+  ASSERT_NE(0U, ep_id);
+  const StoredNode &ep_row = fixture.store.nodes.at(ep_id);
+  // Need an entry point with at least one layer above 0, i.e. a call to
+  // search_layer_ef_1() happens at all (k_nn_search only descends layers
+  // max_layer .. 1 that way).
+  ASSERT_GE(ep_row.layer, 1)
+      << "expected entry point above layer 0 for seed " << kSeed;
+
+  // The entry point's own top-layer neighbor slice starts at offset 0
+  // (stored_layer0_begin() generalizes: offset is (m_layer - layer) * M,
+  // which is 0 when layer == m_layer).
+  uint64_t victim_id = 0;
+  for (size_t i = 0; i < kMLocal && i < ep_row.neighbor_ids.size(); ++i) {
+    if (ep_row.neighbor_ids[i] != 0) {
+      victim_id = ep_row.neighbor_ids[i];
+      break;
+    }
+  }
+  ASSERT_NE(0U, victim_id)
+      << "expected entry point to have a top-layer neighbor for seed " << kSeed;
+
+  StoredNode &victim_row = fixture.store.nodes.at(victim_id);
+  // A correctly-built graph always has victim_row.layer >= ep_row.layer
+  // here (the entry point cannot list a neighbor at a layer above the
+  // neighbor's own top layer). Simulate corruption/a malformed edge by
+  // stamping a too-low persisted layer on the victim, same as a bit-flip
+  // or a stale layer byte from a torn write would produce on load.
+  ASSERT_GE(victim_row.layer, ep_row.layer);
+  victim_row.layer = 0;
+  const std::vector<float> victim_vec = victim_row.vec;
+
+  fixture.store.load_counts.clear();
+  LoadTestHnsw cold(kDimsLocal, euclidean, kMLocal, kEfConstructionLocal);
+  cold.init_from_entry_point(ep_id, &fixture.store);
+
+  // Query == victim's own vector: distance 0 guarantees the entry point's
+  // greedy descent moves into the corrupted victim node at the entry
+  // point's (too-high) layer on the very first search_layer_ef_1() call.
+  EXPECT_DEATH_IF_SUPPORTED(cold.k_nn_search(as_bytes(victim_vec), /*k=*/1,
+                                             /*ef_search=*/16, &fixture.store),
+                            "");
+}
+
 }  // namespace hnsw_unittest
