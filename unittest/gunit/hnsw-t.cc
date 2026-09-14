@@ -871,18 +871,20 @@ TEST(HnswDeathTest, MTooSmallAsserts) {
 }
 #endif  // NDEBUG
 
-// Not gated by NDEBUG: unlike the asserts above, this is a real memory-safety
-// bug (wild-pointer read), not an assert firing, so it must be demonstrated
-// in release builds too.
-TEST(HnswDeathTest, MalformedUpperLayerEdgeUnderflowsNeighborPointers) {
-  // neighbors_begin()/neighbors_end() (vector-common/hnsw.h) compute
-  // (m_layer - layer) * M with no check that layer <= m_layer. If a node is
-  // referenced as a neighbor at some layer L but its own persisted layer is
-  // < L (a malformed/corrupted edge), the subtraction goes negative and
-  // converts to a huge size_t on the multiply: neighbors_begin() returns a
-  // wild Node** pointer. std::copy() at the call site then reads through
-  // it, and the garbage "Node*" values it copies get dereferenced (state(),
-  // dist()) a few lines later - crashing the process.
+// Not gated by NDEBUG: neighbors_begin()/neighbors_end() must not underflow
+// in release builds either.
+TEST(HnswCorruptionTest, MalformedUpperLayerEdgeDoesNotCrash) {
+  // neighbors_begin()/neighbors_end() (vector-common/hnsw.h) used to compute
+  // (m_layer - layer) * M with no check that layer <= m_layer. If a node was
+  // referenced as a neighbor at some layer L but its own persisted layer was
+  // < L (a malformed/corrupted edge), the subtraction went negative and
+  // converted to a huge size_t on the multiply: neighbors_begin() returned a
+  // wild Node** pointer, and the garbage "Node*" values std::copy() read
+  // through it got dereferenced (state(), dist()) a few lines later,
+  // crashing the process. Both accessors now treat layer > m_layer as "no
+  // neighbors on this layer" instead. This is a regression test: search must
+  // complete normally (no crash) even when the persisted graph has this kind
+  // of malformed edge.
   constexpr size_t kDimsLocal = 2;
   constexpr size_t kMLocal = 4;
   constexpr size_t kEfConstructionLocal = 16;
@@ -932,10 +934,15 @@ TEST(HnswDeathTest, MalformedUpperLayerEdgeUnderflowsNeighborPointers) {
 
   // Query == victim's own vector: distance 0 guarantees the entry point's
   // greedy descent moves into the corrupted victim node at the entry
-  // point's (too-high) layer on the very first search_layer_ef_1() call.
-  EXPECT_DEATH_IF_SUPPORTED(cold.k_nn_search(as_bytes(victim_vec), /*k=*/1,
-                                             /*ef_search=*/16, &fixture.store),
-                            "");
+  // point's (too-high) layer on the very first search_layer_ef_1() call -
+  // exactly where this used to crash.
+  const auto hits = cold.k_nn_search(as_bytes(victim_vec), /*k=*/1,
+                                     /*ef_search=*/16, &fixture.store);
+  // The corrupted node's own neighbor list (layer 0, untouched above) is
+  // intact, so it - or something equally close - is still found via the
+  // ordinary layer-0 search; the point of this test is that we got here at
+  // all without crashing.
+  EXPECT_EQ(1U, hits.size());
 }
 
 }  // namespace hnsw_unittest
