@@ -1,0 +1,112 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # PS-11300 (PR #6145 review): UPDATE that changes only the PRIMARY
+--echo # KEY of a vector-indexed row.
+--echo #
+--echo # Design (vec-hnsw-aux-sub-trx.md, "8. UPDATE") says: "Changing only
+--echo # the primary key does not touch the graph at all -- the vector has
+--echo # not moved. It does need the row's *current* node to be
+--echo # re-pointed, which is one more vec_aux_update_row [...] addressing
+--echo # the aux row by label and writing only base_pk."
+--echo #
+--echo # calc_row_difference() (ha_innodb.cc) only mints/propagates a label
+--echo # change when the VECTOR column changed; row_upd_clust_step's vec
+--echo # write-back (row0mysql.cc) is itself gated on that same label being
+--echo # non-zero. A PK-only UPDATE never sets it, so the aux row's
+--echo # base_pk is never rewritten -- it is left naming the OLD primary
+--echo # key forever. The read path (ha_innobase::vec_read_next) resolves
+--echo # each graph candidate by looking up hit.base_pk in the clustered
+--echo # index; once that key no longer exists the candidate is silently
+--echo # skipped. Net effect: the row becomes permanently unreachable
+--echo # through the vector index after its PK changes, even though its
+--echo # vector, and the exact (non-index) path, still find it fine.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+                 k INT,
+                 v VECTOR(4) NOT NULL,
+                 KEY vk (v) TYPE hnsw WITH (M = 4));
+
+INSERT INTO t1 VALUES (7, 100, STRING_TO_VECTOR('[1,0,0,0]'));
+INSERT INTO t1 VALUES (8, 200, STRING_TO_VECTOR('[0,1,0,0]'));
+INSERT INTO t1 VALUES (9, 300, STRING_TO_VECTOR('[0,0,1,0]'));
+
+--echo # Baseline: node for row 7 carries base_pk=7, and the kNN query for
+--echo # row 7's own vector finds it -- both via the index and via the
+--echo # exact (IGNORE INDEX) path.
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+--replace_regex /id=0 level=[0-9]+ base_pk=[0-9]+/id=0 level=# base_pk=#/ /level=[0-9]+/level=#/ /nb=[0-9,]*/nb=#/
+SELECT @@session.innodb_interpreter_output;
+
+--echo # Exact path: row 7 is the exact match (distance 0).
+SELECT id FROM t1 IGNORE INDEX (vk)
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 1;
+--echo # Index path: same answer, same row.
+SELECT id FROM t1 FORCE INDEX (vk)
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 1;
+
+--echo #
+--echo # Change ONLY the primary key of row 7: 7 -> 70. The vector is
+--echo # untouched.
+--echo #
+UPDATE t1 SET id = 70 WHERE id = 7;
+
+--echo # BUG: the aux node still says base_pk=7 -- it was never rewritten
+--echo # to 70. Design document (S8) says this rewrite should have
+--echo # happened; it did not.
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+--replace_regex /id=0 level=[0-9]+ base_pk=[0-9]+/id=0 level=# base_pk=#/ /level=[0-9]+/level=#/ /nb=[0-9,]*/nb=#/
+SELECT @@session.innodb_interpreter_output;
+
+--echo # The base row itself is fine: it exists under its new key, with
+--echo # its vector unchanged.
+SELECT id, k, VECTOR_TO_STRING(v) FROM t1 FORCE INDEX (PRIMARY) WHERE id = 70;
+
+--echo # Exact (non-index) path still finds it under its new PK -- the
+--echo # base table itself is correct.
+SELECT id FROM t1 IGNORE INDEX (vk)
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 1;
+
+--echo # BUG: the vector-index path no longer finds row 70. The graph
+--echo # candidate still names base_pk=7, which no longer exists in the
+--echo # clustered index, so ha_innobase::vec_read_next silently skips it.
+--echo # The row that is the EXACT nearest neighbour (distance 0) is
+--echo # missing from the result -- the top hit is now a strictly farther
+--echo # row. This is the wrong answer, and nothing signals it.
+SELECT id FROM t1 FORCE INDEX (vk)
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 1;
+
+--echo # Same divergence with a wider LIMIT: the exact path ranks row 70
+--echo # first (its own vector, distance 0); the index path never returns
+--echo # it at all, at any rank.
+SELECT id FROM t1 IGNORE INDEX (vk)
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 3;
+SELECT id FROM t1 FORCE INDEX (vk)
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 3;
+
+--echo #
+--echo # A combined UPDATE (PK AND vector change together) is no better:
+--echo # a fresh node/label IS minted for the new vector, but the base_pk
+--echo # stamped onto that brand-new node is read from the row's
+--echo # pre-update primary key (vec_upd_row_pk() reads the pcur's
+--echo # position from before the UPDATE ran), not its post-update one.
+--echo # So even the newly minted node names a primary key the row no
+--echo # longer has.
+--echo #
+UPDATE t1 SET id = 80, v = STRING_TO_VECTOR('[0,0,0,1]') WHERE id = 8;
+
+SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';
+--replace_regex /id=0 level=[0-9]+ base_pk=[0-9]+/id=0 level=# base_pk=#/ /level=[0-9]+/level=#/ /nb=[0-9,]*/nb=#/
+SELECT @@session.innodb_interpreter_output;
+
+--echo # BUG: row 80's new vector [0,0,0,1] is an exact match, but the
+--echo # freshly minted node names base_pk=8 -- a key that no longer
+--echo # exists -- so it too is skipped. Exact path finds it; index path
+--echo # does not.
+SELECT id FROM t1 IGNORE INDEX (vk)
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,0,1]'), 'EUCLIDEAN') LIMIT 1;
+SELECT id FROM t1 FORCE INDEX (vk)
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,0,1]'), 'EUCLIDEAN') LIMIT 1;
+
+DROP TABLE t1;
