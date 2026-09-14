@@ -5195,12 +5195,21 @@ dberr_t row_scan_index_for_mysql(row_prebuilt_t *prebuilt, dict_index_t *index,
     indexes of the old table will remain valid and the new
     table will be unaccessible to MySQL until the
     completion of the ALTER TABLE. */
-  } else if (dict_index_is_online_ddl(index) || (index->type & DICT_FTS) ||
-             index->is_vector()) {
-    /* Full Text and Vector indexes are implemented by auxiliary tables,
-    not the B-tree - page == FIL_NULL. We also skip secondary indexes
-    that are being created online. */
+  } else if (dict_index_is_online_ddl(index) || (index->type & DICT_FTS)) {
+    /* Full Text indexes are implemented by an auxiliary table, not the
+    B-tree - page == FIL_NULL. We also skip secondary indexes that are
+    being created online. */
     return (DB_SUCCESS);
+  } else if (index->is_vector()) {
+    /* Vector indexes are implemented by an auxiliary table too - page
+    == FIL_NULL, so the B-tree/parallel-read code below does not apply.
+    CHECK TABLE still gets a real scan out of this branch: every base
+    row's percona_vec_aux_id must name a node that exists in the aux
+    table (a COUNT(*)-only caller, check_keys == false, has nothing to
+    verify here and skips it). */
+    return check_keys
+               ? vec_check_aux_refs(index, prebuilt->trx->mysql_thd, n_rows)
+               : DB_SUCCESS;
   }
 
   DBUG_EXECUTE_IF("ib_disable_parallel_read", goto skip_parallel_read;);

@@ -629,4 +629,21 @@ break their isolation rather than tidy up.
 dberr_t vec_update_row(trx_t *trx, dict_table_t *table, uint64_t label,
                        const char *q, ulint q_len, uint64_t base_pk, THD *thd);
 
+/** CHECK TABLE support: verify every base row's percona_vec_aux_id names a
+node that actually exists in the vector aux table.
+
+Scan direction is base -> aux only. An aux node nobody references any
+more (left behind by an UPDATE that stamped a fresh label on the same
+row, see vec_update_row) is an expected, permanent byproduct of the
+design and is never visited by this scan, so it is never flagged. Only
+a base row whose label resolves to nothing in the aux table - a
+dangling reference - counts as corruption.
+
+@param[in]      vec_index  the vector index (index->is_vector())
+@param[in]      thd        connection, for the aux MDL fallback
+@param[out]     n_bad      number of base rows with a dangling reference
+@return DB_SUCCESS, DB_CORRUPTION (with *n_bad > 0), or another error */
+[[nodiscard]] dberr_t vec_check_aux_refs(dict_index_t *vec_index, THD *thd,
+                                         ulint *n_bad);
+
 #endif /* vec0hnsw_h */
