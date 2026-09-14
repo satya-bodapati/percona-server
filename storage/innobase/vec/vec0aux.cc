@@ -629,6 +629,7 @@ dberr_t vec_aux_drop_one_table(trx_t *trx, const dict_table_t *parent,
   }
 
   dberr_t err = row_drop_table_for_mysql(aux_name, trx, false, nullptr);
+  DBUG_EXECUTE_IF("vec_aux_drop_force_error", err = DB_ERROR;);
   if (err != DB_SUCCESS && err != DB_TABLE_NOT_FOUND) {
     ib::warn(ER_IB_MSG_466) << "Failed to drop vector aux table " << aux_name
                             << " err=" << static_cast<int>(err);
