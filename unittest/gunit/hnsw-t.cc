@@ -690,6 +690,33 @@ TEST_F(HnswTest, RoundTripStreamRandomGraph) {
                            /*max_results=*/25);
 }
 
+/* A failed first insert must not publish an entry point: doing so would let
+a restart find persisted entry-point metadata pointing at a node/row that
+was never actually written, making a populated index read as empty. */
+TEST_F(HnswTest, FirstInsertEntryPointNotPublishedOnPersistFailure) {
+  RecordingPersistor::Context store;
+  store.dims = kDims;
+  LoadTestHnsw index(kDims, euclidean, kM, kEfConstruction);
+
+  store.fail_insert_ids.insert(1);
+  index.insert(1, /*base_pk=*/101, as_bytes(make_vec({0.0f, 0.0f})), &store);
+
+  EXPECT_EQ(store.entry_point, 0U);
+  EXPECT_TRUE(index
+                  .k_nn_search(as_bytes(make_vec({0.0f, 0.0f})), /*k=*/1,
+                               /*ef_search=*/16, &store)
+                  .empty());
+
+  // A later, successful insert becomes the real entry point; the failed
+  // node stays orphaned rather than corrupting the graph.
+  index.insert(2, /*base_pk=*/102, as_bytes(make_vec({1.0f, 1.0f})), &store);
+  EXPECT_EQ(store.entry_point, 2U);
+  auto hits = index.k_nn_search(as_bytes(make_vec({1.0f, 1.0f})), /*k=*/1,
+                                /*ef_search=*/16, &store);
+  ASSERT_EQ(hits.size(), 1U);
+  EXPECT_EQ(hits[0].base_pk, 102U);
+}
+
 TEST_F(HnswTest, InitFromEntryPointLoadsEP) {
   RoundTripFixture fixture = make_fixed_round_trip_fixture(kDims);
   LoadTestHnsw built(kDims, euclidean, kM, kEfConstruction);
