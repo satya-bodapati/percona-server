@@ -1467,11 +1467,13 @@ class HNSW {
     return static_cast<size_t>(node->id()) & (kLoadNodeLockStripes - 1);
   }
 
-  void lock_load_node(const Node *node) {
-    m_load_node_locks[load_node_lock_index(node)].mutex.lock();
-  }
-  void unlock_load_node(const Node *node) {
-    m_load_node_locks[load_node_lock_index(node)].mutex.unlock();
+  /// The stripe mutex a node's load is serialized on. A plain
+  /// lock()/unlock() pair is not used here: load_node_cb (and the
+  /// allocations it triggers via load_node_neighbors()) can throw
+  /// std::bad_alloc, which would leave the mutex locked forever. Callers
+  /// scope it with std::scoped_lock instead.
+  std::mutex &load_node_lock_mutex(const Node *node) {
+    return m_load_node_locks[load_node_lock_index(node)].mutex;
   }
 
   /**
@@ -1792,7 +1794,7 @@ class HNSW {
 
   bool load_node(PersistorContext *persistor_ctx, Node *node) {
     // Lock the node to avoid concurrent loads of the same node.
-    lock_load_node(node);
+    std::scoped_lock lock(load_node_lock_mutex(node));
     // We need to re-check the state under the lock.
     switch (node->state()) {
       case NODE_DUMMY: {
@@ -1807,21 +1809,17 @@ class HNSW {
         } else {
           node->set_lost();
         }
-        unlock_load_node(node);
         return loaded;
       }
       case NODE_COMPLETE:
-        unlock_load_node(node);
         return true;
       case NODE_LOST:
-        unlock_load_node(node);
         return false;
       case NODE_NEW:
       case NODE_LINKING:
       default:
         // NODE_NEW/LINKING are insert-owned, not loadable stubs.
         assert(false);
-        unlock_load_node(node);
         return false;
     }
   }
