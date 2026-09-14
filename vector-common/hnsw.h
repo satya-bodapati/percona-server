@@ -433,10 +433,15 @@ class HNSW {
       // Lock the neighbor so we can safely read its neighbor lists.
       // TODO: Think about possible optimizations of this/not holding
       //       the lock during the callback.
-      lock_node(neighbor);
+      //
+      // scoped_lock, not lock_node()/unlock_node(): update_neighbors_cb
+      // flattens the neighbor list into a std::vector (vec_flatten_neighbors)
+      // before persisting it, which can throw std::bad_alloc. A bare
+      // lock_node()/unlock_node() pair would then leave this stripe's mutex
+      // locked forever, wedging every other node sharing it.
+      std::scoped_lock lock(node_lock_mutex(neighbor));
       m_persistor.update_neighbors_cb(persistor_ctx, neighbor->id(),
                                       neighbor_ids(neighbor));
-      unlock_node(neighbor);
     }
 
     if (target_layer > max_layer) {
@@ -1444,6 +1449,13 @@ class HNSW {
   }
   void unlock_node(const Node *node) {
     m_node_locks[node_lock_index(node)].mutex.unlock();
+  }
+  /// The stripe mutex a node's neighbor list is protected by, exposed so a
+  /// call that can throw (e.g. a persistor callback) can be scoped with
+  /// std::scoped_lock instead of a bare lock_node()/unlock_node() pair that
+  /// an exception would leave locked forever.
+  std::mutex &node_lock_mutex(const Node *node) {
+    return m_node_locks[node_lock_index(node)].mutex;
   }
 
   static constexpr size_t kLoadNodeLockStripes = 4;  // Should be a power of 2.
