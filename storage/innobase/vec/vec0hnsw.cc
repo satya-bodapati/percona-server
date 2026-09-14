@@ -31,9 +31,11 @@ The HNSW runtime and the persistence callbacks behind it.
 #include "srv0srv.h"
 
 #include <variant>
+#include "btr0pcur.h"
 #include "dict0dd.h"
 #include "dict0dict.h"
 #include "mach0data.h"
+#include "my_dbug.h"
 #include "sql/field.h"
 #include "sql/table.h"
 #include "trx0roll.h"
@@ -93,6 +95,13 @@ dberr_t vec_persist_insert(Vec_ctx *ctx, uint64_t id, uint64_t base_pk,
                            const std::vector<byte> &neighbors) {
   ut_ad(ctx->aux != nullptr);
   ut_ad(id != 0); /* 0 is the empty-slot sentinel; record 0 is metadata */
+
+  /* Test-only: fabricate the one corruption vec_check_aux_refs (CHECK
+  TABLE) exists to catch - a base row whose freshly stamped label never
+  got an aux row - without a general aux-row-delete primitive. The base
+  row's INSERT still commits normally; only this node's aux row is
+  skipped. */
+  DBUG_EXECUTE_IF("vec_skip_aux_row_insert", return DB_SUCCESS;);
 
   vec_aux_row_t row;
   row.id = id;
@@ -932,4 +941,71 @@ dberr_t vec_insert_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
     if (err != DB_SUCCESS) return err;
   }
   return DB_SUCCESS;
+}
+
+dberr_t vec_check_aux_refs(dict_index_t *vec_index, THD *thd, ulint *n_bad) {
+  ut_ad(vec_index->is_vector());
+  *n_bad = 0;
+
+  dict_table_t *base = vec_index->table;
+  dict_index_t *clust = base->first_index();
+
+  /* Pass 1: collect every live row's label into memory first, rather
+  than doing the aux point-lookup (pass 2) while still positioned on
+  the base table's leaf page. Interleaving would mean nesting an mtr on
+  a second B-tree (the aux table) inside the one scanning the base
+  table for the whole walk - exactly the kind of held-latch-across-a-
+  second-tree exposure InnoDB's mtr rules steer away from. Buffering
+  costs 8 bytes per row for the duration of the scan, which is cheap
+  next to what CHECK TABLE already does per row (btr_validate_index). */
+  std::vector<uint64_t> labels;
+  {
+    mtr_t mtr;
+    mtr_start(&mtr);
+    btr_pcur_t pcur;
+    pcur.open_at_side(true, clust, BTR_SEARCH_LEAF, true, 0, &mtr);
+    while (pcur.move_to_next_user_rec(&mtr) == DB_SUCCESS) {
+      const rec_t *rec = pcur.get_rec();
+      if (rec_get_deleted_flag(rec, dict_table_is_comp(base))) {
+        continue;
+      }
+      labels.push_back(vec_get_aux_id_from_rec(base, rec, clust));
+    }
+    pcur.close();
+    mtr_commit(&mtr);
+  }
+
+  MDL_ticket *mdl = nullptr;
+  dict_table_t *aux = vec_aux_open_for_dml(base, vec_index->id, thd, &mdl);
+  if (aux == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  /* Pass 2: for each label, does the aux table still have that node?
+  DB_RECORD_NOT_FOUND is the dangling reference this function looks
+  for. Absent from `labels` above (i.e. an aux node nobody's row names
+  any more) is never checked in either direction - that is the expected
+  orphan left behind by an UPDATE that stamped a fresh label on the
+  same row (vec_update_row), not corruption. */
+  mem_heap_t *heap = mem_heap_create(256, UT_LOCATION_HERE);
+  dberr_t err = DB_SUCCESS;
+  for (uint64_t label : labels) {
+    mem_heap_empty(heap);
+    vec_aux_read_t node;
+    const dberr_t rerr = vec_aux_read_node(aux, label, heap, &node);
+    if (rerr == DB_RECORD_NOT_FOUND) {
+      (*n_bad)++;
+    } else if (rerr != DB_SUCCESS) {
+      err = rerr;
+      break;
+    }
+  }
+  mem_heap_free(heap);
+
+  vec_aux_close_for_dml(aux, thd, &mdl);
+
+  if (err != DB_SUCCESS) {
+    return err;
+  }
+  return (*n_bad == 0) ? DB_SUCCESS : DB_CORRUPTION;
 }
