@@ -307,6 +307,14 @@ void vec_update_aux_id(dict_table_t *table, upd_field_t *ufield,
 const char *vec_upd_new_vector(const dict_table_t *table, const upd_t *update,
                                ulint *len);
 
+/** The new primary key carried by an update vector, if it changes one.
+@param[in]   table   the base table
+@param[in]   update  the update vector
+@param[out]  pk      the new key
+@return true if this update changes the primary key */
+[[nodiscard]] bool vec_upd_new_pk(const dict_table_t *table,
+                                  const upd_t *update, uint64_t *pk);
+
 /** The primary key of the row an update node is positioned on.
 @param[in]   table  the base table
 @param[in]   node   the update node
@@ -314,6 +322,17 @@ const char *vec_upd_new_vector(const dict_table_t *table, const upd_t *update,
 @return true if it could be read */
 [[nodiscard]] bool vec_upd_row_pk(const dict_table_t *table,
                                   const upd_node_t *node, uint64_t *pk);
+
+/** Does this update field change the row's PRIMARY KEY?
+
+The design restricts a vector-indexed table to a single-column BIGINT
+UNSIGNED primary key (vector_pk_combinations.test), so that key is
+always clustered index field 0 - the same fact vec_upd_row_pk relies on.
+@param[in]  table   the base table
+@param[in]  ufield  one field of the update vector
+@return true if it does */
+[[nodiscard]] bool vec_upd_changes_pk_column(const dict_table_t *table,
+                                             const upd_field_t *ufield);
 
 /** Atomically assign the next percona_vec_aux_id for a row about to be
 inserted. Valid ids start at 1. Stamped into the hidden percona_vec_aux_id

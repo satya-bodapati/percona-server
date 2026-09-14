@@ -2934,9 +2934,17 @@ run_again:
     }
   }
 
-  /* A vector-column UPDATE adds the new node. calc_row_difference has
-  already minted the label and put it into the update vector, so the row
-  written above already names the new node - this only has to create it.
+  /* A vector-column UPDATE, OR a PRIMARY KEY UPDATE, adds a new node.
+  calc_row_difference already minted the label and put it into the
+  update vector, so the row written above already names the new node -
+  this only has to create it. A PK change is treated the same as a
+  vector change for exactly the reason a node is immutable in the first
+  place: the row's base_pk is baked into every node that names it, so
+  once the key moves the row is, as far as the graph is concerned, a
+  new version - re-pointing the OLD node's base_pk in place instead
+  would hand a stale-snapshot reader a candidate whose clustered record
+  is now this UPDATE's own (invisible-to-them) insert, losing the row
+  entirely (design: "UPDATE" / MVCC checks).
 
   DELETE deliberately does nothing here: the node has to stay for read
   views still entitled to the row, and the read path filters it by
@@ -2949,16 +2957,34 @@ run_again:
     trx->vec_next_label = 0;
 
     if (!node->is_delete && label != 0) {
-      /* Both of these were established by calc_row_difference before it
-      minted the label, so a miss here means the row now names a node
-      that will never exist. Fail the statement rather than leave the
-      graph behind the table. */
+      /* The vector: calc_row_difference makes the update vector
+      self-sufficient for this - when a PK-only UPDATE mints a label
+      without the UPDATE itself touching the vector column, it also
+      appends a synthetic update field carrying the vector's current
+      (unchanged) value, so this always finds one. node->row / upd_row
+      cannot be used here instead: row_upd() (row0upd.cc) nulls them
+      out as its own cleanup before row_upd_step() returns to us, so
+      by this point they are gone regardless of what the statement
+      did. */
       ulint q_len = 0;
       const char *q = vec_upd_new_vector(table, node->update, &q_len);
 
+      /* The base_pk: prefer the update vector's OWN new value - only
+      present when this UPDATE moved the PK, and then it is the only
+      correct source (vec_upd_row_pk's cursor position is the
+      pre-update row, i.e. the OLD key). Otherwise the PK is
+      unchanged and vec_upd_row_pk's value (old == current) is
+      correct. */
       uint64_t base_pk = 0;
-      const bool have_pk = vec_upd_row_pk(table, node, &base_pk);
+      bool have_pk = vec_upd_new_pk(table, node->update, &base_pk);
+      if (!have_pk) {
+        have_pk = vec_upd_row_pk(table, node, &base_pk);
+      }
 
+      /* Both of these were established by calc_row_difference before
+      it minted the label, so a miss here means the row now names a
+      node that will never exist. Fail the statement rather than
+      leave the graph behind the table. */
       ut_ad(q != nullptr);
       ut_ad(have_pk);
 

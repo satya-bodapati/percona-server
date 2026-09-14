@@ -357,6 +357,29 @@ const char *vec_upd_new_vector(const dict_table_t *table, const upd_t *update,
   return nullptr;
 }
 
+bool vec_upd_new_pk(const dict_table_t *table, const upd_t *update,
+                    uint64_t *pk) {
+  const dict_index_t *clust = table->first_index();
+  if (dict_index_get_n_unique(clust) != 1) return false;
+
+  for (ulint i = 0; i < upd_get_n_fields(update); i++) {
+    const upd_field_t *uf = upd_get_nth_field(update, i);
+    if (uf->is_virtual()) continue;
+    /* The design's single-column primary key is always clustered
+    index field 0 (vec_upd_changes_pk_column makes the same
+    assumption). */
+    if (uf->field_no != 0) continue;
+
+    if (dfield_is_null(&uf->new_val) || dfield_get_len(&uf->new_val) != 8) {
+      return false;
+    }
+    *pk = mach_read_from_8(
+        static_cast<const byte *>(dfield_get_data(&uf->new_val)));
+    return true;
+  }
+  return false;
+}
+
 bool vec_upd_row_pk(const dict_table_t *table, const upd_node_t *node,
                     uint64_t *pk) {
   /* Where the primary key comes from, and why not from node->row.
@@ -400,6 +423,19 @@ bool vec_upd_row_pk(const dict_table_t *table, const upd_node_t *node,
   return ok;
 }
 
+bool vec_upd_changes_pk_column(const dict_table_t *table,
+                               const upd_field_t *ufield) {
+  if (ufield->is_virtual()) return false;
+
+  const dict_index_t *clust = table->first_index();
+  if (dict_index_get_n_unique(clust) != 1) return false;
+
+  /* field_no is the clustered-index field position (see
+  vec_update_aux_id / dict_col_get_clust_pos), and the design's single-
+  column primary key is always field 0 of the clustered index - the
+  same assumption vec_upd_row_pk makes. */
+  return ufield->field_no == 0;
+}
 
 uint64_t vec_assign_next_aux_id(dict_table_t *table) {
   ut_ad(table != nullptr);
