@@ -1788,6 +1788,25 @@ bool ha_innobase::commit_inplace_alter_table(TABLE *altered_table,
     ut_d(old_info_updated = true);
   }
 
+  /* Refresh the label counter under commit MDL, right before it becomes
+  durable. prepare_inplace_alter_table() already carried it into
+  new_dd_tab, but that snapshot predates this ALTER's own copy phase. A
+  rebuild that keeps the vector index is always forced non-online (see
+  check_if_supported_inplace_alter), so nothing can advance the counter
+  in between and this re-read is a no-op. A non-rebuild ALTER - which
+  stays online whenever it neither adds a PK/FULLTEXT/VECTOR key nor
+  needs a rebuild for some other reason - does not get that protection:
+  concurrent DML can keep minting labels via vec_assign_next_aux_id()
+  right up until wait_while_table_is_used() upgrades the MDL to
+  EXCLUSIVE just before this function runs. Re-reading here, under that
+  exclusive lock, is what makes the persisted value match reality
+  instead of the pre-window snapshot. */
+  if (commit && ctx != nullptr &&
+      DICT_TF2_FLAG_IS_SET(ctx->old_table, DICT_TF2_HAS_VEC_AUX_COL)) {
+    dd_set_vec_next_id(new_dd_tab->se_private_data(),
+                       ctx->old_table->vec_aux_autoinc_next_id.load());
+  }
+
   bool res = commit_inplace_alter_table_impl<dd::Table>(
       altered_table, ha_alter_info, commit, new_dd_tab);
 
