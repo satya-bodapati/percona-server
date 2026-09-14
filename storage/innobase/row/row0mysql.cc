@@ -5207,9 +5207,8 @@ dberr_t row_scan_index_for_mysql(row_prebuilt_t *prebuilt, dict_index_t *index,
     row's percona_vec_aux_id must name a node that exists in the aux
     table (a COUNT(*)-only caller, check_keys == false, has nothing to
     verify here and skips it). */
-    return check_keys
-               ? vec_check_aux_refs(index, prebuilt->trx->mysql_thd, n_rows)
-               : DB_SUCCESS;
+    return check_keys ? vec_check_aux_refs(index, prebuilt->trx, n_rows)
+                      : DB_SUCCESS;
   }
 
   DBUG_EXECUTE_IF("ib_disable_parallel_read", goto skip_parallel_read;);

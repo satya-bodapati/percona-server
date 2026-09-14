@@ -640,10 +640,13 @@ a base row whose label resolves to nothing in the aux table - a
 dangling reference - counts as corruption.
 
 @param[in]      vec_index  the vector index (index->is_vector())
-@param[in]      thd        connection, for the aux MDL fallback
+@param[in,out]  trx        the CHECK TABLE transaction; also polled every
+                           1000 rows for KILL/interrupt, same cadence as
+                           the non-vector scan in row_scan_index_for_mysql
 @param[out]     n_bad      number of base rows with a dangling reference
-@return DB_SUCCESS, DB_CORRUPTION (with *n_bad > 0), or another error */
-[[nodiscard]] dberr_t vec_check_aux_refs(dict_index_t *vec_index, THD *thd,
+@return DB_SUCCESS, DB_CORRUPTION (with *n_bad > 0), DB_INTERRUPTED, or
+another error */
+[[nodiscard]] dberr_t vec_check_aux_refs(dict_index_t *vec_index, trx_t *trx,
                                          ulint *n_bad);
 
 #endif /* vec0hnsw_h */
