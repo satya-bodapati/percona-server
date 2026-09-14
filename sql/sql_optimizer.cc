@@ -121,6 +121,7 @@
 #include "sql/window.h"
 #include "sql_string.h"
 #include "template_utils.h"
+#include "vector-common/vector_constants.h"  // get_dimensions
 
 using std::ceil;
 using std::max;
@@ -11113,6 +11114,27 @@ bool JOIN::optimize_vector_query() {
   }
 
   if (vector_column->type() != MYSQL_TYPE_VECTOR) return false;
+
+  /* A NULL, malformed, or dimension-mismatched constant is not something
+  the kNN index can search. On the exact path a NULL query vector makes
+  Item_func_vector_distance::val_real() return NULL for every row, which
+  does not filter any row out; a malformed or wrongly-sized one raises
+  ER_TO_VECTOR_CONVERSION or ER_WRONG_ARGUMENTS. Activating JT_VECTOR here
+  instead sends these cases through vec_read_first(), which reports them
+  as end-of-file - a silently empty result where rows or an error are
+  expected. Leaving the query on the exact path reproduces its behaviour
+  exactly, so validate the constant now rather than duplicating that
+  behaviour in the handler. */
+  String buff;
+  const String *const_vector = const_vector_expr->val_str(&buff);
+  if (const_vector == nullptr || const_vector->ptr() == nullptr) return false;
+  const uint32 const_dims =
+      get_dimensions(const_vector->length(), Field_vector::precision);
+  if (const_dims == UINT32_MAX ||
+      const_dims != down_cast<const Field_vector *>(vector_column)
+                        ->get_max_dimensions()) {
+    return false;
+  }
 
   JOIN_TAB *tab = best_ref[0];
   const TABLE *table = tab->table();
