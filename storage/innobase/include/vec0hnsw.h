@@ -34,6 +34,7 @@ vector index keeps in memory.
 
 #include "db0err.h"
 #include "dict0mem.h"
+#include "srv0srv.h"
 #include "trx0trx.h"
 #include "univ.i"
 #include "ut0rnd.h"
@@ -191,6 +192,25 @@ struct Vec_persistor {
   bool load_node_cb(Context *ctx, Hnsw &hnsw,
                     typename Hnsw::LoadNodeHandle handle) {
     if (ctx->err != DB_SUCCESS) return false;
+
+    /* NOT the place for the innodb_hnsw_max_memory check, however much
+    it looks like it: this is where a cold graph grows, but a false
+    return here is indistinguishable from "this node is gone". load_node
+    (hnsw.h) calls set_lost() on it, NODE_LOST is never retried, and
+    every later search skips that node - so refusing one fault for a
+    transient reason leaves the graph permanently short of nodes and
+    answering queries with fewer rows and no error at all. Measured:
+    with the check here, a search after a refused load returned one row
+    where three were correct.
+
+    So the budget is checked at the entry to a load or an insert instead
+    (vec_runtime_load, vec_add_node), which bounds when a graph may
+    start growing but lets one statement overshoot by whatever it
+    faults. Metering each fault needs a load_node_cb that can say
+    "failed, try again later" as opposed to "lost" - the same API gap
+    Pawel Olchawa raised on vec0hnsw.h, where the callback is to be
+    reworked to report errors properly. This check belongs there. */
+
     const dberr_t err = vec_persist_load_node(ctx, hnsw, handle);
     if (err != DB_SUCCESS) {
       ctx->err = err;
@@ -254,6 +274,21 @@ using Vec_hnsw = HNSW<Vec_arena, Vec_persistor, Vec_random_engine>;
 
 /** In-memory state of one open vector index. */
 struct vec_t : public Vec_runtime {
+  /** Everything the runtime knows about its index is settled here, before
+  the object is published into dict_index_t::vec, and const afterwards.
+  That is not tidiness: publication is the only synchronisation these
+  fields get, so a later assignment to any of them would be a data race
+  against every reader. Making them const means such a patch does not
+  compile. */
+  vec_t(space_index_t index_id_, dict_table_t *table_, uint32_t dims_,
+        uint32_t m_, uint32_t ef_construction_, vec_dist_func_t *dist_)
+      : index_id(index_id_),
+        table(table_),
+        dims(dims_),
+        m(m_),
+        ef_construction(ef_construction_),
+        dist(dist_) {}
+
   ~vec_t() override;
 
   /** The graph. Owns its arena and its persistor by value. */
@@ -281,12 +316,16 @@ struct vec_t : public Vec_runtime {
   next statement retries. */
   std::mutex load_mutex;
   /** The index this runtime belongs to. */
-  space_index_t index_id{0};
+  const space_index_t index_id;
   /** Base table, for opening the aux and reading the label counter. */
-  dict_table_t *table{nullptr};
-  uint32_t dims{0};
-  uint32_t m{0};
-  uint32_t ef_construction{0};
+  dict_table_t *const table;
+  const uint32_t dims;
+  const uint32_t m;
+  const uint32_t ef_construction;
+  /** The distance kernel this index's metric selects, resolved once by
+  parse_options. The graph is built with it rather than with a kernel
+  chosen here, so WITH (metric = ...) is what decides. */
+  vec_dist_func_t *const dist;
   /** True once the graph has been built from the aux table. Atomic, with
   release/acquire ordering: it publishes the `hnsw` pointer to every thread
   that sees it true, which is what lets the hot paths run unlocked. */
@@ -303,6 +342,25 @@ and the row-level code that needs the graph has only dict objects.
 @param[in]      form   the open TABLE, for the vector column's dimension
 @param[in]      thd    session, for error reporting
 @return the runtime, or nullptr if the parameters could not be read */
+/** The runtime attached to `index`, or nullptr if it has none yet.
+
+dict_index_t::vec is written by whichever session opens the table first
+and read by every session after it, with no latch between them, so the
+access is atomic: a release store publishes the object and an acquire
+load here guarantees that a reader seeing the pointer also sees the
+fields written before it. std::atomic_ref rather than making the member
+std::atomic because dict_index_t is never constructed - it is zeroed and
+dict_mem_fill_index_struct() stands in for a constructor - so a member
+with a real constructor would not have one called.
+@param[in]  index  vector index
+@return the runtime, or nullptr */
+[[nodiscard]] inline vec_t *vec_runtime_get(const dict_index_t *index) {
+  /* const_cast: atomic_ref needs a non-const lvalue, and the read itself
+  does not modify the index. */
+  std::atomic_ref<Vec_runtime *> slot(const_cast<dict_index_t *>(index)->vec);
+  return static_cast<vec_t *>(slot.load(std::memory_order_acquire));
+}
+
 vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
                         THD *thd);
 
@@ -445,9 +503,22 @@ dict_index_t *vec_index_of(dict_table_t *table);
 /** Dimensions the index was built with; 0 if it has no runtime yet. */
 uint32_t vec_index_dims(const dict_index_t *index);
 
-dberr_t vec_build_index(trx_t *trx, dict_table_t *table,
-                        dict_index_t *vec_index, uint32_t dims, uint32_t m,
-                        uint32_t ef_construction, THD *thd);
+/** Build the graph and the aux rows for a vector index from one
+clustered scan, on the ALTER's own transaction.
+@param[in]  trx             the ALTER's transaction
+@param[in]  table           base table being altered
+@param[in]  vec_index       the vector index to populate
+@param[in]  dims            vector dimensions
+@param[in]  m               HNSW M
+@param[in]  ef_construction HNSW ef_construction
+@param[in]  dist            distance kernel the index's metric selects,
+                            from HnswParam::dist
+@param[in]  thd             connection, for the aux MDL
+@return DB_SUCCESS or an error */
+[[nodiscard]] dberr_t vec_build_index(trx_t *trx, dict_table_t *table,
+                                      dict_index_t *vec_index, uint32_t dims,
+                                      uint32_t m, uint32_t ef_construction,
+                                      vec_dist_func_t *dist, THD *thd);
 
 dberr_t vec_update_row(trx_t *trx, dict_table_t *table, uint64_t label,
                        const char *q, ulint q_len, uint64_t base_pk, THD *thd);
