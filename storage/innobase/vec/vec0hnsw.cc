@@ -371,11 +371,11 @@ static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
   ctx.vec_bytes = vec->dims * sizeof(float);
   ctx.err = DB_SUCCESS;
 
-  vec->hnsw->init_from_entry_point(entry_point, &ctx);
-  if (ctx.err != DB_SUCCESS) {
+  if (!vec->hnsw->init_from_entry_point(entry_point, &ctx) ||
+      ctx.err != DB_SUCCESS) {
     ut::delete_(vec->hnsw);
     vec->hnsw = nullptr;
-    return ctx.err;
+    return ctx.err != DB_SUCCESS ? ctx.err : DB_CORRUPTION;
   }
 
   vec->loaded.store(true, std::memory_order_release);

@@ -110,8 +110,9 @@ typedef double vec_dist_func_t(const char *a, const char *b, uint32_t dims);
     user's transaction.
 
     Cold start / recovery uses init_from_entry_point(), which loads the
-    entry-point node via load_node_cb and requires success (asserted); the
-    entry point is then NODE_COMPLETE.
+    entry-point node via load_node_cb. A load_node_cb failure (e.g. the
+    persisted row is corrupt) is reported back through its return value
+    instead of being asserted; on success the entry point is NODE_COMPLETE.
 
     Index metadata is not persisted by HNSW itself. The class users must
     store it alongside the graph (at minimum: vector dimensions, M, distance
@@ -845,16 +846,20 @@ class HNSW {
 
     @param id             Graph node id of the persisted entry point.
     @param persistor_ctx  Context passed to load_node_cb..
+    @return false if load_node_cb failed to load the entry-point row (e.g.
+            it is corrupt); the caller's Context carries the specific error.
+            The instance is left with no entry point and must not be used
+            for insert() or search - only destroyed.
   */
-  void init_from_entry_point(uint64_t id, PersistorContext *persistor_ctx) {
+  bool init_from_entry_point(uint64_t id, PersistorContext *persistor_ctx) {
     assert(m_entry_point.load() == nullptr);
     assert(m_nodes.size() == 0);
     Node *node = Node::create(m_allocator, *this, id, NODE_DUMMY);
     m_nodes.insert({id, node});
-    bool loaded [[maybe_unused]] = load_node(persistor_ctx, node);
-    assert(loaded);
+    if (!load_node(persistor_ctx, node)) return false;
     m_entry_point.store(node);
     assert(m_entry_point.load()->state() == NODE_COMPLETE);
+    return true;
   }
 
   /**

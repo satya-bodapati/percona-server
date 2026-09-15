@@ -6,6 +6,11 @@
 --echo # level 0. The other fixed-width column read the same way
 --echo # (base_pk) already does this; level did not.
 --echo #
+--echo # The corruption is injected on the entry-point node's own row, not
+--echo # the index's metadata row (aux id 0), so this also covers
+--echo # HNSW::init_from_entry_point() surfacing a load_node_cb failure as
+--echo # an error return instead of aborting a debug server.
+--echo #
 
 CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
                  v VECTOR(2) NOT NULL,
@@ -22,8 +27,10 @@ INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[0,0]')),
 
 SET SESSION debug = '+d,vec_aux_corrupt_level_len';
 
---echo # The entry-point node (record 0) is read here; with the hook
---echo # active its level field reads back as length 0 instead of 1.
+--echo # The entry-point node (base_pk 1, the first row inserted) is read
+--echo # here via init_from_entry_point(); with the hook active its level
+--echo # field reads back as length 0 instead of 1. The hook skips aux row
+--echo # id 0, which is the index's own metadata row, not a graph node.
 --error ER_NOT_KEYFILE
 SELECT id FROM t1
   ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 1;
