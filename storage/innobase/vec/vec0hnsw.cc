@@ -371,11 +371,18 @@ static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
   ctx.vec_bytes = vec->dims * sizeof(float);
   ctx.err = DB_SUCCESS;
 
-  vec->hnsw->init_from_entry_point(entry_point, &ctx);
-  if (ctx.err != DB_SUCCESS) {
+  const bool entry_point_loaded =
+      vec->hnsw->init_from_entry_point(entry_point, &ctx);
+  if (!entry_point_loaded || ctx.err != DB_SUCCESS) {
     ut::delete_(vec->hnsw);
     vec->hnsw = nullptr;
-    return ctx.err;
+    /* load_node_cb() (Vec_persistor, above) sets ctx.err on every failure
+    path it takes, so this is normally redundant with the ctx.err check -
+    kept as a second, persistor-independent line of defense: a failure
+    init_from_entry_point() reports via its own return but that a future
+    or different Persistor forgot to mirror into ctx.err would otherwise
+    read back here as DB_SUCCESS. */
+    return ctx.err != DB_SUCCESS ? ctx.err : DB_CORRUPTION;
   }
 
   vec->loaded.store(true, std::memory_order_release);
