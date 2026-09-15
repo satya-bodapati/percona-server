@@ -85,6 +85,7 @@ Tester::Tester() noexcept {
   DISPATCH(vec_corrupt_entry_row);
   DISPATCH(vec_knn);
   DISPATCH(vec_next_id);
+  DISPATCH(vec_point_entry_at_missing_row);
   DISPATCH(vec_poison_entry_neighbor);
   DISPATCH(vec_runtime_info);
   DISPATCH(print_dblwr_has_encrypted_pages);
@@ -746,6 +747,51 @@ Writing it in place of the real blob makes vec_aux_neighbors_blob_len's
 length check in vec_aux_read_and_validate_node (vec0hnsw.h) fail no
 matter the victim's own level - shape corruption, not a missing row. */
 static const byte VEC_TEST_TOO_SHORT_BLOB[8] = {0};
+
+Ret_t Tester::vec_point_entry_at_missing_row(
+    std::vector<std::string> &tokens) noexcept {
+  TLOG("Tester::vec_point_entry_at_missing_row()");
+  ut_ad(tokens[0] == "vec_point_entry_at_missing_row");
+  std::ostringstream sout;
+  if (tokens.size() != 2) {
+    XLOG("FAIL: usage: vec_point_entry_at_missing_row db/table");
+    set_output(sout);
+    return RET_FAIL;
+  }
+
+  vec_test_tables_t tt;
+  if (!vec_test_open_aux(tokens[1], tt, nullptr)) {
+    XLOG("FAIL: no vector aux for " << tokens[1]);
+    set_output(sout);
+    return RET_FAIL;
+  }
+  dict_table_t *aux = tt.aux;
+  auto guard = create_scope_guard([&]() { vec_test_close_aux(tt); });
+
+  /* A sentinel far past anything a test's own handful of inserts could
+  ever assign, so no row exists for it - simulating a crash between
+  committing THIS pointer advance (vec_persist_entry_point) and
+  committing the new entry node's own row (vec_persist_insert),
+  distinct from vec_corrupt_entry_row's target existing but malformed
+  row. */
+  const uint64_t missing_id = 999999999999ULL;
+
+  trx_t *trx = trx_allocate_for_background();
+  trx_start_internal(trx, UT_LOCATION_HERE);
+  const dberr_t err =
+      ::vec_aux_update_row(trx, aux, 0, nullptr, 0, &missing_id);
+  trx_commit_for_mysql(trx);
+  trx_free_for_background(trx);
+
+  if (err != DB_SUCCESS) {
+    XLOG("FAIL: vec_aux_update_row err=" << static_cast<int>(err));
+    set_output(sout);
+    return RET_FAIL;
+  }
+  XLOG("PASS: pointed record 0's entry pointer at a row that does not exist");
+  set_output(sout);
+  return RET_PASS;
+}
 
 Ret_t Tester::vec_corrupt_entry_row(std::vector<std::string> &tokens) noexcept {
   TLOG("Tester::vec_corrupt_entry_row()");

@@ -100,3 +100,46 @@ SELECT id FROM t2 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') L
 INSERT INTO t2 VALUES (7, STRING_TO_VECTOR('[0.5,0]'));
 
 DROP TABLE t2;
+
+--echo # --- t3: the entry point's row is not merely malformed, it is GONE ---
+--echo #
+--echo # t1 above corrupts an EXISTING entry row's shape (vec_aux_read_node
+--echo # succeeds, the shape check after it fails). Here record 0's pointer
+--echo # names an id with no row at all -- vec_aux_read_node itself returns
+--echo # DB_RECORD_NOT_FOUND, not a shape mismatch -- simulating a crash
+--echo # between committing the entry-point pointer and committing the new
+--echo # entry node's own row. That DB_RECORD_NOT_FOUND must be converted to
+--echo # DB_CORRUPTION before it can reach INSERT's error path
+--echo # (row_mysql_handle_errors, row0mysql.cc), which has no case for a
+--echo # bare DB_RECORD_NOT_FOUND and aborts the server: the same class of
+--echo # crash the load_node_cb fix addresses for ordinary neighbors, but
+--echo # this entry-point load runs before that guard exists to help.
+--echo #
+
+CREATE TABLE t3 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(2) NOT NULL,
+                 KEY vk (v) TYPE hnsw WITH (M = 4));
+
+INSERT INTO t3 VALUES (1, STRING_TO_VECTOR('[0,0]')),
+                      (2, STRING_TO_VECTOR('[1,0]')),
+                      (3, STRING_TO_VECTOR('[2,0]')),
+                      (4, STRING_TO_VECTOR('[3,0]')),
+                      (5, STRING_TO_VECTOR('[4,0]')),
+                      (6, STRING_TO_VECTOR('[5,0]'));
+
+SET SESSION innodb_interpreter = 'vec_point_entry_at_missing_row test/t3';
+SELECT @@session.innodb_interpreter_output;
+
+--source include/restart_mysqld.inc
+
+--echo # Must not crash the server, and must fail every time for the same
+--echo # reason as t1: vec_runtime_load never sets `loaded`, so every
+--echo # statement retries the cold load and hits the same missing row.
+--error ER_NOT_KEYFILE
+SELECT id FROM t3 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3;
+--error ER_NOT_KEYFILE
+SELECT id FROM t3 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3;
+--error ER_NOT_KEYFILE
+INSERT INTO t3 VALUES (7, STRING_TO_VECTOR('[0.5,0]'));
+
+DROP TABLE t3;

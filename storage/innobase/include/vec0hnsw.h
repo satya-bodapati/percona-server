@@ -56,7 +56,19 @@ per-call, per-transaction, or per-thread fields... callbacks must not
 rely on data written to Persistor members during a prior call" - because
 one persistor instance is stored by value for the index's lifetime and
 serves every caller. So all of it lives here and is passed in. */
+/* Full definition is below (it holds a Vec_hnsw, which is nested inside
+this same header); Vec_ctx only ever needs a pointer to it. */
+struct vec_t;
+
 struct Vec_ctx {
+  /** The index runtime this call belongs to. Lets load_node_cb latch
+  vec_t::corrupted the instant it detects DB_CORRUPTION - see
+  vec_mark_corrupted - rather than only after the whole statement
+  returns, which would leave a window for a concurrent statement to
+  observe the same node already NODE_LOST (a plain, race-free memory
+  read under HNSW's own per-node lock) without ever seeing the flag.
+  Never null on any ctx a real read/write entry point constructs. */
+  vec_t *vec{nullptr};
   /** Sub-transaction the aux writes ride. Not the user's transaction:
   the aux must survive a rollback of the statement that caused it, or
   the graph would keep nodes the aux no longer describes. */
@@ -114,6 +126,14 @@ dberr_t vec_persist_update_neighbors(Vec_ctx *ctx, uint64_t id,
                                      const std::vector<byte> &neighbors);
 
 dberr_t vec_persist_entry_point(Vec_ctx *ctx, uint64_t id);
+
+/** Latch vec_t::corrupted. Declared here (defined in vec0hnsw.cc, after
+vec_t's own definition further down this header) so load_node_cb - a
+template instantiated inline, before vec_t is a complete type at that
+point in the file - can call it without needing vec_t's members visible
+at the call site; only the .cc defining it does.
+@param[in,out]  vec  the index runtime; must not be null */
+void vec_mark_corrupted(vec_t *vec) noexcept;
 
 /** Read one node's aux row and validate its on-disk shape against the
 index's own parameters (dims, M). Split out of vec_persist_load_node so
@@ -298,6 +318,23 @@ struct Vec_persistor {
 
     const dberr_t err = vec_persist_load_node(ctx, hnsw, handle);
     if (err != DB_SUCCESS) {
+      /* Latch immediately, before returning - not after this call's
+      whole statement finishes. HNSW's caller (load_node(), hnsw.h)
+      marks the node NODE_LOST the instant this function returns
+      false, and that state is visible to every other thread the
+      moment it releases the node's striped lock - a plain, correctly
+      synchronised read, not a race in itself. A concurrent statement
+      that reaches the same node after that point sees NODE_LOST and
+      skips it without ever calling back into this function again, so
+      if vec_t::corrupted were set any later than this - e.g. only
+      after this whole search or insert returns - that concurrent
+      statement could read the flag as still false and report success
+      with the corrupt node silently missing. Latching here instead
+      happens-before this function returns, which happens-before
+      set_lost() runs, which happens-before the lock releases - so no
+      concurrent reader can observe NODE_LOST without also being able
+      to observe the flag. */
+      if (err == DB_CORRUPTION) vec_mark_corrupted(ctx->vec);
       if (ctx->loading_entry_point || err != DB_RECORD_NOT_FOUND) {
         ctx->err = err;
       }

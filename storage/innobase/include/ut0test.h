@@ -268,6 +268,20 @@ struct Tester {
   Usage: vec_aux_verify db/table */
   [[nodiscard]] Ret_t vec_aux_verify(std::vector<std::string> &tokens) noexcept;
 
+  /** Point record 0's entry-point pointer straight at an id with no
+  aux row at all, skipping the intermediate "have a real entry, corrupt
+  its row" step vec_corrupt_entry_row takes. Simulates a crash between
+  committing the entry-point pointer (vec_persist_entry_point) and
+  committing the new entry node's own row (vec_persist_insert) -
+  distinct from vec_corrupt_entry_row's target existing but malformed
+  row: here vec_aux_read_node itself returns DB_RECORD_NOT_FOUND for
+  the entry id, not a shape mismatch after a successful read.
+  Usage: vec_point_entry_at_missing_row db/table
+  @param[in]  tokens  the command
+  @return the status */
+  [[nodiscard]] Ret_t vec_point_entry_at_missing_row(
+      std::vector<std::string> &tokens) noexcept;
+
   /** Overwrite the entry point's own row with a neighbor blob whose
   length disagrees with its level - a real shape mismatch, checked
   before any neighbor id is read, unlike vec_poison_entry_neighbor's
