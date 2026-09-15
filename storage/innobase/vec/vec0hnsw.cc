@@ -371,7 +371,16 @@ static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
   ctx.vec_bytes = vec->dims * sizeof(float);
   ctx.err = DB_SUCCESS;
 
-  vec->hnsw->init_from_entry_point(entry_point, &ctx);
+  try {
+    vec->hnsw->init_from_entry_point(entry_point, &ctx);
+  } catch (const std::bad_alloc &) {
+    /* Same escape as vec_add_node's insert(): the class throws rather than
+    returning an error the graph can unwind from. This is the cold-load
+    path, though, so nothing durable has been touched - only the graph
+    object below needs cleaning up, exactly as the ctx.err != DB_SUCCESS
+    case below already does. */
+    ctx.err = DB_OUT_OF_MEMORY;
+  }
   if (ctx.err != DB_SUCCESS) {
     ut::delete_(vec->hnsw);
     vec->hnsw = nullptr;
@@ -710,13 +719,21 @@ bool vec_knn_next(vec_search_t *s, vec_hit_t *hit) {
   ut_ad(s != nullptr && hit != nullptr);
   if (s->ctx.err != DB_SUCCESS) return false;
 
-  const auto next = s->vec->hnsw->nn_search_next(&s->nn);
-  if (s->ctx.err != DB_SUCCESS) return false;
-  if (!next.first) return false;
+  /* A batch refill past the first (nn_search_start already guards that one)
+  runs the same allocating search-layer code and is just as uncaught -
+  same handler-boundary exposure, one call later. */
+  try {
+    const auto next = s->vec->hnsw->nn_search_next(&s->nn);
+    if (s->ctx.err != DB_SUCCESS) return false;
+    if (!next.first) return false;
 
-  hit->id = next.second.id;
-  hit->base_pk = next.second.base_pk;
-  return true;
+    hit->id = next.second.id;
+    hit->base_pk = next.second.base_pk;
+    return true;
+  } catch (const std::bad_alloc &) {
+    s->ctx.err = DB_OUT_OF_MEMORY;
+    return false;
+  }
 }
 
 dberr_t vec_knn_error(const vec_search_t *s) {
@@ -831,7 +848,16 @@ dberr_t vec_build_add_row(Vec_build *b, dict_table_t *table,
   const uint64_t base_pk =
       mach_read_from_8(static_cast<const byte *>(dfield_get_data(pk_df)));
 
-  b->graph->insert(id, base_pk, q, &b->null_ctx);
+  /* Same escape as vec_add_node's insert(): the class throws rather than
+  returning an error. This one is worse - Builder::add_row() (the only
+  caller, through the DDL scan callback) is noexcept, so an uncaught OOM
+  here would terminate the server mid-ALTER instead of failing it with
+  DB_OUT_OF_MEMORY. */
+  try {
+    b->graph->insert(id, base_pk, q, &b->null_ctx);
+  } catch (const std::bad_alloc &) {
+    return DB_OUT_OF_MEMORY;
+  }
 
   /* innodb_hnsw_max_memory. The whole graph is in memory before any of it
   is durable, so this is the only thing bounding a build. Several scan
