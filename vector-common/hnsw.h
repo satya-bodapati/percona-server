@@ -337,7 +337,14 @@ class HNSW {
           select_neighbors(q, nearest, Mmax, new_node_neighbors);
       assert(n <= Mmax);
 
-      for (Node *const *it = new_node_neighbors;
+      // write_it packs new_node_neighbors down over any candidate rejected
+      // below, the same "selected prefix + nullptr-filled tail" shape
+      // select_neighbors() itself produces - so a rejected candidate is
+      // dropped from new_node's own list too, not just left unreciprocated
+      // (which would still leave new_node with an edge to a node that
+      // cannot be traversed onward at layer l).
+      Node **write_it = new_node_neighbors;
+      for (Node **it = new_node_neighbors;
            it != new_node->neighbors_end(*this, l) && *it != nullptr; ++it) {
         Node *neighbor = *it;
         // search_layer() + select_neighbors() post condition:
@@ -353,10 +360,16 @@ class HNSW {
         // Node::neighbors_begin() now reports as an empty (zero-capacity)
         // range - safe to read, but not a valid Mmax-sized write
         // destination, which the write-back path below needs. Reject it as
-        // a reciprocal neighbor rather than back-link into it.
+        // a reciprocal neighbor rather than back-link into it, and drop it
+        // (see write_it above) rather than leave it as new_node's own
+        // dead-end edge.
         if (neighbor->layer() < l) {
           continue;
         }
+        if (write_it != it) {
+          *write_it = neighbor;
+        }
+        ++write_it;
 
         // Back-linking neighbors requires locking though.
         lock_node(neighbor);
@@ -433,6 +446,12 @@ class HNSW {
         }
         unlock_node(neighbor);
         updated_neighbors.insert(neighbor);
+      }
+      // Null-fill past the packed prefix left by any rejected candidate
+      // above (write_it == new_node_neighbors + n when none were).
+      for (Node **tail = write_it; tail != new_node->neighbors_end(*this, l);
+           ++tail) {
+        *tail = nullptr;
       }
     }
 
@@ -1548,8 +1567,12 @@ class HNSW {
       // Node::neighbors_begin()) makes the range below empty, and the loop
       // just below relies on scratch_buffer[0] == nullptr to see that and
       // stop, rather than reprocessing whatever a previous node in this
-      // search left in the buffer.
-      scratch_buffer[0] = nullptr;
+      // search left in the buffer. Guarded by Mmax > 0: the constructor's
+      // M >= 2 is assert-only, so a corrupted/misconfigured M == 0 makes
+      // scratch_buffer empty in a release build, and slot 0 would not exist.
+      if (Mmax > 0) {
+        scratch_buffer[0] = nullptr;
+      }
       lock_node(cur_node);
       std::copy(cur_node->neighbors_begin(*this, layer),
                 cur_node->neighbors_end(*this, layer), scratch_buffer);
@@ -1688,8 +1711,11 @@ class HNSW {
       // The node we are currently inspecting must be complete.
       assert(c.node->state() == NODE_COMPLETE);
 
-      // Pre-clear slot 0: see the matching comment in search_layer_ef_1().
-      scratch_buffer[0] = nullptr;
+      // Pre-clear slot 0: see the matching comment in search_layer_ef_1(),
+      // including the Mmax > 0 guard.
+      if (Mmax > 0) {
+        scratch_buffer[0] = nullptr;
+      }
       lock_node(c.node);
       std::copy(c.node->neighbors_begin(*this, layer),
                 c.node->neighbors_end(*this, layer), scratch_buffer);

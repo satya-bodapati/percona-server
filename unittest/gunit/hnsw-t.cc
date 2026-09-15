@@ -961,19 +961,25 @@ TEST(HnswCorruptionTest, MalformedUpperLayerEdgeDoesNotCrash) {
 }
 
 // insert() can discover a node reachable only through such a malformed edge
-// too (via the entry point's still-intact, too-high edge to it), and
-// select_neighbors() may then choose it as one of the new node's reciprocal
-// neighbors at that same layer. Node::neighbors_begin() reports layer > its
-// own layer as an empty range - safe to *read* - but back-linking needs a
-// valid Mmax-sized *write* destination, which an empty range is not.
-// insert() must reject such a candidate before attempting that write-back.
+// too (via the entry point's still-intact, too-high edge to it, which any
+// search at that layer necessarily enumerates), and select_neighbors() may
+// then choose it as one of the new node's reciprocal neighbors at that same
+// layer. Node::neighbors_begin() reports layer > its own layer as an empty
+// range - safe to *read* - but back-linking needs a valid Mmax-sized
+// *write* destination, which an empty range is not. insert() must reject
+// such a candidate before attempting that write-back, and drop it from the
+// new node's own list too (otherwise the new node ends up with the same
+// kind of malformed edge that was just rejected).
 //
 // insert()'s target layer for the new node is drawn from the RNG seeded in
 // the HNSW constructor; kInsertSeed is the first tried that draws a target
 // layer >= the entry point's layer, so the new node's search actually
-// reaches the layer holding the malformed edge and selects the victim -
-// verified by the asserts below, not assumed.
-TEST(HnswCorruptionTest, InsertRejectsLayerIneligibleNeighborBeforeBacklink) {
+// reaches the layer holding the malformed edge - verified by the assert
+// below, not assumed. Once reached, victim is selected as a candidate for
+// certain (query == victim's own vector, i.e. distance 0 - unbeatable by
+// any other candidate), so the only thing left to check is that it did
+// not survive into the persisted result.
+TEST(HnswCorruptionTest, InsertDropsLayerIneligibleNeighborBeforeBacklink) {
   constexpr size_t kDimsLocal = 2;
   constexpr size_t kMLocal = 4;
   constexpr size_t kEfConstructionLocal = 16;
@@ -1033,15 +1039,38 @@ TEST(HnswCorruptionTest, InsertRejectsLayerIneligibleNeighborBeforeBacklink) {
   ASSERT_GE(new_row.layer, ep_row.layer)
       << "kInsertSeed=" << kInsertSeed
       << " did not draw a target layer reaching the malformed edge";
-  const size_t top_begin = stored_layer0_begin(new_row.layer, kMLocal);
-  const bool backlinked_at_top =
-      std::find(new_row.neighbor_ids.begin() + top_begin,
-                new_row.neighbor_ids.begin() + top_begin + kMLocal,
+
+  // victim_id must be absent from new_row's slots at layer ep_row.layer
+  // specifically - not anywhere in new_row.neighbor_ids: victim's real
+  // layer is 0 (this test's corruption only misrepresents the *edge* into
+  // it, not victim itself - see above), so it is a perfectly legitimate
+  // candidate at layer 0, and insert()'s descent to layer 0 may well pick
+  // it there too. Only the layer-ep_row.layer appearance - found solely
+  // through the malformed edge - must have been rejected and dropped
+  // rather than end up as one of new_node's own edges.
+  //
+  // insert()'s backlink loop runs layers min(max_layer, target_layer) down
+  // to 0, and max_layer == ep_row.layer (the entry point is always the
+  // graph's highest node) - so given the ASSERT_GE above, l = ep_row.layer
+  // is the first (highest) layer it processes, exactly where the malformed
+  // edge lives. Within new_row's own array (top layer == new_row.layer,
+  // which may be higher than l), layer l's slots start at offset
+  // (new_row.layer - l) * M - NOT offset 0 unless new_row.layer == l
+  // exactly, and NOT stored_layer0_begin(new_row.layer, M) either (that
+  // computes new_row's *layer-0* offset, a different slice).
+  const size_t edge_layer = ep_row.layer;
+  const size_t edge_layer_begin =
+      (static_cast<size_t>(new_row.layer) - edge_layer) * kMLocal;
+  const bool victim_survived_at_edge_layer =
+      std::find(new_row.neighbor_ids.begin() + edge_layer_begin,
+                new_row.neighbor_ids.begin() + edge_layer_begin + kMLocal,
                 victim_id) !=
-      new_row.neighbor_ids.begin() + top_begin + kMLocal;
-  EXPECT_TRUE(backlinked_at_top)
-      << "expected the new node to select victim_id=" << victim_id
-      << " as a top-layer neighbor";
+      new_row.neighbor_ids.begin() + edge_layer_begin + kMLocal;
+  EXPECT_FALSE(victim_survived_at_edge_layer)
+      << "victim_id=" << victim_id << " is layer-ineligible at layer "
+      << edge_layer << " (its real layer is 0) and should have been "
+      << "dropped from the new node's own neighbor list there, not just "
+      << "left unreciprocated";
   // The point of this test: insert() got here - selecting a
   // layer-ineligible node and running the back-link write-back path -
   // without crashing.
