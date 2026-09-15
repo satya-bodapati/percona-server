@@ -1,0 +1,63 @@
+#
+# vec_runtime_open() (vec0hnsw.cc) lazily builds the in-memory HNSW
+# runtime for a vector index on every ha_innobase::open(). Before
+# this fix, an allocation failure while constructing that runtime
+# object was logged and left index->vec null, but nothing else
+# noticed: vec_insert_row()/vec_update_row() treated a null runtime
+# exactly like "nothing to do" (a plain `continue`) and let the base
+# row commit anyway, with no corresponding entry in the graph or its
+# aux table. The index silently drifted out of sync with the table -
+# no diagnostic beyond the one log line from the open, and no failed
+# statement pointing at the row that got lost.
+#
+# vec_runtime_open_oom forces the allocation-failure branch inside
+# vec_runtime_open() deterministically, standing in for a genuinely
+# exhausted heap. A server restart guarantees the table is not
+# dict-cached, so the very first touch after the restart is the one
+# that reopens the handler and reaches vec_runtime_open().
+#
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4) NOT NULL,
+                 KEY (v) TYPE hnsw WITH (M = 4));
+INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]'));
+# restart
+# Nothing is dict-cached after the restart: the INSERT below is what
+# opens t1 and, with the knob armed, is also what discovers the
+# runtime failed to build.
+SET SESSION debug = '+d,vec_runtime_open_oom';
+INSERT INTO t1 VALUES (2, STRING_TO_VECTOR('[0,1,0,0]'));
+ERROR HY000: Got error 168 - 'Unknown (generic) error from engine' from storage engine
+SET SESSION debug = '-d,vec_runtime_open_oom';
+# No runtime is attached to the index - confirming the injection
+# actually forced the branch this test exists to cover, rather than
+# the INSERT failing for some unrelated reason.
+SET SESSION innodb_interpreter = 'vec_runtime_info test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+no runtime
+# The failed statement left no trace: row 2 never reached the base
+# table either, so the table and its vector index cannot disagree
+# about it. Before this fix the row would have been visible here
+# while the graph silently never learned about it.
+SELECT id FROM t1 FORCE INDEX (PRIMARY) ORDER BY id;
+id
+1
+# vec_runtime_open logs the out-of-memory reason
+# vec_insert_row refuses rather than silently dropping the row
+# Once the injection is gone, reopening the table (FLUSH TABLES
+# forces it - see the ha_innobase::open comment) lets
+# vec_runtime_open() retry and succeed, and normal DML resumes.
+FLUSH TABLES t1;
+INSERT INTO t1 VALUES (2, STRING_TO_VECTOR('[0,1,0,0]'));
+SET SESSION innodb_interpreter = 'vec_runtime_info test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+dims=4 M=4 ef_construction=200 loaded=1
+SELECT id FROM t1 FORCE INDEX (PRIMARY) ORDER BY id;
+id
+1
+2
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+id
+1
+2
+DROP TABLE t1;

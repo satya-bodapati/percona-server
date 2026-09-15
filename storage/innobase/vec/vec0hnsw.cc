@@ -28,6 +28,8 @@ The HNSW runtime and the persistence callbacks behind it.
 
 #include <algorithm>
 
+#include <my_dbug.h>
+
 #include "srv0srv.h"
 
 #include <variant>
@@ -257,12 +259,26 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
       UT_NEW_THIS_FILE_PSI_KEY, index->id, index->table, dims,
       static_cast<uint32_t>(hnsw_param->M),
       static_cast<uint32_t>(hnsw_param->ef_construction), hnsw_param->dist);
+
+  /* Test-only: let an MTR test force the allocation-failure branch below
+  without needing a genuinely exhausted heap. Mirrors
+  vec_build_start_key_not_found (vec_build_start()). */
+  DBUG_EXECUTE_IF("vec_runtime_open_oom", ut::delete_(vec); vec = nullptr;);
+
   if (vec == nullptr) {
+    /* Out of memory building the runtime. This index is left without a
+    graph: index->vec stays null, and vec_insert_row/vec_update_row
+    (below) now refuse (DB_ERROR) rather than silently drop the row's
+    vector from the graph - a base row with no corresponding graph entry
+    is an inconsistency between the table and its vector index, not
+    something to let through quietly. The next open of this table (a
+    fresh handler, e.g. after the OOM has cleared) retries this
+    function and can still succeed. */
     ib::error(ER_IB_MSG_456)
         << "Failed to open vector runtime for index " << index->name
         << " on table " << index->table->name << ": out of memory;"
-        << " vector search on it will not work until the table is"
-        << " reopened.";
+        << " vector search on it will not work, and inserts/updates on"
+        << " the table will be refused, until the table is reopened.";
     return nullptr;
   }
 
@@ -890,7 +906,21 @@ dberr_t vec_update_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
        index = index->next()) {
     if (!index->is_vector()) continue;
     vec_t *vec = vec_runtime_get(index);
-    if (vec == nullptr) continue;
+    /* No runtime - most likely vec_runtime_open() (this file) hit
+    DB_OUT_OF_MEMORY building the graph object and left index->vec null.
+    Silently continuing here would let this row's base data commit while
+    its vector never reaches the graph or the aux table, with nothing
+    to say so: the same DB_ERROR vec_build_start reports for a failure
+    that is not a corrupt persisted row (that is what DB_CORRUPTION,
+    below, is for) but still means this row's write cannot be trusted. */
+    if (vec == nullptr) {
+      ib::error(ER_IB_MSG_456)
+          << "Cannot update the vector index " << index->name << " on table "
+          << index->table->name << ": no runtime is open for it (see the"
+          << " earlier 'Failed to open vector runtime' error); the update"
+          << " is refused rather than silently dropped.";
+      return DB_ERROR;
+    }
     if (q_len != vec->dims * sizeof(float)) return DB_CORRUPTION;
     const dberr_t err = vec_add_node(vec, table, label, base_pk, q, thd);
     if (err != DB_SUCCESS) return err;
@@ -905,7 +935,18 @@ dberr_t vec_insert_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
     if (!index->is_vector()) continue;
 
     vec_t *vec = vec_runtime_get(index);
-    if (vec == nullptr) continue;
+    /* See vec_update_row's identical check: no runtime means
+    vec_runtime_open() failed (typically DB_OUT_OF_MEMORY), and this row
+    must not be allowed to commit as if it had been added to the graph. */
+    if (vec == nullptr) {
+      ib::error(ER_IB_MSG_456)
+          << "Cannot insert into the vector index " << index->name
+          << " on table " << index->table->name << ": no runtime is open"
+          << " for it (see the earlier 'Failed to open vector runtime'"
+          << " error); the insert is refused rather than silently"
+          << " dropped.";
+      return DB_ERROR;
+    }
 
     ulint vec_len = 0;
     const char *q = vec_row_vector_bytes(index, row, &vec_len);
