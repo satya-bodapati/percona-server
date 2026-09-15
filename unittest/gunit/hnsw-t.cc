@@ -706,15 +706,153 @@ TEST_F(HnswTest, FirstInsertEntryPointNotPublishedOnPersistFailure) {
                   .k_nn_search(as_bytes(make_vec({0.0f, 0.0f})), /*k=*/1,
                                /*ef_search=*/16, &store)
                   .empty());
+  // The failed node is dropped rather than left dangling: the index reads
+  // back as genuinely empty (m_nodes empty <=> no entry point).
+  EXPECT_EQ(0U, index.size());
+#ifndef NDEBUG
+  EXPECT_TRUE(index.validate());
+#endif  // NDEBUG
 
-  // A later, successful insert becomes the real entry point; the failed
-  // node stays orphaned rather than corrupting the graph.
+  // A later, successful insert becomes the real entry point.
   index.insert(2, /*base_pk=*/102, as_bytes(make_vec({1.0f, 1.0f})), &store);
   EXPECT_EQ(store.entry_point, 2U);
   auto hits = index.k_nn_search(as_bytes(make_vec({1.0f, 1.0f})), /*k=*/1,
                                 /*ef_search=*/16, &store);
   ASSERT_EQ(hits.size(), 1U);
   EXPECT_EQ(hits[0].base_pk, 102U);
+}
+
+/* Same as above, but the row itself persists fine and only the
+entry-point-metadata write fails: the node must still not be published, and
+the index must still validate as genuinely empty. */
+TEST_F(HnswTest, FirstInsertEntryPointNotPublishedOnEntryPointMetadataFailure) {
+  RecordingPersistor::Context store;
+  store.dims = kDims;
+  LoadTestHnsw index(kDims, euclidean, kM, kEfConstruction);
+
+  store.fail_entry_point_ids.insert(1);
+  index.insert(1, /*base_pk=*/101, as_bytes(make_vec({0.0f, 0.0f})), &store);
+
+  EXPECT_EQ(store.entry_point, 0U);
+  EXPECT_EQ(0U, index.size());
+#ifndef NDEBUG
+  EXPECT_TRUE(index.validate());
+#endif  // NDEBUG
+  EXPECT_TRUE(index
+                  .k_nn_search(as_bytes(make_vec({0.0f, 0.0f})), /*k=*/1,
+                               /*ef_search=*/16, &store)
+                  .empty());
+
+  index.insert(2, /*base_pk=*/102, as_bytes(make_vec({1.0f, 1.0f})), &store);
+  EXPECT_EQ(store.entry_point, 2U);
+}
+
+namespace {
+/* Deterministically finds the first id, in the fixed id/vector sequence
+used below, whose insert promotes it to entry point (target_layer greater
+than the then-current max layer) - i.e. the first insert that reaches the
+"later entry-point-promotion" branch in HNSW::insert(). Runs against a
+throwaway index sharing the production seed so the real test's RNG draws
+line up exactly: random_layer() draws depend only on the RandomEngine
+(default-seeded 42 in both TestHnsw and LoadTestHnsw) and the number of
+prior insert() calls, not on which Persistor is plugged in. */
+uint64_t find_promotion_id(size_t dims, size_t M, size_t ef_construction,
+                           uint64_t max_id) {
+  TestHnsw probe(dims, euclidean, M, ef_construction);
+  uint64_t prev_ep = 0;
+  for (uint64_t i = 1; i <= max_id; ++i) {
+    const auto v = make_vec({static_cast<float>(i), static_cast<float>(i % 7)});
+    probe.insert(i, 1000 + i, as_bytes(v));
+    const uint64_t ep = probe.entry_point_id();
+    if (prev_ep != 0 && ep != prev_ep) {
+      return i;
+    }
+    prev_ep = ep;
+  }
+  return 0;
+}
+}  // namespace
+
+/* The confirmed bug: a later insert that would be promoted to entry point
+must not be published as one when its own row failed to persist, even
+though the entry-point-metadata write itself would have succeeded. Also
+checks that a cold reload still finds a real, loadable entry point. */
+TEST_F(HnswTest, PromotionSkipsPublishWhenInsertRowFails) {
+  constexpr uint64_t kMaxProbeId = 200;
+  const uint64_t promoted_id =
+      find_promotion_id(kDims, kM, kEfConstruction, kMaxProbeId);
+  ASSERT_NE(0U, promoted_id)
+      << "no entry-point promotion within " << kMaxProbeId << " inserts";
+
+  RecordingPersistor::Context store;
+  store.dims = kDims;
+  LoadTestHnsw index(kDims, euclidean, kM, kEfConstruction);
+  store.fail_insert_ids.insert(promoted_id);
+
+  uint64_t prev_ep = 0;
+  size_t attempts_before_promotion = 0;
+  for (uint64_t i = 1; i <= promoted_id; ++i) {
+    const auto v = make_vec({static_cast<float>(i), static_cast<float>(i % 7)});
+    if (i == promoted_id) {
+      prev_ep = store.entry_point;
+      attempts_before_promotion = store.entry_point_attempts;
+    }
+    index.insert(i, 1000 + i, as_bytes(v), &store);
+  }
+
+  EXPECT_NE(promoted_id, store.entry_point);
+  EXPECT_EQ(prev_ep, store.entry_point);
+  // update_entry_point_cb must not even be called for promoted_id: the
+  // false insert_cb result should short-circuit before it. Note validate()
+  // is not checked here: promoted_id itself still links into the graph
+  // above the entry point's layer (only its persisted promotion was
+  // refused), so validate()'s "entry point sits on the highest layer"
+  // invariant does not hold on this path - true before this change too,
+  // since the pre-existing update_entry_point_cb gate could already skip
+  // a promotion the same way.
+  EXPECT_EQ(attempts_before_promotion, store.entry_point_attempts);
+
+  LoadTestHnsw reloaded(kDims, euclidean, kM, kEfConstruction);
+  reloaded.init_from_entry_point(store.entry_point, &store);
+  EXPECT_FALSE(reloaded
+                   .k_nn_search(as_bytes(make_vec({0.0f, 0.0f})), /*k=*/1,
+                                /*ef_search=*/16, &store)
+                   .empty());
+}
+
+/* Same promotion event, but the row persists fine and only the
+entry-point-metadata write fails: the previous entry point must be kept. */
+TEST_F(HnswTest, PromotionSkipsPublishWhenEntryPointMetadataFails) {
+  constexpr uint64_t kMaxProbeId = 200;
+  const uint64_t promoted_id =
+      find_promotion_id(kDims, kM, kEfConstruction, kMaxProbeId);
+  ASSERT_NE(0U, promoted_id)
+      << "no entry-point promotion within " << kMaxProbeId << " inserts";
+
+  RecordingPersistor::Context store;
+  store.dims = kDims;
+  LoadTestHnsw index(kDims, euclidean, kM, kEfConstruction);
+  store.fail_entry_point_ids.insert(promoted_id);
+
+  uint64_t prev_ep = 0;
+  size_t attempts_before_promotion = 0;
+  for (uint64_t i = 1; i <= promoted_id; ++i) {
+    const auto v = make_vec({static_cast<float>(i), static_cast<float>(i % 7)});
+    if (i == promoted_id) {
+      prev_ep = store.entry_point;
+      attempts_before_promotion = store.entry_point_attempts;
+    }
+    index.insert(i, 1000 + i, as_bytes(v), &store);
+  }
+
+  EXPECT_NE(promoted_id, store.entry_point);
+  EXPECT_EQ(prev_ep, store.entry_point);
+  // Unlike the insert_cb-failure test above, update_entry_point_cb *is*
+  // reached and attempted for promoted_id (its row persisted fine) - only
+  // that attempt is rejected. Proves the promotion branch actually ran
+  // rather than the test passing because target_layer never exceeded
+  // max_layer for promoted_id.
+  EXPECT_EQ(attempts_before_promotion + 1, store.entry_point_attempts);
 }
 
 TEST_F(HnswTest, InitFromEntryPointLoadsEP) {

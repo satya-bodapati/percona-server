@@ -151,6 +151,17 @@ struct RecordingPersistor {
     */
     std::unordered_set<uint64_t> fail_insert_ids;
     /**
+      Graph ids for which update_entry_point_cb should fail (entry point
+      metadata not written). Used by entry-point-publish-on-failure tests.
+    */
+    std::unordered_set<uint64_t> fail_entry_point_ids;
+    /**
+      Number of update_entry_point_cb invocations, counted before the
+      fail_entry_point_ids check. Lets tests prove whether the promotion
+      branch in HNSW::insert() actually called this callback.
+    */
+    size_t entry_point_attempts = 0;
+    /**
       Optional lock for concurrent insert/search against a shared Context.
       When non-null, all RecordingPersistor callbacks lock it. Serial tests
       leave this nullptr.
@@ -190,6 +201,10 @@ struct RecordingPersistor {
     std::unique_lock<std::mutex> lock;
     if (ctx->guard != nullptr) {
       lock = std::unique_lock<std::mutex>(*ctx->guard);
+    }
+    ++ctx->entry_point_attempts;
+    if (ctx->fail_entry_point_ids.count(id) != 0) {
+      return false;
     }
     ctx->entry_point = id;
     return true;
