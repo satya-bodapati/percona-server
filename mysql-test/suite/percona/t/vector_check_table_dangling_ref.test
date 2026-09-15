@@ -32,3 +32,26 @@ SET SESSION debug = '-d,vec_skip_aux_row_insert';
 CHECK TABLE t1;
 
 DROP TABLE t1;
+
+--echo #
+--echo # A stamped label of 0 must be flagged too, not treated as a match on
+--echo # the aux table's record 0 (its entry-point metadata record, not a
+--echo # node). label 0 is otherwise unreachable - vec_assign_next_aux_id
+--echo # never hands it out - so the only way to see it is to fabricate it.
+--echo #
+
+CREATE TABLE t2 (
+  id BIGINT UNSIGNED PRIMARY KEY,
+  v VECTOR(4) NOT NULL,
+  KEY (v) TYPE hnsw WITH (M = 6)
+) ENGINE=InnoDB;
+
+INSERT INTO t2 VALUES (1, STRING_TO_VECTOR('[1,1,1,1]'));
+CHECK TABLE t2;
+
+SET SESSION debug = '+d,vec_stamp_zero_aux_id';
+INSERT INTO t2 VALUES (2, STRING_TO_VECTOR('[2,2,2,2]'));
+SET SESSION debug = '-d,vec_stamp_zero_aux_id';
+CHECK TABLE t2;
+
+DROP TABLE t2;
