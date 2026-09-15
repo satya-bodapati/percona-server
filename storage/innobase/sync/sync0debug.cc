@@ -1417,6 +1417,13 @@ static void sync_latch_meta_init() UNIV_NOTHROW {
 
   LATCH_ADD_MUTEX(ZIP_PAD_MUTEX, SYNC_NO_ORDER_CHECK, zip_pad_mutex_key);
 
+  /* Like ZIP_PAD_MUTEX above: a short flag-transition mutex, never held
+  while acquiring anything else (vec_runtime_open()'s slow path releases
+  it before doing any real work, and its opener/waiter critical sections
+  never call into the dictionary, the buffer pool, or a transaction), so
+  it takes no ordering position of its own. */
+  LATCH_ADD_MUTEX(VEC_OPEN_MUTEX, SYNC_NO_ORDER_CHECK, vec_open_mutex_key);
+
   LATCH_ADD_MUTEX(OS_AIO_READ_MUTEX, SYNC_NO_ORDER_CHECK, PFS_NOT_INSTRUMENTED);
 
   LATCH_ADD_MUTEX(OS_AIO_WRITE_MUTEX, SYNC_NO_ORDER_CHECK,

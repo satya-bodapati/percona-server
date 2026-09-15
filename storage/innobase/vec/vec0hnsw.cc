@@ -27,17 +27,21 @@ The HNSW runtime and the persistence callbacks behind it.
 #include "vec0hnsw.h"
 
 #include <algorithm>
+#include <chrono>
 
 #include <my_dbug.h>
 
 #include "srv0srv.h"
 
 #include <variant>
+#include "debug_sync.h"
 #include "dict0dd.h"
 #include "dict0dict.h"
 #include "mach0data.h"
+#include "scope_guard.h"
 #include "sql/field.h"
 #include "sql/table.h"
+#include "sync0types.h"
 #include "trx0roll.h"
 #include "ut0new.h"
 #include "vec0aux.h"
@@ -193,6 +197,113 @@ dberr_t vec_persist_entry_point(Vec_ctx *ctx, uint64_t id) {
   return err;
 }
 
+/** Allocate dict_index_t::vec_open_mutex/vec_open_event for one index.
+Called at most once per index, through os_once::do_or_wait_for_done()
+below - which is why this is a plain function rather than a lambda:
+do_or_wait_for_done() takes a raw `void (*)(void*)`, matching the exact
+shape dict_index_zip_pad_alloc() (dict0dict.cc) and
+dict_table_autoinc_alloc() (dict0dict.cc) already use for the same
+lazy-mutex idiom on this same struct.
+@param[in,out]  index_void  the index, as a dict_index_t* */
+static void vec_open_sync_alloc(void *index_void) {
+  dict_index_t *index = static_cast<dict_index_t *>(index_void);
+  index->vec_open_mutex = ut::new_withkey<ib_mutex_t>(UT_NEW_THIS_FILE_PSI_KEY);
+  ut_a(index->vec_open_mutex != nullptr);
+  mutex_create(LATCH_ID_VEC_OPEN_MUTEX, index->vec_open_mutex);
+
+  index->vec_open_event = os_event_create();
+  ut_a(index->vec_open_event != nullptr);
+}
+
+/** Ensure index->vec_open_mutex/vec_open_event exist, creating them on
+the first call for this index and waiting for that creation to finish on
+every other concurrent call. Cheap to call unconditionally - the common
+case is the one-instruction check inside os_once that finds
+os_once::DONE already set. */
+static void vec_open_sync_ensure(dict_index_t *index) {
+  os_once::do_or_wait_for_done(&index->vec_open_sync_created,
+                               vec_open_sync_alloc, index);
+}
+
+vec_t *vec_runtime_get_or_wait(dict_index_t *index, THD *thd,
+                               dberr_t *open_err) {
+  *open_err = DB_ERROR_UNSET;
+
+  /* Fast path, no mutex: the overwhelmingly common case is an index
+  that has been open for a while, and vec_runtime_get() is exactly the
+  lock-free acquire load every other reader of index->vec already uses. */
+  vec_t *vec = vec_runtime_get(index);
+  if (vec != nullptr) return vec;
+
+  vec_open_sync_ensure(index);
+  mutex_enter(index->vec_open_mutex);
+
+  for (;;) {
+    /* Re-check under the mutex: an opener may have published between
+    our lock-free check above and taking the mutex, or between one lap
+    of this loop and the next. */
+    vec = vec_runtime_get(index);
+    if (vec != nullptr) {
+      mutex_exit(index->vec_open_mutex);
+      return vec;
+    }
+
+    if (!index->vec_opening) {
+      /* Nobody is opening this index right now. Either no attempt has
+      ever been made - vec_open_err is still the zero-initialized
+      DB_ERROR_UNSET - or the most recent attempt already finished and
+      failed, in which case vec_open_err has its real cause. Both are
+      terminal answers, not something to wait on. */
+      *open_err = vec_runtime_open_err(index);
+      mutex_exit(index->vec_open_mutex);
+      return nullptr;
+    }
+
+    /* An open is genuinely in progress elsewhere. Snapshot the event's
+    signal count under vec_open_mutex - the same mutex vec_runtime_open()
+    takes, in its scope guard, to flip vec_opening back to false right
+    before calling os_event_set() - so no set() can be missed: either
+    this reset happens-before that flip and its matching set() (and the
+    timed wait below then observes the bumped count once that set()
+    runs), or the flip already happened before we got the mutex, in
+    which case the branch above already returned. There is no window in
+    between where a set() could land unseen.
+
+    Only a waiter ever resets this event, and only right here,
+    immediately before waiting - never the opener (see vec_open_event's
+    comment, dict0mem.h). Resetting under this same mutex, right before
+    waiting, is what makes it safe for more than one waiter to do this
+    concurrently: each is serialized by the mutex, so each captures the
+    true, current signal count rather than racing a stale one. */
+    const int64_t sig_count = os_event_reset(index->vec_open_event);
+    mutex_exit(index->vec_open_mutex);
+
+    /* MTR hook: let a test learn that this thread has genuinely reached
+    the wait (vec_opening was observed true, the signal count is
+    captured) before it lets a parked opener proceed - otherwise a test
+    driving both sides has no reliable way to avoid the opener finishing
+    before this thread ever got here, which would make the wait appear
+    to work even on old, buggy code purely by lucky timing. */
+    if (thd != nullptr) DEBUG_SYNC(thd, "vec_runtime_open_wait");
+
+    /* Timed, not an unbounded os_event_wait(): a killed connection must
+    not be stuck here forever (checked below), and an MTR test that
+    parks an opener at the vec_runtime_opening DEBUG_SYNC point needs a
+    wait it can step through rather than one that only the opener
+    finishing can satisfy. 100ms keeps a genuine wait feeling immediate
+    while bounding how long a kill can take to notice. */
+    os_event_wait_time_low(index->vec_open_event,
+                           std::chrono::milliseconds{100}, sig_count);
+
+    if (thd != nullptr && thd_killed(thd)) {
+      *open_err = DB_INTERRUPTED;
+      return nullptr;
+    }
+
+    mutex_enter(index->vec_open_mutex);
+  }
+}
+
 vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
                         THD *thd) {
   ut_ad(index != nullptr);
@@ -202,6 +313,57 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
   if (vec_t *existing = vec_runtime_get(index); existing != nullptr) {
     return existing;
   }
+
+  vec_open_sync_ensure(index);
+  mutex_enter(index->vec_open_mutex);
+
+  if (vec_t *existing = vec_runtime_get(index); existing != nullptr) {
+    /* Someone published between our lock-free check above and taking
+    the mutex. */
+    mutex_exit(index->vec_open_mutex);
+    return existing;
+  }
+
+  if (index->vec_opening) {
+    /* Another thread is already inside the slow path below, for this
+    same index - wait for it rather than racing a second concurrent
+    open (which vec0hnsw.h's vec/vec_open_err publication comment
+    already explains is merely wasteful today, via the CAS below, but
+    would still mean two threads redundantly parsing options, allocating
+    a graph object, and racing to publish). This function's only caller
+    (ha_innobase::open) discards the return value, so a failure here
+    simply surfaces later, to whichever DML/read call next reads
+    vec_open_err through vec_runtime_get_or_wait(). */
+    mutex_exit(index->vec_open_mutex);
+    dberr_t ignored_err;
+    return vec_runtime_get_or_wait(index, thd, &ignored_err);
+  }
+
+  /* We are the opener: publish that fact before dropping the mutex.
+  Only the flag transition itself needs the mutex, not the parse/
+  allocate/build work below, which runs unlatched exactly as it always
+  has. */
+  index->vec_opening = true;
+  mutex_exit(index->vec_open_mutex);
+
+  /* Whatever happens below - success, one of several early failure
+  returns, or a future change adding another one - every thread that
+  found vec_opening true (here, or in vec_runtime_get_or_wait()) must
+  eventually be woken and see it false again. A scope guard makes that
+  true unconditionally, at every return from this point on, instead of
+  relying on each failure branch to remember to clear it. */
+  auto opening_guard = create_scope_guard([index]() {
+    mutex_enter(index->vec_open_mutex);
+    index->vec_opening = false;
+    mutex_exit(index->vec_open_mutex);
+    os_event_set(index->vec_open_event);
+  });
+
+  /* MTR hook: let a test park here, mid-open, with vec_opening already
+  true and the mutex already released, so a concurrent session can be
+  driven deterministically into vec_runtime_get_or_wait()'s waiter path
+  instead of racing it. */
+  DEBUG_SYNC(thd, "vec_runtime_opening");
 
   /* Persist why, for whoever next finds vec_runtime_get(index) still null:
   vec_insert_row, vec_update_row, and ha_innobase::vec_read_first all
@@ -298,17 +460,15 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
     return nullptr;
   }
 
-  /* Publish, or lose the race and use the winner. Two sessions opening
-  the same table both find dict_index_t::vec null - ha_innobase::open
-  takes no latch that would order them - so both build a runtime and one
-  of them must give way. Before this was a compare-exchange the loser's
-  object was simply overwritten and leaked, and had any caller used the
-  returned pointer there would have been two graphs on one index: two
-  arenas both charging innodb_hnsw_max_memory, inserts landing in one
-  graph and searches reading the other.
-
-  The loser's object is safe to destroy: nothing has been loaded into it
-  yet, so ~vec_t deletes a null graph and no arena bytes are involved. */
+  /* Publish, or lose the race and use the winner. This CAS predates
+  vec_opening: with that flag now excluding every other opener/waiter of
+  this same index from reaching this point while we hold it (a second
+  caller finds vec_opening true and waits instead of racing us here),
+  the loser branch below is expected to be unreachable in practice. It
+  is left in place regardless, as cheap defense-in-depth rather than a
+  plain store - if vec_opening's mutual exclusion ever did have a hole,
+  overwriting (and leaking) a runtime someone else already published
+  would be a worse outcome than falling back to it here. */
   std::atomic_ref<Vec_runtime *> slot(index->vec);
   Vec_runtime *expected = nullptr;
   if (!slot.compare_exchange_strong(expected, vec, std::memory_order_release,
@@ -330,13 +490,9 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
   and conclude "never attempted", when actually an open is completing
   right now. Clearing after the publish means a reader can only ever
   observe err == DB_ERROR_UNSET here once vec is already there to be
-  (re-)loaded - see vec_runtime_get_checked() (vec0hnsw.h), which every
+  (re-)loaded - see vec_runtime_get_or_wait() (vec0hnsw.h), which every
   "vec is null" caller now goes through instead of reading vec and
-  vec_open_err as two independent, unordered facts.
-
-  The CAS loser above returns before reaching here and never touches
-  vec_open_err itself - it does not need to, since the winner published
-  index->vec and will run this same clear. */
+  vec_open_err as two independent, unordered facts. */
   set_open_err(DB_ERROR_UNSET);
   return vec;
 }
@@ -944,25 +1100,26 @@ dberr_t vec_update_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
        index = index->next()) {
     if (!index->is_vector()) continue;
     dberr_t open_err = DB_ERROR_UNSET;
-    vec_t *vec = vec_runtime_get_checked(index, &open_err);
+    vec_t *vec = vec_runtime_get_or_wait(index, thd, &open_err);
     /* No runtime - vec_runtime_open() (this file) never ran for this
-    index, or ran and failed (typically DB_OUT_OF_MEMORY building the
-    graph object, but see every failure branch there). Silently
-    continuing here would let this row's base data commit while its
-    vector never reaches the graph or the aux table, with nothing to
-    say so, so this row's write cannot be trusted and is refused - with
-    the ACTUAL cause vec_runtime_open recorded (vec_runtime_open_err,
-    vec0hnsw.h), not a blanket substitute, so the client sees a specific,
-    accurate error rather than a generic one. DB_ERROR is the fallback
-    only for the (should-not-happen) case where nothing was ever
-    recorded: DB_CORRUPTION, below, is reserved for a persisted
-    graph/aux row that disagrees with what is expected, which this is
-    not.
+    index, ran and failed (typically DB_OUT_OF_MEMORY building the
+    graph object, but see every failure branch there), or was killed
+    while this thread was waiting for a concurrent open to finish
+    (DB_INTERRUPTED). Silently continuing here would let this row's
+    base data commit while its vector never reaches the graph or the
+    aux table, with nothing to say so, so this row's write cannot be
+    trusted and is refused - with the ACTUAL cause vec_runtime_open
+    recorded (vec_runtime_open_err, vec0hnsw.h), not a blanket
+    substitute, so the client sees a specific, accurate error rather
+    than a generic one. DB_ERROR is the fallback only for the
+    (should-not-happen) case where nothing was ever recorded:
+    DB_CORRUPTION, below, is reserved for a persisted graph/aux row that
+    disagrees with what is expected, which this is not.
 
-    vec_runtime_get_checked() (vec0hnsw.h) already rechecked vec once
-    against a concurrent open racing with this read, so a null vec here
+    vec_runtime_get_or_wait() (vec0hnsw.h) already waited out any
+    concurrent open of this index before returning, so a null vec here
     means either open_err has the real cause or the open genuinely never
-    ran. */
+    ran - never "an open is still in progress". */
     if (vec == nullptr) {
       const dberr_t err = open_err != DB_ERROR_UNSET ? open_err : DB_ERROR;
       ib::error(ER_IB_MSG_456)
@@ -986,11 +1143,12 @@ dberr_t vec_insert_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
     if (!index->is_vector()) continue;
 
     dberr_t open_err = DB_ERROR_UNSET;
-    vec_t *vec = vec_runtime_get_checked(index, &open_err);
+    vec_t *vec = vec_runtime_get_or_wait(index, thd, &open_err);
     /* See vec_update_row's identical check and comment: no runtime means
-    vec_runtime_open() never ran or failed, and this row must not be
-    allowed to commit as if it had been added to the graph. Report the
-    ACTUAL cause it recorded rather than a blanket DB_ERROR. */
+    vec_runtime_open() never ran, failed, or was interrupted while this
+    thread waited on it, and this row must not be allowed to commit as
+    if it had been added to the graph. Report the ACTUAL cause it
+    recorded rather than a blanket DB_ERROR. */
     if (vec == nullptr) {
       const dberr_t err = open_err != DB_ERROR_UNSET ? open_err : DB_ERROR;
       ib::error(ER_IB_MSG_456)

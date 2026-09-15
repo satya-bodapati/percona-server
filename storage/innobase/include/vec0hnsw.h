@@ -417,8 +417,10 @@ dberr_t vec_runtime_open logged and persisted here), instead of folding
 both into one generic error.
 
 Do not call this directly off the back of a null vec_runtime_get(): use
-vec_runtime_get_checked() below instead, which wraps exactly that
-sequence and closes a race between the two loads (see its comment).
+vec_runtime_get_or_wait() below instead, which wraps exactly that
+sequence and additionally waits out a concurrent open in progress rather
+than guessing from a single snapshot of vec/vec_open_err (see its
+comment).
 @param[in]  index  vector index
 @return the last open failure's cause, or DB_ERROR_UNSET */
 [[nodiscard]] inline dberr_t vec_runtime_open_err(const dict_index_t *index) {
@@ -427,39 +429,42 @@ sequence and closes a race between the two loads (see its comment).
   return slot.load(std::memory_order_acquire);
 }
 
-/** vec_runtime_get(index), plus the recheck every "vec is null" caller
-needs before trusting vec_runtime_open_err(index) == DB_ERROR_UNSET.
+/** vec_runtime_get(index), but for a caller that has already found it
+null and needs the real answer rather than a guess: waits out a
+concurrent vec_runtime_open() in progress, and only then reports either
+the runtime or the cause it failed with.
 
-vec_runtime_open() (vec0hnsw.cc) publishes index->vec before clearing
-vec_open_err back to DB_ERROR_UNSET on its success path, but the two are
-independent atomics: a caller that loads vec (gets null) and then, in a
-separate step, loads vec_open_err (gets DB_ERROR_UNSET) can still land in
-the gap between those two writes, wrongly concluding "open never
-attempted" while an open is in fact completing concurrently. Loading vec
-again, after the err load, closes that gap: this second load's acquire
-synchronizes with the release that cleared vec_open_err, which - because
-vec_runtime_open() clears it only after publishing index->vec - happens
-after that publish in program order, so if the err load really did see a
-clear (as opposed to the zero-initialized DB_ERROR_UNSET no attempt has
-ever touched), the following vec load is guaranteed to see the runtime.
+Before this, a "vec is null" caller (vec_insert_row, vec_update_row,
+ha_innobase::vec_read_first) had to distinguish three states -
+"never attempted", "attempted and failed", "being attempted right now,
+elsewhere" - from just two independent fields (vec, vec_open_err), which
+cannot represent the third: both a fresh index and one mid-open read as
+(vec == nullptr, vec_open_err == DB_ERROR_UNSET). That was a real gap,
+not merely one narrowed by rereading: a session whose own handler never
+calls vec_runtime_open() at all (ha_innobase::open's `key == nullptr`
+skip) could land on a read path while a different session was mid-way
+through the very first open of that index anywhere, see the ambiguous
+zero-init state, and wrongly report "never attempted" - a false empty
+result or false generic error - while the real answer was seconds away.
 
-This does not, and cannot, close the case of a genuine first-ever open
-that has not even started: there DB_ERROR_UNSET comes from zero-init, not
-from any clear, and there is nothing yet for a recheck to observe.
-Callers still need their own "never attempted" fallback for that case
-(e.g. ha_innobase::open's `key == nullptr` guard, vec0hnsw.h/ha_innodb.cc).
+dict_index_t::vec_opening is the third state: true exactly while some
+thread is inside vec_runtime_open()'s slow path for this index, guarded
+by dict_index_t::vec_open_mutex. This function takes that mutex, and
+either returns the freshly published runtime, returns the recorded
+failure of an attempt that already finished, or - if an attempt is
+genuinely in progress - waits on dict_index_t::vec_open_event and loops,
+exactly like every other opener/waiter of this index.
 @param[in]   index     vector index
-@param[out]  open_err  set to vec_runtime_open_err(index) when the
-                        return value is nullptr; left untouched otherwise
-@return the runtime, or nullptr if still not open after the recheck */
-[[nodiscard]] inline vec_t *vec_runtime_get_checked(const dict_index_t *index,
-                                                    dberr_t *open_err) {
-  vec_t *vec = vec_runtime_get(index);
-  if (vec != nullptr) return vec;
-  *open_err = vec_runtime_open_err(index);
-  if (*open_err == DB_ERROR_UNSET) vec = vec_runtime_get(index);
-  return vec;
-}
+@param[in]   thd       caller's session, to notice a kill while waiting;
+                        may be nullptr, in which case a wait cannot be
+                        interrupted by one
+@param[out]  open_err  set to DB_ERROR_UNSET when the return value is
+                        non-null; otherwise the cause to report (the
+                        persisted failure, or DB_INTERRUPTED if thd was
+                        killed while waiting)
+@return the runtime, or nullptr */
+[[nodiscard]] vec_t *vec_runtime_get_or_wait(dict_index_t *index, THD *thd,
+                                             dberr_t *open_err);
 
 vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
                         THD *thd);

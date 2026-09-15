@@ -818,6 +818,7 @@ static PSI_mutex_info all_innodb_mutexes[] = {
     PSI_MUTEX_KEY(trx_sys_shard_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(trx_sys_serialisation_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(zip_pad_mutex, 0, 0, PSI_DOCUMENT_ME),
+    PSI_MUTEX_KEY(vec_open_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(master_key_id_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(sync_array_mutex, 0, 0, PSI_DOCUMENT_ME),
     PSI_MUTEX_KEY(row_drop_list_mutex, 0, 0, PSI_DOCUMENT_ME),
@@ -8438,6 +8439,14 @@ int ha_innobase::open(const char *name, int, uint open_flags,
         break;
       }
     }
+    /* Test-only: let an MTR test force this session's handler down the
+    same path a genuinely un-vectored KEY lookup would take, so it can
+    reach vec_read_first/vec_insert_row/vec_update_row with no runtime
+    of its own ever attempted here - the scenario
+    vec_runtime_get_or_wait() (vec0hnsw.h) exists for. Mirrors
+    vec_runtime_open_oom (vec_runtime_open(), vec0hnsw.cc). */
+    DBUG_EXECUTE_IF("vec_open_skip_key", key = nullptr;);
+
     if (key == nullptr) continue;
 
     (void)vec_runtime_open(index, key, table, thd);
@@ -12210,7 +12219,7 @@ int ha_innobase::vec_read_first(Item *item, uchar *buf, ha_rows limit) {
     return HA_ERR_END_OF_FILE;
   }
   dberr_t vec_open_err = DB_ERROR_UNSET;
-  if (vec_runtime_get_checked(vindex, &vec_open_err) == nullptr) {
+  if (vec_runtime_get_or_wait(vindex, m_user_thd, &vec_open_err) == nullptr) {
     /* No runtime. An index with no rows still gets one - the graph is
     built empty at open time and loaded from the aux lazily, on the
     first search or insert (vec_runtime_load, vec0hnsw.cc) - so this is
@@ -12220,10 +12229,17 @@ int ha_innobase::vec_read_first(Item *item, uchar *buf, ha_rows limit) {
     ordinary, successful search of zero rows, when the table may well
     have rows the search simply could not reach - worse than an error,
     it is a wrong answer. Report the ACTUAL cause vec_runtime_open
-    recorded (vec_runtime_open_err, via vec_runtime_get_checked(),
+    recorded (vec_runtime_open_err, via vec_runtime_get_or_wait(),
     vec0hnsw.h) when it has one; fall back to EOF only for the one case
     nothing was ever recorded for - the open never having been attempted
-    at all (see the "key == nullptr" guard in ha_innobase::open). */
+    at all (see the "key == nullptr" guard in ha_innobase::open).
+
+    This session's own ha_innobase::open() may itself have taken that
+    "key == nullptr" skip and never called vec_runtime_open() at all -
+    vec_runtime_get_or_wait() is what makes that safe: it waits out a
+    concurrent open of this index by any OTHER session before answering,
+    rather than reading vindex->vec/vec_open_err on its own and
+    mistaking "somebody else is mid-open" for "nobody has ever tried". */
     if (vec_open_err != DB_ERROR_UNSET) {
       return convert_error_code_to_mysql(vec_open_err, m_prebuilt->table->flags,
                                          m_user_thd);

@@ -784,6 +784,7 @@ void dict_mem_index_free(dict_index_t *index) /*!< in: index */
 
 #ifndef UNIV_HOTBACKUP
   dict_index_zip_pad_mutex_destroy(index);
+  vec_open_sync_free(index);
 
   if (dict_index_is_spatial(index)) {
     rtr_info_active::iterator it;

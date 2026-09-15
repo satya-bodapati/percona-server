@@ -1,0 +1,72 @@
+#
+# (vec_runtime_open()/vec_runtime_get_or_wait(), vec0hnsw.cc)
+#
+# dict_index_t::vec == nullptr and dict_index_t::vec_open_err ==
+# DB_ERROR_UNSET together are ambiguous: they describe BOTH "nobody has
+# ever attempted to open this index's runtime" AND "somebody is opening
+# it right now, hasn't finished". Before this fix, a session whose own
+# handler skipped vec_runtime_open() entirely (the "key == nullptr"
+# branch in ha_innobase::open) could land on a read path while a
+# DIFFERENT session was mid-way through the very first open of that
+# index anywhere, see that ambiguous zero-init state, and wrongly
+# report "never attempted" - here, a false empty result - while the
+# real answer was seconds away.
+#
+# This test drives exactly that interleaving with two connections and
+# DEBUG_SYNC: con1 is parked inside vec_runtime_open()'s slow path
+# (vec_opening already true, index->vec still null) via the
+# vec_runtime_opening sync point; con2's own handler is forced, via the
+# vec_open_skip_key debug knob, to skip vec_runtime_open() the way a
+# non-vector-key open legitimately would, then runs a vector search
+# that can only reach vec_runtime_get_or_wait()'s waiter path. The
+# second sync point, vec_runtime_open_wait, marks the instant con2 has
+# genuinely entered that wait - without it, releasing con1 right after
+# con2's --send would race con2 actually reaching the wait, and could
+# make the test pass by lucky timing even on the old, buggy code.
+#
+# Before this fix con2 would answer immediately with zero rows - wrong,
+# since the table has a matching row - instead of waiting for con1 to
+# finish and then answering correctly.
+#
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4) NOT NULL,
+KEY (v) TYPE hnsw WITH (M = 4));
+INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]'));
+# restart
+# Nothing is dict-cached after the restart, so con1's INSERT below is
+# what opens t1 and reaches vec_runtime_open() for the very first time
+# since the restart - exactly the window this test needs to hold open.
+SET DEBUG_SYNC = 'vec_runtime_opening SIGNAL opener_parked WAIT_FOR resume_open';
+INSERT INTO t1 VALUES (2, STRING_TO_VECTOR('[0,1,0,0]'));
+SET DEBUG_SYNC = 'now WAIT_FOR opener_parked';
+# con1 is now parked with vec_opening = true and index->vec still
+# null. con2's own open must not attempt vec_runtime_open() itself -
+# vec_open_skip_key forces the same skip a genuinely non-vector KEY
+# lookup takes in ha_innobase::open - so its search below can only
+# reach a real answer through vec_runtime_get_or_wait() waiting on
+# con1, never through its own open.
+SET SESSION debug = '+d,vec_open_skip_key';
+SET DEBUG_SYNC = 'vec_runtime_open_wait SIGNAL waiter_parked';
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 5;
+# Do not release con1 until con2 has genuinely reached the wait -
+# otherwise this test could pass on old, buggy code purely because
+# con1 happened to finish before con2's read ever checked vec_opening.
+SET DEBUG_SYNC = 'now WAIT_FOR waiter_parked';
+SET DEBUG_SYNC = 'now SIGNAL resume_open';
+# con2's search only completes once con1's open has finished - it
+# must see the real, non-empty result rather than the false EOF a
+# racing read would have reported.
+id
+1
+SET SESSION debug = '-d,vec_open_skip_key';
+SET DEBUG_SYNC = 'RESET';
+# Ordinary behaviour is unaffected: a fresh session opens the index
+# normally and both rows are visible.
+SELECT id FROM t1 FORCE INDEX (PRIMARY) ORDER BY id;
+id
+1
+2
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 5;
+id
+1
+2
+DROP TABLE t1;

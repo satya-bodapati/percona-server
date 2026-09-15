@@ -43,3 +43,26 @@ void vec_index_runtime_free(dict_index_t *index) {
       .store(nullptr, std::memory_order_release);
   ut::delete_(runtime);
 }
+
+#ifndef UNIV_HOTBACKUP
+void vec_open_sync_free(dict_index_t *index) {
+  ut_ad(index != nullptr);
+
+  /* Same guard dict_index_zip_pad_mutex_destroy() (dict0mem.h) uses for
+  zip_pad.mutex: only touch what os_once actually finished creating. No
+  reader can be racing here for the same reason vec_index_runtime_free()
+  above needs none - the index is out of the dictionary cache with
+  ref_count 0 before dict_mem_index_free() is reached. */
+  if (index->vec_open_sync_created != os_once::DONE) return;
+
+  if (index->vec_open_mutex != nullptr) {
+    mutex_free(index->vec_open_mutex);
+    ut::delete_(index->vec_open_mutex);
+    index->vec_open_mutex = nullptr;
+  }
+  if (index->vec_open_event != nullptr) {
+    /* Takes the pointer by reference and nulls it. */
+    os_event_destroy(index->vec_open_event);
+  }
+}
+#endif /* !UNIV_HOTBACKUP */

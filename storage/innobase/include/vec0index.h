@@ -55,3 +55,16 @@ so dict_index_t::vec is a raw pointer that starts null for free and has to
 be released by hand here, the way destroy_fields_array() already is.
 @param[in,out]  index  index whose runtime is to be freed */
 void vec_index_runtime_free(dict_index_t *index);
+
+#ifndef UNIV_HOTBACKUP
+/** Release the mutex and event that back vec_runtime_get_or_wait()
+(vec0hnsw.h) for one index, if vec_runtime_open()/
+vec_runtime_get_or_wait() (vec0hnsw.cc) ever lazily created them. Called
+from dict_mem_index_free(), next to vec_index_runtime_free() above and
+dict_index_zip_pad_mutex_destroy() (dict0mem.h) - dict_index_t has no
+destructor, so whatever those two allocated has to be released by hand or
+it leaks on every DROP INDEX/DROP TABLE, for the rest of the server's
+life, for a vector index.
+@param[in,out]  index  index whose vec_open_mutex/vec_open_event to free */
+void vec_open_sync_free(dict_index_t *index);
+#endif /* !UNIV_HOTBACKUP */

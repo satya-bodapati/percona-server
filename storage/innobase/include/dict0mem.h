@@ -1298,10 +1298,55 @@ struct dict_index_t {
   can still land in the gap between those two writes and wrongly read
   "never attempted" while an open is completing concurrently. Readers
   that find vec null - DML refusing a row, or a vector scan reporting the
-  read failed - must go through vec_runtime_get_checked() (vec0hnsw.h),
-  not vec_runtime_get()/vec_runtime_open_err() read independently, since
-  it rechecks vec once after loading this field for exactly that reason. */
+  read failed - must go through vec_runtime_get_or_wait() (vec0hnsw.h),
+  not vec_runtime_get()/vec_runtime_open_err() read independently: unlike
+  a bare recheck of vec, that function also knows about vec_opening
+  below, so it can wait out a genuinely concurrent open instead of
+  merely narrowing the race window around it. */
   dberr_t vec_open_err;
+
+  /** True while some thread is inside vec_runtime_open()'s slow path -
+  parse options, allocate, build, publish - for this index, including a
+  thread parked in vec_runtime_get_or_wait() (vec0hnsw.h) because it
+  found this already true. Guarded by vec_open_mutex below.
+
+  This is the state neither (vec == nullptr) nor
+  (vec_open_err == DB_ERROR_UNSET) can represent on its own: both of
+  those are also exactly what a fresh, never-touched index looks like,
+  so a reader relying on them alone cannot tell "nobody has ever opened
+  this" from "somebody is opening this right now, ask again shortly" -
+  which is the gap this field, and the wait protocol built on it, close.
+
+  Zero-initialized to false along with the rest of dict_index_t by the
+  mem_heap_zalloc() dict_mem_index_create() carves it out of; no
+  constructor runs, so this relies on that zeroing exactly as vec and
+  vec_open_err above already do. */
+  bool vec_opening;
+
+  /** Guards lazy creation of vec_open_mutex/vec_open_event below, via
+  the same os_once idiom as zip_pad.mutex_created (a few members down)
+  and dict_table_t::autoinc_mutex_created (dict0dict.cc): dict_index_t
+  is never constructed, so this can't be a real object with a
+  constructor, and NEVER_DONE is 0, so this too gets its start for free
+  from the zeroed memory. */
+  std::atomic<os_once::state_t> vec_open_sync_created;
+
+  /** Serializes transitions of vec_opening above, and every access to
+  vec_open_event below, across the concurrent openers/waiters
+  vec_runtime_open() and vec_runtime_get_or_wait() (vec0hnsw.cc) can be.
+  Lazily created, the same way zip_pad.mutex is; released in
+  dict_mem_index_free() by vec_open_sync_free() (vec0index.h). */
+  ib_mutex_t *vec_open_mutex;
+
+  /** Signalled by whichever thread finishes an open attempt for this
+  index - success or failure - so every thread parked in
+  vec_runtime_get_or_wait() wakes and rechecks vec/vec_opening/
+  vec_open_err, rather than a single stale read standing in for the
+  answer. Manual-reset (os0event.h). Only a waiter ever resets it, and
+  only right before it waits, under vec_open_mutex - never the opener -
+  so the signal count it captures is always the freshest one available
+  and no set() can land in a window nothing is watching. */
+  os_event_t vec_open_event;
 
   /** id of the transaction that created this index, or 0 if the index existed
   when InnoDB was started up */
