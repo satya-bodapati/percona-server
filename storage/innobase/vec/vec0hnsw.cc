@@ -28,12 +28,14 @@ The HNSW runtime and the persistence callbacks behind it.
 
 #include <algorithm>
 #include <chrono>
+#include <new>
 
 #include <my_dbug.h>
 
 #include "srv0srv.h"
 
 #include <variant>
+#include "current_thd.h"
 #include "debug_sync.h"
 #include "dict0dd.h"
 #include "dict0dict.h"
@@ -204,15 +206,66 @@ do_or_wait_for_done() takes a raw `void (*)(void*)`, matching the exact
 shape dict_index_zip_pad_alloc() (dict0dict.cc) and
 dict_table_autoinc_alloc() (dict0dict.cc) already use for the same
 lazy-mutex idiom on this same struct.
+
+Unlike those two, this must never let an allocation failure escape as an
+exception. ut::new_withkey() and os_event_create() both throw
+std::bad_alloc rather than returning null (ut0new.h), and
+os_once::do_or_wait_for_done() (os0once.h) calls do_func() with no
+try/catch of its own, then immediately does
+state->compare_exchange_strong(in_progress, DONE) - a transition its
+state machine never reverses (NEVER_DONE -> IN_PROGRESS -> DONE). If an
+exception propagated out of here, that compare_exchange_strong would
+never run, leaving the state stuck at IN_PROGRESS forever: every other
+thread calling do_or_wait_for_done() for this same index - i.e. every
+concurrent vec_runtime_open()/vec_runtime_wait_slow() - would then spin
+in do_or_wait_for_done()'s UT_RELAX_CPU() loop for the rest of the
+server's life, not merely fail. So a failure here is instead turned into
+a normal return: whatever this managed to create first is torn down
+(the same steps vec_open_sync_free() (vec0index.cc) uses for the
+success case), index->vec_open_mutex/vec_open_event are left at their
+zero-initialized nullptr, and control returns to
+do_or_wait_for_done() so it can still reach DONE. Every caller of
+vec_open_sync_ensure() below checks for a null vec_open_mutex after the
+call and reports DB_OUT_OF_MEMORY instead of dereferencing it.
+
+This is a deliberate, permanent degradation, not an oversight: os_once
+never retries a completed state, so an index that hits this once
+refuses vector search and vector DML for the rest of the server's life,
+until the table is reopened (which allocates a fresh dict_index_t with
+vec_open_sync_created back at NEVER_DONE). That trade is acceptable
+because what is failing here is an allocation of a tiny mutex and
+event, not the HNSW graph itself - genuinely rare even under memory
+pressure - and because the failure mode this produces is a clear,
+permanent DB_OUT_OF_MEMORY rather than a hang or a crash.
 @param[in,out]  index_void  the index, as a dict_index_t* */
 static void vec_open_sync_alloc(void *index_void) {
   dict_index_t *index = static_cast<dict_index_t *>(index_void);
-  index->vec_open_mutex = ut::new_withkey<ib_mutex_t>(UT_NEW_THIS_FILE_PSI_KEY);
-  ut_a(index->vec_open_mutex != nullptr);
-  mutex_create(LATCH_ID_VEC_OPEN_MUTEX, index->vec_open_mutex);
+  try {
+    index->vec_open_mutex =
+        ut::new_withkey<ib_mutex_t>(UT_NEW_THIS_FILE_PSI_KEY);
+    mutex_create(LATCH_ID_VEC_OPEN_MUTEX, index->vec_open_mutex);
 
-  index->vec_open_event = os_event_create();
-  ut_a(index->vec_open_event != nullptr);
+    index->vec_open_event = os_event_create();
+
+    /* Test-only: let an MTR test force the catch below deterministically,
+    parked (via DEBUG_SYNC) with os_once's state still IN_PROGRESS, so a
+    second, concurrent do_or_wait_for_done() call for this same index can
+    be driven into its UT_RELAX_CPU() wait loop and observed to unblock
+    promptly once this call finishes - instead of spinning forever, which
+    is the actual bug this function's try/catch fixes. Mirrors
+    vec_runtime_open_oom (vec_runtime_open(), below). */
+    DBUG_EXECUTE_IF("vec_open_sync_alloc_oom", {
+      DEBUG_SYNC(current_thd, "vec_open_sync_alloc_parked");
+      throw std::bad_alloc();
+    });
+  } catch (...) {
+    if (index->vec_open_mutex != nullptr) {
+      mutex_free(index->vec_open_mutex);
+      ut::delete_(index->vec_open_mutex);
+      index->vec_open_mutex = nullptr;
+    }
+    index->vec_open_event = nullptr;
+  }
 }
 
 /** Ensure index->vec_open_mutex/vec_open_event exist, creating them on
@@ -227,6 +280,15 @@ static void vec_open_sync_ensure(dict_index_t *index) {
 
 vec_t *vec_runtime_wait_slow(dict_index_t *index, THD *thd, dberr_t *open_err) {
   vec_open_sync_ensure(index);
+  if (index->vec_open_mutex == nullptr) {
+    /* vec_open_sync_alloc() (above) failed to allocate the mutex/event
+    for this index - permanently, for the life of this dict_index_t (see
+    its comment). There is nothing to lock or wait on, so report the
+    same DB_OUT_OF_MEMORY every other opener/waiter for this index will
+    also get, instead of dereferencing a null mutex. */
+    *open_err = DB_OUT_OF_MEMORY;
+    return nullptr;
+  }
   mutex_enter(index->vec_open_mutex);
 
   for (;;) {
@@ -306,6 +368,26 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
   }
 
   vec_open_sync_ensure(index);
+  if (index->vec_open_mutex == nullptr) {
+    /* vec_open_sync_alloc() (above) failed to allocate the mutex/event
+    for this index - permanently, for the life of this dict_index_t (see
+    its comment). Log it the same way every other failure branch in this
+    function does, and persist the same cause vec_insert_row,
+    vec_update_row and ha_innobase::vec_read_first will report through
+    vec_runtime_get_or_wait(), mirroring set_open_err() below - it is not
+    yet in scope here, as it is only meaningful once vec_opening is set
+    below. index->vec stays null, so there is nothing to publish and
+    nothing to lock. */
+    ib::error(ER_IB_MSG_456)
+        << "Failed to open vector runtime for index " << index->name
+        << " on table " << index->table->name << ": out of memory"
+        << " creating its wait-protocol mutex/event; vector search on it"
+        << " will not work, and inserts/updates on the table will be"
+        << " refused, until the table is reopened.";
+    std::atomic_ref<dberr_t>(index->vec_open_err)
+        .store(DB_OUT_OF_MEMORY, std::memory_order_release);
+    return nullptr;
+  }
   mutex_enter(index->vec_open_mutex);
 
   if (vec_t *existing = vec_runtime_get(index); existing != nullptr) {

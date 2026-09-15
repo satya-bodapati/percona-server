@@ -1,0 +1,87 @@
+#
+# vec_open_sync_alloc() (vec0hnsw.cc) lazily allocates
+# dict_index_t::vec_open_mutex/vec_open_event for one index, through
+# os_once::do_or_wait_for_done() (os0once.h) - a one-way state machine
+# (NEVER_DONE -> IN_PROGRESS -> DONE) with no try/catch of its own
+# around the call. Before this fix, an allocation failure inside
+# vec_open_sync_alloc() (ut::new_withkey()/os_event_create() both
+# throw std::bad_alloc rather than returning null) would escape as an
+# exception, so os_once's state->compare_exchange_strong(IN_PROGRESS,
+# DONE) right after the call would never run. The state would be
+# stuck at IN_PROGRESS forever, and every OTHER thread calling
+# do_or_wait_for_done() for this same index - i.e. every concurrent
+# vec_runtime_open()/vec_runtime_wait_slow() - would then spin in its
+# UT_RELAX_CPU() loop for the rest of the server's life.
+#
+# This test forces that allocation failure deterministically via
+# vec_open_sync_alloc_oom, parks the failing thread (con1) with
+# os_once's state genuinely, structurally still IN_PROGRESS (not a
+# timing race: it cannot reach DONE until con1's call returns), and
+# only then starts a second thread (con2) that must wait on that same
+# state. Releasing con1 is what lets con2 proceed - if it did not,
+# con2 would hang here rather than complete this test.
+#
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4) NOT NULL,
+KEY (v) TYPE hnsw WITH (M = 4));
+INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]'));
+# restart
+# Nothing is dict-cached after the restart, so con1 below is the
+# first thread anywhere to call vec_open_sync_ensure() for this
+# index - i.e. the one that actually runs vec_open_sync_alloc() as
+# os_once's do_func, with the injected fault armed.
+SET SESSION debug = '+d,vec_open_sync_alloc_oom';
+SET DEBUG_SYNC = 'vec_open_sync_alloc_parked SIGNAL alloc_parked WAIT_FOR resume_alloc';
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 5;
+SET DEBUG_SYNC = 'now WAIT_FOR alloc_parked';
+# con2 now reaches vec_open_sync_ensure() for the same index while
+# os_once's state is genuinely IN_PROGRESS. Before this fix, con1's
+# exception would already have escaped vec_open_sync_alloc the
+# moment it was thrown - well before this connection even starts -
+# so the state would never reach DONE and this SELECT would never
+# return.
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 5;
+# do_or_wait_for_done()'s IN_PROGRESS wait is a raw UT_RELAX_CPU()
+# spin loop with no DEBUG_SYNC point of its own to park at (it takes
+# no THD), so confirm con2 is still executing - i.e. genuinely inside
+# that loop, since nothing else in this query can block it - before
+# releasing con1. Without this, releasing con1 immediately after
+# con2's --send could let the test pass by lucky timing even if
+# con2's wait were broken.
+# Two connections match this text - con1 itself (still "executing",
+# parked mid-statement at its own DEBUG_SYNC point) and con2 (the
+# one actually being waited for here) - so the condition is 2, not 1.
+# Let con1 finish: its injected exception is caught inside
+# vec_open_sync_alloc(), which then returns normally, so os_once's
+# own compare_exchange_strong(IN_PROGRESS, DONE) runs right
+# afterwards. That state transition - not this test's timing - is
+# what unblocks con2 below.
+SET DEBUG_SYNC = 'now SIGNAL resume_alloc';
+# con1 itself gets a clean, permanent DB_OUT_OF_MEMORY for this
+# index - not a hang, not a crash.
+ERROR HY000: Out of memory; check if mysqld or some other process uses all available memory; if not, you may have to use 'ulimit' to allow mysqld to use more memory or you can add more swap space
+SET SESSION debug = '-d,vec_open_sync_alloc_oom';
+# con2 must also get DB_OUT_OF_MEMORY promptly, rather than spinning
+# forever - the actual bug this fix closes.
+ERROR HY000: Out of memory; check if mysqld or some other process uses all available memory; if not, you may have to use 'ulimit' to allow mysqld to use more memory or you can add more swap space
+SET DEBUG_SYNC = 'RESET';
+# No runtime is attached to the index: the failure is permanent for
+# the life of this dict_index_t.
+SET SESSION innodb_interpreter = 'vec_runtime_info test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+no runtime
+# Unlike a graph-build OOM (vector_runtime_open_oom.test, where
+# index->vec/vec_open_err are simply re-attempted by the next fresh
+# vec_runtime_open() call, even on the SAME dict_index_t), this
+# failure lives in vec_open_sync_created - an os_once state that
+# never leaves DONE once reached. FLUSH TABLES alone is not enough:
+# confirm that here (documenting the difference), then actually
+# restart to get a fresh dict_index_t and confirm recovery.
+FLUSH TABLES t1;
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 5;
+ERROR HY000: Out of memory; check if mysqld or some other process uses all available memory; if not, you may have to use 'ulimit' to allow mysqld to use more memory or you can add more swap space
+# restart
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 5;
+id
+1
+DROP TABLE t1;
