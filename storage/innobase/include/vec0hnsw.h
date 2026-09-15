@@ -115,6 +115,37 @@ dberr_t vec_persist_update_neighbors(Vec_ctx *ctx, uint64_t id,
 
 dberr_t vec_persist_entry_point(Vec_ctx *ctx, uint64_t id);
 
+/** Read one node's aux row and validate its on-disk shape against the
+index's own parameters (dims, M). Split out of vec_persist_load_node so
+a caller that needs to know an id will load cleanly - without a graph or
+a node handle to load it into, e.g. vec_runtime_load checking the entry
+point before calling into HNSW at all - can ask the same question the
+same way, rather than duplicating the two corruption checks or, worse,
+reimplementing them slightly differently.
+@param[in]      ctx   the id-independent parameters (aux table, dims, M)
+@param[in]      id    the node to read
+@param[in,out]  heap  heap the returned bytes are copied onto
+@param[out]     out   the node
+@return DB_SUCCESS, DB_RECORD_NOT_FOUND, DB_CORRUPTION, or a read error */
+inline dberr_t vec_aux_read_and_validate_node(Vec_ctx *ctx, uint64_t id,
+                                              mem_heap_t *heap,
+                                              vec_aux_read_t *out) {
+  const dberr_t err = vec_aux_read_node(ctx->aux, id, heap, out);
+  if (err != DB_SUCCESS) return err;
+
+  if (out->vec_len != ctx->vec_bytes) return DB_CORRUPTION;
+
+  /* The neighbour blob must cover exactly the node's slots. Checking it
+  is not paranoia: the count is derived from level and M rather than
+  stored, so a mismatch means the row and the index disagree about the
+  shape of the graph, and load_node_neighbors would read past the blob. */
+  if (out->neighbors_len != vec_aux_neighbors_blob_len(out->level, ctx->m)) {
+    return DB_CORRUPTION;
+  }
+
+  return DB_SUCCESS;
+}
+
 /** Fill an unloaded node from its aux row.
 
 A template only because LoadNodeHandle is nested in the instantiation,
@@ -136,24 +167,10 @@ dberr_t vec_persist_load_node(Vec_ctx *ctx, Hnsw &hnsw,
 
   mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
   vec_aux_read_t node;
-  dberr_t err = vec_aux_read_node(ctx->aux, id, heap, &node);
+  dberr_t err = vec_aux_read_and_validate_node(ctx, id, heap, &node);
   if (err != DB_SUCCESS) {
     mem_heap_free(heap);
     return err;
-  }
-
-  if (node.vec_len != ctx->vec_bytes) {
-    mem_heap_free(heap);
-    return DB_CORRUPTION;
-  }
-
-  /* The neighbour blob must cover exactly the node's slots. Checking it
-  is not paranoia: the count is derived from level and M rather than
-  stored, so a mismatch means the row and the index disagree about the
-  shape of the graph, and load_node_neighbors would read past the blob. */
-  if (node.neighbors_len != vec_aux_neighbors_blob_len(node.level, ctx->m)) {
-    mem_heap_free(heap);
-    return DB_CORRUPTION;
   }
 
   /* Order matters: load_node_neighbors sizes its allocation from the
@@ -424,6 +441,25 @@ struct vec_t : public Vec_runtime {
   release/acquire ordering: it publishes the `hnsw` pointer to every thread
   that sees it true, which is what lets the hot paths run unlocked. */
   std::atomic<bool> loaded{false};
+  /** True once any load of any node in this graph has found DB_CORRUPTION
+  - a row that exists but disagrees with the index about its own shape.
+  Sticky for the runtime's lifetime (never reset back to false; a DDL
+  rebuild replaces this whole object with a fresh one, which is the only
+  way this index's corrupted state is meant to clear).
+
+  Exists because DB_CORRUPTION and DB_RECORD_NOT_FOUND both end a lazy
+  neighbor load in the graph library marking the node NODE_LOST - a
+  state with no way back to loaded (vector-common/hnsw.h), so a second
+  touch of that same node never calls back into this file to report
+  anything again. That is the right call for DB_RECORD_NOT_FOUND: it is
+  the expected shape of a crash that landed between two related writes,
+  and HNSW's own callers already route around a LOST node without our
+  help. It is the wrong call for DB_CORRUPTION, which is never expected
+  and should not go quiet just because the one node that surfaced it
+  will never be loaded again - every query entry point checks this flag
+  up front and refuses outright once it is set, instead of only the
+  first statement unlucky enough to fault that particular node in. */
+  std::atomic<bool> corrupted{false};
 };
 
 /** Open (lazily create) the runtime for a vector index.

@@ -51,6 +51,25 @@ vec_t::~vec_t() {
   hnsw = nullptr;
 }
 
+/** Refuse outright once this index's graph has ever reported DB_CORRUPTION.
+Called at the top of every read/write entry point, before it does any real
+work - see vec_t::corrupted for why a single sticky flag is needed instead
+of trusting ctx.err alone. */
+static inline dberr_t vec_check_not_corrupted(const vec_t *vec) {
+  return vec->corrupted.load(std::memory_order_relaxed) ? DB_CORRUPTION
+                                                        : DB_SUCCESS;
+}
+
+/** Latch vec_t::corrupted once an operation's result turns out to be
+DB_CORRUPTION. Idempotent (store(true) is safe from concurrent callers),
+so every entry point can call this on its way out without coordinating
+with the others. */
+static inline void vec_note_if_corrupted(vec_t *vec, dberr_t err) {
+  if (err == DB_CORRUPTION) {
+    vec->corrupted.store(true, std::memory_order_relaxed);
+  }
+}
+
 /** Commit the aux sub-transaction and immediately start a fresh one, so that
 no row lock taken by a callback outlives that callback.
 
@@ -372,8 +391,38 @@ static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
   ctx.err = DB_SUCCESS;
   ctx.loading_entry_point = true;
 
+  /* Validate the entry point's own row BEFORE handing control to HNSW.
+  init_from_entry_point() (hnsw.h) asserts that its one load_node_cb
+  call succeeds - correct for every path that reaches it today, since
+  vec_persist_entry_point() only ever names an id whose node row it (or
+  a concurrent insert it raced) already committed - but a crash between
+  that commit and the entry-point row's own commit is exactly the
+  NODE_LOST scenario this file otherwise treats as recoverable, and an
+  assert firing before this function ever gets to inspect ctx.err would
+  turn it into a debug-build abort instead of the graceful dberr_t this
+  caller already knows how to return. Reading and validating the row
+  here first, with the graph not yet reachable by anyone, means that by
+  the time init_from_entry_point() reads the same row, it is guaranteed
+  to still be there and still shaped right - nothing else can write to
+  or corrupt this aux table before vec->loaded flips true - so the
+  assert this is working around can never actually fire. */
+  {
+    mem_heap_t *entry_heap = mem_heap_create(256, UT_LOCATION_HERE);
+    vec_aux_read_t entry_row;
+    const dberr_t entry_err = vec_aux_read_and_validate_node(
+        &ctx, entry_point, entry_heap, &entry_row);
+    mem_heap_free(entry_heap);
+    if (entry_err != DB_SUCCESS) {
+      vec_note_if_corrupted(vec, entry_err);
+      ut::delete_(vec->hnsw);
+      vec->hnsw = nullptr;
+      return entry_err;
+    }
+  }
+
   vec->hnsw->init_from_entry_point(entry_point, &ctx);
   if (ctx.err != DB_SUCCESS) {
+    vec_note_if_corrupted(vec, ctx.err);
     ut::delete_(vec->hnsw);
     vec->hnsw = nullptr;
     return ctx.err;
@@ -420,6 +469,11 @@ they are the same operation: a node is immutable, so a changed vector is
 a new node rather than an edit of the old one. */
 static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
                             uint64_t base_pk, const char *q, THD *thd) {
+  {
+    const dberr_t corrupted_err = vec_check_not_corrupted(vec);
+    if (corrupted_err != DB_SUCCESS) return corrupted_err;
+  }
+
   /* innodb_hnsw_max_memory, checked BEFORE insert() starts mutating.
 
   Vec_arena::allocate() is the single point every graph byte passes
@@ -529,6 +583,7 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
   trx_free_for_background(aux_trx);
   vec_aux_close_for_dml(aux, thd, &mdl);
 
+  vec_note_if_corrupted(vec, ctx.err);
   return ctx.err;
 }
 
@@ -555,6 +610,11 @@ dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
 
   auto *vec = vec_runtime_get(index);
   if (vec == nullptr) return DB_TABLE_NOT_FOUND;
+
+  {
+    const dberr_t corrupted_err = vec_check_not_corrupted(vec);
+    if (corrupted_err != DB_SUCCESS) return corrupted_err;
+  }
 
   MDL_ticket *mdl = nullptr;
   dict_table_t *aux =
@@ -603,6 +663,7 @@ dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
 
   const dberr_t err = ctx.err;
   vec_aux_close_for_dml(aux, thd, &mdl);
+  vec_note_if_corrupted(vec, err);
   return err;
 }
 
@@ -628,6 +689,11 @@ dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
 
   auto *vec = vec_runtime_get(index);
   if (vec == nullptr) return DB_TABLE_NOT_FOUND;
+
+  {
+    const dberr_t corrupted_err = vec_check_not_corrupted(vec);
+    if (corrupted_err != DB_SUCCESS) return corrupted_err;
+  }
 
   MDL_ticket *mdl = nullptr;
   dict_table_t *aux =
@@ -669,6 +735,7 @@ dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
                              &s->ctx);
   if (s->ctx.err != DB_SUCCESS) {
     const dberr_t err = s->ctx.err;
+    vec_note_if_corrupted(vec, err);
     vec_knn_close(s);
     return err;
   }
@@ -682,7 +749,10 @@ bool vec_knn_next(vec_search_t *s, vec_hit_t *hit) {
   if (s->ctx.err != DB_SUCCESS) return false;
 
   const auto next = s->vec->hnsw->nn_search_next(&s->nn);
-  if (s->ctx.err != DB_SUCCESS) return false;
+  if (s->ctx.err != DB_SUCCESS) {
+    vec_note_if_corrupted(s->vec, s->ctx.err);
+    return false;
+  }
   if (!next.first) return false;
 
   hit->id = next.second.id;

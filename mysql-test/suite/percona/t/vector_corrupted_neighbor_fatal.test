@@ -1,0 +1,102 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # Two DB_CORRUPTION scenarios, contrasted with the DB_RECORD_NOT_FOUND
+--echo # ones in vector_lost_neighbor_nonfatal.test: a row that EXISTS but
+--echo # disagrees with the index about its own shape is never an expected
+--echo # crash artifact (unlike a row that is simply missing), so it must
+--echo # stay fatal -- consistently, not just on the first query.
+--echo #
+
+--echo # --- t1: the entry point's OWN row is corrupt ---
+--echo #
+--echo # vec_runtime_load's cold start reads the entry point's row before
+--echo # ever calling into HNSW's init_from_entry_point(), which asserts
+--echo # that load succeeds (hnsw.h) -- a debug-build abort, not a
+--echo # returned error, if that row were ever handed to it unvalidated.
+--echo # Simulates a crash between committing the entry-point pointer
+--echo # (record 0) and committing the entry node's own row.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(2) NOT NULL,
+                 KEY vk (v) TYPE hnsw WITH (M = 4));
+
+INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[0,0]')),
+                      (2, STRING_TO_VECTOR('[1,0]')),
+                      (3, STRING_TO_VECTOR('[2,0]')),
+                      (4, STRING_TO_VECTOR('[3,0]')),
+                      (5, STRING_TO_VECTOR('[4,0]')),
+                      (6, STRING_TO_VECTOR('[5,0]'));
+
+SET SESSION innodb_interpreter = 'vec_corrupt_entry_row test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # Force a cold reload: without a restart the entry point node is
+--echo # already NODE_COMPLETE in memory and the on-disk edit above is
+--echo # never looked at again.
+--source include/restart_mysqld.inc
+
+--echo # Must not crash the server (that is the bug this file's first
+--echo # scenario pins), and must fail every time, not just the first --
+--echo # vec_runtime_load never sets `loaded`, so every statement below
+--echo # retries the cold load and hits the same corrupt row again.
+--error ER_NOT_KEYFILE
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3;
+--error ER_NOT_KEYFILE
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3;
+--error ER_NOT_KEYFILE
+INSERT INTO t1 VALUES (7, STRING_TO_VECTOR('[0.5,0]'));
+
+DROP TABLE t1;
+
+--echo # --- t2: a real, reachable NON-entry neighbor's row is corrupt ---
+--echo #
+--echo # Contrast with vector_lost_neighbor_nonfatal.test's
+--echo # vec_poison_entry_neighbor, which aims the entry point's slot 0 at
+--echo # an id with NO row at all (DB_RECORD_NOT_FOUND, the expected crash
+--echo # artifact, correctly nonfatal after the fix in this same commit).
+--echo # Here the target id is real and stays a real neighbor -- only its
+--echo # OWN row's shape is wrong (DB_CORRUPTION), which is never expected
+--echo # and must stay fatal on every query that reaches it, not just the
+--echo # first: the node still gets marked NODE_LOST and is never
+--echo # reloaded, so vec_t::corrupted is what keeps the SECOND query from
+--echo # silently answering with one node quietly missing and no error.
+--echo #
+
+CREATE TABLE t2 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(2) NOT NULL,
+                 KEY vk (v) TYPE hnsw WITH (M = 4));
+
+INSERT INTO t2 VALUES (1, STRING_TO_VECTOR('[0,0]')),
+                      (2, STRING_TO_VECTOR('[1,0]')),
+                      (3, STRING_TO_VECTOR('[2,0]')),
+                      (4, STRING_TO_VECTOR('[3,0]')),
+                      (5, STRING_TO_VECTOR('[4,0]')),
+                      (6, STRING_TO_VECTOR('[5,0]'));
+
+SET SESSION innodb_interpreter = 'vec_corrupt_entry_neighbor_row test/t2';
+SELECT @@session.innodb_interpreter_output;
+
+--source include/restart_mysqld.inc
+
+--echo # First query: the cold-start entry point load itself succeeds (its
+--echo # own row is untouched here), but expanding into its corrupt
+--echo # neighbor fails -- the node is marked NODE_LOST and vec_t::corrupted
+--echo # latches.
+--error ER_NOT_KEYFILE
+SELECT id FROM t2 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3;
+
+--echo # Second, identical query: the corrupt node is already NODE_LOST, so
+--echo # load_node_cb is never called again for it -- without vec_t::corrupted,
+--echo # this would silently succeed with the corruption never mentioned
+--echo # again. It must still fail.
+--error ER_NOT_KEYFILE
+SELECT id FROM t2 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3;
+
+--echo # The insert path is refused too, fast, without touching the graph
+--echo # at all (vec_check_not_corrupted at the top of vec_add_node).
+--error ER_NOT_KEYFILE
+INSERT INTO t2 VALUES (7, STRING_TO_VECTOR('[0.5,0]'));
+
+DROP TABLE t2;

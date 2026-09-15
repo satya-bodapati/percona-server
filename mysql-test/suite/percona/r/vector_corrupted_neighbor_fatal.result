@@ -1,0 +1,88 @@
+#
+# Two DB_CORRUPTION scenarios, contrasted with the DB_RECORD_NOT_FOUND
+# ones in vector_lost_neighbor_nonfatal.test: a row that EXISTS but
+# disagrees with the index about its own shape is never an expected
+# crash artifact (unlike a row that is simply missing), so it must
+# stay fatal -- consistently, not just on the first query.
+#
+# --- t1: the entry point's OWN row is corrupt ---
+#
+# vec_runtime_load's cold start reads the entry point's row before
+# ever calling into HNSW's init_from_entry_point(), which asserts
+# that load succeeds (hnsw.h) -- a debug-build abort, not a
+# returned error, if that row were ever handed to it unvalidated.
+# Simulates a crash between committing the entry-point pointer
+# (record 0) and committing the entry node's own row.
+#
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(2) NOT NULL,
+KEY vk (v) TYPE hnsw WITH (M = 4));
+INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[0,0]')),
+(2, STRING_TO_VECTOR('[1,0]')),
+(3, STRING_TO_VECTOR('[2,0]')),
+(4, STRING_TO_VECTOR('[3,0]')),
+(5, STRING_TO_VECTOR('[4,0]')),
+(6, STRING_TO_VECTOR('[5,0]'));
+SET SESSION innodb_interpreter = 'vec_corrupt_entry_row test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+PASS: corrupted entry point's own row shape
+# Force a cold reload: without a restart the entry point node is
+# already NODE_COMPLETE in memory and the on-disk edit above is
+# never looked at again.
+# restart
+# Must not crash the server (that is the bug this file's first
+# scenario pins), and must fail every time, not just the first --
+# vec_runtime_load never sets `loaded`, so every statement below
+# retries the cold load and hits the same corrupt row again.
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3;
+ERROR HY000: Incorrect key file for table 't1'; try to repair it
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3;
+ERROR HY000: Incorrect key file for table 't1'; try to repair it
+INSERT INTO t1 VALUES (7, STRING_TO_VECTOR('[0.5,0]'));
+ERROR HY000: Incorrect key file for table 't1'; try to repair it
+DROP TABLE t1;
+# --- t2: a real, reachable NON-entry neighbor's row is corrupt ---
+#
+# Contrast with vector_lost_neighbor_nonfatal.test's
+# vec_poison_entry_neighbor, which aims the entry point's slot 0 at
+# an id with NO row at all (DB_RECORD_NOT_FOUND, the expected crash
+# artifact, correctly nonfatal after the fix in this same commit).
+# Here the target id is real and stays a real neighbor -- only its
+# OWN row's shape is wrong (DB_CORRUPTION), which is never expected
+# and must stay fatal on every query that reaches it, not just the
+# first: the node still gets marked NODE_LOST and is never
+# reloaded, so vec_t::corrupted is what keeps the SECOND query from
+# silently answering with one node quietly missing and no error.
+#
+CREATE TABLE t2 (id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(2) NOT NULL,
+KEY vk (v) TYPE hnsw WITH (M = 4));
+INSERT INTO t2 VALUES (1, STRING_TO_VECTOR('[0,0]')),
+(2, STRING_TO_VECTOR('[1,0]')),
+(3, STRING_TO_VECTOR('[2,0]')),
+(4, STRING_TO_VECTOR('[3,0]')),
+(5, STRING_TO_VECTOR('[4,0]')),
+(6, STRING_TO_VECTOR('[5,0]'));
+SET SESSION innodb_interpreter = 'vec_corrupt_entry_neighbor_row test/t2';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+PASS: corrupted entry point's first real neighbor's row shape
+# restart
+# First query: the cold-start entry point load itself succeeds (its
+# own row is untouched here), but expanding into its corrupt
+# neighbor fails -- the node is marked NODE_LOST and vec_t::corrupted
+# latches.
+SELECT id FROM t2 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3;
+ERROR HY000: Incorrect key file for table 't2'; try to repair it
+# Second, identical query: the corrupt node is already NODE_LOST, so
+# load_node_cb is never called again for it -- without vec_t::corrupted,
+# this would silently succeed with the corruption never mentioned
+# again. It must still fail.
+SELECT id FROM t2 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3;
+ERROR HY000: Incorrect key file for table 't2'; try to repair it
+# The insert path is refused too, fast, without touching the graph
+# at all (vec_check_not_corrupted at the top of vec_add_node).
+INSERT INTO t2 VALUES (7, STRING_TO_VECTOR('[0.5,0]'));
+ERROR HY000: Incorrect key file for table 't2'; try to repair it
+DROP TABLE t2;

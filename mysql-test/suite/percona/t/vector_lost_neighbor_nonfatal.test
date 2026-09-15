@@ -11,6 +11,16 @@
 --echo # memory, every LATER query skips it silently and succeeds -- same
 --echo # underlying condition, inconsistent outcome.
 --echo #
+--echo # Two independent graphs below, each poisoned and restarted fresh,
+--echo # so each can show its OWN first touch: a SELECT faulting the stub
+--echo # in itself (t1), and an INSERT faulting it in before either SELECT
+--echo # gets the chance to (t2). Sharing one graph between the two would
+--echo # let the earlier statement resolve (and cache NODE_LOST) the stub
+--echo # for the later one, silently turning it into a no-op that proves
+--echo # nothing about the later statement's own first-touch behavior.
+--echo #
+
+--echo # --- t1: a bare SELECT is the first toucher ---
 
 CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
                  v VECTOR(2) NOT NULL,
@@ -36,15 +46,10 @@ SELECT @@session.innodb_interpreter_output;
 --echo # never looked at again.
 --source include/restart_mysqld.inc
 
---echo # The insert path lazily loads neighbor stubs the same way search
---echo # does (hnsw.h:392, 1457), through the same ctx that now defaults
---echo # loading_entry_point to false -- so it must not fail here either.
-INSERT INTO t1 VALUES (7, STRING_TO_VECTOR('[0.5,0]'));
-
 --echo # Both queries must behave the same way: the missing neighbor is
 --echo # skipped, not fatal, whether this is the first touch (which faults
 --echo # it in and marks it NODE_LOST) or a later one (which finds it
---echo # already NODE_LOST). Before the fix, the first of these two
+--echo # already NODE_LOST). Before the fix, the FIRST of these two
 --echo # identical queries fails with ER_KEY_NOT_FOUND and only the second
 --echo # succeeds. The row count is checked, not specific ids -- HNSW's
 --echo # random layer draw picks a different entry point each run, so
@@ -60,3 +65,45 @@ SELECT COUNT(*) AS rows_found FROM (
 ) second_query;
 
 DROP TABLE t1;
+
+--echo # --- t2: an INSERT is the first toucher ---
+
+CREATE TABLE t2 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(2) NOT NULL,
+                 KEY vk (v) TYPE hnsw WITH (M = 4));
+
+INSERT INTO t2 VALUES (1, STRING_TO_VECTOR('[0,0]')),
+                      (2, STRING_TO_VECTOR('[1,0]')),
+                      (3, STRING_TO_VECTOR('[2,0]')),
+                      (4, STRING_TO_VECTOR('[3,0]')),
+                      (5, STRING_TO_VECTOR('[4,0]')),
+                      (6, STRING_TO_VECTOR('[5,0]'));
+
+SET SESSION innodb_interpreter = 'vec_poison_entry_neighbor test/t2 999999999';
+SELECT @@session.innodb_interpreter_output;
+
+--source include/restart_mysqld.inc
+
+--echo # The insert path lazily loads neighbor stubs the same way search
+--echo # does (hnsw.h:392, 1457), through the same ctx that now defaults
+--echo # loading_entry_point to false -- so THIS statement, not either
+--echo # SELECT below, is what first faults the stub in here. Before the
+--echo # fix, this INSERT did not just fail -- it crashed the whole server
+--echo # (DB_RECORD_NOT_FOUND reached row_mysql_handle_errors, which has
+--echo # no case for it and answers with ib::fatal: SIGABRT at
+--echo # row0mysql.cc:1238, "Unknown error code 1500: Record not found").
+INSERT INTO t2 VALUES (7, STRING_TO_VECTOR('[0.5,0]'));
+
+--echo # Both queries below now find the stub already NODE_LOST from the
+--echo # INSERT above -- they are exercising the "later touch" side rather
+--echo # than repeating t1's "first touch" one, which is the point: this
+--echo # graph's own first toucher was the INSERT, and it already had to
+--echo # survive it for either of these to even run.
+SELECT COUNT(*) AS rows_found FROM (
+  SELECT id FROM t2 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3
+) first_query;
+SELECT COUNT(*) AS rows_found FROM (
+  SELECT id FROM t2 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3
+) second_query;
+
+DROP TABLE t2;
