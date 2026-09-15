@@ -61,14 +61,14 @@ asserts on nullptr anyway (hnsw.h has two "revisit once we add memory
 limits" TODOs). Refusal against innodb_hnsw_max_memory has to happen
 before insert() starts mutating rather than inside allocate(), because
 there is no per-block free to unwind with. */
-/** Bytes held by every Vec_arena in the server, heap block headers
-included. What innodb_hnsw_max_memory is measured against. */
-uint64_t vec_arena_global_bytes();
-
 class Vec_arena {
  public:
   Vec_arena() = default;
   ~Vec_arena();
+
+  /** Bytes held by every Vec_arena in the server, heap block headers
+  included. What innodb_hnsw_max_memory is measured against. */
+  static uint64_t global_bytes();
 
   Vec_arena(const Vec_arena &) = delete;
   Vec_arena &operator=(const Vec_arena &) = delete;
