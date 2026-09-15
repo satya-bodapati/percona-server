@@ -214,6 +214,24 @@ class ha_innobase : public handler {
   vec_search_t *m_vec_search = nullptr;
   std::string m_vec_query;
 
+  /** True when ha_innobase::open() took the defensive "key == nullptr"
+  fallback for this table's vector index instead of calling
+  vec_runtime_open() - so this handler never attempted to open the
+  runtime itself. vec_read_first() consults this only after
+  vec_runtime_get_or_wait() has already come back with the ambiguous
+  "never attempted" terminal state (vec == nullptr, no concurrent open,
+  no recorded failure) - not beforehand, since a genuinely concurrent
+  open by another session must still be waited out and answered
+  normally, exactly as it is today (vector_runtime_open_wait.test). Only
+  once that wait has confirmed nobody else can answer either does this
+  flag turn the ambiguity into a distinct error instead of a silently
+  wrong empty result (see vec_read_first()'s comment).
+
+  A single bool is enough only because a table has at most one vector
+  index today (the design's "Limitations"); revisit this - e.g. a
+  per-index flag - if that ever changes. */
+  bool m_vec_runtime_skipped = false;
+
  public:
   void position(const uchar *record) override;
 

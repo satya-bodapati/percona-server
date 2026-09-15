@@ -1,0 +1,63 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # ha_innobase::vec_read_first() (ha_innodb.cc) reads
+--echo # vec_runtime_get_or_wait() (vec0hnsw.h). That call resolves to one of
+--echo # three outcomes: a published runtime, a recorded failure cause, or -
+--echo # when nobody anywhere has ever opened this index, and nobody is
+--echo # opening it right now - the ambiguous "never attempted" terminal
+--echo # state (vec == nullptr, vec_opening == false,
+--echo # vec_open_err == DB_ERROR_UNSET).
+--echo #
+--echo # Before this fix, that terminal state was always reported as
+--echo # HA_ERR_END_OF_FILE - a silent, wrong "the index is empty" answer
+--echo # whenever THIS handler's own open() had taken the defensive
+--echo # "key == nullptr" branch (ha_innobase::open) and so never actually
+--echo # attempted vec_runtime_open() itself. The base table can still have
+--echo # real rows the search simply could not reach.
+--echo #
+--echo # vec_open_skip_key forces exactly that branch, with no concurrent
+--echo # opener anywhere (a restart guarantees the dict cache, and therefore
+--echo # every vec_open_* state, starts fresh) - so the SELECT below hits the
+--echo # genuinely ambiguous terminal state, not a race with some other
+--echo # session's real open (vector_runtime_open_wait.test already covers
+--echo # that different, already-correctly-handled case).
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4) NOT NULL,
+                 KEY (v) TYPE hnsw WITH (M = 4));
+INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]'));
+
+--source include/restart_mysqld.inc
+
+--echo # Nothing is dict-cached after the restart, so this connection's own
+--echo # open of t1 below is the first and only touch of the index's runtime
+--echo # state anywhere - and vec_open_skip_key forces it to skip
+--echo # vec_runtime_open() entirely, the same way a genuinely non-vector KEY
+--echo # lookup would.
+SET SESSION debug = '+d,vec_open_skip_key';
+
+--echo # Confirm the query really takes the vector-index access path
+--echo # (type=vector_knn) rather than falling back to a table scan that
+--echo # would pass by coincidence.
+--replace_column 10 # 11 #
+EXPLAIN SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 5;
+
+--echo # Before this fix: an ordinary, successful, empty result (0 rows) -
+--echo # silently wrong, since t1 has a matching row. After this fix: a
+--echo # clear, distinct error instead.
+--error ER_UNSUPPORTED_EXTENSION
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 5;
+SHOW WARNINGS;
+
+SET SESSION debug = '-d,vec_open_skip_key';
+
+--echo # Ordinary behaviour is unaffected: without the debug knob, a fresh
+--echo # session's open legitimately calls vec_runtime_open(), and the same
+--echo # query returns the real result.
+--connect (con1, localhost, root,,)
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 5;
+--disconnect con1
+
+--connection default
+DROP TABLE t1;

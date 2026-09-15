@@ -8424,9 +8424,14 @@ int ha_innobase::open(const char *name, int, uint open_flags,
   simply has no graph, and the DML path reports the problem when it
   tries to use one. Refusing the open would take the whole table
   offline for a vector index that may not even be queried. */
+  /* Reset before the loop below, rather than relying on the member
+  initializer alone: if this handler's open() ever ran more than once
+  (handler::ha_open() reusing the same object), a stale true from an
+  earlier open must not linger. */
+  m_vec_runtime_skipped = false;
   for (dict_index_t *index = m_prebuilt->table->first_index(); index != nullptr;
        index = index->next()) {
-    if (!index->is_vector() || index->vec != nullptr) continue;
+    if (!index->is_vector() || vec_runtime_get(index) != nullptr) continue;
 
     /* Match by name, which is how InnoDB pairs a KEY with a
     dict_index_t everywhere else - dict_table_get_index_on_name() is the
@@ -8447,7 +8452,12 @@ int ha_innobase::open(const char *name, int, uint open_flags,
     vec_runtime_open_oom (vec_runtime_open(), vec0hnsw.cc). */
     DBUG_EXECUTE_IF("vec_open_skip_key", key = nullptr;);
 
-    if (key == nullptr) continue;
+    if (key == nullptr) {
+      /* This handler never attempted to open a runtime for this index -
+      see m_vec_runtime_skipped's comment (ha_innodb.h). */
+      m_vec_runtime_skipped = true;
+      continue;
+    }
 
     (void)vec_runtime_open(index, key, table, thd);
   }
@@ -12218,6 +12228,7 @@ int ha_innobase::vec_read_first(Item *item, uchar *buf, ha_rows limit) {
   if (vindex == nullptr) {
     return HA_ERR_END_OF_FILE;
   }
+
   dberr_t vec_open_err = DB_ERROR_UNSET;
   if (vec_runtime_get_or_wait(vindex, m_user_thd, &vec_open_err) == nullptr) {
     /* No runtime. An index with no rows still gets one - the graph is
@@ -12243,6 +12254,26 @@ int ha_innobase::vec_read_first(Item *item, uchar *buf, ha_rows limit) {
     if (vec_open_err != DB_ERROR_UNSET) {
       return convert_error_code_to_mysql(vec_open_err, m_prebuilt->table->flags,
                                          m_user_thd);
+    }
+
+    if (m_vec_runtime_skipped) {
+      /* The one genuinely ambiguous case (see m_vec_runtime_skipped's
+      comment, ha_innodb.h): this handler's own open() never called
+      vec_runtime_open() for this index, and vec_runtime_get_or_wait()
+      just confirmed nobody else has an open in progress or recorded a
+      failure either - so this handler cannot tell "the index has never
+      been opened by anyone" from "it has real rows this handler simply
+      never attempted to reach". Reporting HA_ERR_END_OF_FILE here would
+      be a silent wrong answer - an ordinary, successful empty search -
+      when the base table may have matching rows. Report a distinct,
+      clear error instead. */
+      push_warning_printf(
+          m_user_thd, Sql_condition::SL_WARNING, HA_ERR_UNSUPPORTED,
+          "InnoDB: this handler never attached to the vector runtime for"
+          " index %s on table %s; reopen the table (e.g. start a new"
+          " session) and retry the query.",
+          vindex->name(), m_prebuilt->table->name.m_name);
+      return HA_ERR_UNSUPPORTED;
     }
     return HA_ERR_END_OF_FILE;
   }
