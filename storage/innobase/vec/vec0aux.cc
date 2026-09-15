@@ -427,6 +427,17 @@ bool vec_upd_changes_pk_column(const dict_table_t *table,
                                const upd_field_t *ufield) {
   if (ufield->is_virtual()) return false;
 
+  /* The hidden aux-id column is sticky: DROP INDEX removes the vector
+  index and its aux table but leaves the column (and
+  DICT_TF2_HAS_VEC_AUX_COL) in place, the same as FTS_DOC_ID survives
+  a dropped FULLTEXT index. The caller gates on that flag alone, so
+  without this check a PK-changing UPDATE on such a table - no vector
+  index left, just the leftover column - would be misclassified as
+  needing the label-mint/new-node path below, which has no vector
+  column to read a value from. Mirror vec_upd_changes_indexed_vector's
+  own guard. */
+  if (vec_indexed_col_no(table) == ULINT_UNDEFINED) return false;
+
   const dict_index_t *clust = table->first_index();
   if (dict_index_get_n_unique(clust) != 1) return false;
 
