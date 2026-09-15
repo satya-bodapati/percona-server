@@ -1290,11 +1290,17 @@ struct dict_index_t {
 
   Same publication rule as vec: vec_runtime_open() stores here (via
   std::atomic_ref, release order) on every failure branch, and clears it
-  back to DB_ERROR_UNSET when a later attempt on the same index succeeds,
-  so a stale cause can never outlive the failure it describes. Readers
+  back to DB_ERROR_UNSET only after a later attempt on the same index has
+  already published vec, so a stale cause can never outlive the failure
+  it describes. That ordering - publish vec, then clear vec_open_err -
+  matters: vec and vec_open_err are independent atomics, so a reader that
+  loads vec (null) and this field (DB_ERROR_UNSET) in two separate steps
+  can still land in the gap between those two writes and wrongly read
+  "never attempted" while an open is completing concurrently. Readers
   that find vec null - DML refusing a row, or a vector scan reporting the
-  read failed - load it (acquire) to turn "no runtime" into a specific,
-  accurate error instead of a blanket one. */
+  read failed - must go through vec_runtime_get_checked() (vec0hnsw.h),
+  not vec_runtime_get()/vec_runtime_open_err() read independently, since
+  it rechecks vec once after loading this field for exactly that reason. */
   dberr_t vec_open_err;
 
   /** id of the transaction that created this index, or 0 if the index existed

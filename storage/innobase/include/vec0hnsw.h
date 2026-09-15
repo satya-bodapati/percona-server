@@ -415,12 +415,50 @@ never ran" (DB_ERROR_UNSET; nothing wrong to report, whatever the caller's
 own fallback is applies) from "the open ran and failed" (the real
 dberr_t vec_runtime_open logged and persisted here), instead of folding
 both into one generic error.
+
+Do not call this directly off the back of a null vec_runtime_get(): use
+vec_runtime_get_checked() below instead, which wraps exactly that
+sequence and closes a race between the two loads (see its comment).
 @param[in]  index  vector index
 @return the last open failure's cause, or DB_ERROR_UNSET */
 [[nodiscard]] inline dberr_t vec_runtime_open_err(const dict_index_t *index) {
   std::atomic_ref<dberr_t> slot(
       const_cast<dict_index_t *>(index)->vec_open_err);
   return slot.load(std::memory_order_acquire);
+}
+
+/** vec_runtime_get(index), plus the recheck every "vec is null" caller
+needs before trusting vec_runtime_open_err(index) == DB_ERROR_UNSET.
+
+vec_runtime_open() (vec0hnsw.cc) publishes index->vec before clearing
+vec_open_err back to DB_ERROR_UNSET on its success path, but the two are
+independent atomics: a caller that loads vec (gets null) and then, in a
+separate step, loads vec_open_err (gets DB_ERROR_UNSET) can still land in
+the gap between those two writes, wrongly concluding "open never
+attempted" while an open is in fact completing concurrently. Loading vec
+again, after the err load, closes that gap: this second load's acquire
+synchronizes with the release that cleared vec_open_err, which - because
+vec_runtime_open() clears it only after publishing index->vec - happens
+after that publish in program order, so if the err load really did see a
+clear (as opposed to the zero-initialized DB_ERROR_UNSET no attempt has
+ever touched), the following vec load is guaranteed to see the runtime.
+
+This does not, and cannot, close the case of a genuine first-ever open
+that has not even started: there DB_ERROR_UNSET comes from zero-init, not
+from any clear, and there is nothing yet for a recheck to observe.
+Callers still need their own "never attempted" fallback for that case
+(e.g. ha_innobase::open's `key == nullptr` guard, vec0hnsw.h/ha_innodb.cc).
+@param[in]   index     vector index
+@param[out]  open_err  set to vec_runtime_open_err(index) when the
+                        return value is nullptr; left untouched otherwise
+@return the runtime, or nullptr if still not open after the recheck */
+[[nodiscard]] inline vec_t *vec_runtime_get_checked(const dict_index_t *index,
+                                                    dberr_t *open_err) {
+  vec_t *vec = vec_runtime_get(index);
+  if (vec != nullptr) return vec;
+  *open_err = vec_runtime_open_err(index);
+  if (*open_err == DB_ERROR_UNSET) vec = vec_runtime_get(index);
+  return vec;
 }
 
 vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,

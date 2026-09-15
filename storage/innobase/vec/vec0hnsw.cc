@@ -298,16 +298,6 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
     return nullptr;
   }
 
-  /* A working runtime is about to be published (or already was, by
-  whichever session wins the race below): whatever this index's vec_open_err
-  said about an earlier failed attempt no longer applies, and every reader
-  from here on finds vec non-null first and never looks at vec_open_err
-  again anyway. Cleared for tidiness, not correctness - but tidiness is
-  what keeps a stale cause from ever being the only thing left to read if
-  the runtime is later torn down (vec_index_runtime_free) without a new
-  failure ever being recorded. */
-  set_open_err(DB_ERROR_UNSET);
-
   /* Publish, or lose the race and use the winner. Two sessions opening
   the same table both find dict_index_t::vec null - ha_innobase::open
   takes no latch that would order them - so both build a runtime and one
@@ -326,6 +316,28 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
     ut::delete_(vec);
     return static_cast<vec_t *>(expected);
   }
+
+  /* Only now, after index->vec is visible to readers, clear whatever
+  vec_open_err said about an earlier failed attempt: it no longer
+  applies, and clearing it here (rather than never) keeps a stale cause
+  from being the only thing left to read if the runtime is later torn
+  down (vec_index_runtime_free) without a new failure ever being
+  recorded.
+
+  The order is not just tidiness, though: clearing it before publishing
+  (as this used to do) leaves a window where a concurrent reader can
+  load vec (still null) and then vec_open_err (already DB_ERROR_UNSET)
+  and conclude "never attempted", when actually an open is completing
+  right now. Clearing after the publish means a reader can only ever
+  observe err == DB_ERROR_UNSET here once vec is already there to be
+  (re-)loaded - see vec_runtime_get_checked() (vec0hnsw.h), which every
+  "vec is null" caller now goes through instead of reading vec and
+  vec_open_err as two independent, unordered facts.
+
+  The CAS loser above returns before reaching here and never touches
+  vec_open_err itself - it does not need to, since the winner published
+  index->vec and will run this same clear. */
+  set_open_err(DB_ERROR_UNSET);
   return vec;
 }
 
@@ -931,7 +943,8 @@ dberr_t vec_update_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
   for (dict_index_t *index = table->first_index(); index != nullptr;
        index = index->next()) {
     if (!index->is_vector()) continue;
-    vec_t *vec = vec_runtime_get(index);
+    dberr_t open_err = DB_ERROR_UNSET;
+    vec_t *vec = vec_runtime_get_checked(index, &open_err);
     /* No runtime - vec_runtime_open() (this file) never ran for this
     index, or ran and failed (typically DB_OUT_OF_MEMORY building the
     graph object, but see every failure branch there). Silently
@@ -944,9 +957,13 @@ dberr_t vec_update_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
     only for the (should-not-happen) case where nothing was ever
     recorded: DB_CORRUPTION, below, is reserved for a persisted
     graph/aux row that disagrees with what is expected, which this is
-    not. */
+    not.
+
+    vec_runtime_get_checked() (vec0hnsw.h) already rechecked vec once
+    against a concurrent open racing with this read, so a null vec here
+    means either open_err has the real cause or the open genuinely never
+    ran. */
     if (vec == nullptr) {
-      const dberr_t open_err = vec_runtime_open_err(index);
       const dberr_t err = open_err != DB_ERROR_UNSET ? open_err : DB_ERROR;
       ib::error(ER_IB_MSG_456)
           << "Cannot update the vector index " << index->name << " on table "
@@ -968,13 +985,13 @@ dberr_t vec_insert_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
        index = index->next()) {
     if (!index->is_vector()) continue;
 
-    vec_t *vec = vec_runtime_get(index);
+    dberr_t open_err = DB_ERROR_UNSET;
+    vec_t *vec = vec_runtime_get_checked(index, &open_err);
     /* See vec_update_row's identical check and comment: no runtime means
     vec_runtime_open() never ran or failed, and this row must not be
     allowed to commit as if it had been added to the graph. Report the
     ACTUAL cause it recorded rather than a blanket DB_ERROR. */
     if (vec == nullptr) {
-      const dberr_t open_err = vec_runtime_open_err(index);
       const dberr_t err = open_err != DB_ERROR_UNSET ? open_err : DB_ERROR;
       ib::error(ER_IB_MSG_456)
           << "Cannot insert into the vector index " << index->name
