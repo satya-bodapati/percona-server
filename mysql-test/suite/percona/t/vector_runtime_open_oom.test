@@ -58,12 +58,12 @@ EXPLAIN SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'E
 SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
 
 --let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
---let $assert_select = Failed to open vector runtime for index v on table test/t1: out of memory
+--let $assert_select = Failed to open vector runtime for index `v` on table `test`.`t1`: out of memory
 --let $assert_count = 1
 --let $assert_text = vec_runtime_open logs the out-of-memory reason
 --source include/assert_grep.inc
 
---let $assert_select = Cannot insert into the vector index v on table test/t1: no runtime is open for it
+--let $assert_select = Cannot insert into the vector index `v` on table `test`.`t1`: no runtime is open for it
 --let $assert_count = 1
 --let $assert_text = vec_insert_row refuses rather than silently dropping the row
 --source include/assert_grep.inc
