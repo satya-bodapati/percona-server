@@ -237,7 +237,29 @@ struct Vec_persistor {
   template <typename Hnsw>
   bool load_node_cb(Context *ctx, Hnsw &hnsw,
                     typename Hnsw::LoadNodeHandle handle) {
-    if (ctx->err != DB_SUCCESS) return false;
+    /* Mirrors the assignment below: an earlier DB_RECORD_NOT_FOUND left
+    in ctx->err by a *previous* call to this same function does not stop
+    this one from trying its own row, unless that previous call was
+    loading the entry point - the same case that made it fatal there.
+    Anything else already in ctx->err (DB_CORRUPTION, or a write
+    callback's failure) still stops the walk outright: those are never
+    expected, so continuing to read the aux cannot be trusted.
+
+    On the current call graph this is a no-op: the only site that can
+    put DB_RECORD_NOT_FOUND into ctx->err is the assignment a few lines
+    down, and it only does so when ctx->loading_entry_point is true - in
+    which case init_from_entry_point() (hnsw.h) makes exactly one such
+    call before vec_runtime_load() gives up, so there is never a *later*
+    call in the same walk for this branch to matter to. Kept anyway so
+    the guard stays the mirror image of the assignment it guards - if
+    that ever changes (e.g. a second entry-point-style caller, or a
+    write callback that starts propagating DB_RECORD_NOT_FOUND instead
+    of absorbing it), this keeps behaving correctly instead of silently
+    reintroducing the bug the assignment below was written to fix. */
+    if (ctx->err != DB_SUCCESS &&
+        (ctx->loading_entry_point || ctx->err != DB_RECORD_NOT_FOUND)) {
+      return false;
+    }
 
     /* NOT the place for the innodb_hnsw_max_memory check, however much
     it looks like it: this is where a cold graph grows, but a false
