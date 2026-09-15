@@ -26,7 +26,7 @@ v VECTOR(4) NOT NULL,
 KEY vk (v) TYPE hnsw WITH (M = 4));
 INSERT INTO t1 VALUES (7, 100, STRING_TO_VECTOR('[1,0,0,0]'));
 INSERT INTO t1 VALUES (8, 200, STRING_TO_VECTOR('[0,1,0,0]'));
-INSERT INTO t1 VALUES (9, 300, STRING_TO_VECTOR('[0,0,1,0]'));
+INSERT INTO t1 VALUES (9, 300, STRING_TO_VECTOR('[0,0,2,0]'));
 # Baseline: node for row 7 carries base_pk=7, and the kNN query for
 # row 7's own vector finds it -- both via the index and via the
 # exact (IGNORE INDEX) path.
@@ -91,8 +91,8 @@ SELECT id FROM t1 FORCE INDEX (vk)
 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 3;
 id
 70
-9
 8
+9
 #
 # A combined UPDATE (PK AND vector change together) mints ONE new
 # node carrying the NEW vector together with the NEW key -- not the
@@ -132,14 +132,17 @@ INSERT INTO t2 VALUES (1, STRING_TO_VECTOR('[0,0]')),
 (3, STRING_TO_VECTOR('[50,0]'));
 START TRANSACTION WITH CONSISTENT SNAPSHOT;
 UPDATE t2 SET id = 101 WHERE id = 1;
-# The snapshot reader still finds row 1 under its OLD key...
-SELECT id, VECTOR_TO_STRING(v) FROM t2
+# The snapshot reader still finds row 1 under its OLD key... via the
+# vector index itself (FORCE INDEX), not merely the always-correct
+# exact path -- this is the query the isolation guarantee is about.
+SELECT id, VECTOR_TO_STRING(v) FROM t2 FORCE INDEX (vk)
 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 1;
 id	VECTOR_TO_STRING(v)
 1	[0.00000e+00,0.00000e+00]
 COMMIT;
-# After the snapshot ends, the new key is what a fresh read sees.
-SELECT id, VECTOR_TO_STRING(v) FROM t2
+# After the snapshot ends, the new key is what a fresh read sees,
+# again via the index.
+SELECT id, VECTOR_TO_STRING(v) FROM t2 FORCE INDEX (vk)
 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 1;
 id	VECTOR_TO_STRING(v)
 101	[0.00000e+00,0.00000e+00]

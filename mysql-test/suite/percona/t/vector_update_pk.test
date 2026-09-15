@@ -30,7 +30,7 @@ CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
 
 INSERT INTO t1 VALUES (7, 100, STRING_TO_VECTOR('[1,0,0,0]'));
 INSERT INTO t1 VALUES (8, 200, STRING_TO_VECTOR('[0,1,0,0]'));
-INSERT INTO t1 VALUES (9, 300, STRING_TO_VECTOR('[0,0,1,0]'));
+INSERT INTO t1 VALUES (9, 300, STRING_TO_VECTOR('[0,0,2,0]'));
 
 --echo # Baseline: node for row 7 carries base_pk=7, and the kNN query for
 --echo # row 7's own vector finds it -- both via the index and via the
@@ -111,14 +111,17 @@ disconnect con2;
 --source include/wait_until_disconnected.inc
 connection default;
 
---echo # The snapshot reader still finds row 1 under its OLD key...
-SELECT id, VECTOR_TO_STRING(v) FROM t2
+--echo # The snapshot reader still finds row 1 under its OLD key... via the
+--echo # vector index itself (FORCE INDEX), not merely the always-correct
+--echo # exact path -- this is the query the isolation guarantee is about.
+SELECT id, VECTOR_TO_STRING(v) FROM t2 FORCE INDEX (vk)
   ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 1;
 
 COMMIT;
 
---echo # After the snapshot ends, the new key is what a fresh read sees.
-SELECT id, VECTOR_TO_STRING(v) FROM t2
+--echo # After the snapshot ends, the new key is what a fresh read sees,
+--echo # again via the index.
+SELECT id, VECTOR_TO_STRING(v) FROM t2 FORCE INDEX (vk)
   ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 1;
 
 DROP TABLE t1, t2;
