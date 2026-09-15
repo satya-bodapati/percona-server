@@ -390,6 +390,7 @@ static UNIV_COLD void my_error_innodb(
       my_error(ER_QUERY_INTERRUPTED, MYF(0));
       break;
     case DB_OUT_OF_MEMORY:
+    case DB_VEC_OUT_OF_MEMORY:
       my_error(ER_OUT_OF_RESOURCES, MYF(0));
       break;
     case DB_OUT_OF_FILE_SPACE:
@@ -3632,11 +3633,11 @@ to column numbers in altered_table */
 #ifdef UNIV_DEBUG
   const size_t old_extra =
       (old_has_doc_id ? 1u : 0u) + (old_has_vec_aux_col ? 1u : 0u);
-  assert(i + DATA_N_SYS_COLS + old_extra == old_table->n_cols);
+  ut_ad(i + DATA_N_SYS_COLS + old_extra == old_table->n_cols);
   const size_t new_extra =
       (new_has_doc_id ? 1u : 0u) + (new_has_vec_aux_col ? 1u : 0u);
-  assert(altered_table->s->fields + DATA_N_SYS_COLS + new_extra ==
-         static_cast<ulint>(new_table->n_cols + new_table->n_v_cols));
+  ut_ad(altered_table->s->fields + DATA_N_SYS_COLS + new_extra ==
+        static_cast<ulint>(new_table->n_cols + new_table->n_v_cols));
 #endif
 
   /* The slots advance with the NEW table's hidden columns, which is not
@@ -3652,7 +3653,7 @@ to column numbers in altered_table */
   }
 
   if (old_has_vec_aux_col) {
-    assert(!strcmp(old_table->get_col_name(i), VEC_AUX_ID_COL_NAME));
+    ut_ad(!strcmp(old_table->get_col_name(i), VEC_AUX_ID_COL_NAME));
     col_map[i] = new_has_vec_aux_col ? new_hidden_slot++ : ULINT_UNDEFINED;
     i++;
   }
@@ -4792,7 +4793,7 @@ template <typename Table>
   column (or percona_vec_aux_id) is to be added, and the primary index
   definition is just copied from old table and stored in indexdefs[0] */
   assert(!add_fts_doc_id || new_clustered);
-  assert(!add_vec_aux_col || new_clustered);
+  ut_ad(!add_vec_aux_col || new_clustered);
   assert(new_clustered == (innobase_need_rebuild(ha_alter_info) ||
                            add_fts_doc_id || add_vec_aux_col));
 
@@ -5248,7 +5249,7 @@ template <typename Table>
     as FTS), and the modification-log loop below exempts vector
     indexes - so a vector index never enters ONLINE_INDEX_CREATION. */
     if (ctx->add_index[a]->is_vector()) {
-      assert(!vec_index);
+      ut_ad(!vec_index);
       vec_index = ctx->add_index[a];
       ut_ad(dict_index_get_online_status(vec_index) == ONLINE_INDEX_COMPLETE);
     }
@@ -8350,7 +8351,6 @@ rollback_trx:
       dict_table_autoinc_set_col_pos(t, field->field_index());
       dict_table_autoinc_unlock(t);
     }
-
 
     bool add_fts = false;
 

@@ -87,15 +87,16 @@ the statement is refused.
 
 This asserts the refusal rather than skipping it, so that whoever wires
 the parameter up sees this test go red and knows to update the design's
-open item along with it. vector_runtime_open asserts the same thing at
-SQL level. */
+open item along with it. The vector_runtime_open MTR test asserts the
+same thing at SQL level. */
 TEST_F(Vec0VecTest, HnswEfConstructionIsRefused) {
-  EXPECT_TRUE(parse("CREATE TABLE t1 ("
-                    "  id BIGINT UNSIGNED PRIMARY KEY,"
-                    "  v1 VECTOR(128) NOT NULL,"
-                    "  KEY(v1) TYPE hnsw WITH (ef_construction = 300)"
-                    ")",
-                    ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER));
+  EXPECT_TRUE(
+      parse("CREATE TABLE t1 ("
+            "  id BIGINT UNSIGNED PRIMARY KEY,"
+            "  v1 VECTOR(128) NOT NULL,"
+            "  KEY(v1) TYPE hnsw WITH (ef_construction = 300)"
+            ")",
+            ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER));
 }
 
 /* Every parameter the parser actually supports, together. */
@@ -114,8 +115,10 @@ TEST_F(Vec0VecTest, HnswAllSupportedParams) {
 }
 
 /* No WITH(...) at all: every parameter keeps its default. Worth its own
-case because the open-time overload reaches the parser with a NULL
-Construction_params pointer, where Key_spec always supplies an array. */
+case because the parameter container (Vector_index_params_YY, a
+Mem_root_array_YY of name/value pairs) is then empty and its backing
+array is null - both overloads reach the parser that way, and parsing
+must leave every default alone. */
 TEST_F(Vec0VecTest, HnswNoWithClause) {
   EXPECT_FALSE(
       parse("CREATE TABLE t1 ("

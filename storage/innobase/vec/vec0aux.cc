@@ -208,7 +208,6 @@ bool vec_aux_is_aux_table_name(const char *name) {
   return vec_aux_parse_table_name(name, nullptr, nullptr, nullptr);
 }
 
-
 bool vec_aux_table_has_vector_index(const dict_table_t *table) {
   if (table == nullptr) return false;
   for (const dict_index_t *idx = UT_LIST_GET_FIRST(table->indexes);
@@ -399,7 +398,6 @@ bool vec_upd_row_pk(const dict_table_t *table, const upd_node_t *node,
   if (heap != nullptr) mem_heap_free(heap);
   return ok;
 }
-
 
 uint64_t vec_assign_next_aux_id(dict_table_t *table) {
   ut_ad(table != nullptr);

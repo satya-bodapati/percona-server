@@ -2486,6 +2486,7 @@ int convert_error_code_to_mysql(dberr_t error, uint32_t flags, THD *thd) {
     case DB_UNDO_RECORD_TOO_BIG:
       return (HA_ERR_UNDO_REC_TOO_BIG);
     case DB_OUT_OF_MEMORY:
+    case DB_VEC_OUT_OF_MEMORY:
       return (HA_ERR_OUT_OF_MEM);
     case DB_TABLESPACE_EXISTS:
       return (HA_ERR_TABLESPACE_EXISTS);
@@ -4821,14 +4822,10 @@ static bool innobase_redo_set_state(THD *thd, bool enable) {
 static bool innobase_validate_vector_index_params(
     THD *thd, const char *db_name, HA_CREATE_INFO *create_info,
     const Alter_info *alter_info) {
+  /* Every vector key, so the error does not depend on key order. */
   for (const auto *key : alter_info->key_list) {
-    switch (key->type) {
-      case KEYTYPE_VECTOR:
-        return storage::innobase::vec::validate_options(*key);
-        break;
-      default:
-        break;
-    }
+    if (key->type != KEYTYPE_VECTOR) continue;
+    if (storage::innobase::vec::validate_options(*key)) return true;
   }
 
   return false;
@@ -23776,10 +23773,13 @@ static MYSQL_SYSVAR_BOOL(
 
 static MYSQL_SYSVAR_ULONGLONG(
     hnsw_max_memory, srv_hnsw_max_memory, PLUGIN_VAR_RQCMDARG,
-    "Upper bound, in bytes, on memory held by HNSW vector index graphs"
-    " across all tables and indexes. An INSERT or UPDATE that would build"
-    " a graph node while the bound is already reached is refused with"
-    " ER_OUT_OF_RESOURCES. 0 means no limit.",
+    "Upper bound, in bytes, on the node arenas of HNSW vector index"
+    " graphs, across all tables and indexes. This is where the nodes,"
+    " their vectors and their neighbour lists live; the per-graph id"
+    " lookup map is not charged against it. An INSERT, UPDATE or a query"
+    " that would start building or loading a graph while the bound is"
+    " already reached is refused with ER_OUT_OF_RESOURCES. 0 means no"
+    " limit.",
     nullptr, nullptr, 1ULL << 30, 0, ~0ULL, 0);
 
 static MYSQL_SYSVAR_ULONGLONG(

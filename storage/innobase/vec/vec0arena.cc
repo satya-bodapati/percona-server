@@ -50,7 +50,7 @@ tables and all indexes - and every graph byte passes through
 Vec_arena::allocate(), so one counter here covers exactly that scope. */
 static std::atomic<uint64_t> vec_arena_bytes{0};
 
-uint64_t vec_arena_global_bytes() {
+uint64_t Vec_arena::global_bytes() {
   return vec_arena_bytes.load(std::memory_order_relaxed);
 }
 

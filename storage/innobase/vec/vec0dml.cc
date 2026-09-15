@@ -78,7 +78,6 @@ ulint vec_aux_neighbors_blob_len(uint8_t level, uint32_t m) {
   return (static_cast<ulint>(level) + 2) * m * 8;
 }
 
-
 /** Bottom-up build of a vector aux table.
 
 vec_aux_insert drives the row API: undo per row, redo per row, and an

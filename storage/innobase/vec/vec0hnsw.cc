@@ -337,8 +337,8 @@ static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
   needed - this one so a cold index cannot start loading into a budget
   that is already gone, that one so the load cannot run past it. */
   if (srv_hnsw_max_memory != 0 &&
-      vec_arena_global_bytes() >= srv_hnsw_max_memory) {
-    return DB_OUT_OF_MEMORY;
+      Vec_arena::global_bytes() >= srv_hnsw_max_memory) {
+    return DB_VEC_OUT_OF_MEMORY;
   }
 
   vec->hnsw =
@@ -421,24 +421,16 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
                             uint64_t base_pk, const char *q, THD *thd) {
   /* innodb_hnsw_max_memory, checked BEFORE insert() starts mutating.
 
-  Vec_arena::allocate() is the single point every graph byte passes
-  through and would be the natural place to refuse - but refusing there
-  returns nullptr, which hnsw.h turns into a throw (four sites, e.g.
-  Node::create) partway through a rewire, with neighbours already
-  relinked and no per-block free to unwind with. So the refusal happens
-  here instead, at the entry to the operation, where nothing has been
-  touched yet and DB_OUT_OF_MEMORY simply fails the statement.
+  Refused here, at the entry to the operation, rather than in
+  Vec_arena::allocate(): the arena has no per-block free, so a refusal
+  partway through a rewire cannot be unwound.
 
-  This is a charge check, not a prediction: it asks whether the budget is
-  already spent, not whether this insert would fit. Sizing the insert is
-  not possible from outside the class - sizeof(Node) is private, and one
-  insert also allocates stubs for lazily loaded neighbours and a copy of
-  the query vector. The budget can therefore be exceeded by at most what
-  one insert allocates, which is the price of refusing before mutating
-  rather than during. */
+  A charge check, not a prediction - it asks whether the budget is spent,
+  not whether this insert fits. Taken outside the graph's lock, so the
+  overshoot is one insert's allocation per thread already past it. */
   if (srv_hnsw_max_memory != 0 &&
-      vec_arena_global_bytes() >= srv_hnsw_max_memory) {
-    return DB_OUT_OF_MEMORY;
+      Vec_arena::global_bytes() >= srv_hnsw_max_memory) {
+    return DB_VEC_OUT_OF_MEMORY;
   }
 
   MDL_ticket *mdl = nullptr;
@@ -734,7 +726,7 @@ Vec_build *vec_build_start(dict_index_t *index, const TABLE *altered_table) {
   /* Same pre-flight as the DML path (design: "Memory limits"): refuse
   before building anything rather than throwing partway through. */
   if (srv_hnsw_max_memory != 0 &&
-      vec_arena_global_bytes() >= srv_hnsw_max_memory) {
+      Vec_arena::global_bytes() >= srv_hnsw_max_memory) {
     return nullptr;
   }
 
@@ -808,8 +800,8 @@ dberr_t vec_build_add_row(Vec_build *b, dict_table_t *table,
   threads can pass this together and overshoot by a node each, which is
   bounded by the thread count and cheaper than serialising them. */
   if (srv_hnsw_max_memory != 0 &&
-      vec_arena_global_bytes() >= srv_hnsw_max_memory) {
-    return DB_OUT_OF_MEMORY;
+      Vec_arena::global_bytes() >= srv_hnsw_max_memory) {
+    return DB_VEC_OUT_OF_MEMORY;
   }
   return DB_SUCCESS;
 }
