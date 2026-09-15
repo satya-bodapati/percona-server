@@ -11115,18 +11115,25 @@ bool JOIN::optimize_vector_query() {
 
   if (vector_column->type() != MYSQL_TYPE_VECTOR) return false;
 
-  /* A NULL, malformed, or dimension-mismatched constant is not something
-  the kNN index can search. On the exact path a NULL query vector makes
-  Item_func_vector_distance::val_real() return NULL for every row, which
-  does not filter any row out; a malformed or wrongly-sized one raises
-  ER_TO_VECTOR_CONVERSION or ER_WRONG_ARGUMENTS. Activating JT_VECTOR here
-  instead sends these cases through vec_read_first(), which reports them
-  as end-of-file - a silently empty result where rows or an error are
-  expected. Leaving the query on the exact path reproduces its behaviour
-  exactly, so validate the constant now rather than duplicating that
-  behaviour in the handler. */
+  /* A NULL, malformed, non-finite, or dimension-mismatched constant is
+  not something the kNN index can search. On the exact path a NULL query
+  vector makes Item_func_vector_distance::val_real() return NULL for
+  every row, which does not filter any row out; a malformed or
+  wrongly-sized one raises ER_TO_VECTOR_CONVERSION or ER_WRONG_ARGUMENTS;
+  a NaN/Inf component raises ER_DATA_OUT_OF_RANGE (check_float_overflow
+  on the computed distance). Activating JT_VECTOR here instead sends
+  these cases through vec_read_first(), which reports them as
+  end-of-file - a silently empty result where rows or an error are
+  expected, or (NaN/Inf) unordered results from a graph search that,
+  unlike val_real(), never checks for them. Leaving the query on the
+  exact path reproduces its behaviour exactly, so validate the constant
+  now rather than duplicating that behaviour in the handler. */
   String buff;
   const String *const_vector = const_vector_expr->val_str(&buff);
+  // val_str() itself may have raised an error (e.g. a nested
+  // TO_VECTOR() call on malformed input, or OOM); propagate it rather
+  // than silently falling back to the exact path with a pending error.
+  if (thd->is_error()) return true;
   if (const_vector == nullptr || const_vector->ptr() == nullptr) return false;
   const uint32 const_dims =
       get_dimensions(const_vector->length(), Field_vector::precision);
@@ -11134,6 +11141,10 @@ bool JOIN::optimize_vector_query() {
       const_dims != down_cast<const Field_vector *>(vector_column)
                         ->get_max_dimensions()) {
     return false;
+  }
+  const auto *const_floats = pointer_cast<const float *>(const_vector->ptr());
+  for (uint32 i = 0; i < const_dims; ++i) {
+    if (!std::isfinite(const_floats[i])) return false;
   }
 
   JOIN_TAB *tab = best_ref[0];
