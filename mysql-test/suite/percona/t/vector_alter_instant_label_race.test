@@ -1,0 +1,112 @@
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+
+--echo #
+--echo # PS-11300: the label-counter snapshot in prepare_inplace_alter_table()
+--echo # (handler0alter.cc) is carried into new_dd_tab before this ALTER's own
+--echo # commit persists it. commit_inplace_alter_table() re-reads the counter
+--echo # to fix that for the general online-DDL case (see
+--echo # vector_alter_online_label_race.test) - but only when a
+--echo # ha_innobase_inplace_ctx exists. ALGORITHM=INSTANT never creates one:
+--echo # prepare_inplace_alter_table_impl() returns for the is_instant branch
+--echo # before ever setting ha_alter_info->handler_ctx. INSTANT also never
+--echo # takes the SHARED_LOCK_AFTER_PREPARE/NO_LOCK_AFTER_PREPARE branch in
+--echo # mysql_inplace_alter_table() that upgrades the MDL up front - but it
+--echo # still runs through wait_while_table_is_used() ("Upgrade to EXCLUSIVE
+--echo # before commit") right before ha_commit_inplace_alter_table(), same as
+--echo # every other algorithm, and that already blocks new table opens by
+--echo # the time commit_inplace_alter_table() runs (confirmed with gdb: a
+--echo # concurrent INSERT sits in MDL_wait::timed_wait /
+--echo # open_table_get_mdl_lock while an instant ALTER is paused at
+--echo # alter_table_inplace_before_commit). So the reachable window for
+--echo # INSTANT is the same shape as the online case, just earlier: between
+--echo # the prepare-time snapshot and that wait_while_table_is_used() call,
+--echo # which is exactly what pausing at alter_table_inplace_after_lock_
+--echo # downgrade (common to every algorithm, INSTANT included) below
+--echo # catches. An unrelated instant ADD COLUMN cannot be used to show this:
+--echo # check_if_supported_inplace_alter's online=false gate keys off
+--echo # innobase_need_rebuild(), which ADD COLUMN sets structurally
+--echo # regardless of whether InnoDB later executes it instantly - so with a
+--echo # surviving vector index it is refused LOCK=NONE (and therefore
+--echo # ALGORITHM=INSTANT) outright. RENAME COLUMN is pure metadata, never
+--echo # sets that flag, and reaches ha_innobase::commit_inplace_alter_table()
+--echo # with handler_ctx == nullptr (confirmed with gdb against this build).
+--echo #
+--echo # Same second ingredient as the online case: an unrelated
+--echo # AUTO_INCREMENT column makes dd_set_autoinc bump DD_TABLE_VERSION on
+--echo # this ALTER's commit, and a checkpoint forced while the ALTER is
+--echo # paused orphans whatever the buffered dynamic metadata mechanism
+--echo # would otherwise have rescued. Without that, a bare restart cannot
+--echo # distinguish "fixed" from "buggy" reliably, since an ordinary
+--echo # background flush could rescue the stale value by luck.
+--echo #
+--echo # A second, independent bug hid behind the first: Instant_ddl_impl's
+--echo # own dd_commit_inplace_no_change() calls dd_copy_private(), which
+--echo # clears new_dd_tab's se_private_data and repopulates it from
+--echo # old_dd_tab wholesale - it only special-cases AUTOINC/VERSION to
+--echo # survive that. Neither the prepare-time snapshot nor the
+--echo # commit_inplace_alter_table() refresh above meant anything once this
+--echo # ran afterwards: both were simply erased, and old_dd_tab never had a
+--echo # DD_TABLE_VEC_NEXT_ID key to copy back in either (only a rebuild
+--echo # writes one), so the counter came back as unset - id=1, not id=3 -
+--echo # regardless of any race. dd_copy_private() now preserves it the same
+--echo # way it preserves AUTOINC/VERSION.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+                 serial BIGINT UNSIGNED AUTO_INCREMENT UNIQUE,
+                 pad INT,
+                 v VECTOR(4) NOT NULL);
+INSERT INTO t1 (id, pad, v) VALUES (1,10,STRING_TO_VECTOR('[1,0,0,0]')),
+                                   (2,20,STRING_TO_VECTOR('[2,0,0,0]'));
+ALTER TABLE t1 ADD KEY (v) TYPE hnsw WITH (M = 8);
+
+--echo # Labels 1,2 handed out by the index build.
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # An unrelated instant column rename - no rebuild, no ctx at all. Pause
+--echo # it right after prepare, before wait_while_table_is_used() blocks new
+--echo # opens - the same window the online test catches, just earlier in
+--echo # this algorithm's timeline.
+connect (con1, localhost, root,,);
+connection con1;
+SET DEBUG_SYNC = 'alter_table_inplace_after_lock_downgrade SIGNAL paused WAIT_FOR go';
+--send ALTER TABLE t1 RENAME COLUMN pad TO pad2, ALGORITHM=INSTANT
+
+connection default;
+SET DEBUG_SYNC = 'now WAIT_FOR paused';
+
+--echo # Concurrent DML while the instant ALTER is paused before it blocks new
+--echo # opens: labels 3,4,5 must survive it.
+INSERT INTO t1 (id, v) VALUES (3,STRING_TO_VECTOR('[3,0,0,0]')),
+                              (4,STRING_TO_VECTOR('[4,0,0,0]')),
+                              (5,STRING_TO_VECTOR('[5,0,0,0]'));
+
+--echo # Flush dynamic metadata now, while still paused before the version-
+--echo # bumping commit - see the design note above.
+SET GLOBAL innodb_log_checkpoint_now = ON;
+
+SET DEBUG_SYNC = 'now SIGNAL go';
+
+connection con1;
+--reap
+disconnect con1;
+
+connection default;
+SET DEBUG_SYNC = 'RESET';
+
+--echo # In memory, right after the instant ALTER commits, everything is
+--echo # still fine: 5 nodes, labels 1..5, no duplicates.
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--source include/restart_mysqld.inc
+
+--echo # Once fixed, this must read id=6. Before the ctx==nullptr case was
+--echo # covered, it read id=3 here - a label already carried by the row
+--echo # inserted as id=3 during the race.
+SET SESSION innodb_interpreter = 'vec_next_id test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+DROP TABLE t1;
