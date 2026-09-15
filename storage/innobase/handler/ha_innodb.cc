@@ -12206,7 +12206,28 @@ int ha_innobase::vec_read_first(Item *item, uchar *buf, ha_rows limit) {
   DBUG_TRACE;
 
   dict_index_t *vindex = vec_index_of(m_prebuilt->table);
-  if (vindex == nullptr || vindex->vec == nullptr) {
+  if (vindex == nullptr) {
+    return HA_ERR_END_OF_FILE;
+  }
+  if (vec_runtime_get(vindex) == nullptr) {
+    /* No runtime. An index with no rows still gets one - the graph is
+    built empty at open time and loaded from the aux lazily, on the
+    first search or insert (vec_runtime_load, vec0hnsw.cc) - so this is
+    never "the index legitimately has nothing in it yet"; it is always
+    either vec_runtime_open() never having run for this index, or having
+    run and failed. Silently reporting EOF here would tell the client an
+    ordinary, successful search of zero rows, when the table may well
+    have rows the search simply could not reach - worse than an error,
+    it is a wrong answer. Report the ACTUAL cause vec_runtime_open
+    recorded (vec_runtime_open_err, vec0hnsw.h) when it has one; fall
+    back to EOF only for the one case nothing was ever recorded for -
+    the open never having been attempted at all (see the "key == nullptr"
+    guard in ha_innobase::open). */
+    const dberr_t open_err = vec_runtime_open_err(vindex);
+    if (open_err != DB_ERROR_UNSET) {
+      return convert_error_code_to_mysql(open_err, m_prebuilt->table->flags,
+                                         m_user_thd);
+    }
     return HA_ERR_END_OF_FILE;
   }
 

@@ -29,7 +29,7 @@ INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]'));
 --echo # opens t1 and, with the knob armed, is also what discovers the
 --echo # runtime failed to build.
 SET SESSION debug = '+d,vec_runtime_open_oom';
---error ER_GET_ERRNO,ER_INTERNAL_ERROR,1
+--error ER_OUT_OF_RESOURCES
 INSERT INTO t1 VALUES (2, STRING_TO_VECTOR('[0,1,0,0]'));
 SET SESSION debug = '-d,vec_runtime_open_oom';
 
@@ -45,6 +45,18 @@ SELECT @@session.innodb_interpreter_output;
 --echo # while the graph silently never learned about it.
 SELECT id FROM t1 FORCE INDEX (PRIMARY) ORDER BY id;
 
+--echo # The vector index still has one committed row (id=1). A search
+--echo # must not silently report zero results just because the runtime
+--echo # failed to open earlier in this same session - that would be a
+--echo # false "the index is empty" answer, worse than an error, since the
+--echo # table plainly has a matching row. First confirm the query really
+--echo # takes the vector-index access path (type=vector_knn) rather than
+--echo # falling back to a table scan that would pass by coincidence.
+--replace_column 10 # 11 #
+EXPLAIN SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+--error ER_OUT_OF_RESOURCES
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+
 --let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
 --let $assert_select = Failed to open vector runtime for index v on table test/t1: out of memory
 --let $assert_count = 1
@@ -58,7 +70,8 @@ SELECT id FROM t1 FORCE INDEX (PRIMARY) ORDER BY id;
 
 --echo # Once the injection is gone, reopening the table (FLUSH TABLES
 --echo # forces it - see the ha_innobase::open comment) lets
---echo # vec_runtime_open() retry and succeed, and normal DML resumes.
+--echo # vec_runtime_open() retry and succeed, and normal DML and search
+--echo # both resume.
 FLUSH TABLES t1;
 INSERT INTO t1 VALUES (2, STRING_TO_VECTOR('[0,1,0,0]'));
 SET SESSION innodb_interpreter = 'vec_runtime_info test/t1';

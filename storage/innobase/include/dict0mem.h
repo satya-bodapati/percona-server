@@ -1278,6 +1278,25 @@ struct dict_index_t {
   fields_array. */
   Vec_runtime *vec;
 
+  /** Why vec is null, when it is: the dberr_t vec_runtime_open() (vec0hnsw.cc)
+  returned from its last failed attempt to build this index's runtime, or
+  DB_ERROR_UNSET if no attempt has ever failed - which covers both "no
+  attempt has been made yet" and "the runtime is open" alike, since
+  whoever finds vec non-null has no reason to look at this field.
+
+  DB_ERROR_UNSET is 0 (db0err.h), so this gets the same free zero-init
+  vec gets above from the struct being zeroed rather than constructed;
+  no explicit initialization needed in dict_mem_fill_index_struct().
+
+  Same publication rule as vec: vec_runtime_open() stores here (via
+  std::atomic_ref, release order) on every failure branch, and clears it
+  back to DB_ERROR_UNSET when a later attempt on the same index succeeds,
+  so a stale cause can never outlive the failure it describes. Readers
+  that find vec null - DML refusing a row, or a vector scan reporting the
+  read failed - load it (acquire) to turn "no runtime" into a specific,
+  accurate error instead of a blanket one. */
+  dberr_t vec_open_err;
+
   /** id of the transaction that created this index, or 0 if the index existed
   when InnoDB was started up */
   trx_id_t trx_id;

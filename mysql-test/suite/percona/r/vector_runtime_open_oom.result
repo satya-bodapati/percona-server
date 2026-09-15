@@ -25,7 +25,7 @@ INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]'));
 # runtime failed to build.
 SET SESSION debug = '+d,vec_runtime_open_oom';
 INSERT INTO t1 VALUES (2, STRING_TO_VECTOR('[0,1,0,0]'));
-ERROR HY000: Got error 168 - 'Unknown (generic) error from engine' from storage engine
+ERROR HY000: Out of memory; check if mysqld or some other process uses all available memory; if not, you may have to use 'ulimit' to allow mysqld to use more memory or you can add more swap space
 SET SESSION debug = '-d,vec_runtime_open_oom';
 # No runtime is attached to the index - confirming the injection
 # actually forced the branch this test exists to cover, rather than
@@ -41,11 +41,26 @@ no runtime
 SELECT id FROM t1 FORCE INDEX (PRIMARY) ORDER BY id;
 id
 1
+# The vector index still has one committed row (id=1). A search
+# must not silently report zero results just because the runtime
+# failed to open earlier in this same session - that would be a
+# false "the index is empty" answer, worse than an error, since the
+# table plainly has a matching row. First confirm the query really
+# takes the vector-index access path (type=vector_knn) rather than
+# falling back to a table scan that would pass by coincidence.
+EXPLAIN SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	vector_knn	NULL	v	1	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t1`.`id` AS `id` from `test`.`t1` order by distance(`test`.`t1`.`v`,to_vector('[1,0,0,0]'),'EUCLIDEAN') limit 2
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+ERROR HY000: Out of memory; check if mysqld or some other process uses all available memory; if not, you may have to use 'ulimit' to allow mysqld to use more memory or you can add more swap space
 # vec_runtime_open logs the out-of-memory reason
 # vec_insert_row refuses rather than silently dropping the row
 # Once the injection is gone, reopening the table (FLUSH TABLES
 # forces it - see the ha_innobase::open comment) lets
-# vec_runtime_open() retry and succeed, and normal DML resumes.
+# vec_runtime_open() retry and succeed, and normal DML and search
+# both resume.
 FLUSH TABLES t1;
 INSERT INTO t1 VALUES (2, STRING_TO_VECTOR('[0,1,0,0]'));
 SET SESSION innodb_interpreter = 'vec_runtime_info test/t1';

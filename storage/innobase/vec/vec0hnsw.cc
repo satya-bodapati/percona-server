@@ -203,6 +203,16 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
     return existing;
   }
 
+  /* Persist why, for whoever next finds vec_runtime_get(index) still null:
+  vec_insert_row, vec_update_row, and ha_innobase::vec_read_first all
+  report this specific cause instead of a blanket error or a false
+  "index is empty". Release order pairs with vec_runtime_open_err()'s
+  acquire load (vec0hnsw.h). */
+  auto set_open_err = [index](dberr_t err) {
+    std::atomic_ref<dberr_t>(index->vec_open_err)
+        .store(err, std::memory_order_release);
+  };
+
   /* The values the user wrote in WITH(...), round-tripped through the
   DD and parsed by the open-time overload added for exactly this. */
   storage::innobase::vec::VectorIndexParam vip;
@@ -212,6 +222,7 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
         << " on table " << index->table->name << ": could not parse the"
         << " index's WITH(...) options; vector search on it will not"
         << " work until the table is reopened.";
+    set_open_err(DB_ERROR);
     return nullptr;
   }
   const auto *hnsw_param = std::get_if<storage::innobase::vec::HnswParam>(&vip);
@@ -221,6 +232,7 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
         << " on table " << index->table->name << ": WITH(...) options do"
         << " not describe an HNSW index; vector search on it will not"
         << " work until the table is reopened.";
+    set_open_err(DB_ERROR);
     return nullptr;
   }
 
@@ -241,6 +253,7 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
         << " on table " << index->table->name << ": the indexed column is"
         << " not a VECTOR column; vector search on it will not work"
         << " until the table is reopened.";
+    set_open_err(DB_ERROR);
     return nullptr;
   }
   const Field_vector *field = down_cast<const Field_vector *>(f);
@@ -252,6 +265,7 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
         << " on table " << index->table->name << ": invalid vector"
         << " dimension " << dims << "; vector search on it will not work"
         << " until the table is reopened.";
+    set_open_err(DB_ERROR);
     return nullptr;
   }
 
@@ -268,19 +282,31 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
   if (vec == nullptr) {
     /* Out of memory building the runtime. This index is left without a
     graph: index->vec stays null, and vec_insert_row/vec_update_row
-    (below) now refuse (DB_ERROR) rather than silently drop the row's
-    vector from the graph - a base row with no corresponding graph entry
-    is an inconsistency between the table and its vector index, not
-    something to let through quietly. The next open of this table (a
-    fresh handler, e.g. after the OOM has cleared) retries this
-    function and can still succeed. */
+    (below) now refuse (the persisted DB_OUT_OF_MEMORY, via
+    vec_runtime_open_err) rather than silently drop the row's vector
+    from the graph - a base row with no corresponding graph entry is an
+    inconsistency between the table and its vector index, not something
+    to let through quietly. The next open of this table (a fresh
+    handler, e.g. after the OOM has cleared) retries this function and
+    can still succeed. */
     ib::error(ER_IB_MSG_456)
         << "Failed to open vector runtime for index " << index->name
         << " on table " << index->table->name << ": out of memory;"
         << " vector search on it will not work, and inserts/updates on"
         << " the table will be refused, until the table is reopened.";
+    set_open_err(DB_OUT_OF_MEMORY);
     return nullptr;
   }
+
+  /* A working runtime is about to be published (or already was, by
+  whichever session wins the race below): whatever this index's vec_open_err
+  said about an earlier failed attempt no longer applies, and every reader
+  from here on finds vec non-null first and never looks at vec_open_err
+  again anyway. Cleared for tidiness, not correctness - but tidiness is
+  what keeps a stale cause from ever being the only thing left to read if
+  the runtime is later torn down (vec_index_runtime_free) without a new
+  failure ever being recorded. */
+  set_open_err(DB_ERROR_UNSET);
 
   /* Publish, or lose the race and use the winner. Two sessions opening
   the same table both find dict_index_t::vec null - ha_innobase::open
@@ -906,20 +932,28 @@ dberr_t vec_update_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
        index = index->next()) {
     if (!index->is_vector()) continue;
     vec_t *vec = vec_runtime_get(index);
-    /* No runtime - most likely vec_runtime_open() (this file) hit
-    DB_OUT_OF_MEMORY building the graph object and left index->vec null.
-    Silently continuing here would let this row's base data commit while
-    its vector never reaches the graph or the aux table, with nothing
-    to say so: the same DB_ERROR vec_build_start reports for a failure
-    that is not a corrupt persisted row (that is what DB_CORRUPTION,
-    below, is for) but still means this row's write cannot be trusted. */
+    /* No runtime - vec_runtime_open() (this file) never ran for this
+    index, or ran and failed (typically DB_OUT_OF_MEMORY building the
+    graph object, but see every failure branch there). Silently
+    continuing here would let this row's base data commit while its
+    vector never reaches the graph or the aux table, with nothing to
+    say so, so this row's write cannot be trusted and is refused - with
+    the ACTUAL cause vec_runtime_open recorded (vec_runtime_open_err,
+    vec0hnsw.h), not a blanket substitute, so the client sees a specific,
+    accurate error rather than a generic one. DB_ERROR is the fallback
+    only for the (should-not-happen) case where nothing was ever
+    recorded: DB_CORRUPTION, below, is reserved for a persisted
+    graph/aux row that disagrees with what is expected, which this is
+    not. */
     if (vec == nullptr) {
+      const dberr_t open_err = vec_runtime_open_err(index);
+      const dberr_t err = open_err != DB_ERROR_UNSET ? open_err : DB_ERROR;
       ib::error(ER_IB_MSG_456)
           << "Cannot update the vector index " << index->name << " on table "
           << index->table->name << ": no runtime is open for it (see the"
           << " earlier 'Failed to open vector runtime' error); the update"
           << " is refused rather than silently dropped.";
-      return DB_ERROR;
+      return err;
     }
     if (q_len != vec->dims * sizeof(float)) return DB_CORRUPTION;
     const dberr_t err = vec_add_node(vec, table, label, base_pk, q, thd);
@@ -935,17 +969,20 @@ dberr_t vec_insert_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
     if (!index->is_vector()) continue;
 
     vec_t *vec = vec_runtime_get(index);
-    /* See vec_update_row's identical check: no runtime means
-    vec_runtime_open() failed (typically DB_OUT_OF_MEMORY), and this row
-    must not be allowed to commit as if it had been added to the graph. */
+    /* See vec_update_row's identical check and comment: no runtime means
+    vec_runtime_open() never ran or failed, and this row must not be
+    allowed to commit as if it had been added to the graph. Report the
+    ACTUAL cause it recorded rather than a blanket DB_ERROR. */
     if (vec == nullptr) {
+      const dberr_t open_err = vec_runtime_open_err(index);
+      const dberr_t err = open_err != DB_ERROR_UNSET ? open_err : DB_ERROR;
       ib::error(ER_IB_MSG_456)
           << "Cannot insert into the vector index " << index->name
           << " on table " << index->table->name << ": no runtime is open"
           << " for it (see the earlier 'Failed to open vector runtime'"
           << " error); the insert is refused rather than silently"
           << " dropped.";
-      return DB_ERROR;
+      return err;
     }
 
     ulint vec_len = 0;

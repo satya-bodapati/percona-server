@@ -407,6 +407,22 @@ with a real constructor would not have one called.
   return static_cast<vec_t *>(slot.load(std::memory_order_acquire));
 }
 
+/** Why `vec_runtime_get(index)` is null, when it is.
+
+Callers that already found the runtime null - vec_insert_row,
+vec_update_row, ha_innobase::vec_read_first - use this to tell "the open
+never ran" (DB_ERROR_UNSET; nothing wrong to report, whatever the caller's
+own fallback is applies) from "the open ran and failed" (the real
+dberr_t vec_runtime_open logged and persisted here), instead of folding
+both into one generic error.
+@param[in]  index  vector index
+@return the last open failure's cause, or DB_ERROR_UNSET */
+[[nodiscard]] inline dberr_t vec_runtime_open_err(const dict_index_t *index) {
+  std::atomic_ref<dberr_t> slot(
+      const_cast<dict_index_t *>(index)->vec_open_err);
+  return slot.load(std::memory_order_acquire);
+}
+
 vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
                         THD *thd);
 
