@@ -73,11 +73,17 @@ transaction contributes undo and redo, not exclusion.
 
 What is given up is per-insert atomicity: a callback failing midway leaves the
 earlier callbacks committed, so the aux keeps a node whose base row may never
-commit. That is the orphan section 13 already accepts and filters at read
+commit. That is the orphan the design's "Rollback, and why orphans are
+acceptable" accepts and filters at read
 time — and it is the better direction to diverge in, because the in-memory
 rewire cannot be undone either. Rolling the whole insert back left memory
-holding a node the aux had discarded. */
+holding a node the aux had discarded.
+
+An index build opts out via ctx->commit_steps: there trx is the ALTER's own
+transaction, not a sub-transaction, and committing it per callback would
+commit the DDL a node at a time. */
 static void vec_ctx_step_commit(Vec_ctx *ctx) {
+  if (!ctx->commit_steps) return;
   trx_commit_for_mysql(ctx->trx);
   trx_start_internal(ctx->trx, UT_LOCATION_HERE);
 }
@@ -199,10 +205,20 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
   DD and parsed by the open-time overload added for exactly this. */
   storage::innobase::vec::VectorIndexParam vip;
   if (storage::innobase::vec::parse_options(*key, vip)) {
+    ib::error(ER_IB_MSG_456)
+        << "Failed to open vector runtime for index " << index->name
+        << " on table " << index->table->name << ": could not parse the"
+        << " index's WITH(...) options; vector search on it will not"
+        << " work until the table is reopened.";
     return nullptr;
   }
   const auto *hnsw_param = std::get_if<storage::innobase::vec::HnswParam>(&vip);
   if (hnsw_param == nullptr) {
+    ib::error(ER_IB_MSG_456)
+        << "Failed to open vector runtime for index " << index->name
+        << " on table " << index->table->name << ": WITH(...) options do"
+        << " not describe an HNSW index; vector search on it will not"
+        << " work until the table is reopened.";
     return nullptr;
   }
 
@@ -217,16 +233,35 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
   field. */
   ut_a(key->user_defined_key_parts == 1);
   const Field *f = form->field[key->key_part[0].field->field_index()];
-  if (f == nullptr || f->type() != MYSQL_TYPE_VECTOR) return nullptr;
+  if (f == nullptr || f->type() != MYSQL_TYPE_VECTOR) {
+    ib::error(ER_IB_MSG_456)
+        << "Failed to open vector runtime for index " << index->name
+        << " on table " << index->table->name << ": the indexed column is"
+        << " not a VECTOR column; vector search on it will not work"
+        << " until the table is reopened.";
+    return nullptr;
+  }
   const Field_vector *field = down_cast<const Field_vector *>(f);
 
   const uint32_t dims = field->get_max_dimensions();
   if (dims == 0 || dims == UINT32_MAX) {
+    ib::error(ER_IB_MSG_456)
+        << "Failed to open vector runtime for index " << index->name
+        << " on table " << index->table->name << ": invalid vector"
+        << " dimension " << dims << "; vector search on it will not work"
+        << " until the table is reopened.";
     return nullptr;
   }
 
   auto *vec = ut::new_withkey<vec_t>(UT_NEW_THIS_FILE_PSI_KEY);
-  if (vec == nullptr) return nullptr;
+  if (vec == nullptr) {
+    ib::error(ER_IB_MSG_456)
+        << "Failed to open vector runtime for index " << index->name
+        << " on table " << index->table->name << ": out of memory;"
+        << " vector search on it will not work until the table is"
+        << " reopened.";
+    return nullptr;
+  }
 
   vec->index_id = index->id;
   vec->table = index->table;
@@ -404,7 +439,7 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
   everything below durable, ours included. The invariant "aux superset of
   committed base rows" therefore holds by LSN ordering, and a flush here
   buys nothing. If the user's transaction never commits, the aux rows are an
-  orphan at worst, which section 13 accepts.
+  orphan at worst, which the design's rollback section accepts.
 
   This is what makes committing per callback affordable. Measured on an idle
   128-core box, RelWithDebInfo, 40000 single-threaded inserts: 8.5s for one
@@ -461,7 +496,8 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
 
     This now rolls back only the callback that failed: everything before it
     was committed by vec_ctx_step_commit. The earlier rows stand, which is
-    the orphan section 13 accepts, and is the direction that keeps the aux
+    the orphan the design's rollback section accepts, and is the direction
+    that keeps the aux
     tracking memory rather than diverging from it. */
     trx_rollback_to_savepoint(aux_trx, nullptr);
   }
@@ -649,7 +685,7 @@ dberr_t vec_build_index(trx_t *trx, dict_table_t *table,
   ut_a(vec_index != nullptr && vec_index->is_vector());
   ut_a(dims != 0 && m != 0);
 
-  /* Same pre-flight as the DML path (design section 17a): refuse before
+  /* Same pre-flight as the DML path (design: "Memory limits"): refuse before
   building anything rather than throwing partway through. */
   if (srv_hnsw_max_memory != 0 &&
       vec_arena_global_bytes() >= srv_hnsw_max_memory) {
@@ -672,6 +708,10 @@ dberr_t vec_build_index(trx_t *trx, dict_table_t *table,
   ctx.m = m;
   ctx.vec_bytes = dims * sizeof(float);
   ctx.err = DB_SUCCESS;
+  /* trx here is the ALTER's own transaction, so the callbacks must not
+  commit it. The whole build lands in one transaction and rolls back with
+  the ALTER. */
+  ctx.commit_steps = false;
 
   /* A private graph, discarded below. It is not installed on the index:
   a half-built graph must never be reachable, and if the ALTER fails
