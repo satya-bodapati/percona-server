@@ -1,5 +1,3 @@
---source include/have_debug.inc
-
 --echo #
 --echo # PS-11300: GROUP BY combined with the canonical
 --echo # ORDER BY DISTANCE(...) LIMIT k shape.
@@ -38,6 +36,11 @@
 --echo # optimize_vector_query() now bails out when JOIN::grouped is set --
 --echo # the same guard fts_index_access() already has -- so this shape
 --echo # falls back to the exact path: one row per group, correct count.
+--echo #
+--echo # Unlike its sibling vector_*.test files, this one does not require
+--echo # a debug build: the guard is release-build correctness, not just a
+--echo # debug assert, and this test's own DDL/queries use no debug-only
+--echo # construct, so it runs (and would catch a regression) on any build.
 --echo #
 
 CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,

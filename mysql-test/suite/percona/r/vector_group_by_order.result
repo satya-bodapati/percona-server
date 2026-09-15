@@ -37,6 +37,11 @@
 # the same guard fts_index_access() already has -- so this shape
 # falls back to the exact path: one row per group, correct count.
 #
+# Unlike its sibling vector_*.test files, this one does not require
+# a debug build: the guard is release-build correctness, not just a
+# debug assert, and this test's own DDL/queries use no debug-only
+# construct, so it runs (and would catch a regression) on any build.
+#
 CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
 g INT,
 v VECTOR(2) NOT NULL,
