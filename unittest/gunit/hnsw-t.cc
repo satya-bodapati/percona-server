@@ -921,10 +921,25 @@ TEST(HnswCorruptionTest, MalformedUpperLayerEdgeDoesNotCrash) {
   StoredNode &victim_row = fixture.store.nodes.at(victim_id);
   // A correctly-built graph always has victim_row.layer >= ep_row.layer
   // here (the entry point cannot list a neighbor at a layer above the
-  // neighbor's own top layer). Simulate corruption/a malformed edge by
-  // stamping a too-low persisted layer on the victim, same as a bit-flip
-  // or a stale layer byte from a torn write would produce on load.
+  // neighbor's own top layer).
   ASSERT_GE(victim_row.layer, ep_row.layer);
+
+  // Simulate a malformed *edge* only: the entry point's own record is
+  // untouched (it still lists victim at its top layer), but victim's own
+  // record is rewritten to a self-consistent, genuinely-lower-layer node -
+  // its neighbor_ids is truncated to just victim's real layer-0 slice, the
+  // same shape a production loader's blob-length-vs-layer check (which
+  // rejects a layer/blob mismatch as corruption before this library ever
+  // sees the node) would accept. So this - some other node's edge naming a
+  // target that does not reach that layer - is exactly the corruption a
+  // blob-length check cannot catch: it only validates a node against its
+  // own record, never the edges pointing at it.
+  const size_t victim_l0_begin = stored_layer0_begin(victim_row.layer, kMLocal);
+  const size_t victim_l0_end = stored_layer0_end(victim_row.layer, kMLocal);
+  ASSERT_LE(victim_l0_end, victim_row.neighbor_ids.size());
+  victim_row.neighbor_ids.assign(
+      victim_row.neighbor_ids.begin() + victim_l0_begin,
+      victim_row.neighbor_ids.begin() + victim_l0_end);
   victim_row.layer = 0;
   const std::vector<float> victim_vec = victim_row.vec;
 
@@ -943,6 +958,93 @@ TEST(HnswCorruptionTest, MalformedUpperLayerEdgeDoesNotCrash) {
   // ordinary layer-0 search; the point of this test is that we got here at
   // all without crashing.
   EXPECT_EQ(1U, hits.size());
+}
+
+// insert() can discover a node reachable only through such a malformed edge
+// too (via the entry point's still-intact, too-high edge to it), and
+// select_neighbors() may then choose it as one of the new node's reciprocal
+// neighbors at that same layer. Node::neighbors_begin() reports layer > its
+// own layer as an empty range - safe to *read* - but back-linking needs a
+// valid Mmax-sized *write* destination, which an empty range is not.
+// insert() must reject such a candidate before attempting that write-back.
+//
+// insert()'s target layer for the new node is drawn from the RNG seeded in
+// the HNSW constructor; kInsertSeed is the first tried that draws a target
+// layer >= the entry point's layer, so the new node's search actually
+// reaches the layer holding the malformed edge and selects the victim -
+// verified by the asserts below, not assumed.
+TEST(HnswCorruptionTest, InsertRejectsLayerIneligibleNeighborBeforeBacklink) {
+  constexpr size_t kDimsLocal = 2;
+  constexpr size_t kMLocal = 4;
+  constexpr size_t kEfConstructionLocal = 16;
+  constexpr size_t kNumPoints = 300;
+  constexpr uint64_t kSeed = 42;
+  constexpr uint32_t kInsertSeed = 289;
+
+  RoundTripFixture fixture =
+      make_random_round_trip_fixture(kDimsLocal, kNumPoints, kSeed);
+  LoadTestHnsw built(kDimsLocal, euclidean, kMLocal, kEfConstructionLocal);
+  populate_round_trip_index(built, &fixture);
+
+  const uint64_t ep_id = fixture.store.entry_point;
+  ASSERT_NE(0U, ep_id);
+  const StoredNode &ep_row = fixture.store.nodes.at(ep_id);
+  ASSERT_GE(ep_row.layer, 1)
+      << "expected entry point above layer 0 for seed " << kSeed;
+
+  uint64_t victim_id = 0;
+  for (size_t i = 0; i < kMLocal && i < ep_row.neighbor_ids.size(); ++i) {
+    if (ep_row.neighbor_ids[i] != 0) {
+      victim_id = ep_row.neighbor_ids[i];
+      break;
+    }
+  }
+  ASSERT_NE(0U, victim_id)
+      << "expected entry point to have a top-layer neighbor for seed " << kSeed;
+
+  StoredNode &victim_row = fixture.store.nodes.at(victim_id);
+  ASSERT_GE(victim_row.layer, ep_row.layer);
+  const size_t victim_l0_begin = stored_layer0_begin(victim_row.layer, kMLocal);
+  const size_t victim_l0_end = stored_layer0_end(victim_row.layer, kMLocal);
+  ASSERT_LE(victim_l0_end, victim_row.neighbor_ids.size());
+  victim_row.neighbor_ids.assign(
+      victim_row.neighbor_ids.begin() + victim_l0_begin,
+      victim_row.neighbor_ids.begin() + victim_l0_end);
+  victim_row.layer = 0;
+  const std::vector<float> victim_vec = victim_row.vec;
+
+  LoadTestHnsw cold(kDimsLocal, euclidean, kMLocal, kEfConstructionLocal,
+                    kInsertSeed);
+  cold.init_from_entry_point(ep_id, &fixture.store);
+
+  const uint64_t new_id = kNumPoints + 10;
+  const uint64_t new_pk = 900000;
+  // New node's vector == victim's: distance 0 guarantees victim - found via
+  // the entry point's still-intact edge - outranks every other candidate at
+  // every layer the search reaches, so select_neighbors() picks it whenever
+  // that layer is >= victim's real layer (trivially true: victim's real
+  // layer is 0).
+  cold.insert(new_id, new_pk, as_bytes(victim_vec), &fixture.store);
+
+  // Confirm this run actually exercised the scenario described above,
+  // rather than passing vacuously because the new node's random target
+  // layer stayed below the entry point's.
+  const StoredNode &new_row = fixture.store.nodes.at(new_id);
+  ASSERT_GE(new_row.layer, ep_row.layer)
+      << "kInsertSeed=" << kInsertSeed
+      << " did not draw a target layer reaching the malformed edge";
+  const size_t top_begin = stored_layer0_begin(new_row.layer, kMLocal);
+  const bool backlinked_at_top =
+      std::find(new_row.neighbor_ids.begin() + top_begin,
+                new_row.neighbor_ids.begin() + top_begin + kMLocal,
+                victim_id) !=
+      new_row.neighbor_ids.begin() + top_begin + kMLocal;
+  EXPECT_TRUE(backlinked_at_top)
+      << "expected the new node to select victim_id=" << victim_id
+      << " as a top-layer neighbor";
+  // The point of this test: insert() got here - selecting a
+  // layer-ineligible node and running the back-link write-back path -
+  // without crashing.
 }
 
 }  // namespace hnsw_unittest

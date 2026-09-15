@@ -344,6 +344,20 @@ class HNSW {
         // all neighbors of the newly inserted node are complete.
         assert(neighbor->state() == NODE_COMPLETE);
 
+        // A malformed/corrupted edge elsewhere in the graph can still let
+        // select_neighbors() choose a node that does not itself reach layer
+        // l (neighbor->layer() < l) - e.g. some other, uncorrupted node's
+        // persisted neighbor list names it as an l-layer neighbor while its
+        // own record disagrees. Back-linking would call
+        // neighbors_begin()/neighbors_end() for layer l on it, which
+        // Node::neighbors_begin() now reports as an empty (zero-capacity)
+        // range - safe to read, but not a valid Mmax-sized write
+        // destination, which the write-back path below needs. Reject it as
+        // a reciprocal neighbor rather than back-link into it.
+        if (neighbor->layer() < l) {
+          continue;
+        }
+
         // Back-linking neighbors requires locking though.
         lock_node(neighbor);
         Node **it2 = neighbor->neighbors_begin(*this, l);
