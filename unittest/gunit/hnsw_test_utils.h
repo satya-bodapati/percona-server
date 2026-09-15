@@ -194,7 +194,14 @@ struct RecordingPersistor {
     if (ctx->guard != nullptr) {
       lock = std::unique_lock<std::mutex>(*ctx->guard);
     }
-    ctx->nodes.at(id).neighbor_ids.assign(neighbors.begin(), neighbors.end());
+    // A neighbor may be a node whose own insert_cb failed (accepted
+    // degradation in the general insert path, see hnsw.h): its row was
+    // never written, so there is nothing here to update. Skip rather than
+    // throw, matching a real persistor silently no-op'ing via ctx->err.
+    auto it = ctx->nodes.find(id);
+    if (it != ctx->nodes.end()) {
+      it->second.neighbor_ids.assign(neighbors.begin(), neighbors.end());
+    }
   }
 
   bool update_entry_point_cb(Context *ctx, uint64_t id) {
@@ -222,7 +229,17 @@ struct RecordingPersistor {
     if (ctx->fail_load_ids.count(id) != 0) {
       return false;
     }
-    const StoredNode &row = ctx->nodes.at(id);
+    // A referenced id may be a node whose own insert_cb failed (accepted
+    // degradation in the general insert path, see hnsw.h): no row was ever
+    // written for it. Real load_node_cb implementations report that as a
+    // failed load (e.g. vec_persist_load_node -> DB_RECORD_NOT_FOUND),
+    // which HNSW turns into NODE_LOST, not a crash - so do the same here
+    // instead of letting unordered_map::at() throw.
+    const auto stored = ctx->nodes.find(id);
+    if (stored == ctx->nodes.end()) {
+      return false;
+    }
+    const StoredNode &row = stored->second;
     // Copy out under the lock so load_* can run without holding it across
     // HNSW internal locks (load_node_neighbors takes m_global_lock).
     const uint8_t layer = row.layer;
