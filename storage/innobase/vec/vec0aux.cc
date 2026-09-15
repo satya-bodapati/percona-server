@@ -166,9 +166,12 @@ bool vec_aux_parse_table_name(const char *name, table_id_t *parent_id_out,
   if (name == nullptr) return false;
   const char *slash = strchr(name, '/');
   const char *after_db = slash != nullptr ? slash + 1 : name;
+  /* strncmp, not a length check and memcmp: it stops at the NUL, so a
+  name shorter than the prefix simply compares unequal. There is nothing
+  to guard against, and strlen() here would scan the whole name to learn
+  something the comparison already knows. */
   const size_t prefix_len = strlen(VEC_AUX_PREFIX);
-  if (strlen(after_db) < prefix_len) return false;
-  if (memcmp(after_db, VEC_AUX_PREFIX, prefix_len) != 0) return false;
+  if (strncmp(after_db, VEC_AUX_PREFIX, prefix_len) != 0) return false;
   const char *token = after_db + prefix_len;
 
   const char *token_end = strchr(token, '_');
@@ -201,6 +204,16 @@ bool vec_aux_parse_table_name(const char *name, table_id_t *parent_id_out,
 
 bool vec_aux_is_aux_table_name(const char *name) {
   return vec_aux_parse_table_name(name, nullptr, nullptr, nullptr);
+}
+
+size_t vec_aux_count_indexes(const dict_table_t *table) {
+  if (table == nullptr) return 0;
+  size_t n = 0;
+  for (const dict_index_t *idx = UT_LIST_GET_FIRST(table->indexes);
+       idx != nullptr; idx = UT_LIST_GET_NEXT(indexes, idx)) {
+    if (idx->is_vector()) n++;
+  }
+  return n;
 }
 
 bool vec_aux_table_has_vector_index(const dict_table_t *table) {
