@@ -1333,7 +1333,8 @@ struct dict_index_t {
 
   /** Serializes transitions of vec_opening above, and every access to
   vec_open_event below, across the concurrent openers/waiters
-  vec_runtime_open() and vec_runtime_get_or_wait() (vec0hnsw.cc) can be.
+  vec_runtime_open() (vec0hnsw.cc) and vec_runtime_get_or_wait()'s slow
+  path, vec_runtime_wait_slow() (vec0hnsw.cc), can be.
   Lazily created, the same way zip_pad.mutex is; released in
   dict_mem_index_free() by vec_open_sync_free() (vec0index.h). */
   ib_mutex_t *vec_open_mutex;

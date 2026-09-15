@@ -2,7 +2,8 @@
 --source include/have_debug_sync.inc
 
 --echo #
---echo # (vec_runtime_open()/vec_runtime_get_or_wait(), vec0hnsw.cc)
+--echo # (vec_runtime_open() (vec0hnsw.cc), vec_runtime_get_or_wait() (vec0hnsw.h)
+--echo # / its slow path vec_runtime_wait_slow() (vec0hnsw.cc))
 --echo #
 --echo # dict_index_t::vec == nullptr and dict_index_t::vec_open_err ==
 --echo # DB_ERROR_UNSET together are ambiguous: they describe BOTH "nobody has

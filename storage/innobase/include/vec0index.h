@@ -59,7 +59,7 @@ void vec_index_runtime_free(dict_index_t *index);
 #ifndef UNIV_HOTBACKUP
 /** Release the mutex and event that back vec_runtime_get_or_wait()
 (vec0hnsw.h) for one index, if vec_runtime_open()/
-vec_runtime_get_or_wait() (vec0hnsw.cc) ever lazily created them. Called
+vec_runtime_wait_slow() (vec0hnsw.cc) ever lazily created them. Called
 from dict_mem_index_free(), next to vec_index_runtime_free() above and
 dict_index_zip_pad_mutex_destroy() (dict0mem.h) - dict_index_t has no
 destructor, so whatever those two allocated has to be released by hand or

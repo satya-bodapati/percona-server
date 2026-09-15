@@ -225,16 +225,7 @@ static void vec_open_sync_ensure(dict_index_t *index) {
                                vec_open_sync_alloc, index);
 }
 
-vec_t *vec_runtime_get_or_wait(dict_index_t *index, THD *thd,
-                               dberr_t *open_err) {
-  *open_err = DB_ERROR_UNSET;
-
-  /* Fast path, no mutex: the overwhelmingly common case is an index
-  that has been open for a while, and vec_runtime_get() is exactly the
-  lock-free acquire load every other reader of index->vec already uses. */
-  vec_t *vec = vec_runtime_get(index);
-  if (vec != nullptr) return vec;
-
+vec_t *vec_runtime_wait_slow(dict_index_t *index, THD *thd, dberr_t *open_err) {
   vec_open_sync_ensure(index);
   mutex_enter(index->vec_open_mutex);
 
@@ -242,7 +233,7 @@ vec_t *vec_runtime_get_or_wait(dict_index_t *index, THD *thd,
     /* Re-check under the mutex: an opener may have published between
     our lock-free check above and taking the mutex, or between one lap
     of this loop and the next. */
-    vec = vec_runtime_get(index);
+    vec_t *vec = vec_runtime_get(index);
     if (vec != nullptr) {
       mutex_exit(index->vec_open_mutex);
       return vec;

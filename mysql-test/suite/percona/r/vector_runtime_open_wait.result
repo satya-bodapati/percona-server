@@ -1,5 +1,6 @@
 #
-# (vec_runtime_open()/vec_runtime_get_or_wait(), vec0hnsw.cc)
+# (vec_runtime_open() (vec0hnsw.cc), vec_runtime_get_or_wait() (vec0hnsw.h)
+# / its slow path vec_runtime_wait_slow() (vec0hnsw.cc))
 #
 # dict_index_t::vec == nullptr and dict_index_t::vec_open_err ==
 # DB_ERROR_UNSET together are ambiguous: they describe BOTH "nobody has

@@ -429,6 +429,28 @@ comment).
   return slot.load(std::memory_order_acquire);
 }
 
+/** The slow path behind vec_runtime_get_or_wait(): only reached once its
+lock-free vec_runtime_get() check has already come up empty. Takes
+dict_index_t::vec_open_mutex, and either returns the freshly published
+runtime, returns the recorded failure of an attempt that already
+finished, or - if an attempt is genuinely in progress - waits on
+dict_index_t::vec_open_event and loops, exactly like every other
+opener/waiter of this index. Defined out-of-line (vec0hnsw.cc): it needs
+the file-static vec_open_sync_ensure() there, and it is the rarely-taken
+path anyway, so there is nothing to gain from inlining it at call sites.
+@param[in]   index     vector index
+@param[in]   thd       caller's session, to notice a kill while waiting;
+                        may be nullptr, in which case a wait cannot be
+                        interrupted by one
+@param[out]  open_err  pre-set to DB_ERROR_UNSET by the caller; left
+                        untouched when the return value is non-null,
+                        otherwise overwritten with the cause to report
+                        (the persisted failure, or DB_INTERRUPTED if thd
+                        was killed while waiting)
+@return the runtime, or nullptr */
+[[nodiscard]] vec_t *vec_runtime_wait_slow(dict_index_t *index, THD *thd,
+                                           dberr_t *open_err);
+
 /** vec_runtime_get(index), but for a caller that has already found it
 null and needs the real answer rather than a guess: waits out a
 concurrent vec_runtime_open() in progress, and only then reports either
@@ -449,11 +471,8 @@ result or false generic error - while the real answer was seconds away.
 
 dict_index_t::vec_opening is the third state: true exactly while some
 thread is inside vec_runtime_open()'s slow path for this index, guarded
-by dict_index_t::vec_open_mutex. This function takes that mutex, and
-either returns the freshly published runtime, returns the recorded
-failure of an attempt that already finished, or - if an attempt is
-genuinely in progress - waits on dict_index_t::vec_open_event and loops,
-exactly like every other opener/waiter of this index.
+by dict_index_t::vec_open_mutex - see vec_runtime_wait_slow() above for
+how that mutex, the event and vec_opening are actually used.
 @param[in]   index     vector index
 @param[in]   thd       caller's session, to notice a kill while waiting;
                         may be nullptr, in which case a wait cannot be
@@ -463,8 +482,21 @@ exactly like every other opener/waiter of this index.
                         persisted failure, or DB_INTERRUPTED if thd was
                         killed while waiting)
 @return the runtime, or nullptr */
-[[nodiscard]] vec_t *vec_runtime_get_or_wait(dict_index_t *index, THD *thd,
-                                             dberr_t *open_err);
+[[nodiscard]] inline vec_t *vec_runtime_get_or_wait(dict_index_t *index,
+                                                    THD *thd,
+                                                    dberr_t *open_err) {
+  *open_err = DB_ERROR_UNSET;
+
+  /* Fast path, no mutex: the overwhelmingly common case is an index
+  that has been open for a while, and vec_runtime_get() is exactly the
+  lock-free acquire load every other reader of index->vec already uses. */
+  vec_t *vec = vec_runtime_get(index);
+  if (UNIV_LIKELY(vec != nullptr)) {
+    return vec;
+  }
+
+  return vec_runtime_wait_slow(index, thd, open_err);
+}
 
 vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
                         THD *thd);
