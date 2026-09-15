@@ -65,11 +65,13 @@ struct NullPersistor {
   struct Context {};
 
   template <typename NeighborIds>
-  void insert_cb(Context *, uint64_t, uint64_t, const char *, uint8_t,
-                 NeighborIds) {}
+  bool insert_cb(Context *, uint64_t, uint64_t, const char *, uint8_t,
+                 NeighborIds) {
+    return true;
+  }
   template <typename NeighborIds>
   void update_neighbors_cb(Context *, uint64_t, NeighborIds) {}
-  void update_entry_point_cb(Context *, uint64_t) {}
+  bool update_entry_point_cb(Context *, uint64_t) { return true; }
   template <typename Hnsw>
   bool load_node_cb(Context *, Hnsw &, typename Hnsw::LoadNodeHandle) {
     assert(false);
@@ -144,6 +146,22 @@ struct RecordingPersistor {
     */
     std::unordered_set<uint64_t> fail_load_ids;
     /**
+      Graph ids for which insert_cb should fail (id not written to nodes).
+      Used by entry-point-publish-on-failure tests.
+    */
+    std::unordered_set<uint64_t> fail_insert_ids;
+    /**
+      Graph ids for which update_entry_point_cb should fail (entry point
+      metadata not written). Used by entry-point-publish-on-failure tests.
+    */
+    std::unordered_set<uint64_t> fail_entry_point_ids;
+    /**
+      Number of update_entry_point_cb invocations, counted before the
+      fail_entry_point_ids check. Lets tests prove whether the promotion
+      branch in HNSW::insert() actually called this callback.
+    */
+    size_t entry_point_attempts = 0;
+    /**
       Optional lock for concurrent insert/search against a shared Context.
       When non-null, all RecordingPersistor callbacks lock it. Serial tests
       leave this nullptr.
@@ -152,11 +170,14 @@ struct RecordingPersistor {
   };
 
   template <typename NeighborIds>
-  void insert_cb(Context *ctx, uint64_t id, uint64_t base_pk, const char *q,
+  bool insert_cb(Context *ctx, uint64_t id, uint64_t base_pk, const char *q,
                  uint8_t layer, NeighborIds neighbors) {
     std::unique_lock<std::mutex> lock;
     if (ctx->guard != nullptr) {
       lock = std::unique_lock<std::mutex>(*ctx->guard);
+    }
+    if (ctx->fail_insert_ids.count(id) != 0) {
+      return false;
     }
     StoredNode &row = ctx->nodes[id];
     row.base_pk = base_pk;
@@ -164,6 +185,7 @@ struct RecordingPersistor {
     row.vec.assign(reinterpret_cast<const float *>(q),
                    reinterpret_cast<const float *>(q) + ctx->dims);
     row.neighbor_ids.assign(neighbors.begin(), neighbors.end());
+    return true;
   }
 
   template <typename NeighborIds>
@@ -172,15 +194,27 @@ struct RecordingPersistor {
     if (ctx->guard != nullptr) {
       lock = std::unique_lock<std::mutex>(*ctx->guard);
     }
-    ctx->nodes.at(id).neighbor_ids.assign(neighbors.begin(), neighbors.end());
+    // A neighbor may be a node whose own insert_cb failed (accepted
+    // degradation in the general insert path, see hnsw.h): its row was
+    // never written, so there is nothing here to update. Skip rather than
+    // throw, matching a real persistor silently no-op'ing via ctx->err.
+    auto it = ctx->nodes.find(id);
+    if (it != ctx->nodes.end()) {
+      it->second.neighbor_ids.assign(neighbors.begin(), neighbors.end());
+    }
   }
 
-  void update_entry_point_cb(Context *ctx, uint64_t id) {
+  bool update_entry_point_cb(Context *ctx, uint64_t id) {
     std::unique_lock<std::mutex> lock;
     if (ctx->guard != nullptr) {
       lock = std::unique_lock<std::mutex>(*ctx->guard);
     }
+    ++ctx->entry_point_attempts;
+    if (ctx->fail_entry_point_ids.count(id) != 0) {
+      return false;
+    }
     ctx->entry_point = id;
+    return true;
   }
 
   template <typename Hnsw>
@@ -195,7 +229,17 @@ struct RecordingPersistor {
     if (ctx->fail_load_ids.count(id) != 0) {
       return false;
     }
-    const StoredNode &row = ctx->nodes.at(id);
+    // A referenced id may be a node whose own insert_cb failed (accepted
+    // degradation in the general insert path, see hnsw.h): no row was ever
+    // written for it. Real load_node_cb implementations report that as a
+    // failed load (e.g. vec_persist_load_node -> DB_RECORD_NOT_FOUND),
+    // which HNSW turns into NODE_LOST, not a crash - so do the same here
+    // instead of letting unordered_map::at() throw.
+    const auto stored = ctx->nodes.find(id);
+    if (stored == ctx->nodes.end()) {
+      return false;
+    }
+    const StoredNode &row = stored->second;
     // Copy out under the lock so load_* can run without holding it across
     // HNSW internal locks (load_node_neighbors takes m_global_lock).
     const uint8_t layer = row.layer;

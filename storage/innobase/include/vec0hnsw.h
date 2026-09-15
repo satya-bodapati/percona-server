@@ -68,9 +68,11 @@ struct Vec_ctx {
   uint32_t m{0};
   /** Bytes per vector; needed to write and read the vec column. */
   uint32_t vec_bytes{0};
-  /** First failure. The callbacks return void, so this is how they
-  report: each one short-circuits when it is already set, and the caller
-  inspects it once insert() returns. */
+  /** First failure. update_neighbors_cb still returns void, so this is
+  how it reports; insert_cb/update_entry_point_cb also return bool (true
+  iff ctx->err is still DB_SUCCESS after the call), but every callback
+  still short-circuits when this is already set, and the caller inspects
+  it once insert() returns. */
   dberr_t err{DB_SUCCESS};
   /** Whether a callback may commit trx and start it again.
 
@@ -186,12 +188,13 @@ struct Vec_persistor {
   using Context = Vec_ctx;
 
   template <typename NeighborIds>
-  void insert_cb(Context *ctx, uint64_t id, uint64_t base_pk, const char *q,
+  bool insert_cb(Context *ctx, uint64_t id, uint64_t base_pk, const char *q,
                  uint8_t layer, NeighborIds nbrs) {
-    if (ctx->err != DB_SUCCESS) return;
+    if (ctx->err != DB_SUCCESS) return false;
     std::vector<byte> blob;
     vec_flatten_neighbors(nbrs, blob);
     ctx->err = vec_persist_insert(ctx, id, base_pk, q, layer, blob);
+    return ctx->err == DB_SUCCESS;
   }
 
   template <typename NeighborIds>
@@ -202,9 +205,10 @@ struct Vec_persistor {
     ctx->err = vec_persist_update_neighbors(ctx, id, blob);
   }
 
-  void update_entry_point_cb(Context *ctx, uint64_t id) {
-    if (ctx->err != DB_SUCCESS) return;
+  bool update_entry_point_cb(Context *ctx, uint64_t id) {
+    if (ctx->err != DB_SUCCESS) return false;
     ctx->err = vec_persist_entry_point(ctx, id);
+    return ctx->err == DB_SUCCESS;
   }
 
   /** Returns false on failure, which marks the node NODE_LOST rather than
@@ -261,11 +265,13 @@ struct Vec_null_persistor {
   struct Context {};
 
   template <typename NeighborIds>
-  void insert_cb(Context *, uint64_t, uint64_t, const char *, uint8_t,
-                 NeighborIds) {}
+  bool insert_cb(Context *, uint64_t, uint64_t, const char *, uint8_t,
+                 NeighborIds) {
+    return true;
+  }
   template <typename NeighborIds>
   void update_neighbors_cb(Context *, uint64_t, NeighborIds) {}
-  void update_entry_point_cb(Context *, uint64_t) {}
+  bool update_entry_point_cb(Context *, uint64_t) { return true; }
   template <typename Hnsw>
   bool load_node_cb(Context *, Hnsw &, typename Hnsw::LoadNodeHandle) {
     ut_error;

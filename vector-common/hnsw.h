@@ -71,9 +71,17 @@ typedef double vec_dist_func_t(const char *a, const char *b, uint32_t dims);
     rely on data written to Persistor members during a prior call.
     Must provide:
       - nested type Context (call-scoped state, e.g. transaction / THD);
-      - insert_cb(Context *, id, base_pk, q, layer, NeighborIdRange);
+      - insert_cb(Context *, id, base_pk, q, layer, NeighborIdRange) -> bool:
+        true on success. Only the first-insert and later-entry-point-promotion
+        paths check this: on failure the node is not marked complete and
+        does not become the entry point, left orphaned in m_nodes rather than
+        retried (same "degrade, don't corrupt" philosophy as load_node_cb's
+        NODE_LOST). The general (non-entry-point) insert path does not check
+        this return value; see @todo item 1.
       - update_neighbors_cb(Context *, id, NeighborIdRange);
-      - update_entry_point_cb(Context *, id);
+      - update_entry_point_cb(Context *, id) -> bool: true on success. On
+        failure HNSW keeps the previous (or no) entry point rather than
+        publishing one whose persisted metadata never landed.
       - load_node_cb(Context *, HNSW &, LoadNodeHandle) -> bool: fill a
         NODE_DUMMY node from storage. @p handle is opaque; use only the
         HNSW load_* helpers on it. On success must call, in order:
@@ -288,17 +296,39 @@ class HNSW {
     new_node->set_linking();
 
     if (entry_point == nullptr) {
-      std::scoped_lock lock(m_entry_point_lock);
-      entry_point = m_entry_point.load();
-      if (entry_point == nullptr) {
-        new_node->set_complete();
-        m_persistor.insert_cb(persistor_ctx, id, base_pk, q, target_layer,
-                              neighbor_ids(new_node));
-        m_persistor.update_entry_point_cb(persistor_ctx, id);
-        m_entry_point.store(new_node);
+      bool own_first_insert = false;
+      bool persisted = false;
+      {
+        std::scoped_lock lock(m_entry_point_lock);
+        entry_point = m_entry_point.load();
+        if (entry_point == nullptr) {
+          own_first_insert = true;
+          // Only publish once both callbacks succeed: storing the entry
+          // point (or marking this node complete) on a failed insert would
+          // let a restart find persisted metadata pointing at a node/row
+          // that was never actually written.
+          persisted =
+              m_persistor.insert_cb(persistor_ctx, id, base_pk, q, target_layer,
+                                    neighbor_ids(new_node)) &&
+              m_persistor.update_entry_point_cb(persistor_ctx, id);
+          if (persisted) {
+            new_node->set_complete();
+            m_entry_point.store(new_node);
+          }
+        } else {
+          max_layer = entry_point->layer();
+        }
+      }
+      if (own_first_insert) {
+        if (!persisted) {
+          // This node has no back-links yet (nothing else can reference the
+          // very first node), so dropping it restores the empty-index state
+          // (m_nodes empty <=> no entry point) instead of leaving a
+          // NODE_LINKING node that validate() would reject.
+          std::scoped_lock lock(m_global_lock);
+          m_nodes.erase(id);
+        }
         return;
-      } else {
-        max_layer = entry_point->layer();
       }
     }
 
@@ -418,11 +448,13 @@ class HNSW {
       }
     }
 
-    m_persistor.insert_cb(persistor_ctx, id, base_pk, q, target_layer,
-                          neighbor_ids(new_node));
+    const bool inserted = m_persistor.insert_cb(
+        persistor_ctx, id, base_pk, q, target_layer, neighbor_ids(new_node));
 
-    // Mark the node as complete. Doing this after calling persistor insert
-    // callback ensures that nodes marked as such are always known to persistor.
+    // Mark the node as complete regardless of insert_cb's result: the
+    // general (non-entry-point) insert path does not check it (@todo 1)
+    // and a failed row here degrades the same way a NODE_LOST neighbor
+    // reference does. The entry-point promotion below does check it.
     new_node->set_complete();
 
     for (Node *neighbor : updated_neighbors) {
@@ -443,9 +475,12 @@ class HNSW {
       std::scoped_lock lock(m_entry_point_lock);
       // Check if our new node still should be made the entry point.
       // Another node that just has been inserted concurrently might
-      // already have taken the spot.
-      if (target_layer > m_entry_point.load()->layer()) {
-        m_persistor.update_entry_point_cb(persistor_ctx, id);
+      // already have taken the spot. Also refuse to promote a node whose
+      // own row failed to persist: doing so would let a restart find
+      // entry-point metadata pointing at a node/row that was never
+      // actually written.
+      if (inserted && target_layer > m_entry_point.load()->layer() &&
+          m_persistor.update_entry_point_cb(persistor_ctx, id)) {
         m_entry_point.store(new_node);
       }
     }
