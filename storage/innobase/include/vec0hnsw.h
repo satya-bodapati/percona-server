@@ -209,11 +209,31 @@ struct Vec_persistor {
 
   /** Returns false on failure, which marks the node NODE_LOST rather than
   leaving a half-filled COMPLETE one. The first error is kept in ctx->err
-  so the statement fails rather than answering from a partial graph. */
+  so the statement fails rather than answering from a partial graph.
+
+  The guard below only stops the walk outright for an already-recorded
+  error that is genuinely fatal (anything but DB_RECORD_NOT_FOUND, e.g.
+  DB_CORRUPTION or a write callback's failure) - one where continuing to
+  read the aux, or the graph itself, can no longer be trusted.
+  DB_RECORD_NOT_FOUND from an earlier, different node says nothing about
+  the node load_node_cb is asked for now: it is the documented NODE_LOST
+  crash artifact (see the state-diagram comment above and load_node in
+  hnsw.h), local to whichever row was missing. Short-circuiting on it
+  unconditionally - as opposed to letting each node stand on its own -
+  used to mark every node touched later in the same walk NODE_LOST too,
+  without ever reading its row. That mark is never retried (hnsw.h), so
+  it outlives the failing statement: it silently shrinks the in-memory
+  graph for every later query against this index until the next reload.
+  Letting an unrelated node's load proceed on its own merits does not
+  make the current statement succeed - ctx->err (set below) still fails
+  it the same as before - it only keeps a healthy node from being
+  wrongly and permanently lost. */
   template <typename Hnsw>
   bool load_node_cb(Context *ctx, Hnsw &hnsw,
                     typename Hnsw::LoadNodeHandle handle) {
-    if (ctx->err != DB_SUCCESS) return false;
+    if (ctx->err != DB_SUCCESS && ctx->err != DB_RECORD_NOT_FOUND) {
+      return false;
+    }
 
     /* NOT the place for the innodb_hnsw_max_memory check, however much
     it looks like it: this is where a cold graph grows, but a false
