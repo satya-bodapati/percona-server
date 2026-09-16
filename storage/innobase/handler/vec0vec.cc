@@ -27,6 +27,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "vec0vec.h"
 
+#include "vector-common/vector_distance.h"
+
 #include <algorithm>
 #include <cassert>
 #include <cctype>
@@ -85,6 +87,32 @@ namespace storage::innobase::vec {
 the TYPE token and the WITH(...) list - so the same parse serves DDL,
 where they arrive on a Key_spec, and table open, where they arrive on a
 KEY. */
+namespace {
+/** Every metric the syntax accepts, and the kernel it selects. One list:
+adding a metric is one row here, and nothing downstream chooses a kernel
+for itself. */
+struct Vec_metric {
+  vector_constants::Metric metric;
+  vec_metric_func_t dist;
+};
+constexpr Vec_metric vec_metrics[] = {
+    {vector_constants::Metric::kEuclidean, &vector_distance_euclidean_squared}};
+
+/** The kernel a metric selects, or nullptr if we have none for it. The
+metric name is resolved by the server (vector_constants::metric_from_name),
+so this maps only the ones InnoDB can actually build a graph with.
+
+Squared euclidean is deliberate for EUCLIDEAN: the graph only ever
+compares distances, and skipping the square root costs nothing in
+ordering. */
+vec_metric_func_t vec_metric_func(vector_constants::Metric metric) {
+  for (const Vec_metric &m : vec_metrics) {
+    if (metric == m.metric) return m.dist;
+  }
+  return nullptr;
+}
+}  // namespace
+
 bool parse_options(LEX_CSTRING type, const Vector_index_params_YY *params,
                    VectorIndexParam &vip) {
   if (type.str == nullptr) {
@@ -98,7 +126,10 @@ bool parse_options(LEX_CSTRING type, const Vector_index_params_YY *params,
   }
 
   auto &hnsw_param = vip.emplace<HnswParam>();
-  if (params == nullptr) return false;
+  if (params == nullptr) {
+    hnsw_param.dist = vec_metric_func(hnsw_param.metric);
+    return false;
+  }
 
   for (const auto &[key, value] : *params) {
     if (my_strcasecmp(system_charset_info, key.str, "M") == 0) {
@@ -133,6 +164,8 @@ bool parse_options(LEX_CSTRING type, const Vector_index_params_YY *params,
     return true;
   }
 
+  /* Resolved once the metric is settled, so the two can never disagree. */
+  hnsw_param.dist = vec_metric_func(hnsw_param.metric);
   return false;
 }
 
