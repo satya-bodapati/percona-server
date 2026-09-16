@@ -110,8 +110,9 @@ typedef double vec_dist_func_t(const char *a, const char *b, uint32_t dims);
     user's transaction.
 
     Cold start / recovery uses init_from_entry_point(), which loads the
-    entry-point node via load_node_cb and requires success (asserted); the
-    entry point is then NODE_COMPLETE.
+    entry-point node via load_node_cb. On success the entry point is then
+    NODE_COMPLETE; on failure init_from_entry_point() returns false and
+    leaves the graph with no entry point at all (see its own comment).
 
     Index metadata is not persisted by HNSW itself. The class users must
     store it alongside the graph (at minimum: vector dimensions, M, distance
@@ -845,16 +846,50 @@ class HNSW {
 
     @param id             Graph node id of the persisted entry point.
     @param persistor_ctx  Context passed to load_node_cb..
+
+    @return true if the entry-point node was loaded and installed. false if
+            load_node() failed (Persistor::load_node_cb() returned false -
+            e.g. an I/O error, or a missing/corrupted persisted row): the
+            instance is left exactly as it was before this call - m_nodes
+            empty, no entry point - so it behaves as, and may be reused as,
+            a freshly constructed, never-populated index (including a retry
+            of this same call), rather than one pointing at the NODE_LOST
+            stub load_node() leaves behind. Every reader of the entry point
+            (insert(), k_nn_search(), nn_search_start()) already treats a
+            null entry point as "empty graph" and a non-null one as
+            unconditionally NODE_COMPLETE (see the Node state-machine
+            comment above); publishing a NODE_LOST node here would break
+            that second assumption and, in a release build where the guard
+            below is compiled out, send those readers straight into a
+            NODE_DUMMY/NODE_LOST node's never-initialized vector and
+            neighbor storage. The caller decides what "the persisted graph
+            failed to open" means for it - e.g. the InnoDB persistor's
+            load_node_cb() has already recorded the underlying dberr_t in
+            its own context before returning false here.
   */
-  void init_from_entry_point(uint64_t id, PersistorContext *persistor_ctx) {
+  bool init_from_entry_point(uint64_t id, PersistorContext *persistor_ctx) {
     assert(m_entry_point.load() == nullptr);
     assert(m_nodes.size() == 0);
     Node *node = Node::create(m_allocator, *this, id, NODE_DUMMY);
     m_nodes.insert({id, node});
-    bool loaded [[maybe_unused]] = load_node(persistor_ctx, node);
-    assert(loaded);
+    if (!load_node(persistor_ctx, node)) {
+      // load_node() already called node->set_lost(); a failing load_node_cb
+      // may also have created neighbor NODE_DUMMY stubs in m_nodes before
+      // giving up (the Persistor contract allows a partial fill). Clear
+      // m_nodes rather than just erasing `id`, so the instance is left
+      // exactly as it started - m_entry_point still null, m_nodes empty,
+      // both asserted at entry above - and safe to retry or to use as a
+      // normal empty graph via insert(), rather than in some in-between
+      // state. This can be reached with a real, externally-triggered
+      // failure (corrupt/missing persisted entry-point row, storage I/O
+      // error), not just an internal logic bug, so it must fail the same
+      // deterministic way in release builds as in debug ones.
+      m_nodes.clear();
+      return false;
+    }
+    assert(node->state() == NODE_COMPLETE);
     m_entry_point.store(node);
-    assert(m_entry_point.load()->state() == NODE_COMPLETE);
+    return true;
   }
 
   /**

@@ -871,4 +871,82 @@ TEST(HnswDeathTest, MTooSmallAsserts) {
 }
 #endif  // NDEBUG
 
+// Not gated by NDEBUG: a persisted entry-point node that fails to load
+// (I/O error, corrupted/missing aux row - see Persistor::load_node_cb())
+// must not be published as the entry point in release builds either.
+TEST(HnswCorruptionTest, EntryPointLoadFailureLeavesGraphEmpty) {
+  // init_from_entry_point() used to assert(loaded) - compiled out under
+  // NDEBUG - and then unconditionally store the NODE_DUMMY/NODE_LOST stub
+  // as the entry point regardless of whether load_node() actually
+  // succeeded. Every reader of m_entry_point (insert(), k_nn_search(),
+  // nn_search_start()) treats a non-null entry point as always
+  // NODE_COMPLETE and dereferences its vector/neighbor data unconditionally,
+  // so a release build would read never-initialized node state instead of
+  // failing deterministically. init_from_entry_point() now returns false and
+  // leaves the entry point null - the same state as a never-populated
+  // index - when the load fails.
+  constexpr size_t kDimsLocal = 2;
+  constexpr size_t kMLocal = 4;
+  constexpr size_t kEfConstructionLocal = 16;
+  constexpr size_t kNumPoints = 50;
+  constexpr uint64_t kSeed = 99;
+
+  RoundTripFixture fixture =
+      make_random_round_trip_fixture(kDimsLocal, kNumPoints, kSeed);
+  LoadTestHnsw built(kDimsLocal, euclidean, kMLocal, kEfConstructionLocal);
+  populate_round_trip_index(built, &fixture);
+  const uint64_t ep_id = fixture.store.entry_point;
+  ASSERT_NE(0U, ep_id);
+
+  // Forge the failure: make the persistor refuse to load the entry-point
+  // node itself, the same hook used elsewhere (AdjacentPruneShortListZero
+  // FillsTail above) to simulate a lazy-load failure on an ordinary
+  // neighbor, applied here to the node init_from_entry_point() loads
+  // eagerly.
+  fixture.store.fail_load_ids.insert(ep_id);
+
+  LoadTestHnsw cold(kDimsLocal, euclidean, kMLocal, kEfConstructionLocal);
+  const bool loaded = cold.init_from_entry_point(ep_id, &fixture.store);
+  EXPECT_FALSE(loaded);
+
+  // The instance must be left exactly as it started - not just a null
+  // entry point, but genuinely empty (m_nodes cleared of the failed stub
+  // too), matching init_from_entry_point()'s own entry preconditions
+  // (assert(m_entry_point.load() == nullptr); assert(m_nodes.size() == 0)).
+  EXPECT_EQ(0U, cold.size());
+  EXPECT_EQ(0U, cold.entry_point_id());
+
+  // The graph must behave exactly like a freshly constructed, empty index:
+  // a search finds nothing (not a crash, not a wrong-answer read through a
+  // half-initialized node) ...
+  const auto query = as_bytes(fixture.query);
+  const auto hits =
+      cold.k_nn_search(query, /*k=*/5, /*ef_search=*/16, &fixture.store);
+  EXPECT_TRUE(hits.empty());
+
+  // ... and it is still usable: the next insert() becomes the new entry
+  // point, exactly as it would for an index that was never populated.
+  const uint64_t new_id = kNumPoints + 10;
+  const uint64_t new_pk = 900000;
+  const std::vector<float> new_vec = {1.0f, 2.0f};
+  cold.insert(new_id, new_pk, as_bytes(new_vec), &fixture.store);
+
+  const auto hits_after_insert = cold.k_nn_search(
+      as_bytes(new_vec), /*k=*/1, /*ef_search=*/16, &fixture.store);
+  ASSERT_EQ(1U, hits_after_insert.size());
+  EXPECT_EQ(new_pk, hits_after_insert[0].base_pk);
+
+  // A fresh instance may also retry init_from_entry_point() itself after a
+  // failure - e.g. against a different, working aux copy - rather than
+  // only being usable as an empty graph via insert(). fail_load_ids is
+  // still set from above for the first (failing) call.
+  LoadTestHnsw retried(kDimsLocal, euclidean, kMLocal, kEfConstructionLocal);
+  EXPECT_FALSE(retried.init_from_entry_point(ep_id, &fixture.store));
+  fixture.store.fail_load_ids.clear();
+  EXPECT_TRUE(retried.init_from_entry_point(ep_id, &fixture.store));
+  const auto retried_hits =
+      retried.k_nn_search(query, /*k=*/5, /*ef_search=*/16, &fixture.store);
+  EXPECT_FALSE(retried_hits.empty());
+}
+
 }  // namespace hnsw_unittest

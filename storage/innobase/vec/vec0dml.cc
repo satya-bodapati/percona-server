@@ -40,6 +40,7 @@ DEVIATION FROM FTS rationale (no fts_parse_sql / pars_mutex). */
 #include "dict0dict.h"
 #include "lob0lob.h"
 #include "mach0data.h"
+#include "my_dbug.h"
 #include "pars0pars.h"
 #include "que0que.h"
 #include "read0types.h"
@@ -77,7 +78,6 @@ be a second copy of the truth to keep consistent. */
 ulint vec_aux_neighbors_blob_len(uint8_t level, uint32_t m) {
   return (static_cast<ulint>(level) + 2) * m * 8;
 }
-
 
 /** Bottom-up build of a vector aux table.
 
@@ -626,7 +626,16 @@ dberr_t vec_aux_read_node(dict_table_t *aux, uint64_t id, mem_heap_t *heap,
   out->base_pk = mach_read_from_8(p);
 
   p = rec_get_nth_field(clust, rec, offsets, p_level, &len);
-  out->level = len == 1 ? p[0] : 0;
+  /* id 0 is the index metadata row (vec_runtime_load), not a graph
+  node: corrupting it there returns DB_CORRUPTION before
+  init_from_entry_point() ever runs, so the hook must skip it to
+  actually exercise load_node()'s corruption path. */
+  DBUG_EXECUTE_IF("vec_aux_corrupt_level_len", if (id != 0) len = 0;);
+  if (len != 1) {
+    err = DB_CORRUPTION;
+    goto done;
+  }
+  out->level = p[0];
 
   if (!vec_aux_copy_field(clust, rec, offsets, p_vec, heap, &out->vec,
                           &out->vec_len) ||
