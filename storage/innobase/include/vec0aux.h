@@ -51,6 +51,9 @@ extern const char *VEC_AUX_PREFIX;
 index. Type: BIGINT UNSIGNED NOT NULL; no secondary index. */
 #define VEC_AUX_ID_COL_NAME "percona_vec_aux_id"
 
+/** Width of percona_vec_aux_id on disk and in the insert buffer. */
+constexpr ulint VEC_AUX_ID_LEN = 8;
+
 /** Number of user columns in a vector aux table.
 
 Vector HNSW has different semantics: one aux row per graph vertex, all
@@ -156,7 +159,8 @@ only (no pars_sql).
 in-memory dict_table_t entries must have been created by
 @ref vec_aux_create_all_tables / @ref vec_aux_create_one_table first.
 Returns true on success. */
-[[nodiscard]] bool vec_aux_create_dd_tables(dict_table_t *parent);
+[[nodiscard]] bool vec_aux_create_dd_table(dict_table_t *parent,
+                                           const dict_index_t *index);
 
 /** Take an exclusive MDL on every vector aux table belonging to `parent`, so
 nothing can be reading one while we drop it. The aux tables are hidden, so
@@ -186,13 +190,6 @@ void vec_aux_detach_tables(const dict_table_t *parent, bool dict_locked);
 
 /** True iff `table` has at least one vector index attached. */
 [[nodiscard]] bool vec_aux_table_has_vector_index(const dict_table_t *table);
-
-/** How many vector indexes `table` has. PS-11264 caps this at one; code
-that relies on the cap can assert on it, so that lifting the cap fails
-loudly rather than silently doing the wrong thing once.
-@param[in]  table  any table, may be nullptr
-@return the count, 0 if the table has none */
-[[nodiscard]] size_t vec_aux_count_indexes(const dict_table_t *table);
 
 /** Rename every vector aux table belonging to `parent` after the parent itself
 has been renamed to `new_parent_name`. Only the db-prefix portion of the aux
@@ -304,6 +301,6 @@ uint64_t vec_assign_next_aux_id(dict_table_t *table);
 /** Stamp the hidden percona_vec_aux_id dfield in `row` with the next id from
 the per-table counter. No-op for tables without the hidden column.
 Allocations come from `heap` so they outlive this call. */
-void vec_stamp_aux_id(dict_table_t *table, dtuple_t *row, mem_heap_t *heap);
+void vec_stamp_aux_id(dict_table_t *table, dtuple_t *row, byte *buf);
 
 #endif /* vec0aux_h */
