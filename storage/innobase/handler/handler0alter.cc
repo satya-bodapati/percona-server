@@ -1521,6 +1521,18 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
     }
   }
 
+  /* No ALTER of a vector-indexed table runs with LOCK=NONE, whatever it
+  changes. The label counter is read in the prepare phase and written to
+  the new dd::Table at commit; concurrent DML would keep minting labels
+  in between, so the committed value would be behind the labels already
+  stamped into rows, and a later mint could reissue one. */
+  if (online && (innobase_vector_exist(altered_table) ||
+                 vec_aux_table_has_vector_index(m_prebuilt->table))) {
+    ha_alter_info->unsupported_reason = innobase_get_err_msg(
+        ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_NOLOCK);
+    online = false;
+  }
+
   return online ? HA_ALTER_INPLACE_NO_LOCK_AFTER_PREPARE
                 : HA_ALTER_INPLACE_SHARED_LOCK_AFTER_PREPARE;
 }
