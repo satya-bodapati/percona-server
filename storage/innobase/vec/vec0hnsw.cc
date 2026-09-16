@@ -387,7 +387,16 @@ static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
   ctx.vec_bytes = vec->dims * sizeof(float);
   ctx.err = DB_SUCCESS;
 
-  vec->hnsw->init_from_entry_point(entry_point, &ctx);
+  try {
+    vec->hnsw->init_from_entry_point(entry_point, &ctx);
+  } catch (const std::bad_alloc &) {
+    /* Same escape as vec_add_node's insert(): the class throws rather than
+    returning an error the graph can unwind from. This is the cold-load
+    path, though, so nothing durable has been touched - only the graph
+    object below needs cleaning up, exactly as the ctx.err != DB_SUCCESS
+    case below already does. */
+    ctx.err = DB_OUT_OF_MEMORY;
+  }
   if (ctx.err != DB_SUCCESS) {
     ut::delete_(vec->hnsw);
     vec->hnsw = nullptr;
@@ -522,7 +531,17 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
   /* Unlocked: the class is thread-safe for concurrent insert() and search,
   and the only operation it is not thread-safe for - init_from_entry_point -
   cannot be running, because reaching here means `loaded` is already true. */
-  vec->hnsw->insert(label, base_pk, q, &ctx);
+  try {
+    vec->hnsw->insert(label, base_pk, q, &ctx);
+  } catch (const std::bad_alloc &) {
+    /* The pre-flight charge check above only bounds the common case; one
+    insert can still allocate past it (see the comment on that check), and
+    the class itself throws on an allocation failure rather than returning
+    an error the graph could unwind from cleanly. Map it onto the same
+    ctx.err path every other failure here takes, so the aux sub-transaction
+    is rolled back below exactly as it would be for any other error. */
+    ctx.err = DB_OUT_OF_MEMORY;
+  }
 
   /* Commits whatever the last callback left open - often nothing, since
   each callback commits its own work. */
@@ -601,11 +620,20 @@ dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
   same node cannot collide. */
   {
     const size_t want = exclude == nullptr ? k : k + exclude->size();
-    const auto hits =
-        vec->hnsw->k_nn_search(reinterpret_cast<const char *>(q), want,
-                               std::max(ef_search, want), &ctx);
-    out->reserve(hits.size());
-    for (const auto &h : hits) out->push_back({h.id, h.base_pk});
+    /* k_nn_search allocates throughout - the result vector, its internal
+    scratch buffer and priority queue - and none of it is caught inside the
+    class. Left uncaught here, an OOM would propagate straight out of this
+    handler-facing call into the MySQL executor instead of failing the
+    statement with DB_OUT_OF_MEMORY. */
+    try {
+      const auto hits =
+          vec->hnsw->k_nn_search(reinterpret_cast<const char *>(q), want,
+                                 std::max(ef_search, want), &ctx);
+      out->reserve(hits.size());
+      for (const auto &h : hits) out->push_back({h.id, h.base_pk});
+    } catch (const std::bad_alloc &) {
+      ctx.err = DB_OUT_OF_MEMORY;
+    }
   }
 
   if (exclude != nullptr && !out->empty()) {
@@ -679,9 +707,20 @@ dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
   /* Unlocked, like every other graph access: the class is thread-safe for
   concurrent search, and a search mutates only by faulting stubs in, which
   load_node() serialises under its own striped lock. */
-  vec->hnsw->nn_search_start(&s->nn, reinterpret_cast<const char *>(q),
-                             batch_size, std::max(ef_search, batch_size),
-                             &s->ctx);
+  try {
+    /* NNSearchContext::init throws std::bad_alloc explicitly on a failed
+    malloc, and allocates further (scratch buffer, visited set) besides;
+    none of it is caught inside the class. Left uncaught here, an OOM would
+    propagate out of this handler-facing call into the MySQL executor
+    instead of failing the statement with DB_OUT_OF_MEMORY. s->nn.reset(),
+    called by vec_knn_close below, tolerates the partially-initialised
+    context this can leave behind. */
+    vec->hnsw->nn_search_start(&s->nn, reinterpret_cast<const char *>(q),
+                               batch_size, std::max(ef_search, batch_size),
+                               &s->ctx);
+  } catch (const std::bad_alloc &) {
+    s->ctx.err = DB_OUT_OF_MEMORY;
+  }
   if (s->ctx.err != DB_SUCCESS) {
     const dberr_t err = s->ctx.err;
     vec_knn_close(s);
@@ -696,13 +735,21 @@ bool vec_knn_next(vec_search_t *s, vec_hit_t *hit) {
   ut_ad(s != nullptr && hit != nullptr);
   if (s->ctx.err != DB_SUCCESS) return false;
 
-  const auto next = s->vec->hnsw->nn_search_next(&s->nn);
-  if (s->ctx.err != DB_SUCCESS) return false;
-  if (!next.first) return false;
+  /* A batch refill past the first (nn_search_start already guards that one)
+  runs the same allocating search-layer code and is just as uncaught -
+  same handler-boundary exposure, one call later. */
+  try {
+    const auto next = s->vec->hnsw->nn_search_next(&s->nn);
+    if (s->ctx.err != DB_SUCCESS) return false;
+    if (!next.first) return false;
 
-  hit->id = next.second.id;
-  hit->base_pk = next.second.base_pk;
-  return true;
+    hit->id = next.second.id;
+    hit->base_pk = next.second.base_pk;
+    return true;
+  } catch (const std::bad_alloc &) {
+    s->ctx.err = DB_OUT_OF_MEMORY;
+    return false;
+  }
 }
 
 dberr_t vec_knn_error(const vec_search_t *s) {
@@ -856,7 +903,16 @@ dberr_t vec_build_add_row(Vec_build *b, dict_table_t *table,
   const uint64_t base_pk =
       mach_read_from_8(static_cast<const byte *>(dfield_get_data(pk_df)));
 
-  b->graph->insert(id, base_pk, q, &b->null_ctx);
+  /* Same escape as vec_add_node's insert(): the class throws rather than
+  returning an error. This one is worse - Builder::add_row() (the only
+  caller, through the DDL scan callback) is noexcept, so an uncaught OOM
+  here would terminate the server mid-ALTER instead of failing it with
+  DB_OUT_OF_MEMORY. */
+  try {
+    b->graph->insert(id, base_pk, q, &b->null_ctx);
+  } catch (const std::bad_alloc &) {
+    return DB_OUT_OF_MEMORY;
+  }
 
   /* innodb_hnsw_max_memory. The whole graph is in memory before any of it
   is durable, so this is the only thing bounding a build. Several scan
@@ -907,24 +963,35 @@ dberr_t vec_build_write_aux(Vec_build *b, trx_t *trx, dict_table_t *table,
   dberr_t err = vec_aux_bulk_insert(bulk, meta);
   std::vector<byte> neighbors;
 
-  b->graph->for_each_node_sorted([&](uint64_t id, uint64_t base_pk,
-                                     const char *vec, uint8_t layer,
-                                     Vec_build_hnsw::NeighborIdRange nbrs) {
-    if (err != DB_SUCCESS) return;
+  /* vec_flatten_neighbors below can throw std::bad_alloc (std::vector
+  reallocation). The walk runs with the bulk load already started
+  (vec_aux_bulk_start above), so letting that escape would both skip
+  vec_aux_bulk_finish - leaking the Btree_load and never telling the
+  observer to discard its already-written, redo-less pages - and, since
+  Builder::vec_build() is noexcept, terminate the server. Map it onto the
+  same err path every other failure here takes instead. */
+  try {
+    b->graph->for_each_node_sorted([&](uint64_t id, uint64_t base_pk,
+                                       const char *vec, uint8_t layer,
+                                       Vec_build_hnsw::NeighborIdRange nbrs) {
+      if (err != DB_SUCCESS) return;
 
-    vec_flatten_neighbors(nbrs, neighbors);
+      vec_flatten_neighbors(nbrs, neighbors);
 
-    vec_aux_row_t row;
-    row.id = id;
-    row.vec = reinterpret_cast<const float *>(vec);
-    row.dims = b->dims;
-    row.base_pk = base_pk;
-    row.level = layer;
-    row.neighbors = neighbors.data();
-    row.neighbors_len = neighbors.size();
+      vec_aux_row_t row;
+      row.id = id;
+      row.vec = reinterpret_cast<const float *>(vec);
+      row.dims = b->dims;
+      row.base_pk = base_pk;
+      row.level = layer;
+      row.neighbors = neighbors.data();
+      row.neighbors_len = neighbors.size();
 
-    err = vec_aux_bulk_insert(bulk, row);
-  });
+      err = vec_aux_bulk_insert(bulk, row);
+    });
+  } catch (const std::bad_alloc &) {
+    err = DB_OUT_OF_MEMORY;
+  }
 
   err = vec_aux_bulk_finish(bulk, err);
 
