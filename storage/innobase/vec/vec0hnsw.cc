@@ -373,6 +373,22 @@ static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
     return err;
   }
 
+  /* Graph node id 0 is the class's reserved empty-slot sentinel; no real
+  node is ever assigned it (vec_persist_entry_point). A record 0 naming it
+  as the entry point is therefore corrupt, not merely empty - and passing
+  it on would hit ut_a(id != 0) in vec_persist_load_node instead of
+  failing gracefully.
+
+  DB_INDEX_CORRUPT, not DB_CORRUPTION: convert_error_code_to_mysql maps
+  DB_CORRUPTION to HA_ERR_CRASHED, which reports the *base table* as
+  crashed. Only this vector index's runtime is bad; the base table and
+  its other indexes are fine, so this must stay index-scoped. */
+  if (entry_point == 0) {
+    ut::delete_(vec->hnsw);
+    vec->hnsw = nullptr;
+    return DB_INDEX_CORRUPT;
+  }
+
   Vec_ctx ctx;
   ctx.aux = aux;
   ctx.thd = thd;
@@ -442,7 +458,11 @@ Also refuses a graph already known to be short of nodes.
 @return DB_SUCCESS, or the reason the graph is not usable */
 static dberr_t vec_runtime_load_once(vec_t *vec, dict_index_t *index,
                                      dict_table_t *aux, THD *thd) {
-  if (vec->corrupted_hnsw.load(std::memory_order_acquire)) return DB_CORRUPTION;
+  /* Index-scoped, not DB_CORRUPTION: only this index's graph is bad, and
+  DB_CORRUPTION would report the base table as crashed. */
+  if (vec->corrupted_hnsw.load(std::memory_order_acquire)) {
+    return DB_INDEX_CORRUPT;
+  }
 
   if (vec->loaded.load(std::memory_order_acquire)) return DB_SUCCESS;
 
@@ -450,7 +470,7 @@ static dberr_t vec_runtime_load_once(vec_t *vec, dict_index_t *index,
   if (vec->loaded.load(std::memory_order_relaxed)) return DB_SUCCESS;
 
   const dberr_t err = vec_runtime_load(vec, aux, thd);
-  if (err == DB_CORRUPTION) {
+  if (err == DB_INDEX_CORRUPT || err == DB_CORRUPTION) {
     dict_set_corrupted(index);
   }
   return err;
@@ -560,8 +580,7 @@ static dberr_t vec_add_node(vec_t *vec, dict_index_t *index,
     This now rolls back only the callback that failed: everything before it
     was committed by vec_ctx_step_commit. The earlier rows stand, which is
     the orphan the design's rollback section accepts, and is the direction
-    that keeps the aux
-    tracking memory rather than diverging from it. */
+    that keeps the aux tracking memory rather than diverging from it. */
     trx_rollback_to_savepoint(aux_trx, nullptr);
   }
   trx_free_for_background(aux_trx);
