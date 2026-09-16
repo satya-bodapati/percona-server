@@ -48,6 +48,7 @@ naming. No population - that lands in PS-11300. */
 #include "fts0fts.h"
 #include "fts0priv.h"
 #include "mach0data.h"
+#include "my_dbug.h"
 #include "row0mysql.h"
 #include "row0upd.h"
 #include "trx0trx.h"
@@ -227,7 +228,16 @@ void vec_stamp_aux_id(dict_table_t *table, dtuple_t *row, byte *buf) {
   ut_ad(table->vec_aux_col != ULINT_UNDEFINED);
   ut_ad(table->vec_aux_col < dtuple_get_n_fields(row));
 
-  const uint64_t id = vec_assign_next_aux_id(table);
+  uint64_t id = vec_assign_next_aux_id(table);
+
+  /* Test-only: fabricate a corrupt stamped label so vec_check_aux_refs
+  has a label == 0 case to catch. 0 is otherwise unreachable - it is the
+  counter's reserved sentinel and is never handed out. */
+  DBUG_EXECUTE_IF("vec_stamp_zero_aux_id", id = 0;);
+
+  /* `buf` is the caller's, reserved once per handle and rewritten for
+  every row. Big-endian (mach format) so a clustered-index range scan on
+  this column would order numerically. */
   mach_write_to_8(buf, id);
 
   dfield_t *dfield = dtuple_get_nth_field(row, table->vec_aux_col);
