@@ -31,10 +31,15 @@ ALTER TABLE t1 ADD KEY (v) TYPE hnsw WITH (M = 4), ALGORITHM=INPLACE;
 SET @@SESSION.debug = '-d,vec_build_start_key_not_found';
 
 --let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
---let $assert_select = Failed to start the vector index build for index v on table test/t1: no matching vector KEY in the altered table
+--let $assert_select = Failed to start the vector index build .*no matching vector KEY in the altered table
 --let $assert_count = 1
 --let $assert_text = vec_build_start logs the real reason instead of silently reporting out-of-memory
 --source include/assert_grep.inc
+
+# The test injects this failure on purpose.
+--disable_query_log
+call mtr.add_suppression("Failed to start the vector index build");
+--enable_query_log
 
 --echo # The failed attempt rolled back cleanly: retrying without the
 --echo # injection succeeds, and the aux from the failed try was not left

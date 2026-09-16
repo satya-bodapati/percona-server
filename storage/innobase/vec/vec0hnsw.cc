@@ -426,7 +426,47 @@ static const char *vec_row_vector_bytes(const dict_index_t *index,
 Shared by INSERT and by a vector-column UPDATE, because to the graph
 they are the same operation: a node is immutable, so a changed vector is
 a new node rather than an edit of the old one. */
-static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
+/** Load the graph once, under load_mutex.
+
+A corrupt aux is sticky: it will not read correctly next time either, so the
+index is marked corrupt and every statement on it fails with
+ER_INDEX_CORRUPT until DROP and re-ADD rebuild it. Any other failure is
+treated as transient - the runtime stays unloaded and the next statement
+retries.
+
+Also refuses a graph already known to be short of nodes.
+@param[in,out]  vec    the runtime
+@param[in]      index  the index owning it, for marking it corrupt
+@param[in]      aux    the aux table, already open
+@param[in]      thd    session
+@return DB_SUCCESS, or the reason the graph is not usable */
+static dberr_t vec_runtime_load_once(vec_t *vec, dict_index_t *index,
+                                     dict_table_t *aux, THD *thd) {
+  if (vec->corrupted_hnsw.load(std::memory_order_acquire)) return DB_CORRUPTION;
+
+  if (vec->loaded.load(std::memory_order_acquire)) return DB_SUCCESS;
+
+  std::lock_guard<std::mutex> g(vec->load_mutex);
+  if (vec->loaded.load(std::memory_order_relaxed)) return DB_SUCCESS;
+
+  const dberr_t err = vec_runtime_load(vec, aux, thd);
+  if (err == DB_CORRUPTION) {
+    dict_set_corrupted(index);
+  }
+  return err;
+}
+
+/** Record that a node failed to load mid-statement. HNSW has marked it lost
+and will not retry, so the graph can no longer answer correctly. The graph
+is not freed here - searches may be walking it - so a flag stands in until
+the runtime is built again.
+@param[in,out]  vec  the runtime */
+static void vec_runtime_set_corrupted(vec_t *vec) {
+  vec->corrupted_hnsw.store(true, std::memory_order_release);
+}
+
+static dberr_t vec_add_node(vec_t *vec, dict_index_t *index,
+                            dict_table_t *table, uint64_t label,
                             uint64_t base_pk, const char *q, THD *thd) {
   /* innodb_hnsw_max_memory, checked BEFORE insert() starts mutating.
 
@@ -489,18 +529,13 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
   ctx.vec_bytes = vec->dims * sizeof(float);
   ctx.err = DB_SUCCESS;
 
-  /* Lazy build, once. Double-checked on the atomic, so a warm index takes
-  no lock here and none at all below. */
-  if (!vec->loaded.load(std::memory_order_acquire)) {
-    std::lock_guard<std::mutex> g(vec->load_mutex);
-    if (!vec->loaded.load(std::memory_order_relaxed)) {
-      const dberr_t lerr = vec_runtime_load(vec, aux, thd);
-      if (lerr != DB_SUCCESS) {
-        trx_rollback_to_savepoint(aux_trx, nullptr);
-        trx_free_for_background(aux_trx);
-        vec_aux_close_for_dml(aux, thd, &mdl);
-        return lerr;
-      }
+  {
+    const dberr_t lerr = vec_runtime_load_once(vec, index, aux, thd);
+    if (lerr != DB_SUCCESS) {
+      trx_rollback_to_savepoint(aux_trx, nullptr);
+      trx_free_for_background(aux_trx);
+      vec_aux_close_for_dml(aux, thd, &mdl);
+      return lerr;
     }
   }
 
@@ -514,6 +549,10 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
   if (ctx.err == DB_SUCCESS) {
     trx_commit_for_mysql(aux_trx);
   } else {
+    /* Whatever went wrong, a node may have failed to load on the way in
+    and HNSW will not retry it. */
+    vec_runtime_set_corrupted(vec);
+
     /* trx_rollback_to_savepoint, not trx_rollback_for_mysql: the aux
     transaction is a BACKGROUND trx, so it is not in the MySQL trx list that
     trx_rollback_for_mysql asserts membership of.
@@ -559,14 +598,11 @@ dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
       vec_aux_open_for_dml(vec->table, vec->index_id, thd, &mdl);
   if (aux == nullptr) return DB_TABLE_NOT_FOUND;
 
-  if (!vec->loaded.load(std::memory_order_acquire)) {
-    std::lock_guard<std::mutex> g(vec->load_mutex);
-    if (!vec->loaded.load(std::memory_order_relaxed)) {
-      const dberr_t lerr = vec_runtime_load(vec, aux, thd);
-      if (lerr != DB_SUCCESS) {
-        vec_aux_close_for_dml(aux, thd, &mdl);
-        return lerr;
-      }
+  {
+    const dberr_t lerr = vec_runtime_load_once(vec, index, aux, thd);
+    if (lerr != DB_SUCCESS) {
+      vec_aux_close_for_dml(aux, thd, &mdl);
+      return lerr;
     }
   }
 
@@ -600,6 +636,7 @@ dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
   }
 
   const dberr_t err = ctx.err;
+  if (err != DB_SUCCESS) vec_runtime_set_corrupted(vec);
   vec_aux_close_for_dml(aux, thd, &mdl);
   return err;
 }
@@ -632,14 +669,11 @@ dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
       vec_aux_open_for_dml(vec->table, vec->index_id, thd, &mdl);
   if (aux == nullptr) return DB_TABLE_NOT_FOUND;
 
-  if (!vec->loaded.load(std::memory_order_acquire)) {
-    std::lock_guard<std::mutex> g(vec->load_mutex);
-    if (!vec->loaded.load(std::memory_order_relaxed)) {
-      const dberr_t lerr = vec_runtime_load(vec, aux, thd);
-      if (lerr != DB_SUCCESS) {
-        vec_aux_close_for_dml(aux, thd, &mdl);
-        return lerr;
-      }
+  {
+    const dberr_t lerr = vec_runtime_load_once(vec, index, aux, thd);
+    if (lerr != DB_SUCCESS) {
+      vec_aux_close_for_dml(aux, thd, &mdl);
+      return lerr;
     }
   }
 
@@ -930,7 +964,7 @@ dberr_t vec_update_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
     vec_t *vec = vec_runtime_get(index);
     if (vec == nullptr) continue;
     if (q_len != vec->dims * sizeof(float)) return DB_CORRUPTION;
-    const dberr_t err = vec_add_node(vec, table, label, base_pk, q, thd);
+    const dberr_t err = vec_add_node(vec, index, table, label, base_pk, q, thd);
     if (err != DB_SUCCESS) return err;
   }
   return DB_SUCCESS;
@@ -979,7 +1013,7 @@ dberr_t vec_insert_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
     const uint64_t base_pk =
         mach_read_from_8(static_cast<const byte *>(dfield_get_data(pk_df)));
 
-    const dberr_t err = vec_add_node(vec, table, label, base_pk, q, thd);
+    const dberr_t err = vec_add_node(vec, index, table, label, base_pk, q, thd);
     if (err != DB_SUCCESS) return err;
   }
   return DB_SUCCESS;

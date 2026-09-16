@@ -376,6 +376,17 @@ struct vec_t : public Vec_runtime {
   release/acquire ordering: it publishes the `hnsw` pointer to every thread
   that sees it true, which is what lets the hot paths run unlocked. */
   std::atomic<bool> loaded{false};
+
+  /** Set when a node failed to load during a search or an insert. HNSW has
+  marked that node lost and never retries it, so this graph would answer
+  later queries with fewer rows and no error. Once set, every statement on
+  this index fails instead. Cleared only by building the runtime again -
+  a reopen after eviction, DROP and re-ADD, or a restart.
+
+  A flag rather than freeing and reloading the graph: readers do not take
+  load_mutex once `loaded` is true, so freeing `hnsw` here would run
+  concurrently with searches already walking it. */
+  std::atomic<bool> corrupted_hnsw{false};
 };
 
 /** Open (lazily create) the runtime for a vector index.
