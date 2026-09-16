@@ -753,7 +753,7 @@ dberr_t Builder::init(Cursor &cursor, size_t n_threads) noexcept {
       (DB_OUT_OF_MEMORY) from its own KEY not being where it should be
       (DB_ERROR, logged) - report whichever it found rather than always
       claiming the index ran out of memory. */
-      ut_a(vec_err != DB_SUCCESS);
+      ut_ad(vec_err != DB_SUCCESS);
       set_error(vec_err);
       set_next_state();
       return get_error();
