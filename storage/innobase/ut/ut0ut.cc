@@ -474,6 +474,9 @@ const char *ut_strerr(dberr_t num) {
       return ("Sample reader has been requested to stop sampling");
     case DB_OUT_OF_RESOURCES:
       return ("System has run out of resources");
+    case DB_ANN_NODE_NOT_FOUND:
+      return ("Vector ANN search failed");
+
     case DB_FTS_TOO_MANY_NESTED_EXP:
       return ("Too many nested sub-expressions in a full-text search");
     case DB_PAGE_IS_STALE:

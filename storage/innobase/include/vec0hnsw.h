@@ -125,7 +125,11 @@ dberr_t vec_persist_load_node(Vec_ctx *ctx, Hnsw &hnsw,
   dberr_t err = vec_aux_read_node(ctx->aux, id, heap, &node);
   if (err != DB_SUCCESS) {
     mem_heap_free(heap);
-    return err;
+    /* A miss here is never benign: this id came off a neighbour list, so
+    the graph says the node must exist. DB_RECORD_NOT_FOUND would reach
+    the client as HA_ERR_NO_ACTIVE_RECORD, indistinguishable from an
+    ordinary missing row. Report it as what it is. */
+    return err == DB_RECORD_NOT_FOUND ? DB_ANN_NODE_NOT_FOUND : err;
   }
 
   if (node.vec_len != ctx->vec_bytes) {
@@ -376,6 +380,17 @@ struct vec_t : public Vec_runtime {
   release/acquire ordering: it publishes the `hnsw` pointer to every thread
   that sees it true, which is what lets the hot paths run unlocked. */
   std::atomic<bool> loaded{false};
+
+  /** Set when a node failed to load during a search or an insert. HNSW has
+  marked that node lost and never retries it, so this graph would answer
+  later queries with fewer rows and no error. Once set, every statement on
+  this index fails instead. Cleared only by building the runtime again -
+  a reopen after eviction, DROP and re-ADD, or a restart.
+
+  A flag rather than freeing and reloading the graph: readers do not take
+  load_mutex once `loaded` is true, so freeing `hnsw` here would run
+  concurrently with searches already walking it. */
+  std::atomic<bool> corrupted_hnsw{false};
 };
 
 /** Open (lazily create) the runtime for a vector index.
