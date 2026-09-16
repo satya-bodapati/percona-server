@@ -5,7 +5,7 @@
 
 Checks:
   C1 coverage      - every changed non-test file is assigned or marked SPLIT
-  C2 forward refs  - ADVISORY hint only; the per-commit build is the authority
+  C2 forward refs  - no symbol calls one from a later category (exact ranges)
 """
 import re, subprocess, sys, collections
 
@@ -57,25 +57,21 @@ byfile = collections.defaultdict(list)
 for c, f, s in syms:
     byfile[f].append((c, s))
 
+sys.path.insert(0, 'v3-tools')
+from symrange import ranges, strip_noncode
+
 def bodies(path, names):
+    """Exact bodies, comments and literals stripped so a brace inside a
+    comment cannot run one function into the next."""
     try:
-        src = open(norm(path)).read().split('\n')
+        code = strip_noncode(open(norm(path)).read()).split('\n')
     except OSError:
         return {}
     out = {}
-    for i, l in enumerate(src):
-        m = re.match(r'^[A-Za-z_][\w:<>,* &]*?\**([A-Za-z_]\w*)\(', l)
-        if not m or m.group(1) not in names:
-            continue
-        d, started, j = 0, False, i
-        while j < len(src):
-            d += src[j].count('{') - src[j].count('}')
-            if '{' in src[j]:
-                started = True
-            if started and d <= 0:
-                break
-            j += 1
-        out.setdefault(m.group(1), []).append('\n'.join(src[i:j + 1]))
+    for name, a, b in ranges(norm(path)):
+        short = name.split('::')[-1]
+        if short in names:
+            out.setdefault(short, []).append('\n'.join(code[a - 1:b]))
     return out
 
 viol = set()
@@ -94,9 +90,10 @@ for f, lst in byfile.items():
 # brace counting, which a brace inside a comment or string defeats, so it
 # reports references that do not exist. The per-commit build is what proves
 # the ordering; this is only a hint about where to look first.
-print('C2 forward refs (ADVISORY, textual - expect false positives): %d' % len(viol))
-for v in sorted(viol)[:10]:
-    print('     cat %d %s -> cat %d %s' % v)
+print('C2 forward refs: %d' % len(viol))
+for v in sorted(viol):
+    print('     cat %d %-30s -> cat %d %s' % v)
+    rc = 1
 
 print('RESULT:', 'PASS' if rc == 0 else 'FAIL')
 sys.exit(rc)

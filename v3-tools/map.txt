@@ -265,23 +265,132 @@
 9 FILE storage/innobase/include/db0err.h
 10 FILE vec-hnsw-aux-sub-trx.md          # design document
 
-# ---- shared, needs line-level split
-SPLIT share/messages_to_clients.txt      # cat 8 (ALTER refusals) + cat 4 (max memory)
-SPLIT storage/innobase/include/dict0mem.h    # cat 1 flags + cat 2 hidden col fields
-SPLIT storage/innobase/include/dict0dd.h     # cat 1 aux + cat 2 vec_next_id
-SPLIT storage/innobase/include/ut0test.h     # interpreter cmds, per category
-SPLIT storage/innobase/ut/ut0test.cc         # interpreter cmds, per category
-SPLIT storage/innobase/include/dict0dict.h
-SPLIT storage/innobase/include/row0mysql.h
-SPLIT storage/innobase/include/trx0trx.h
-SPLIT storage/innobase/handler/ha_innodb.h
-SPLIT storage/innobase/include/ddl0impl-builder.h
-SPLIT storage/innobase/include/rem0lrec.h
-SPLIT storage/innobase/include/srv0srv.h
-SPLIT storage/innobase/include/vec0index.h
-SPLIT storage/innobase/dict/dict0mem.cc
-SPLIT storage/innobase/dict/mem.cc
-SPLIT storage/innobase/buf/buf0flu.cc
+# ---- headers: whole-file at the EARLIEST category that needs them.
+# A declaration with no definition is harmless until something calls it, and
+# nothing does before its own category, so headers need no line-splitting.
+1 FILE storage/innobase/include/dict0mem.h
+1 FILE storage/innobase/include/dict0dd.h
+1 FILE storage/innobase/include/dict0dict.h
+1 FILE storage/innobase/include/ut0test.h
+1 FILE storage/innobase/ut/ut0test.cc
+1 FILE storage/innobase/dict/dict0mem.cc
+1 FILE storage/innobase/dict/mem.cc
+2 FILE storage/innobase/include/row0mysql.h
+2 FILE storage/innobase/include/rem0lrec.h
+2 FILE storage/innobase/buf/buf0flu.cc
+3 FILE share/messages_to_clients.txt
+4 FILE storage/innobase/handler/ha_innodb.h
+4 FILE storage/innobase/include/srv0srv.h
+4 FILE storage/innobase/include/vec0index.h
+5 FILE storage/innobase/include/trx0trx.h
+6 FILE storage/innobase/include/ddl0impl-builder.h
 1 FILE storage/innobase/handler/i_s.cc      # aux tables hidden from I_S
 5 FILE storage/innobase/row/row0uins.cc     # insert-undo drops the graph node
 4 FILE storage/innobase/include/vec0arena.h
+
+# ---- MTR tests: placed at the LATEST category whose behaviour they assert.
+# Derived from the commits that introduced or modified each test. The bias is
+# late, which is safe (a test cannot assert what has not landed) but can leave
+# an early category thinner than it needs to be - see cat 3.
+8 FILE mysql-test/suite/percona/t/vector_alter.test
+8 FILE mysql-test/suite/percona/r/vector_alter.result
+6 FILE mysql-test/suite/percona/t/vector_alter_add_fulltext.test
+6 FILE mysql-test/suite/percona/r/vector_alter_add_fulltext.result
+2 FILE mysql-test/suite/percona/t/vector_alter_combinations.test
+2 FILE mysql-test/suite/percona/r/vector_alter_combinations.result
+8 FILE mysql-test/suite/percona/t/vector_alter_instant_label_race.test
+8 FILE mysql-test/suite/percona/r/vector_alter_instant_label_race.result
+2 FILE mysql-test/suite/percona/t/vector_alter_label_counter.test
+2 FILE mysql-test/suite/percona/r/vector_alter_label_counter.result
+8 FILE mysql-test/suite/percona/t/vector_alter_online_label_race.test
+8 FILE mysql-test/suite/percona/r/vector_alter_online_label_race.result
+8 FILE mysql-test/suite/percona/t/vector_alter_rebuild.test
+8 FILE mysql-test/suite/percona/r/vector_alter_rebuild.result
+8 FILE mysql-test/suite/percona/t/vector_alter_rebuild_column.test
+8 FILE mysql-test/suite/percona/r/vector_alter_rebuild_column.result
+8 FILE mysql-test/suite/percona/t/vector_audit_gaps.test
+8 FILE mysql-test/suite/percona/r/vector_audit_gaps.result
+7 FILE mysql-test/suite/percona/t/vector_aux_corrupt_entry_point.test
+7 FILE mysql-test/suite/percona/r/vector_aux_corrupt_entry_point.result
+4 FILE mysql-test/suite/percona/t/vector_aux_dml_debug.test
+4 FILE mysql-test/suite/percona/r/vector_aux_dml_debug.result
+1 FILE mysql-test/suite/percona/t/vector_aux_drop_mdl.test
+1 FILE mysql-test/suite/percona/r/vector_aux_drop_mdl.result
+1 FILE mysql-test/suite/percona/t/vector_aux_name_reserved.test
+1 FILE mysql-test/suite/percona/r/vector_aux_name_reserved.result
+1 FILE mysql-test/suite/percona/t/vector_aux_parse_trailing.test
+1 FILE mysql-test/suite/percona/r/vector_aux_parse_trailing.result
+1 FILE mysql-test/suite/percona/t/vector_aux_predicate.test
+1 FILE mysql-test/suite/percona/r/vector_aux_predicate.result
+6 FILE mysql-test/suite/percona/t/vector_aux_prepare_error.test
+6 FILE mysql-test/suite/percona/r/vector_aux_prepare_error.result
+6 FILE mysql-test/suite/percona/t/vector_aux_rebuild_rollback.test
+6 FILE mysql-test/suite/percona/r/vector_aux_rebuild_rollback.result
+1 FILE mysql-test/suite/percona/t/vector_aux_rename_reserved.test
+1 FILE mysql-test/suite/percona/r/vector_aux_rename_reserved.result
+5 FILE mysql-test/suite/percona/t/vector_aux_update_empty_repeat.test
+5 FILE mysql-test/suite/percona/r/vector_aux_update_empty_repeat.result
+5 FILE mysql-test/suite/percona/t/vector_blob_col.test
+5 FILE mysql-test/suite/percona/r/vector_blob_col.result
+5 FILE mysql-test/suite/percona/t/vector_build_atomicity.test
+5 FILE mysql-test/suite/percona/r/vector_build_atomicity.result
+9 FILE mysql-test/suite/percona/t/vector_build_config_error.test
+9 FILE mysql-test/suite/percona/r/vector_build_config_error.result
+8 FILE mysql-test/suite/percona/t/vector_concurrent_insert.test
+8 FILE mysql-test/suite/percona/r/vector_concurrent_insert.result
+4 FILE mysql-test/suite/percona/t/vector_counter_persist.test
+4 FILE mysql-test/suite/percona/r/vector_counter_persist.result
+2 FILE mysql-test/suite/percona/t/vector_counter_stale_buffer.test
+2 FILE mysql-test/suite/percona/r/vector_counter_stale_buffer.result
+1 FILE mysql-test/suite/percona/t/vector_create_like.test
+1 FILE mysql-test/suite/percona/r/vector_create_like.result
+5 FILE mysql-test/suite/percona/t/vector_drop_index_aux_error.test
+5 FILE mysql-test/suite/percona/r/vector_drop_index_aux_error.result
+1 FILE mysql-test/suite/percona/t/vector_drop_pk.test
+1 FILE mysql-test/suite/percona/r/vector_drop_pk.result
+2 FILE mysql-test/suite/percona/t/vector_fk.test
+2 FILE mysql-test/suite/percona/r/vector_fk.result
+2 FILE mysql-test/suite/percona/t/vector_import_blocked.test
+2 FILE mysql-test/suite/percona/r/vector_import_blocked.result
+6 FILE mysql-test/suite/percona/t/vector_index_build.test
+6 FILE mysql-test/suite/percona/r/vector_index_build.result
+6 FILE mysql-test/suite/percona/t/vector_index_build_parallel.test
+6 FILE mysql-test/suite/percona/r/vector_index_build_parallel.result
+7 FILE mysql-test/suite/percona/t/vector_index_not_scannable.test
+7 FILE mysql-test/suite/percona/r/vector_index_not_scannable.result
+5 FILE mysql-test/suite/percona/t/vector_index_syntax.test
+5 FILE mysql-test/suite/percona/r/vector_index_syntax.result
+2 FILE mysql-test/suite/percona/t/vector_insert.test
+2 FILE mysql-test/suite/percona/r/vector_insert.result
+8 FILE mysql-test/suite/percona/t/vector_insert_contention.test
+8 FILE mysql-test/suite/percona/r/vector_insert_contention.result
+5 FILE mysql-test/suite/percona/t/vector_insert_graph.test
+5 FILE mysql-test/suite/percona/r/vector_insert_graph.result
+2 FILE mysql-test/suite/percona/t/vector_insert_then_alter.test
+2 FILE mysql-test/suite/percona/r/vector_insert_then_alter.result
+8 FILE mysql-test/suite/percona/t/vector_instant_no_index_label.test
+8 FILE mysql-test/suite/percona/r/vector_instant_no_index_label.result
+8 FILE mysql-test/suite/percona/t/vector_instant_virtual.test
+8 FILE mysql-test/suite/percona/r/vector_instant_virtual.result
+4 FILE mysql-test/suite/percona/t/vector_max_memory.test
+4 FILE mysql-test/suite/percona/r/vector_max_memory.result
+1 FILE mysql-test/suite/percona/t/vector_misc_lifecycle.test
+1 FILE mysql-test/suite/percona/r/vector_misc_lifecycle.result
+1 FILE mysql-test/suite/percona/t/vector_persistence.test
+1 FILE mysql-test/suite/percona/r/vector_persistence.result
+8 FILE mysql-test/suite/percona/t/vector_pk_combinations.test
+8 FILE mysql-test/suite/percona/r/vector_pk_combinations.result
+4 FILE mysql-test/suite/percona/t/vector_runtime_open.test
+4 FILE mysql-test/suite/percona/r/vector_runtime_open.result
+7 FILE mysql-test/suite/percona/t/vector_scan_lifetime.test
+7 FILE mysql-test/suite/percona/r/vector_scan_lifetime.result
+7 FILE mysql-test/suite/percona/t/vector_search.test
+7 FILE mysql-test/suite/percona/r/vector_search.result
+7 FILE mysql-test/suite/percona/t/vector_stale_node.test
+7 FILE mysql-test/suite/percona/r/vector_stale_node.result
+5 FILE mysql-test/suite/percona/t/vector_update.test
+5 FILE mysql-test/suite/percona/r/vector_update.result
+5 FILE mysql-test/suite/percona/t/vector_update_pk.test
+5 FILE mysql-test/suite/percona/r/vector_update_pk.result
+5 FILE mysql-test/suite/percona/t/vector_update_pk_lock_wait.test
+5 FILE mysql-test/suite/percona/r/vector_update_pk_lock_wait.result
