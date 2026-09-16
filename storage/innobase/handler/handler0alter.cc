@@ -1810,6 +1810,15 @@ bool ha_innobase::commit_inplace_alter_table(TABLE *altered_table,
 
   ut_ad(ctx == nullptr || !(ctx->need_rebuild() && is_instant(ha_alter_info)));
 
+  /* Carry the label counter into the new definition, from the live value
+  under this commit-phase MDL. The prepare phase also writes it, but an
+  INSTANT alter never runs prepare, and neither does a no-change one. */
+  if (commit &&
+      DICT_TF2_FLAG_IS_SET(m_prebuilt->table, DICT_TF2_HAS_VEC_AUX_COL)) {
+    dd_set_vec_next_id(new_dd_tab->se_private_data(),
+                       m_prebuilt->table->vec_aux_autoinc_next_id.load());
+  }
+
   if (is_instant(ha_alter_info)) {
     ut_ad(!res);
 
