@@ -111,6 +111,13 @@ vec_metric_func_t vec_metric_func(vector_constants::Metric metric) {
   }
   return nullptr;
 }
+
+/** Upper bound on the HNSW "M" option. Each node's neighbor buffer is
+(layer + 2) * M pointers (vector-common/hnsw.h), so an unbounded M turns
+even a single-row index into a multi-gigabyte allocation; 200 keeps that
+buffer small while leaving headroom over any M a real workload would
+choose. */
+constexpr int kMaxHnswM = 200;
 }  // namespace
 
 bool parse_options(LEX_CSTRING type, const Vector_index_params_YY *params,
@@ -136,7 +143,8 @@ bool parse_options(LEX_CSTRING type, const Vector_index_params_YY *params,
       const auto *last = value.str + value.length;
       int val;
       auto result = std::from_chars(value.str, last, val);
-      if (result.ptr == last && result.ec == errc()) {
+      if (result.ptr == last && result.ec == errc() && val >= 2 &&
+          val <= kMaxHnswM) {
         hnsw_param.M = val;
       } else {
         my_error(ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER_VALUE, MYF(0),
