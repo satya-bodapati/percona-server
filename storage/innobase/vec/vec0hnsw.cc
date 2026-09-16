@@ -51,6 +51,31 @@ vec_t::~vec_t() {
   hnsw = nullptr;
 }
 
+/** Refuse outright once this index has ever reported DB_CORRUPTION. Called
+at the top of every entry point and again before returning success - see
+vec_t::corrupted for why a single sticky flag, checked twice, beats
+trusting one call's own ctx.err alone. Acquire, paired with
+vec_mark_corrupted's release. */
+static inline dberr_t vec_check_not_corrupted(const vec_t *vec) {
+  return vec->corrupted.load(std::memory_order_acquire) ? DB_CORRUPTION
+                                                        : DB_SUCCESS;
+}
+
+/** Defined here rather than inline in the header: load_node_cb
+(vec0hnsw.h) calls this before vec_t is a complete type there. Release,
+paired with vec_check_not_corrupted's acquire. */
+void vec_mark_corrupted(vec_t *vec) noexcept {
+  vec->corrupted.store(true, std::memory_order_release);
+}
+
+/** Mark corruption found outside load_node_cb - e.g. vec_runtime_load
+validating the entry row itself, before HNSW (and load_node_cb) ever
+runs. Idempotent, so harmless where it's redundant with load_node_cb's
+own call. */
+static inline void vec_note_if_corrupted(vec_t *vec, dberr_t err) {
+  if (err == DB_CORRUPTION) vec_mark_corrupted(vec);
+}
+
 /** Commit the aux sub-transaction and immediately start a fresh one, so that
 no row lock taken by a callback outlives that callback.
 
@@ -381,14 +406,46 @@ static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
   }
 
   Vec_ctx ctx;
+  ctx.vec = vec;
   ctx.aux = aux;
   ctx.thd = thd;
   ctx.m = vec->m;
   ctx.vec_bytes = vec->dims * sizeof(float);
   ctx.err = DB_SUCCESS;
+  ctx.loading_entry_point = true;
+
+  /* Validate the entry row before handing control to HNSW.
+  init_from_entry_point() (hnsw.h) asserts its one load_node_cb call
+  succeeds; a crash between committing the entry pointer and committing
+  the entry row itself - the same NODE_LOST race this file otherwise
+  tolerates - would trip that assert instead of returning a clean
+  dberr_t. Checking here first, before the graph is reachable by anyone
+  else, guarantees the row is still there and valid by the time
+  init_from_entry_point() reads it. */
+  {
+    mem_heap_t *entry_heap = mem_heap_create(256, UT_LOCATION_HERE);
+    vec_aux_read_t entry_row;
+    dberr_t entry_err = vec_aux_read_and_validate_node(&ctx, entry_point,
+                                                       entry_heap, &entry_row);
+    mem_heap_free(entry_heap);
+    /* Not the "empty index" case handled above (record 0 itself
+    missing). Record 0 exists and names entry_point, so a missing row
+    for that id means the aux table disagrees with its own metadata -
+    treat it as corruption, not a bare DB_RECORD_NOT_FOUND that
+    INSERT's error path (row_mysql_handle_errors, row0mysql.cc) can't
+    handle and would abort the server on. */
+    if (entry_err == DB_RECORD_NOT_FOUND) entry_err = DB_CORRUPTION;
+    if (entry_err != DB_SUCCESS) {
+      vec_note_if_corrupted(vec, entry_err);
+      ut::delete_(vec->hnsw);
+      vec->hnsw = nullptr;
+      return entry_err;
+    }
+  }
 
   vec->hnsw->init_from_entry_point(entry_point, &ctx);
   if (ctx.err != DB_SUCCESS) {
+    vec_note_if_corrupted(vec, ctx.err);
     ut::delete_(vec->hnsw);
     vec->hnsw = nullptr;
     return ctx.err;
@@ -435,6 +492,11 @@ they are the same operation: a node is immutable, so a changed vector is
 a new node rather than an edit of the old one. */
 static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
                             uint64_t base_pk, const char *q, THD *thd) {
+  {
+    const dberr_t corrupted_err = vec_check_not_corrupted(vec);
+    if (corrupted_err != DB_SUCCESS) return corrupted_err;
+  }
+
   /* innodb_hnsw_max_memory, checked BEFORE insert() starts mutating.
 
   Vec_arena::allocate() is the single point every graph byte passes
@@ -497,6 +559,7 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
   trx_start_internal(aux_trx, UT_LOCATION_HERE);
 
   Vec_ctx ctx;
+  ctx.vec = vec;
   ctx.trx = aux_trx;
   ctx.aux = aux;
   ctx.thd = thd;
@@ -544,7 +607,16 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
   trx_free_for_background(aux_trx);
   vec_aux_close_for_dml(aux, thd, &mdl);
 
-  return ctx.err;
+  vec_note_if_corrupted(vec, ctx.err);
+
+  /* This insert's own callbacks may all have succeeded while a
+  concurrent search or insert independently marked corruption elsewhere
+  in the graph. Recheck rather than report success to a caller who'd
+  otherwise have no way to learn the index they just wrote to is now
+  known corrupt. */
+  dberr_t err = ctx.err;
+  if (err == DB_SUCCESS) err = vec_check_not_corrupted(vec);
+  return err;
 }
 
 dict_index_t *vec_index_of(dict_table_t *table) {
@@ -571,6 +643,11 @@ dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
   auto *vec = vec_runtime_get(index);
   if (vec == nullptr) return DB_TABLE_NOT_FOUND;
 
+  {
+    const dberr_t corrupted_err = vec_check_not_corrupted(vec);
+    if (corrupted_err != DB_SUCCESS) return corrupted_err;
+  }
+
   MDL_ticket *mdl = nullptr;
   dict_table_t *aux =
       vec_aux_open_for_dml(vec->table, vec->index_id, thd, &mdl);
@@ -588,6 +665,7 @@ dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
   }
 
   Vec_ctx ctx;
+  ctx.vec = vec;
   ctx.trx = nullptr;
   ctx.aux = aux;
   ctx.thd = thd;
@@ -616,8 +694,15 @@ dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
                out->end());
   }
 
-  const dberr_t err = ctx.err;
+  dberr_t err = ctx.err;
   vec_aux_close_for_dml(aux, thd, &mdl);
+  vec_note_if_corrupted(vec, err);
+
+  /* This search's own loads may have only touched already-NODE_LOST
+  nodes if a concurrent statement is the one that just detected the
+  corruption. Recheck rather than return `out` silently missing what
+  that other statement found. */
+  if (err == DB_SUCCESS) err = vec_check_not_corrupted(vec);
   return err;
 }
 
@@ -644,6 +729,11 @@ dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
   auto *vec = vec_runtime_get(index);
   if (vec == nullptr) return DB_TABLE_NOT_FOUND;
 
+  {
+    const dberr_t corrupted_err = vec_check_not_corrupted(vec);
+    if (corrupted_err != DB_SUCCESS) return corrupted_err;
+  }
+
   MDL_ticket *mdl = nullptr;
   dict_table_t *aux =
       vec_aux_open_for_dml(vec->table, vec->index_id, thd, &mdl);
@@ -669,6 +759,7 @@ dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
   s->aux = aux;
   s->mdl = mdl;
   s->thd = thd;
+  s->ctx.vec = vec;
   s->ctx.trx = nullptr;
   s->ctx.aux = aux;
   s->ctx.thd = thd;
@@ -684,8 +775,20 @@ dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
                              &s->ctx);
   if (s->ctx.err != DB_SUCCESS) {
     const dberr_t err = s->ctx.err;
+    vec_note_if_corrupted(vec, err);
     vec_knn_close(s);
     return err;
+  }
+
+  /* Same recheck as vec_knn_search: this batch's own faults may have
+  all landed on nodes lost for a reason this scan never itself saw as
+  an error. */
+  {
+    const dberr_t corrupted_err = vec_check_not_corrupted(vec);
+    if (corrupted_err != DB_SUCCESS) {
+      vec_knn_close(s);
+      return corrupted_err;
+    }
   }
 
   *out = s;
@@ -697,8 +800,21 @@ bool vec_knn_next(vec_search_t *s, vec_hit_t *hit) {
   if (s->ctx.err != DB_SUCCESS) return false;
 
   const auto next = s->vec->hnsw->nn_search_next(&s->nn);
-  if (s->ctx.err != DB_SUCCESS) return false;
+  if (s->ctx.err != DB_SUCCESS) {
+    vec_note_if_corrupted(s->vec, s->ctx.err);
+    return false;
+  }
   if (!next.first) return false;
+
+  /* Same recheck as vec_knn_search/vec_knn_open: this hit may look
+  valid while a concurrent statement just found corruption. On a
+  positive, set it into ctx.err so vec_knn_error() reports it and later
+  calls short-circuit via the top check. */
+  const dberr_t corrupted_err = vec_check_not_corrupted(s->vec);
+  if (corrupted_err != DB_SUCCESS) {
+    s->ctx.err = corrupted_err;
+    return false;
+  }
 
   hit->id = next.second.id;
   hit->base_pk = next.second.base_pk;

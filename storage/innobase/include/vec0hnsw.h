@@ -56,7 +56,17 @@ per-call, per-transaction, or per-thread fields... callbacks must not
 rely on data written to Persistor members during a prior call" - because
 one persistor instance is stored by value for the index's lifetime and
 serves every caller. So all of it lives here and is passed in. */
+/* Defined further down (holds a Vec_hnsw nested in this header); Vec_ctx
+only needs a pointer. */
+struct vec_t;
+
 struct Vec_ctx {
+  /** Index runtime this call belongs to. Lets load_node_cb set
+  vec_t::corrupted the instant it sees DB_CORRUPTION, instead of after
+  the whole statement returns - closing a window where a concurrent
+  statement could observe the node already NODE_LOST without seeing the
+  flag. Never null. */
+  vec_t *vec{nullptr};
   /** Sub-transaction the aux writes ride. Not the user's transaction:
   the aux must survive a rollback of the statement that caused it, or
   the graph would keep nodes the aux no longer describes. */
@@ -86,6 +96,14 @@ struct Vec_ctx {
   gained either, because an index under construction is invisible, so
   there is no second writer to deadlock against. */
   bool commit_steps{true};
+  /** True only during the cold-start entry-point load
+  (vec_runtime_load's call to init_from_entry_point), which has no
+  fallback and must fail loudly. False everywhere else: a missing row on
+  an ordinary neighbor-stub load is the expected NODE_LOST case (an
+  insert that crashed before insert_cb, after a concurrent insert
+  already referenced it - see hnsw.h), and HNSW already skips such
+  nodes, so ctx->err must stay untouched. */
+  bool loading_entry_point{false};
 };
 
 /* The persistor's shims forward here. Ordinary functions, so their
@@ -100,6 +118,40 @@ dberr_t vec_persist_update_neighbors(Vec_ctx *ctx, uint64_t id,
                                      const std::vector<byte> &neighbors);
 
 dberr_t vec_persist_entry_point(Vec_ctx *ctx, uint64_t id);
+
+/** Set vec_t::corrupted. Defined in vec0hnsw.cc, after vec_t is
+complete - load_node_cb below is a template instantiated inline, before
+vec_t is a complete type here, so it can only call this by declaration.
+@param[in,out]  vec  the index runtime; must not be null */
+void vec_mark_corrupted(vec_t *vec) noexcept;
+
+/** Read and shape-validate one node's aux row. Split out of
+vec_persist_load_node so a caller with just an id - e.g. vec_runtime_load
+checking the entry row before HNSW runs - can reuse the same corruption
+checks instead of duplicating them.
+@param[in]      ctx   the id-independent parameters (aux table, dims, M)
+@param[in]      id    the node to read
+@param[in,out]  heap  heap the returned bytes are copied onto
+@param[out]     out   the node
+@return DB_SUCCESS, DB_RECORD_NOT_FOUND, DB_CORRUPTION, or a read error */
+inline dberr_t vec_aux_read_and_validate_node(Vec_ctx *ctx, uint64_t id,
+                                              mem_heap_t *heap,
+                                              vec_aux_read_t *out) {
+  const dberr_t err = vec_aux_read_node(ctx->aux, id, heap, out);
+  if (err != DB_SUCCESS) return err;
+
+  if (out->vec_len != ctx->vec_bytes) return DB_CORRUPTION;
+
+  /* The neighbour blob must cover exactly the node's slots. Checking it
+  is not paranoia: the count is derived from level and M rather than
+  stored, so a mismatch means the row and the index disagree about the
+  shape of the graph, and load_node_neighbors would read past the blob. */
+  if (out->neighbors_len != vec_aux_neighbors_blob_len(out->level, ctx->m)) {
+    return DB_CORRUPTION;
+  }
+
+  return DB_SUCCESS;
+}
 
 /** Fill an unloaded node from its aux row.
 
@@ -122,7 +174,7 @@ dberr_t vec_persist_load_node(Vec_ctx *ctx, Hnsw &hnsw,
 
   mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
   vec_aux_read_t node;
-  dberr_t err = vec_aux_read_node(ctx->aux, id, heap, &node);
+  dberr_t err = vec_aux_read_and_validate_node(ctx, id, heap, &node);
   if (err != DB_SUCCESS) {
     mem_heap_free(heap);
     /* Unlike vec_runtime_load's lookup of record 0, a miss here is never
@@ -131,20 +183,6 @@ dberr_t vec_persist_load_node(Vec_ctx *ctx, Hnsw &hnsw,
     client as HA_ERR_NO_ACTIVE_RECORD - indistinguishable from an
     ordinary missing row. Report it as what it is. */
     return err == DB_RECORD_NOT_FOUND ? DB_ANN_NODE_NOT_FOUND : err;
-  }
-
-  if (node.vec_len != ctx->vec_bytes) {
-    mem_heap_free(heap);
-    return DB_CORRUPTION;
-  }
-
-  /* The neighbour blob must cover exactly the node's slots. Checking it
-  is not paranoia: the count is derived from level and M rather than
-  stored, so a mismatch means the row and the index disagree about the
-  shape of the graph, and load_node_neighbors would read past the blob. */
-  if (node.neighbors_len != vec_aux_neighbors_blob_len(node.level, ctx->m)) {
-    mem_heap_free(heap);
-    return DB_CORRUPTION;
   }
 
   /* Order matters: load_node_neighbors sizes its allocation from the
@@ -212,13 +250,29 @@ struct Vec_persistor {
     ctx->err = vec_persist_entry_point(ctx, id);
   }
 
-  /** Returns false on failure, which marks the node NODE_LOST rather than
-  leaving a half-filled COMPLETE one. The first error is kept in ctx->err
-  so the statement fails rather than answering from a partial graph. */
+  /** Returns false on failure, which marks the node NODE_LOST - HNSW's
+  own callers already treat that as "skip this neighbor".
+
+  Whether the failure also reaches ctx->err, failing the caller's whole
+  statement, depends on ctx->loading_entry_point: true only during the
+  cold-start entry-point load, which must fail loudly; false for an
+  ordinary neighbor-stub load, where a missing row is the expected
+  NODE_LOST case (hnsw.h) and HNSW already routes around it.
+  DB_CORRUPTION stays fatal either way - unlike a missing row, that is
+  never expected. */
   template <typename Hnsw>
   bool load_node_cb(Context *ctx, Hnsw &hnsw,
                     typename Hnsw::LoadNodeHandle handle) {
-    if (ctx->err != DB_SUCCESS) return false;
+    /* A stale DB_RECORD_NOT_FOUND left by an earlier call to this
+    function doesn't block this one, unless that earlier call was the
+    entry-point load. Anything else in ctx->err is a real failure and
+    still stops the walk. Currently a no-op (only the assignment below
+    can set DB_RECORD_NOT_FOUND, and only during entry-point load), kept
+    so this guard mirrors that assignment if either ever changes. */
+    if (ctx->err != DB_SUCCESS &&
+        (ctx->loading_entry_point || ctx->err != DB_RECORD_NOT_FOUND)) {
+      return false;
+    }
 
     /* NOT the place for the innodb_hnsw_max_memory check, however much
     it looks like it: this is where a cold graph grows, but a false
@@ -240,7 +294,16 @@ struct Vec_persistor {
 
     const dberr_t err = vec_persist_load_node(ctx, hnsw, handle);
     if (err != DB_SUCCESS) {
-      ctx->err = err;
+      /* Set the flag before returning, not after the whole statement
+      finishes: load_node() (hnsw.h) marks the node NODE_LOST the instant
+      this returns false, visible to any thread once it releases the
+      node's lock. Setting corrupted here happens-before that release,
+      so no concurrent reader can see NODE_LOST without also seeing the
+      flag - setting it later would leave a window where one could. */
+      if (err == DB_CORRUPTION) vec_mark_corrupted(ctx->vec);
+      if (ctx->loading_entry_point || err != DB_RECORD_NOT_FOUND) {
+        ctx->err = err;
+      }
       return false;
     }
     return true;
@@ -381,6 +444,20 @@ struct vec_t : public Vec_runtime {
   release/acquire ordering: it publishes the `hnsw` pointer to every thread
   that sees it true, which is what lets the hot paths run unlocked. */
   std::atomic<bool> loaded{false};
+  /** True once any node load in this graph has hit DB_CORRUPTION - a row
+  that exists but disagrees with the index about its own shape. Sticky
+  for the runtime's lifetime; only a DDL rebuild (a fresh object) clears
+  it.
+
+  Needed because both DB_CORRUPTION and DB_RECORD_NOT_FOUND leave a node
+  NODE_LOST with no way back (vector-common/hnsw.h), so a second touch
+  never calls back here to report anything again. That's fine for
+  DB_RECORD_NOT_FOUND - an expected crash artifact HNSW already routes
+  around - but not for DB_CORRUPTION, which must not go quiet just
+  because its node won't be loaded again. Every entry point checks this
+  flag up front instead of relying on the one statement that first hit
+  it. */
+  std::atomic<bool> corrupted{false};
 };
 
 /** Open (lazily create) the runtime for a vector index.

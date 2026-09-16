@@ -268,6 +268,48 @@ struct Tester {
   Usage: vec_aux_verify db/table */
   [[nodiscard]] Ret_t vec_aux_verify(std::vector<std::string> &tokens) noexcept;
 
+  /** Point record 0's entry-point pointer straight at an id with no
+  aux row at all, skipping the intermediate "have a real entry, corrupt
+  its row" step vec_corrupt_entry_row takes. Simulates a crash between
+  committing the entry-point pointer (vec_persist_entry_point) and
+  committing the new entry node's own row (vec_persist_insert) -
+  distinct from vec_corrupt_entry_row's target existing but malformed
+  row: here vec_aux_read_node itself returns DB_RECORD_NOT_FOUND for
+  the entry id, not a shape mismatch after a successful read.
+  Usage: vec_point_entry_at_missing_row db/table
+  @param[in]  tokens  the command
+  @return the status */
+  [[nodiscard]] Ret_t vec_point_entry_at_missing_row(
+      std::vector<std::string> &tokens) noexcept;
+
+  /** Overwrite the entry point's own row with a neighbor blob whose
+  length disagrees with its level - a real shape mismatch, checked
+  before any neighbor id is read, unlike vec_poison_entry_neighbor's
+  merely-missing target. Simulates a crash between committing the
+  entry-point pointer (record 0) and committing the entry node's own
+  row: a smaller variant of the same "insert crashed mid-way" family,
+  but for the one row vec_runtime_load's cold start cannot route
+  around. Reads the entry point id itself, for the same
+  non-reproducibility reason vec_poison_entry_neighbor does.
+  Usage: vec_corrupt_entry_row db/table
+  @param[in]  tokens  the command
+  @return the status */
+  [[nodiscard]] Ret_t vec_corrupt_entry_row(
+      std::vector<std::string> &tokens) noexcept;
+
+  /** Overwrite the entry point's first real (nonzero) neighbor's own
+  row with a neighbor blob whose length disagrees with its level - the
+  DB_CORRUPTION counterpart to vec_poison_entry_neighbor's
+  DB_RECORD_NOT_FOUND, on a real, still-reachable node rather than the
+  entry point itself. Unlike a missing row, corruption is never an
+  expected crash artifact, so every query that faults this node in
+  should be refused, not just the first (see vec_t::corrupted).
+  Usage: vec_corrupt_entry_neighbor_row db/table
+  @param[in]  tokens  the command
+  @return the status */
+  [[nodiscard]] Ret_t vec_corrupt_entry_neighbor_row(
+      std::vector<std::string> &tokens) noexcept;
+
   /** Run a k-NN search against the graph, loading it from the aux first.
   Proves the graph was persisted, reloaded and answers correctly - the
   only way to query it until the server read path exists.
@@ -279,6 +321,24 @@ struct Tester {
   @param[in]  tokens  the command
   @return the status */
   [[nodiscard]] Ret_t vec_next_id(std::vector<std::string> &tokens) noexcept;
+
+  /** Overwrite slot 0 of the entry point's own neighbor blob with an id
+  that has no aux row, simulating the crash artifact documented for
+  NODE_LOST in vector-common/hnsw.h (an insert that crashed before
+  insert_cb, after a concurrent insert had already referenced it as a
+  neighbor). Every other slot -- the entry point's real neighbors -- is
+  left untouched, so a fixed server still answers from the rest of the
+  graph instead of just the entry point. Reads the entry point id and
+  its existing neighbor blob from the aux table itself, so the caller
+  does not need either -- the layer draw is non-reproducible across
+  runs (hnsw.h: "no test may record per-node level or nb"). Requires
+  the index runtime already loaded (any prior DML/DQL against the
+  table in this session loads it).
+  Usage: vec_poison_entry_neighbor db/table bogus_id
+  @param[in]  tokens  the command
+  @return the status */
+  [[nodiscard]] Ret_t vec_poison_entry_neighbor(
+      std::vector<std::string> &tokens) noexcept;
 
   /** Print a vector index runtime's parameters.
   Usage: vec_runtime_info db/table
