@@ -1788,6 +1788,42 @@ bool ha_innobase::commit_inplace_alter_table(TABLE *altered_table,
     ut_d(old_info_updated = true);
   }
 
+  /* Refresh the label counter right before it becomes durable.
+  prepare_inplace_alter_table() already carried it into new_dd_tab, but
+  that snapshot predates this ALTER's own copy phase. A rebuild that
+  keeps the vector index is always forced non-online (see
+  check_if_supported_inplace_alter), so nothing can advance the counter
+  in between and this re-read is a no-op there. A non-rebuild ALTER -
+  which stays online whenever it neither adds a PK/FULLTEXT/VECTOR key
+  nor needs a rebuild for some other reason - does not get that
+  protection: concurrent DML can keep minting labels via
+  vec_assign_next_aux_id() right up until wait_while_table_is_used()
+  upgrades the MDL to EXCLUSIVE just before this function runs, and
+  re-reading here, under that exclusive lock, is what makes the
+  persisted value match reality instead of the pre-window snapshot.
+
+  ctx is null for two cases handled later below: a true no-op ALTER
+  (nothing to refresh either way) and - the one that matters - INSTANT,
+  which never sets up a ha_innobase_inplace_ctx at all
+  (prepare_inplace_alter_table_impl returns before doing so). INSTANT
+  does skip the SHARED_LOCK_AFTER_PREPARE/NO_LOCK_AFTER_PREPARE branch
+  that upgrades the MDL up front in mysql_inplace_alter_table() - but it
+  still runs through that function's later, unconditional
+  wait_while_table_is_used() call ("Upgrade to EXCLUSIVE before commit")
+  right before ha_commit_inplace_alter_table(), same as every other
+  algorithm. So by the time this runs, new table opens are already
+  blocked here too; reading m_prebuilt->table (the one live dict_table_t
+  throughout, since INSTANT never rebuilds) closes the window exactly
+  like the ctx != nullptr case above. */
+  if (commit) {
+    dict_table_t *vec_table =
+        ctx != nullptr ? ctx->old_table : m_prebuilt->table;
+    if (DICT_TF2_FLAG_IS_SET(vec_table, DICT_TF2_HAS_VEC_AUX_COL)) {
+      dd_set_vec_next_id(new_dd_tab->se_private_data(),
+                         vec_table->vec_aux_autoinc_next_id.load());
+    }
+  }
+
   bool res = commit_inplace_alter_table_impl<dd::Table>(
       altered_table, ha_alter_info, commit, new_dd_tab);
 

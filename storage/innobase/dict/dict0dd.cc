@@ -1701,6 +1701,8 @@ void dd_copy_private(Table &new_table, const Table &old_table) {
   uint64_t autoinc = 0;
   uint64_t version = 0;
   bool reset = false;
+  uint64_t vec_next_id = 0;
+  bool reset_vec_next_id = false;
   dd::Properties &se_private_data = new_table.se_private_data();
 
   /* AUTOINC metadata could be set at the beginning for
@@ -1709,6 +1711,18 @@ void dd_copy_private(Table &new_table, const Table &old_table) {
     se_private_data.get(dd_table_key_strings[DD_TABLE_AUTOINC], &autoinc);
     se_private_data.get(dd_table_key_strings[DD_TABLE_VERSION], &version);
     reset = true;
+  }
+
+  /* Same reasoning as AUTOINC above: prepare_inplace_alter_table() (and,
+  for the LOCK=NONE window, commit_inplace_alter_table()) already staged
+  the label counter into new_table before this call - the wholesale
+  clear()/set_se_private_data(old_table...) below would otherwise silently
+  drop it back to old_table's value (or to unset, minting from 1 again),
+  since this key isn't among what that copy carries forward on its own. */
+  if (se_private_data.exists(dd_table_key_strings[DD_TABLE_VEC_NEXT_ID])) {
+    se_private_data.get(dd_table_key_strings[DD_TABLE_VEC_NEXT_ID],
+                        &vec_next_id);
+    reset_vec_next_id = true;
   }
 
   new_table.se_private_data().clear();
@@ -1726,6 +1740,11 @@ void dd_copy_private(Table &new_table, const Table &old_table) {
   if (reset) {
     se_private_data.set(dd_table_key_strings[DD_TABLE_VERSION], version);
     se_private_data.set(dd_table_key_strings[DD_TABLE_AUTOINC], autoinc);
+  }
+
+  if (reset_vec_next_id) {
+    se_private_data.set(dd_table_key_strings[DD_TABLE_VEC_NEXT_ID],
+                        vec_next_id);
   }
 
   ut_ad(new_table.indexes()->size() == old_table.indexes().size());
