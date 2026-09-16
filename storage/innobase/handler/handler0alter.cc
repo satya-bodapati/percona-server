@@ -1415,6 +1415,22 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
 
   m_prebuilt->trx->will_lock++;
 
+  /* A table with a vector index used to be refused a native rebuild here,
+  on the grounds that the rebuild mints a new table_id and index_id and
+  the aux the graph lives in is named after them - so the graph would be
+  lost. That stopped being true when the build moved into ddl::Builder:
+  a rebuild recreates every index on the new table, the vector index among
+  them, so the graph is rebuilt from the copied rows with their labels
+  intact and base_pk following the new primary key.
+
+  What remains is that such a rebuild is not ONLINE - the branch below
+  still clears `online` for it, because the row log cannot maintain a
+  graph while DML runs against it. LOCK=SHARED it is.
+
+  vector_alter_rebuild.test covers the shapes: FORCE, OPTIMIZE,
+  ENGINE=InnoDB, ROW_FORMAT, a primary key swap, ADD and DROP COLUMN, and
+  the AUTO_INCREMENT ones that need the label counter to survive. */
+
   if (!online) {
     /* We already determined that only a non-locking
     operation is possible. */
@@ -1455,12 +1471,6 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
     rebuild-during-copy, native/online rebuild could be re-enabled;
     THAT would be a deliberate improvement beyond FTS (which never got
     it) and must be justified as a deviation then. PS-11300+. */
-    if (vec_aux_table_has_vector_index(m_prebuilt->table)) {
-      ha_alter_info->unsupported_reason =
-          innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR);
-      return HA_ALTER_INPLACE_NOT_SUPPORTED;
-    }
-
     if (innobase_spatial_exist(altered_table)) {
       ha_alter_info->unsupported_reason =
           innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_GIS);
@@ -1519,7 +1529,7 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
         supported. Reason:" and then nothing, because every other branch
         here sets a reason and this one did not. */
         ha_alter_info->unsupported_reason = innobase_get_err_msg(
-            ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR);
+            ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_NOLOCK);
         online = false;
         break;
       }
@@ -8356,6 +8366,7 @@ rollback_trx:
       dict_table_autoinc_set_col_pos(t, field->field_index());
       dict_table_autoinc_unlock(t);
     }
+
 
     bool add_fts = false;
 
