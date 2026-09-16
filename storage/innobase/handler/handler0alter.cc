@@ -1621,6 +1621,21 @@ bool ha_innobase::prepare_inplace_alter_table(TABLE *altered_table,
                    ha_alter_info->create_info->auto_increment_value);
   }
 
+  /* Carry the label counter into the new definition. A rebuild mints a
+  new table_id, and dd_set_autoinc above deliberately bumps
+  DD_TABLE_VERSION to invalidate buffered dynamic metadata - either is
+  enough to lose a counter that lives only in that buffer. Autoinc
+  survives both by keeping its value here, in se_private_data; so does
+  this one now.
+
+  Taken from the live table rather than from the old definition, because
+  the buffer is where the current value is - the definition holds
+  whatever was written at the last ALTER. */
+  if (DICT_TF2_FLAG_IS_SET(m_prebuilt->table, DICT_TF2_HAS_VEC_AUX_COL)) {
+    dd_set_vec_next_id(new_dd_tab->se_private_data(),
+                       m_prebuilt->table->vec_aux_autoinc_next_id.load());
+  }
+
   return prepare_inplace_alter_table_impl<dd::Table>(
       altered_table, ha_alter_info, old_dd_tab, new_dd_tab);
 }
@@ -5476,14 +5491,15 @@ template <typename Table>
     column; once the column exists a later ADD is INPLACE with no
     rebuild, and then ctx->new_table is the table that was already there
     (vector_index_build.test asserts the TABLE_ID does not change across
-    such an ADD). Iterating its vector indexes is still right, because
-    PS-11264 caps a table at one - so when vec_index is set there is
-    exactly one to register and it is the one this ALTER added. The
-    assertion below is what would catch that cap being lifted without
-    this code being revisited. */
+    such an ADD).
+
+    So register vec_index itself rather than whatever vector indexes the
+    table holds: DROP KEY v, ADD KEY v2 in one statement leaves both on
+    the parent until commit, and the dropped one's aux is already on its
+    way out. vec_index is the one this ALTER added - the loop above
+    asserts there is only ever one. */
     if (vec_index) {
-      ut_a(vec_aux_count_indexes(ctx->new_table) == 1);
-      if (!vec_aux_create_dd_tables(ctx->new_table)) {
+      if (!vec_aux_create_dd_table(ctx->new_table, vec_index)) {
         error = DB_ERROR;
         goto error_handling;
       }
