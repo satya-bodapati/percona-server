@@ -568,11 +568,18 @@ struct Vec_build;
 /** Start building `index`. The HNSW parameters come from the index's own
 definition in `altered_table`, which is the only place they exist during
 an ALTER - nothing in the dictionary carries M or ef_construction.
-@param[in]  index          the vector index being built
-@param[in]  altered_table  the MySQL table definition the ALTER produces
+@param[in]   index          the vector index being built
+@param[in]   altered_table  the MySQL table definition the ALTER produces
+@param[out]  err            DB_SUCCESS on success; on failure, DB_OUT_OF_MEMORY
+                            only for an actual allocation/memory-budget
+                            failure, DB_ERROR for anything else (the index's
+                            own KEY could not be found or parsed) - the two
+                            are not interchangeable to the caller, which
+                            reports err to the user
 @return the build state, or nullptr if it could not be created */
 [[nodiscard]] Vec_build *vec_build_start(dict_index_t *index,
-                                         const TABLE *altered_table);
+                                         const TABLE *altered_table,
+                                         dberr_t *err);
 
 /** Add one base row to the graph. Called from the DDL scan's per-row
 callback, concurrently from every scan thread: HNSW::insert serialises
@@ -605,3 +612,23 @@ void vec_build_free(Vec_build *b);
 
 dberr_t vec_update_row(trx_t *trx, dict_table_t *table, uint64_t label,
                        const char *q, ulint q_len, uint64_t base_pk, THD *thd);
+
+/** CHECK TABLE support: verify every base row's percona_vec_aux_id names a
+node that actually exists in the vector aux table.
+
+Scan direction is base -> aux only. An aux node nobody references any
+more (left behind by an UPDATE that stamped a fresh label on the same
+row, see vec_update_row) is an expected, permanent byproduct of the
+design and is never visited by this scan, so it is never flagged. Only
+a base row whose label resolves to nothing in the aux table - a
+dangling reference - counts as corruption.
+
+@param[in]      vec_index  the vector index (index->is_vector())
+@param[in,out]  trx        the CHECK TABLE transaction; also polled every
+                           1000 rows for KILL/interrupt, same cadence as
+                           the non-vector scan in row_scan_index_for_mysql
+@param[out]     n_bad      number of base rows with a dangling reference
+@return DB_SUCCESS, DB_CORRUPTION (with *n_bad > 0), DB_INTERRUPTED, or
+another error */
+[[nodiscard]] dberr_t vec_check_aux_refs(dict_index_t *vec_index, trx_t *trx,
+                                         ulint *n_bad);
