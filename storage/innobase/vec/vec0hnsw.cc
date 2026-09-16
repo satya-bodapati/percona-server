@@ -31,9 +31,12 @@ The HNSW runtime and the persistence callbacks behind it.
 #include "srv0srv.h"
 
 #include <variant>
+#include "btr0pcur.h"
 #include "dict0dd.h"
 #include "dict0dict.h"
+#include "lock0lock.h"
 #include "mach0data.h"
+#include "my_dbug.h"
 #include "sql/field.h"
 #include "sql/table.h"
 #include "trx0roll.h"
@@ -93,6 +96,13 @@ dberr_t vec_persist_insert(Vec_ctx *ctx, uint64_t id, uint64_t base_pk,
                            const std::vector<byte> &neighbors) {
   ut_ad(ctx->aux != nullptr);
   ut_ad(id != 0); /* 0 is the empty-slot sentinel; record 0 is metadata */
+
+  /* Test-only: fabricate the one corruption vec_check_aux_refs (CHECK
+  TABLE) exists to catch - a base row whose freshly stamped label never
+  got an aux row - without a general aux-row-delete primitive. The base
+  row's INSERT still commits normally; only this node's aux row is
+  skipped. */
+  DBUG_EXECUTE_IF("vec_skip_aux_row_insert", return DB_SUCCESS;);
 
   vec_aux_row_t row;
   row.id = id;
@@ -929,6 +939,19 @@ dberr_t vec_insert_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
     if (vec_len != vec->dims * sizeof(float)) return DB_CORRUPTION;
 
     const uint64_t label = vec_get_aux_id_from_row(table, row);
+    /* Test-only: fabricate a corrupt stamped label (see
+    vec_stamp_aux_id, vec0aux.cc) for vec_check_aux_refs's label == 0
+    case to catch. Every other path treats 0 as impossible, per this
+    column's documented contract - skip node creation for this row
+    instead of minting one under a label the aux table already reserves
+    for its own metadata record.
+
+    DBUG_EVALUATE_IF, not DBUG_EXECUTE_IF: the latter's do/while(0)
+    wrapper would swallow a `continue` here, continuing that hidden
+    loop instead of this function's for-loop over indexes. */
+    if (label == 0 && DBUG_EVALUATE_IF("vec_stamp_zero_aux_id", true, false)) {
+      continue;
+    }
     ut_ad(label != 0);
 
     /* base_pk is the base row's PRIMARY KEY, not the label. A search
@@ -948,4 +971,148 @@ dberr_t vec_insert_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
     if (err != DB_SUCCESS) return err;
   }
   return DB_SUCCESS;
+}
+
+dberr_t vec_check_aux_refs(dict_index_t *vec_index, trx_t *trx, ulint *n_bad) {
+  ut_ad(vec_index->is_vector());
+  *n_bad = 0;
+
+  THD *thd = trx->mysql_thd;
+  dict_table_t *base = vec_index->table;
+  dict_index_t *clust = base->first_index();
+  const ulint aux_id_pos = clust->get_col_pos(base->vec_aux_col);
+
+  /* A consistent read view, same as the clustered-index scan above this
+  one in row_scan_index_for_mysql takes for its own parallel-eligible
+  path (trx_assign_read_view there; a no-op here if that already ran,
+  since the clustered index is always checked first and REPEATABLE READ
+  assigns the view once per transaction). Without this, the raw pcur
+  walk below would see the current physical B-tree unfiltered: a
+  concurrent INSERT's row can be physically visible before its own
+  transaction (and the aux row that names it) commits, which would
+  read this function's own not-yet-there aux row as a dangling
+  reference - a false positive on a perfectly ordinary table under
+  write traffic. */
+  ReadView *view = trx_assign_read_view(trx);
+
+  /* Pass 1: collect every live, visible row's label into memory first,
+  rather than doing the aux point-lookup (pass 2) while still
+  positioned on the base table's leaf page. Interleaving would mean
+  nesting an mtr on a second B-tree (the aux table) inside the one
+  scanning the base table for the whole walk - exactly the kind of
+  held-latch-across-a-second-tree exposure InnoDB's mtr rules steer
+  away from. Buffering costs 8 bytes per row for the duration of the
+  scan, which is cheap next to what CHECK TABLE already does per row
+  (btr_validate_index). */
+  std::vector<uint64_t> labels;
+  {
+    mtr_t mtr;
+    mtr_start(&mtr);
+    btr_pcur_t pcur;
+    pcur.open_at_side(true, clust, BTR_SEARCH_LEAF, true, 0, &mtr);
+    ulint cnt = 1000;
+    while (pcur.move_to_next_user_rec(&mtr) == DB_SUCCESS) {
+      /* Check thd->killed every 1,000 scanned rows, same cadence as
+      the non-vector scan below in row_scan_index_for_mysql. */
+      if (--cnt == 0) {
+        if (trx_is_interrupted(trx)) {
+          pcur.close();
+          mtr_commit(&mtr);
+          return DB_INTERRUPTED;
+        }
+        cnt = 1000;
+      }
+
+      const rec_t *rec = pcur.get_rec();
+      ulint offsets_[REC_OFFS_NORMAL_SIZE];
+      ulint *offsets = offsets_;
+      mem_heap_t *rec_heap = nullptr;
+      rec_offs_init(offsets_);
+      offsets = rec_get_offsets(rec, clust, offsets, ULINT_UNDEFINED,
+                                UT_LOCATION_HERE, &rec_heap);
+
+      /* Not visible to our snapshot: either a row our view predates
+      (skip - as of our snapshot it doesn't exist yet, nothing to
+      check) or a later version of a row an older, still-visible
+      version of which this function cannot reconstruct without a full
+      undo walk. The one case this leaves unchecked is a row a
+      concurrent, not-yet-committed DELETE has physically marked: like
+      the accepted aux orphan, a transient false negative here is a
+      lesser cost than a false positive on ordinary concurrent DML,
+      and a later CHECK TABLE run sees it once things settle. */
+      if (!lock_clust_rec_cons_read_sees(rec, clust, offsets, view)) {
+        if (rec_heap != nullptr) mem_heap_free(rec_heap);
+        continue;
+      }
+
+      if (rec_get_deleted_flag(rec, dict_table_is_comp(base))) {
+        if (rec_heap != nullptr) mem_heap_free(rec_heap);
+        continue;
+      }
+
+      ulint len;
+      const byte *data =
+          rec_get_nth_field(nullptr, rec, offsets, aux_id_pos, &len);
+      ut_ad(len == 8);
+      const uint64_t label = mach_read_from_8(data);
+      if (rec_heap != nullptr) mem_heap_free(rec_heap);
+
+      /* 0 is the aux table's empty-slot/metadata sentinel (record 0
+      holds the graph's entry point, not a node), so a stamped row can
+      never legitimately carry it - vec_get_aux_id_from_row/_from_rec's
+      own contract says so. A row that does is corrupt on its own
+      terms; a plain aux lookup on label 0 would instead find record 0
+      and report success, masking exactly this. */
+      if (label == 0) {
+        (*n_bad)++;
+        continue;
+      }
+      labels.push_back(label);
+    }
+    pcur.close();
+    mtr_commit(&mtr);
+  }
+
+  MDL_ticket *mdl = nullptr;
+  dict_table_t *aux = vec_aux_open_for_dml(base, vec_index->id, thd, &mdl);
+  if (aux == nullptr) {
+    return DB_TABLE_NOT_FOUND;
+  }
+
+  /* Pass 2: for each label, does the aux table still have that node?
+  DB_RECORD_NOT_FOUND is the dangling reference this function looks
+  for. Absent from `labels` above (i.e. an aux node nobody's row names
+  any more) is never checked in either direction - that is the expected
+  orphan left behind by an UPDATE that stamped a fresh label on the
+  same row (vec_update_row), not corruption. */
+  mem_heap_t *heap = mem_heap_create(256, UT_LOCATION_HERE);
+  dberr_t err = DB_SUCCESS;
+  ulint cnt = 1000;
+  for (uint64_t label : labels) {
+    if (--cnt == 0) {
+      if (trx_is_interrupted(trx)) {
+        err = DB_INTERRUPTED;
+        break;
+      }
+      cnt = 1000;
+    }
+
+    mem_heap_empty(heap);
+    vec_aux_read_t node;
+    const dberr_t rerr = vec_aux_read_node(aux, label, heap, &node);
+    if (rerr == DB_RECORD_NOT_FOUND) {
+      (*n_bad)++;
+    } else if (rerr != DB_SUCCESS) {
+      err = rerr;
+      break;
+    }
+  }
+  mem_heap_free(heap);
+
+  vec_aux_close_for_dml(aux, thd, &mdl);
+
+  if (err != DB_SUCCESS) {
+    return err;
+  }
+  return (*n_bad == 0) ? DB_SUCCESS : DB_CORRUPTION;
 }

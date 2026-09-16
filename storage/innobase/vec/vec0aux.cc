@@ -48,6 +48,7 @@ naming. No population - that lands in PS-11300. */
 #include "fts0fts.h"
 #include "fts0priv.h"
 #include "mach0data.h"
+#include "my_dbug.h"
 #include "row0mysql.h"
 #include "row0upd.h"
 #include "trx0trx.h"
@@ -208,7 +209,6 @@ bool vec_aux_is_aux_table_name(const char *name) {
   return vec_aux_parse_table_name(name, nullptr, nullptr, nullptr);
 }
 
-
 bool vec_aux_table_has_vector_index(const dict_table_t *table) {
   if (table == nullptr) return false;
   for (const dict_index_t *idx = UT_LIST_GET_FIRST(table->indexes);
@@ -239,7 +239,13 @@ void vec_stamp_aux_id(dict_table_t *table, dtuple_t *row, byte *buf) {
   ut_ad(table->vec_aux_col != ULINT_UNDEFINED);
   ut_ad(table->vec_aux_col < dtuple_get_n_fields(row));
 
-  const uint64_t id = vec_assign_next_aux_id(table);
+  uint64_t id = vec_assign_next_aux_id(table);
+  /* Test-only: fabricate a corrupt stamped label (see the matching
+  bypass in vec_insert_row, vec0hnsw.cc) for vec_check_aux_refs's
+  label == 0 case to catch. 0 is otherwise unreachable here - it is
+  the counter's reserved starting sentinel, and vec_assign_next_aux_id
+  never hands it out. */
+  DBUG_EXECUTE_IF("vec_stamp_zero_aux_id", id = 0;);
 
   /* `buf` is the caller's, reserved once per handle and rewritten for
   every row - not allocated here. fts_create_doc_id does allocate per
@@ -399,7 +405,6 @@ bool vec_upd_row_pk(const dict_table_t *table, const upd_node_t *node,
   if (heap != nullptr) mem_heap_free(heap);
   return ok;
 }
-
 
 uint64_t vec_assign_next_aux_id(dict_table_t *table) {
   ut_ad(table != nullptr);
