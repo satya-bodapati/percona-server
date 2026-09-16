@@ -80,7 +80,7 @@ Data dictionary interface */
 #include "sql_table.h"
 #include "univ.i"  // Using OS_PATH_SEPARATOR
 #include "vec0aux.h"
-#endif             /* !UNIV_HOTBACKUP */
+#endif /* !UNIV_HOTBACKUP */
 
 const char *DD_instant_col_val_coder::encode(const byte *stream, size_t in_len,
                                              size_t *out_len) {
@@ -4017,7 +4017,7 @@ static inline dict_table_t *dd_fill_dict_table(const Table *dd_tab,
   /* Same check for vector aux tables: the on-disk name is the source of
   truth because DD se_private_data does not currently round-trip flags2's
   AUX bit. Reconstruct DICT_TF2_VEC_AUX and the parent_id from the
-  "<db>/vec_<parent_id>_<index_id>" name pattern. */
+  "<db>/percona_vec_<type>_<parent_id>_<index_id>" name pattern. */
   if (vec_aux_is_aux_table_name(norm_name)) {
     DICT_TF2_FLAG_SET(m_table, DICT_TF2_VEC_AUX);
     table_id_t parent_id = 0;
@@ -5323,9 +5323,9 @@ dict_table_t *dd_open_table_one(dd::cache::Dictionary_client *client,
     }
     /* DEVIATION FROM FTS: no fts_optimize_add_table parallel for
     vector-indexed tables. FTS registers with a background optimize
-    thread that rebalances token trees; HNSW has no equivalent
-    background maintenance in phase 1 (PS-11299). PS-11300 revisits
-    if the HNSW graph needs post-insert rebalancing. */
+    thread that rebalances token trees; the HNSW graph is maintained
+    entirely on the DML path, so there is no background worker to
+    register with. */
 
     if (dict_sys->dynamic_metadata != nullptr) {
       dict_table_load_dynamic_metadata(m_table);
@@ -6110,7 +6110,7 @@ bool dd_process_dd_indexes_rec(mem_heap_t *heap, const rec_t *rec,
     }
 
     /* For FTS or vec aux table, we need to acquire mdl lock on parent.
-    is_aux() is true for BOTH FTS and vec aux tables — dispatch by the
+    is_aux() is true for BOTH FTS and vec aux tables - dispatch by the
     specific predicate. Without the split, the FTS-only ut_ad(is_fts)
     would trip on any I_S / SYS_INDEXES scan that hits a vec aux. */
     if (table->is_aux()) {
@@ -6392,12 +6392,12 @@ bool dd_process_dd_tablespaces_rec(mem_heap_t *heap, const rec_t *rec,
   return true;
 }
 
-/** Get dd tablespace id for fts table
-@param[in]      parent_table    parent table of fts table
-@param[in]      table           fts table
+/** Get dd tablespace id for an auxiliary table - FTS or vector
+@param[in]      parent_table    parent table of the aux table
+@param[in]      table           aux table
 @param[in,out]  dd_space_id     dd table space id
 @return true on success, false on failure. */
-static bool dd_get_or_assign_fts_tablespace_id(const dict_table_t *parent_table,
+static bool dd_get_or_assign_aux_tablespace_id(const dict_table_t *parent_table,
                                                const dict_table_t *table,
                                                dd::Object_id &dd_space_id) {
   THD *thd = current_thd;
@@ -6633,7 +6633,7 @@ bool dd_create_fts_index_table(const dict_table_t *parent_table,
 
   /* Fill table space info, etc */
   dd::Object_id dd_space_id;
-  if (!dd_get_or_assign_fts_tablespace_id(parent_table, table, dd_space_id)) {
+  if (!dd_get_or_assign_aux_tablespace_id(parent_table, table, dd_space_id)) {
     return false;
   }
 
@@ -6686,7 +6686,7 @@ bool dd_create_vec_aux_table(const dict_table_t *parent_table,
   dd_table->set_schema_id(schema->id());
 
   /* Re-use the FTS aux table options (hidden, dynamic, binary collation,
-  no compression/encryption) — the vec aux is the same kind of object. */
+  no compression/encryption) - the vec aux is the same kind of object. */
   dd_set_fts_table_options(dd_table, table);
 
   /* Columns. Order and types must match the in-memory dict_table_t
@@ -6755,7 +6755,7 @@ bool dd_create_vec_aux_table(const dict_table_t *parent_table,
 
   /* Tablespace. Same machinery FTS uses for its per-aux tablespace. */
   dd::Object_id dd_space_id;
-  if (!dd_get_or_assign_fts_tablespace_id(parent_table, table, dd_space_id)) {
+  if (!dd_get_or_assign_aux_tablespace_id(parent_table, table, dd_space_id)) {
     return false;
   }
   table->dd_space_id = dd_space_id;
@@ -6892,7 +6892,7 @@ bool dd_create_fts_common_table(const dict_table_t *parent_table,
 
   /* Fill table space info, etc */
   dd::Object_id dd_space_id;
-  if (!dd_get_or_assign_fts_tablespace_id(parent_table, table, dd_space_id)) {
+  if (!dd_get_or_assign_aux_tablespace_id(parent_table, table, dd_space_id)) {
     ut_d(ut_error);
     ut_o(return false);
   }
@@ -6917,11 +6917,11 @@ bool dd_create_fts_common_table(const dict_table_t *parent_table,
   return true;
 }
 
-/** Drop dd table & tablespace for fts aux table
+/** Drop dd table & tablespace for an auxiliary table - FTS or vector
 @param[in]      name            table name
 @param[in]      file_per_table  flag whether use file per table
 @return true on success, false on failure. */
-bool dd_drop_fts_table(const char *name, bool file_per_table) {
+bool dd_drop_aux_table(const char *name, bool file_per_table) {
   std::string db_name;
   std::string table_name;
 
@@ -6970,11 +6970,11 @@ bool dd_drop_fts_table(const char *name, bool file_per_table) {
   return true;
 }
 
-/** Rename dd table & tablespace files for fts aux table
+/** Rename dd table & tablespace files for an auxiliary table - FTS or vector
 @param[in]      table           dict table
 @param[in]      old_name        old innodb table name
 @return true on success, false on failure. */
-bool dd_rename_fts_table(const dict_table_t *table, const char *old_name) {
+bool dd_rename_aux_table(const dict_table_t *table, const char *old_name) {
   std::string new_db;
   std::string new_table;
   dict_name::get_table(table->name.m_name, new_db, new_table);
