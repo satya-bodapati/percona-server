@@ -70,6 +70,20 @@ struct Vec_ctx {
   report: each one short-circuits when it is already set, and the caller
   inspects it once insert() returns. */
   dberr_t err{DB_SUCCESS};
+  /** Whether a callback may commit trx and start it again.
+
+  True for DML, where trx is a background sub-transaction and committing
+  per callback is what stops concurrent inserts deadlocking on each
+  other's neighbour rows.
+
+  False for an index build, where trx is the ALTER's own transaction.
+  Committing there would commit the DDL itself a node at a time: it ends
+  the transaction the dictionary changes are being made in, clears
+  trx->dict_operation, drops the locks the ALTER holds, and marks a user
+  transaction internal so its GTID is no longer persisted. Nothing is
+  gained either, because an index under construction is invisible, so
+  there is no second writer to deadlock against. */
+  bool commit_steps{true};
 };
 
 /* The persistor's shims forward here. Ordinary functions, so their
@@ -359,7 +373,8 @@ storage error */
 /** Search the graph, loading it from the aux table first if needed.
 
 The raw graph search: candidates in ascending distance order, straight
-out of k_nn_search(). It applies neither MVCC check of design section 14
+out of k_nn_search(). It applies neither MVCC check of the design's
+"How MVCC works"
 — both need the reader's transaction, which lives above this call. What
 it does supply is the node id each candidate came from, which is what
 lets check (1) be made at all.
@@ -424,7 +439,7 @@ dberr_t vec_knn_error(const vec_search_t *s);
 /** End a scan and release the aux table and its MDL. Safe on nullptr. */
 void vec_knn_close(vec_search_t *s);
 
-/** The vector index on @p table, or nullptr. At most one exists (§23). */
+/** The vector index on @p table, or nullptr. At most one exists. */
 dict_index_t *vec_index_of(dict_table_t *table);
 
 /** Dimensions the index was built with; 0 if it has no runtime yet. */
