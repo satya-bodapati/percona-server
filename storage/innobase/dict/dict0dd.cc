@@ -3557,7 +3557,7 @@ void get_field_types(const dd::Table *dd_tab, const dict_table_t *m_table,
   them as non-nullabe in DD but treat as nullable in InnoDB.
   This way the compatibility with 5.7 FTS AUX tables is also
   maintained. */
-  if (dd_tab && m_table->is_aux()) {
+  if (dd_tab && m_table->is_fts_aux()) {
     const dd::Table &dd_table = dd_tab->table();
     const dd::Column *dd_col = dd_find_column(&dd_table, field->field_name);
     const dd::Properties &p = dd_col->se_private_data();
