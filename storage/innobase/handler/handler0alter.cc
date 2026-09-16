@@ -1463,10 +1463,16 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
           innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_FTS);
     }
   } else if ((ha_alter_info->handler_flags & Alter_inplace_info::ADD_INDEX)) {
-    /* Building a full-text index requires a lock.
-    We could do without a lock if the table already contains
-    an FTS_DOC_ID column, but in that case we would have
-    to apply the modification log to the full-text indexes. */
+    /* Two index kinds need at least a shared lock while they are built,
+    and this loop finds either.
+
+    Building a full-text index requires a lock. We could do without a
+    lock if the table already contains an FTS_DOC_ID column, but in that
+    case we would have to apply the modification log to the full-text
+    indexes.
+
+    A vector index requires one for the same reason and one more of its
+    own; see the HA_VECTOR branch below. */
 
     for (uint i = 0; i < ha_alter_info->index_add_count; i++) {
       const KEY *key =
@@ -1480,33 +1486,31 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
         online = false;
         break;
       }
-      /* Mirror the FTS restriction above for vector indexes: ADD
-      VECTOR INDEX must not run with LOCK=NONE. Two independent
-      reasons now, either of which is sufficient:
+      /* ADD VECTOR INDEX must not run with LOCK=NONE either, for two
+      independent reasons:
 
-      1. The rollback path (ddl::mark_secondary_indexes) drops an
-         uncommitted vec index and its aux table from the cache
-         immediately - safe only when no concurrent thread can hold a
-         prebuilt ins_node entry_list referencing the index, which
-         SHARED lock guarantees. Same reasoning FTS documents at
-         ddl0ddl.cc mark_secondary_indexes.
+      1. Rollback (ddl::mark_secondary_indexes) drops an uncommitted vec
+         index and its aux from the cache immediately, which is safe only
+         while no concurrent thread can hold a prebuilt ins_node
+         entry_list referencing the index. A shared lock guarantees that;
+         FTS documents the same reasoning there.
 
-      2. vec_build_index() populates the graph from one clustered scan
+      2. vec_build_index() populates the graph from a clustered scan
          taken after the index build, outside ddl::Builder. Under
          LOCK=NONE a concurrent INSERT would land in the row log and be
-         applied to the new index by row_log_apply, which knows nothing
-         about the graph - the row would exist in the table and not in
-         the index.
+         applied by row_log_apply, which knows nothing about the graph:
+         the row would exist in the table and not in the index.
 
-      Reason 2 is the same trade FTS states directly above: "we could do
-      without a lock ... but in that case we would have to apply the
-      modification log to the full-text indexes." Upstream never built
-      that, so ADD FULLTEXT requires LOCK=SHARED too - the branch above
-      sets online = false unconditionally for HA_FULLTEXT. We are at
-      parity, and deliberately so: supporting LOCK=NONE here would be a
-      deviation BEYOND FTS, and would have to be justified as one rather
-      than treated as finishing an unfinished job. */
+      Reason 2 is the trade FTS states above and never took, so ADD
+      FULLTEXT needs a lock too. We are at parity deliberately -
+      supporting LOCK=NONE here would be a deviation beyond FTS and would
+      have to be argued as one. */
       if (key->flags & HA_VECTOR) {
+        /* Without this the server prints "ALGORITHM=INPLACE is not
+        supported. Reason:" and then nothing, because every other branch
+        here sets a reason and this one did not. */
+        ha_alter_info->unsupported_reason = innobase_get_err_msg(
+            ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR);
         online = false;
         break;
       }
@@ -2047,8 +2051,8 @@ static bool innobase_init_foreign(
   while (index != nullptr) {
     /* Exclude both FTS and vector indexes: neither has a B-tree
     (page == FIL_NULL) that FK enforcement can walk. Sibling
-    dict_foreign_find_index at dict0dict.cc:3409 already filters
-    vec - keep both helpers symmetric. */
+    dict_foreign_find_index already filters vec - keep both helpers
+    symmetric. */
     if (!(index->type & DICT_FTS) && !dict_index_is_vector(index) &&
         dict_foreign_qualify_index(table, col_names, columns, n_cols, index,
                                    nullptr, true, 0)) {
@@ -4615,6 +4619,11 @@ while preparing ALTER TABLE.
 @param fts_doc_id_col The column number of FTS_DOC_ID
 @param add_fts_doc_id Flag: add column FTS_DOC_ID?
 @param add_fts_doc_id_idx Flag: add index FTS_DOC_ID_INDEX (FTS_DOC_ID)?
+@param add_vec_aux_col Flag: add the hidden percona_vec_aux_id column? Set
+only when a vector index is being added to a table that does not have the
+column yet; whether a rebuild keeps an existing one is decided from the new
+dd::Table, not from this flag
+@param prebuilt Prebuilt struct of the table
 
 @retval true Failure
 @retval false Success */
@@ -4852,17 +4861,23 @@ template <typename Table>
     FTS_DOC_ID. DICT_TF2_HAS_VEC_AUX_COL is set by vec_add_aux_id_column
     itself, so no flags2 OR-in here.
 
-    add_vec_aux_col covers the ALTER that introduces the column. A table
-    that already has it needs the slot on every rebuild, whatever caused
-    the rebuild: the commit path carries percona_vec_aux_id forward into
-    the new dd::Table unconditionally, so the dict_table_t has to agree
-    or the DD and the .ibd disagree on the column count. Deciding it here
-    rather than at the add_vec_aux_col assignment keeps it independent of
-    which predicate forced new_clustered - ADD FULLTEXT, for one, rebuilds
-    through add_fts_doc_id without setting innobase_need_rebuild(). */
+    The dict follows the DD: materialise the column exactly when the new
+    definition has it. Asking the OLD table's sticky
+    DICT_TF2_HAS_VEC_AUX_COL instead is what corrupted tables - the
+    carry-forward in dd_commit_inplace_alter_table only runs on the
+    no-rebuild branch, so a rebuild that kept the column here wrote rows
+    with a column the committed dd::Table did not describe, and the next
+    page-splitting INSERT asserted in btr_page_split_and_insert.
+
+    That gives the right answer in every case. ADD FULLTEXT on a
+    vector-indexed table rebuilds through add_fts_doc_id without setting
+    innobase_need_rebuild(), and the new definition still carries the
+    column because the vector index is still there. DROP INDEX keeps it,
+    through the commit path. A rebuild once no vector index remains drops
+    it from both sides at once, which is what FTS does with FTS_DOC_ID. */
     const bool need_vec_aux_col =
         add_vec_aux_col ||
-        DICT_TF2_FLAG_IS_SET(user_table, DICT_TF2_HAS_VEC_AUX_COL);
+        dd_find_column(&new_dd_tab->table(), VEC_AUX_ID_COL_NAME) != nullptr;
     if (need_vec_aux_col) {
       n_cols++;
     }
@@ -5439,12 +5454,21 @@ template <typename Table>
       }
     }
 
-    /* Mirrors the fts_index branch above: register the vec aux with
-    the DD only when a NEW vector index was added in this ALTER.
-    Because ADD VECTOR INDEX always forces rebuild (add_vec_aux_col),
-    vec_index being set implies ctx->new_table is a freshly-built
-    rebuild target - safe to iterate its vec indexes. */
+    /* Mirrors the fts_index branch above: register the vec aux with the
+    DD only when a NEW vector index was added in this ALTER.
+
+    ctx->new_table is NOT necessarily a fresh table here. Only the FIRST
+    ADD VECTOR INDEX rebuilds, because it has to create the hidden
+    column; once the column exists a later ADD is INPLACE with no
+    rebuild, and then ctx->new_table is the table that was already there
+    (vector_index_build.test asserts the TABLE_ID does not change across
+    such an ADD). Iterating its vector indexes is still right, because
+    PS-11264 caps a table at one - so when vec_index is set there is
+    exactly one to register and it is the one this ALTER added. The
+    assertion below is what would catch that cap being lifted without
+    this code being revisited. */
     if (vec_index) {
+      ut_a(vec_aux_count_indexes(ctx->new_table) == 1);
       if (!vec_aux_create_dd_tables(ctx->new_table)) {
         error = DB_ERROR;
         goto error_handling;
@@ -5461,8 +5485,8 @@ error_handling:
   }
 
   /* Mirror the FTS detach above for vector aux. Vec aux tables are
-  created pinned (can_be_evicted=false, the state after row_create_
-  table_for_mysql at row0mysql.cc:3279); this call flips them back
+  created pinned (can_be_evicted=false, the state
+  row_create_table_for_mysql leaves them in); this call flips them back
   to evictable so dict_sys can LRU them out. Runs on BOTH success and
   fail paths (this label is reached by fall-through on success too),
   matching FTS's shape. */
@@ -6444,28 +6468,26 @@ bool ha_innobase::prepare_inplace_alter_table_impl(
                               ha_alter_info->create_info->auto_increment_value,
                               autoinc_col_max_value);
 
-  /* Decide whether the fresh dict_table_t built in the rebuild path
-  needs a materialized percona_vec_aux_id column slot.
+  /* A vector index is being added to a table that does not own
+  percona_vec_aux_id yet, so the column has to be created. This both
+  materialises it and forces a rebuild, through
+  `rebuild = ... || add_vec_aux_col ...` in innobase_create_key_defs.
+  Mirrors add_fts_doc_id.
 
-  Two cases require it:
-  (a) A new vec index is being added on a table that does not yet own
-      percona_vec_aux_id - add_vec_aux_col both materializes the column AND
-      forces rebuild (via `rebuild = ... || add_vec_aux_col ...` at
-      line 3111). Mirrors add_fts_doc_id.
-  (b) The table already owns percona_vec_aux_id (Option A retention) AND the
-      SQL layer independently requires a rebuild (ALTER TABLE FORCE,
-      ROW_FORMAT change, DROP PRIMARY KEY, ...). Without materializing
-      here, `add_vec_aux_col=false`, so n_cols is not bumped and
-      vec_add_aux_id_column is not called (see the branch at
-      line 4930), so the fresh dict_table_t has NO percona_vec_aux_id column.
-      innobase_build_col_map then maps the old percona_vec_aux_id slot to
-      ULINT_UNDEFINED and the row-copy drops the column's bytes,
-      while the new dd::Table (post get_extra_columns_and_keys) still
-      lists percona_vec_aux_id. Result: DD says N columns, .ibd has N-1, first
-      SELECT after commit trips on the mismatch. FTS avoids this by
-      blocking INPLACE-rebuild on FTS-indexed tables at line 1380
-      (ER_INNODB_FT_LIMIT) - vec instead materializes correctly so
-      INPLACE-rebuild can stay supported for other ALTER cases. */
+  Nothing here decides about a table that ALREADY owns the column. It
+  used to: "old table has the flag and the SQL layer wants a rebuild" set
+  this too, on the theory that the column is retained across every ALTER.
+  That is not what happens. The column reaches the rebuilt table's
+  dd::Table only when the new definition needs it - when a vector index
+  survives the ALTER - and the commit path carries it forward only on the
+  no-rebuild branch. So on a rebuild with no vector index left, this flag
+  put the column in the dict_table_t while the committed dd::Table had
+  none, every row was written with a column the dictionary did not
+  describe, and the next page-splitting INSERT asserted in
+  btr_page_split_and_insert. FTS_DOC_ID behaves the same way: a rebuild
+  after the last FULLTEXT index is dropped loses it, consistently on both
+  sides. prepare_inplace_alter_table_dict now reads the new dd::Table and
+  follows it. */
   if (!DICT_TF2_FLAG_IS_SET(m_prebuilt->table, DICT_TF2_HAS_VEC_AUX_COL)) {
     for (uint k = 0; k < ha_alter_info->index_add_count; k++) {
       const KEY *new_key =
@@ -6475,8 +6497,6 @@ bool ha_innobase::prepare_inplace_alter_table_impl(
         break;
       }
     }
-  } else if (innobase_need_rebuild(ha_alter_info)) {
-    add_vec_aux_col = true;
   }
 
   return prepare_inplace_alter_table_dict(
