@@ -233,6 +233,6 @@ enum dberr_t {
   /** A vector index's ANN search hit an aux row that should exist -
   named by a neighbour list in the graph - but does not: the persisted
   graph and the aux table have gone out of sync. */
-  DB_ANN_FAILED
+  DB_ANN_NODE_NOT_FOUND
 };
 #endif

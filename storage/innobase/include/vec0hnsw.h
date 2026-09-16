@@ -130,7 +130,7 @@ dberr_t vec_persist_load_node(Vec_ctx *ctx, Hnsw &hnsw,
     node must exist. DB_RECORD_NOT_FOUND would otherwise surface at the
     client as HA_ERR_NO_ACTIVE_RECORD - indistinguishable from an
     ordinary missing row. Report it as what it is. */
-    return err == DB_RECORD_NOT_FOUND ? DB_ANN_FAILED : err;
+    return err == DB_RECORD_NOT_FOUND ? DB_ANN_NODE_NOT_FOUND : err;
   }
 
   if (node.vec_len != ctx->vec_bytes) {

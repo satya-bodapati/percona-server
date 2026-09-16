@@ -1228,7 +1228,7 @@ handle_new_error:
           << FORCE_RECOVERY_MSG;
       break;
 
-    case DB_ANN_FAILED:
+    case DB_ANN_NODE_NOT_FOUND:
       /* A vector index's persisted graph named a node that its aux
       table no longer has. Recoverable at the statement level - unlike
       DB_CORRUPTION, nothing here says the base table or the rest of
