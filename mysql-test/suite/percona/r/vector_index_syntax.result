@@ -553,3 +553,36 @@ Table	Non_unique	Key_name	Seq_in_index	Column_name	Collation	Cardinality	Sub_par
 t1	0	PRIMARY	1	id	A	0	NULL	NULL		BTREE			YES	NULL
 t1	1	v1	1	v1	NULL	0	NULL	NULL		VECTOR			YES	NULL
 DROP TABLE t1;
+#
+# Every vector index in the statement is checked, not just the first
+# one found. The option check used to return on the first vector key,
+# so a bad option on a later key went unreported and the statement
+# failed for some other reason - which made the error depend on the
+# order the keys were written in.
+#
+CREATE TABLE t (
+id BIGINT UNSIGNED PRIMARY KEY,
+v1 VECTOR( 8 ) NOT NULL,
+v2 VECTOR( 8 ) NOT NULL,
+KEY ( v1 ) TYPE hnsw WITH ( M = 8 ),
+KEY ( v2 ) TYPE hnsw WITH ( bogus = 1 )
+);
+ERROR HY000: Illegal index construction parameter: bogus.
+# Same statement, keys the other way round: same error.
+CREATE TABLE t (
+id BIGINT UNSIGNED PRIMARY KEY,
+v1 VECTOR( 8 ) NOT NULL,
+v2 VECTOR( 8 ) NOT NULL,
+KEY ( v2 ) TYPE hnsw WITH ( bogus = 1 ),
+KEY ( v1 ) TYPE hnsw WITH ( M = 8 )
+);
+ERROR HY000: Illegal index construction parameter: bogus.
+# An illegal VALUE on the later key is reported too.
+CREATE TABLE t (
+id BIGINT UNSIGNED PRIMARY KEY,
+v1 VECTOR( 8 ) NOT NULL,
+v2 VECTOR( 8 ) NOT NULL,
+KEY ( v1 ) TYPE hnsw WITH ( M = 8 ),
+KEY ( v2 ) TYPE hnsw WITH ( M = abc )
+);
+ERROR HY000: Illegal index construction parameter value: abc.
