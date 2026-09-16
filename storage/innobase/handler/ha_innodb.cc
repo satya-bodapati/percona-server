@@ -8422,7 +8422,7 @@ int ha_innobase::open(const char *name, int, uint open_flags,
   offline for a vector index that may not even be queried. */
   for (dict_index_t *index = m_prebuilt->table->first_index(); index != nullptr;
        index = index->next()) {
-    if (!index->is_vector() || index->vec != nullptr) continue;
+    if (!index->is_vector() || vec_runtime_get(index) != nullptr) continue;
 
     /* Match by name, which is how InnoDB pairs a KEY with a
     dict_index_t everywhere else - dict_table_get_index_on_name() is the
@@ -12203,7 +12203,7 @@ int ha_innobase::vec_read_first(Item *item, uchar *buf, ha_rows limit) {
   DBUG_TRACE;
 
   dict_index_t *vindex = vec_index_of(m_prebuilt->table);
-  if (vindex == nullptr || vindex->vec == nullptr) {
+  if (vindex == nullptr || vec_runtime_get(vindex) == nullptr) {
     return HA_ERR_END_OF_FILE;
   }
 
@@ -12247,6 +12247,20 @@ int ha_innobase::vec_read_next(uchar *buf) {
   if (m_vec_search == nullptr) return HA_ERR_END_OF_FILE;
 
   for (;;) {
+    /* Each MVCC-invisible candidate below is skipped with a `continue`,
+    so a single call here can run through an unbounded number of stale
+    or not-yet-visible graph nodes before returning. Without this check
+    that whole run completes before control ever gets back to the SQL
+    layer: the statement-level kill check in dispatch_command() still
+    reports ER_QUERY_INTERRUPTED once the statement finishes, but only
+    after the work is done, so KILL QUERY / KILL CONNECTION / shutdown
+    cannot cut it short. Poll here instead, matching the convention
+    used elsewhere in this file (e.g. ha_innobase::records(),
+    ha_innobase::check()). */
+    if (thd_killed(m_user_thd)) {
+      return HA_ERR_QUERY_INTERRUPTED;
+    }
+
     vec_hit_t hit;
     if (!vec_knn_next(m_vec_search, &hit)) {
       /* Either the graph is exhausted or a lazy node load failed; only
