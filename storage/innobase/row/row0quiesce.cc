@@ -1095,8 +1095,9 @@ dberr_t row_quiesce_set_state(
     HNSW persistence in the aux .ibd is not export-consistent. Mirror
     the FTS warning above. */
     ib_senderrf(trx->mysql_thd, IB_LOG_LEVEL_WARN, ER_NOT_SUPPORTED_YET,
-                "FLUSH TABLES on tables that have a vector index."
-                " Vector auxiliary tables will not be flushed.");
+                "FLUSH TABLES on a table carrying vector index metadata."
+                " Vector auxiliary tables will not be flushed, and the"
+                " resulting export cannot be imported.");
   }
 
   if (srv_thread_is_active(srv_threads.m_trx_recovery_rollback)) {
