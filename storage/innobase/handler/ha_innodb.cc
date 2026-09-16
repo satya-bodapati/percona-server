@@ -15307,8 +15307,7 @@ int create_table_info_t::create_table_update_global_dd(Table *dd_table) {
   just created, so its vector index is the one to register. */
   if (DICT_TF2_FLAG_IS_SET(m_table, DICT_TF2_HAS_VEC_AUX_COL)) {
     dict_index_t *vec_index = vec_index_of(m_table);
-    if (vec_index != nullptr &&
-        !vec_aux_create_dd_table(m_table, vec_index)) {
+    if (vec_index != nullptr && !vec_aux_create_dd_table(m_table, vec_index)) {
       return HA_ERR_GENERIC;
     }
   }
