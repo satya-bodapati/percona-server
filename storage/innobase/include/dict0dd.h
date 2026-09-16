@@ -1403,7 +1403,7 @@ bool dd_create_fts_common_table(const dict_table_t *parent_table,
 
 /** Create dd table for the auxiliary table of a vector (HNSW) index.
 Mirrors dd_create_fts_index_table; the schema is the fixed 5-column
-(id, vec, row_ref, level, neighbors) layout from vec0aux.h.
+(id, vec, base_pk, level, neighbors) layout from vec0aux.h.
 @param[in]      parent_table    parent table that owns the vector index
 @param[in,out]  table           in-memory aux table (its dd_space_id is
                                 populated as a side effect)
@@ -1411,17 +1411,17 @@ Mirrors dd_create_fts_index_table; the schema is the fixed 5-column
 bool dd_create_vec_aux_table(const dict_table_t *parent_table,
                              dict_table_t *table);
 
-/** Drop dd table & tablespace for fts aux table
+/** Drop dd table & tablespace for an auxiliary table - FTS or vector
 @param[in]      name            table name
 @param[in]      file_per_table  flag whether use file per table
 @return true on success, false on failure. */
-bool dd_drop_fts_table(const char *name, bool file_per_table);
+bool dd_drop_aux_table(const char *name, bool file_per_table);
 
-/** Rename dd table & tablespace files for fts aux table
+/** Rename dd table & tablespace files for an auxiliary table - FTS or vector
 @param[in]      table           dict table
 @param[in]      old_name        old innodb table name
 @return true on success, false on failure. */
-bool dd_rename_fts_table(const dict_table_t *table, const char *old_name);
+bool dd_rename_aux_table(const dict_table_t *table, const char *old_name);
 
 /** Open a table from its database and table name, this is currently used by
 foreign constraint parser to get the referenced table.
