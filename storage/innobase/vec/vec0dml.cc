@@ -33,7 +33,9 @@ Parser-free DML on vector-index auxiliary tables. See vec0dml.h for the */
 #include <algorithm>
 #include <limits>
 
+#include "btr0load.h"
 #include "btr0pcur.h"
+#include "buf0flu.h"
 #include "dict0dict.h"
 #include "lob0lob.h"
 #include "mach0data.h"
@@ -46,6 +48,7 @@ Parser-free DML on vector-index auxiliary tables. See vec0dml.h for the */
 #include "row0vers.h"
 #include "scope_guard.h"
 #include "trx0roll.h"
+#include "trx0undo.h"
 #include "vec0aux.h"
 
 /* Aux table user-column ordinals, fixed by create_in_mem_vec_aux_table
@@ -55,6 +58,12 @@ constexpr ulint VEC_AUX_COL_VEC = 1;
 constexpr ulint VEC_AUX_COL_BASE_PK = 2;
 constexpr ulint VEC_AUX_COL_LEVEL = 3;
 constexpr ulint VEC_AUX_COL_NEIGHBORS = 4;
+
+/** Set one aux field, mapping a zero-length value to an empty value rather
+than SQL NULL - every aux column is NOT NULL. Defined below; both writers
+use it. */
+static void vec_aux_set_dfield(dfield_t *df, const void *data, ulint len,
+                               mem_heap_t *heap);
 
 /* Neighbour slots serialize as a flat big-endian array of ids, one per
 slot, with 0 for an empty slot. No header: the class reserves graph node
@@ -68,12 +77,148 @@ ulint vec_aux_neighbors_blob_len(uint8_t level, uint32_t m) {
   return (static_cast<ulint>(level) + 2) * m * 8;
 }
 
+
+/** Bottom-up build of a vector aux table.
+
+vec_aux_insert drives the row API: undo per row, redo per row, and an
+insert into the middle of a tree that is being built left to right anyway.
+An index build does not need any of that. The aux table is created by this
+ALTER and dropped if it rolls back, so there is nothing for row undo to
+undo, and Btree_load writes its pages with MTR_LOG_NO_REDO.
+
+The price of no redo is that nothing else will get those pages to disk:
+they reach it only because the Flush_observer below flushes them before
+the statement commits. The DDL's own observer covers the table being
+altered, not this one - Flush_observer is per tablespace - so the aux gets
+its own.
+
+Rows must arrive in ascending id order. Btree_load appends; it does not
+sort. HNSW::for_each_node_sorted is what supplies that. */
+struct Vec_aux_bulk {
+  Vec_aux_bulk(trx_t *trx, dict_table_t *aux_, Flush_observer *observer_)
+      : aux(aux_),
+        clust(aux_->first_index()),
+        observer(observer_),
+        load(ut::new_withkey<Btree_load>(UT_NEW_THIS_FILE_PSI_KEY, clust,
+                                         trx->id, observer_)),
+        heap(mem_heap_create(1024, UT_LOCATION_HERE)) {
+    /* Every row carries the same system columns: this transaction, and a
+    roll pointer flagged as an insert with no undo behind it - the same
+    pair ddl::bulk uses. */
+    trx_write_trx_id(trx_id_buf, trx->id);
+    trx_write_roll_ptr(roll_ptr_buf, trx_undo_build_roll_ptr(true, 0, 0, 0));
+  }
+
+  ~Vec_aux_bulk() {
+    if (heap != nullptr) mem_heap_free(heap);
+    if (load != nullptr) ut::delete_(load);
+    /* Flushing or freeing it here would be flushing half a statement's pages,
+    and ~Flush_observer would assert on the rest. */
+  }
+
+  Vec_aux_bulk(const Vec_aux_bulk &) = delete;
+  Vec_aux_bulk &operator=(const Vec_aux_bulk &) = delete;
+
+  dict_table_t *aux{};
+  dict_index_t *clust{};
+  Flush_observer *observer{};
+  Btree_load *load{};
+  mem_heap_t *heap{};
+  byte trx_id_buf[DATA_TRX_ID_LEN]{};
+  byte roll_ptr_buf[DATA_ROLL_PTR_LEN]{};
+  uint64_t n_rows{};
+};
+
+Vec_aux_bulk *vec_aux_bulk_start(trx_t *trx, dict_table_t *aux,
+                                 Flush_observer *observer) {
+  ut_a(trx != nullptr && aux != nullptr);
+  /* Btree_load requires one, and the caller's is the statement's. */
+  if (observer == nullptr) return nullptr;
+  auto *b = ut::new_withkey<Vec_aux_bulk>(UT_NEW_THIS_FILE_PSI_KEY, trx, aux,
+                                          observer);
+  if (b != nullptr && (b->observer == nullptr || b->load == nullptr)) {
+    ut::delete_(b);
+    return nullptr;
+  }
+  return b;
+}
+
+dberr_t vec_aux_bulk_insert(Vec_aux_bulk *b, const vec_aux_row_t &row) {
+  ut_a(b != nullptr);
+  ut_a(row.vec != nullptr || (row.id == 0 && row.dims == 0));
+  ut_a(row.neighbors != nullptr || row.neighbors_len == 0);
+
+  if (row.level < 0 || row.level > 127) return DB_CORRUPTION;
+
+  /* An index entry, not a row: clustered field order, system columns
+  included. rec_convert_dtuple_to_rec expects exactly that. */
+  dict_index_t *clust = b->clust;
+  const ulint n_fields = dict_index_get_n_fields(clust);
+
+  dtuple_t *entry = dtuple_create(b->heap, n_fields);
+  dict_index_copy_types(entry, clust, n_fields);
+  dtuple_set_n_fields_cmp(entry, dict_index_get_n_unique(clust));
+
+  const auto set = [&](ulint col, const void *data, ulint len) {
+    vec_aux_set_dfield(
+        dtuple_get_nth_field(
+            entry, dict_col_get_clust_pos(b->aux->get_col(col), clust)),
+        data, len, b->heap);
+  };
+
+  byte id_buf[8];
+  mach_write_to_8(id_buf, row.id);
+  set(VEC_AUX_COL_ID, id_buf, sizeof(id_buf));
+  set(VEC_AUX_COL_VEC, row.vec, row.dims * sizeof(float));
+
+  byte base_pk_buf[8];
+  mach_write_to_8(base_pk_buf, row.base_pk);
+  set(VEC_AUX_COL_BASE_PK, base_pk_buf, sizeof(base_pk_buf));
+
+  const byte level_buf = static_cast<byte>(row.level);
+  set(VEC_AUX_COL_LEVEL, &level_buf, 1);
+  set(VEC_AUX_COL_NEIGHBORS, row.neighbors, row.neighbors_len);
+
+  dfield_set_data(
+      dtuple_get_nth_field(entry, clust->get_sys_col_pos(DATA_TRX_ID)),
+      b->trx_id_buf, DATA_TRX_ID_LEN);
+  dfield_set_data(
+      dtuple_get_nth_field(entry, clust->get_sys_col_pos(DATA_ROLL_PTR)),
+      b->roll_ptr_buf, DATA_ROLL_PTR_LEN);
+
+  /* Level 0: leaf. Btree_load owns everything above it - allocating pages,
+  carrying separators up, committing them - which is all build() does with
+  the rows a merge cursor hands it. */
+  const dberr_t err = b->load->insert(entry, 0);
+
+  mem_heap_empty(b->heap);
+
+  /* Same cadence build() uses, so a killed ALTER stops here rather than
+  finishing the tree first. */
+  if (err == DB_SUCCESS && !(++b->n_rows % 4096) &&
+      b->observer->check_interrupted()) {
+    return DB_INTERRUPTED;
+  }
+  return err;
+}
+
+dberr_t vec_aux_bulk_finish(Vec_aux_bulk *b, dberr_t err) {
+  ut_a(b != nullptr);
+
+  err = b->load->finish(err);
+
+  /* On failure the statement's observer is told, so the pages it owns are
+  discarded rather than written when the DDL flushes it. */
+  if (err != DB_SUCCESS) b->observer->interrupted();
+
+  ut::delete_(b);
+  return err;
+}
+
 /** Fill one user dfield of the aux row tuple with a heap-duplicated
 value (the run loop may retry after lock waits; values must be stable). */
-static void vec_aux_set_field(dtuple_t *tuple, ulint col_no, const void *data,
-                              ulint len, mem_heap_t *heap) {
-  dfield_t *df = dtuple_get_nth_field(tuple, col_no);
-
+static void vec_aux_set_dfield(dfield_t *df, const void *data, ulint len,
+                               mem_heap_t *heap) {
   /* Every column of the aux table is NOT NULL, so there is no SQL NULL
   case to handle here - and mapping a zero-length value onto NULL would
   be wrong rather than merely unused: a node with no neighbours yet has
@@ -88,6 +233,11 @@ static void vec_aux_set_field(dtuple_t *tuple, ulint col_no, const void *data,
   ut_a(data != nullptr);
   void *copy = mem_heap_dup(heap, data, len);
   dfield_set_data(df, copy, len);
+}
+
+static void vec_aux_set_field(dtuple_t *tuple, ulint col_no, const void *data,
+                              ulint len, mem_heap_t *heap) {
+  vec_aux_set_dfield(dtuple_get_nth_field(tuple, col_no), data, len, heap);
 }
 
 dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
@@ -385,10 +535,6 @@ dberr_t vec_aux_update_row(trx_t *trx, dict_table_t *aux, uint64_t id,
   return DB_SUCCESS;
 }
 
-/** Copy one (possibly externally stored) field of an aux clustered-index
-record into a byte vector.
-@return true on success */
-
 /** Copy one record field onto a heap, materialising an off-page BLOB.
 
 The vector and neighbour columns are BLOBs, so a large VECTOR(n) can be
@@ -420,149 +566,6 @@ static bool vec_aux_copy_field(const dict_index_t *clust, const rec_t *rec,
   *out = static_cast<const byte *>(mem_heap_dup(heap, data, len));
   *out_len = len;
   return true;
-}
-
-dberr_t vec_base_scan_rows(dict_table_t *base, const dict_index_t *vec_index,
-                           uint32_t dims, const Vec_base_row_cb &cb) {
-  ut_a(base != nullptr);
-  ut_a(vec_index != nullptr);
-  ut_a(dims != 0);
-  ut_a(base->vec_aux_col != ULINT_UNDEFINED);
-
-  dict_index_t *clust = base->first_index();
-
-  /* The column comes from the index, never from a scan for a BLOB -
-  VECTOR, BLOB, TEXT and JSON all collapse to DATA_BLOB. See
-  vec_indexed_col_no(). */
-  ut_a(vec_index->n_fields == 1);
-  const dict_col_t *vec_col = vec_index->get_field(0)->col;
-  const ulint pos_vec = dict_col_get_clust_pos(vec_col, clust);
-  const ulint pos_id =
-      dict_col_get_clust_pos(base->get_col(base->vec_aux_col), clust);
-  const size_t vec_bytes = dims * sizeof(float);
-
-  /* Why not Parallel_reader, which is how the rest of InnoDB reads a
-  clustered index in bulk: its callbacks all run with the scan's
-  mini-transaction latching. The per-row callback is called with the page
-  S-latched, and the page-end hook fires inside traverse_recs() with the
-  range's mtr still open. Our per-row work writes aux rows through the row
-  API, and row_ins_clust_index_entry() asserts
-  check_my_thread_mtrs_are_not_latching() - correctly, because taking aux
-  latches under a base-table leaf latch is a latching order this code has
-  no business inventing. Parallel_reader suits callbacks that read or copy,
-  and the DDL builder, which bulk-loads pages rather than inserting rows.
-
-  So the scan stays a cursor scan, and streams: read a bounded batch with
-  the latch held, drop the mtr, insert that batch with no latches, then
-  restore the cursor and carry on. Memory is one batch, not the table. */
-  constexpr size_t BATCH_ROWS = 128;
-  constexpr size_t BATCH_BYTES = 1 << 20;
-
-  struct Row {
-    uint64_t id;
-    uint64_t base_pk;
-    std::vector<byte> vec;
-  };
-  std::vector<Row> batch;
-  batch.reserve(BATCH_ROWS);
-  size_t batch_bytes = 0;
-
-  mem_heap_t *offset_heap = nullptr;
-  mem_heap_t *row_heap = mem_heap_create(2048, UT_LOCATION_HERE);
-  dberr_t err = DB_SUCCESS;
-
-  const auto flush = [&]() -> dberr_t {
-    for (const Row &r : batch) {
-      const dberr_t cb_err = cb(r.id, r.base_pk, r.vec.data(), r.vec.size());
-      if (cb_err != DB_SUCCESS) {
-        batch.clear();
-        batch_bytes = 0;
-        return cb_err;
-      }
-    }
-    batch.clear();
-    batch_bytes = 0;
-    return DB_SUCCESS;
-  };
-
-  mtr_t mtr;
-  mtr_start(&mtr);
-  btr_pcur_t pcur;
-  pcur.open_at_side(true /* left */, clust, BTR_SEARCH_LEAF, true, 0, &mtr);
-
-  for (;;) {
-    bool more = true;
-
-    while (batch.size() < BATCH_ROWS && batch_bytes < BATCH_BYTES) {
-      if (pcur.move_to_next_user_rec(&mtr) != DB_SUCCESS) {
-        more = false;
-        break;
-      }
-
-      const rec_t *rec = pcur.get_rec();
-      ulint *offsets = rec_get_offsets(rec, clust, nullptr, ULINT_UNDEFINED,
-                                       UT_LOCATION_HERE, &offset_heap);
-
-      /* Delete-marked records are committed deletes pending purge, not
-      rows. Uncommitted changes cannot be present: the ALTER holds at
-      least a shared lock and waited out prior writers at MDL upgrade,
-      which is what lets this read records directly rather than through a
-      read view. */
-      if (rec_get_deleted_flag(rec, dict_table_is_comp(base))) continue;
-
-      const byte *vec_data = nullptr;
-      ulint vec_len = 0;
-      if (!vec_aux_copy_field(clust, rec, offsets, pos_vec, row_heap, &vec_data,
-                              &vec_len)) {
-        err = DB_CORRUPTION;
-        break;
-      }
-
-      /* An indexed vector column is NOT NULL (sql_table.cc), so a null
-      here means the record does not match the index being built. */
-      if (vec_data == nullptr) continue;
-
-      if (vec_len != vec_bytes) {
-        err = DB_CORRUPTION;
-        break;
-      }
-
-      ulint id_len = 0;
-      const byte *id_ptr =
-          rec_get_nth_field(clust, rec, offsets, pos_id, &id_len);
-      ut_a(id_len == 8);
-
-      ulint pk_len = 0;
-      const byte *pk_ptr = rec_get_nth_field(clust, rec, offsets, 0, &pk_len);
-      ut_a(pk_len == 8);
-
-      batch.push_back({mach_read_from_8(id_ptr), mach_read_from_8(pk_ptr),
-                       std::vector<byte>(vec_data, vec_data + vec_len)});
-      batch_bytes += vec_len;
-
-      mem_heap_empty(row_heap);
-    }
-
-    /* Pause the scan across the inserts: the cursor's position is
-    remembered by key, so nothing holds a latch while the graph and the
-    aux are written. */
-    if (more && err == DB_SUCCESS) pcur.store_position(&mtr);
-    mtr_commit(&mtr);
-
-    if (err == DB_SUCCESS && !batch.empty()) err = flush();
-
-    if (!more || err != DB_SUCCESS) break;
-
-    mtr_start(&mtr);
-    pcur.restore_position(BTR_SEARCH_LEAF, &mtr, UT_LOCATION_HERE);
-  }
-
-  pcur.close();
-
-  if (offset_heap != nullptr) mem_heap_free(offset_heap);
-  mem_heap_free(row_heap);
-
-  return err;
 }
 
 dberr_t vec_aux_read_node(dict_table_t *aux, uint64_t id, mem_heap_t *heap,
