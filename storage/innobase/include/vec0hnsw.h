@@ -56,18 +56,16 @@ per-call, per-transaction, or per-thread fields... callbacks must not
 rely on data written to Persistor members during a prior call" - because
 one persistor instance is stored by value for the index's lifetime and
 serves every caller. So all of it lives here and is passed in. */
-/* Full definition is below (it holds a Vec_hnsw, which is nested inside
-this same header); Vec_ctx only ever needs a pointer to it. */
+/* Defined further down (holds a Vec_hnsw nested in this header); Vec_ctx
+only needs a pointer. */
 struct vec_t;
 
 struct Vec_ctx {
-  /** The index runtime this call belongs to. Lets load_node_cb latch
-  vec_t::corrupted the instant it detects DB_CORRUPTION - see
-  vec_mark_corrupted - rather than only after the whole statement
-  returns, which would leave a window for a concurrent statement to
-  observe the same node already NODE_LOST (a plain, race-free memory
-  read under HNSW's own per-node lock) without ever seeing the flag.
-  Never null on any ctx a real read/write entry point constructs. */
+  /** Index runtime this call belongs to. Lets load_node_cb set
+  vec_t::corrupted the instant it sees DB_CORRUPTION, instead of after
+  the whole statement returns - closing a window where a concurrent
+  statement could observe the node already NODE_LOST without seeing the
+  flag. Never null. */
   vec_t *vec{nullptr};
   /** Sub-transaction the aux writes ride. Not the user's transaction:
   the aux must survive a rollback of the statement that caused it, or
@@ -98,19 +96,13 @@ struct Vec_ctx {
   gained either, because an index under construction is invisible, so
   there is no second writer to deadlock against. */
   bool commit_steps{true};
-  /** True only around the cold-start entry-point load
-  (init_from_entry_point, called from vec_runtime_load). That load is
-  required to succeed - the graph has no other way in - so its
-  load_node_cb failure must reach ctx->err and fail the caller.
-
-  False everywhere else, including every lazy neighbor-stub load a
-  search or insert triggers while walking the graph. A missing row
-  there is the documented, expected NODE_LOST case (hnsw.h: an insert
-  that crashed before insert_cb, after a concurrent insert already
-  referenced it as a neighbor) - HNSW itself already treats that
-  load_node_cb failure as "skip this neighbor", so ctx->err must stay
-  untouched or the whole statement fails over a node the caller was
-  going to route around anyway. */
+  /** True only during the cold-start entry-point load
+  (vec_runtime_load's call to init_from_entry_point), which has no
+  fallback and must fail loudly. False everywhere else: a missing row on
+  an ordinary neighbor-stub load is the expected NODE_LOST case (an
+  insert that crashed before insert_cb, after a concurrent insert
+  already referenced it - see hnsw.h), and HNSW already skips such
+  nodes, so ctx->err must stay untouched. */
   bool loading_entry_point{false};
 };
 
@@ -127,21 +119,16 @@ dberr_t vec_persist_update_neighbors(Vec_ctx *ctx, uint64_t id,
 
 dberr_t vec_persist_entry_point(Vec_ctx *ctx, uint64_t id);
 
-/** Latch vec_t::corrupted. Declared here (defined in vec0hnsw.cc, after
-vec_t's own definition further down this header) so load_node_cb - a
-template instantiated inline, before vec_t is a complete type at that
-point in the file - can call it without needing vec_t's members visible
-at the call site; only the .cc defining it does.
+/** Set vec_t::corrupted. Defined in vec0hnsw.cc, after vec_t is
+complete - load_node_cb below is a template instantiated inline, before
+vec_t is a complete type here, so it can only call this by declaration.
 @param[in,out]  vec  the index runtime; must not be null */
 void vec_mark_corrupted(vec_t *vec) noexcept;
 
-/** Read one node's aux row and validate its on-disk shape against the
-index's own parameters (dims, M). Split out of vec_persist_load_node so
-a caller that needs to know an id will load cleanly - without a graph or
-a node handle to load it into, e.g. vec_runtime_load checking the entry
-point before calling into HNSW at all - can ask the same question the
-same way, rather than duplicating the two corruption checks or, worse,
-reimplementing them slightly differently.
+/** Read and shape-validate one node's aux row. Split out of
+vec_persist_load_node so a caller with just an id - e.g. vec_runtime_load
+checking the entry row before HNSW runs - can reuse the same corruption
+checks instead of duplicating them.
 @param[in]      ctx   the id-independent parameters (aux table, dims, M)
 @param[in]      id    the node to read
 @param[in,out]  heap  heap the returned bytes are copied onto
@@ -258,41 +245,25 @@ struct Vec_persistor {
     ctx->err = vec_persist_entry_point(ctx, id);
   }
 
-  /** Returns false on failure, which marks the node NODE_LOST rather than
-  leaving a half-filled COMPLETE one - HNSW's own callers already treat
-  that as "skip this neighbor" (hnsw.h: search/insert continue past a
-  LOST or failed-to-load candidate).
+  /** Returns false on failure, which marks the node NODE_LOST - HNSW's
+  own callers already treat that as "skip this neighbor".
 
-  Whether the failure also reaches ctx->err - and so fails the caller's
-  whole statement - depends on ctx->loading_entry_point: true only
-  during the cold-start entry-point load, which has no fallback and
-  must fail loudly; false for every ordinary lazy neighbor-stub load,
-  where a missing row is the expected NODE_LOST crash artifact
-  (hnsw.h) and HNSW is already routing around it. DB_CORRUPTION - the
-  row was found but its own shape disagrees with the index - stays
-  fatal either way: unlike a missing row, that is never expected. */
+  Whether the failure also reaches ctx->err, failing the caller's whole
+  statement, depends on ctx->loading_entry_point: true only during the
+  cold-start entry-point load, which must fail loudly; false for an
+  ordinary neighbor-stub load, where a missing row is the expected
+  NODE_LOST case (hnsw.h) and HNSW already routes around it.
+  DB_CORRUPTION stays fatal either way - unlike a missing row, that is
+  never expected. */
   template <typename Hnsw>
   bool load_node_cb(Context *ctx, Hnsw &hnsw,
                     typename Hnsw::LoadNodeHandle handle) {
-    /* Mirrors the assignment below: an earlier DB_RECORD_NOT_FOUND left
-    in ctx->err by a *previous* call to this same function does not stop
-    this one from trying its own row, unless that previous call was
-    loading the entry point - the same case that made it fatal there.
-    Anything else already in ctx->err (DB_CORRUPTION, or a write
-    callback's failure) still stops the walk outright: those are never
-    expected, so continuing to read the aux cannot be trusted.
-
-    On the current call graph this is a no-op: the only site that can
-    put DB_RECORD_NOT_FOUND into ctx->err is the assignment a few lines
-    down, and it only does so when ctx->loading_entry_point is true - in
-    which case init_from_entry_point() (hnsw.h) makes exactly one such
-    call before vec_runtime_load() gives up, so there is never a *later*
-    call in the same walk for this branch to matter to. Kept anyway so
-    the guard stays the mirror image of the assignment it guards - if
-    that ever changes (e.g. a second entry-point-style caller, or a
-    write callback that starts propagating DB_RECORD_NOT_FOUND instead
-    of absorbing it), this keeps behaving correctly instead of silently
-    reintroducing the bug the assignment below was written to fix. */
+    /* A stale DB_RECORD_NOT_FOUND left by an earlier call to this
+    function doesn't block this one, unless that earlier call was the
+    entry-point load. Anything else in ctx->err is a real failure and
+    still stops the walk. Currently a no-op (only the assignment below
+    can set DB_RECORD_NOT_FOUND, and only during entry-point load), kept
+    so this guard mirrors that assignment if either ever changes. */
     if (ctx->err != DB_SUCCESS &&
         (ctx->loading_entry_point || ctx->err != DB_RECORD_NOT_FOUND)) {
       return false;
@@ -318,22 +289,12 @@ struct Vec_persistor {
 
     const dberr_t err = vec_persist_load_node(ctx, hnsw, handle);
     if (err != DB_SUCCESS) {
-      /* Latch immediately, before returning - not after this call's
-      whole statement finishes. HNSW's caller (load_node(), hnsw.h)
-      marks the node NODE_LOST the instant this function returns
-      false, and that state is visible to every other thread the
-      moment it releases the node's striped lock - a plain, correctly
-      synchronised read, not a race in itself. A concurrent statement
-      that reaches the same node after that point sees NODE_LOST and
-      skips it without ever calling back into this function again, so
-      if vec_t::corrupted were set any later than this - e.g. only
-      after this whole search or insert returns - that concurrent
-      statement could read the flag as still false and report success
-      with the corrupt node silently missing. Latching here instead
-      happens-before this function returns, which happens-before
-      set_lost() runs, which happens-before the lock releases - so no
-      concurrent reader can observe NODE_LOST without also being able
-      to observe the flag. */
+      /* Set the flag before returning, not after the whole statement
+      finishes: load_node() (hnsw.h) marks the node NODE_LOST the instant
+      this returns false, visible to any thread once it releases the
+      node's lock. Setting corrupted here happens-before that release,
+      so no concurrent reader can see NODE_LOST without also seeing the
+      flag - setting it later would leave a window where one could. */
       if (err == DB_CORRUPTION) vec_mark_corrupted(ctx->vec);
       if (ctx->loading_entry_point || err != DB_RECORD_NOT_FOUND) {
         ctx->err = err;
@@ -478,24 +439,19 @@ struct vec_t : public Vec_runtime {
   release/acquire ordering: it publishes the `hnsw` pointer to every thread
   that sees it true, which is what lets the hot paths run unlocked. */
   std::atomic<bool> loaded{false};
-  /** True once any load of any node in this graph has found DB_CORRUPTION
-  - a row that exists but disagrees with the index about its own shape.
-  Sticky for the runtime's lifetime (never reset back to false; a DDL
-  rebuild replaces this whole object with a fresh one, which is the only
-  way this index's corrupted state is meant to clear).
+  /** True once any node load in this graph has hit DB_CORRUPTION - a row
+  that exists but disagrees with the index about its own shape. Sticky
+  for the runtime's lifetime; only a DDL rebuild (a fresh object) clears
+  it.
 
-  Exists because DB_CORRUPTION and DB_RECORD_NOT_FOUND both end a lazy
-  neighbor load in the graph library marking the node NODE_LOST - a
-  state with no way back to loaded (vector-common/hnsw.h), so a second
-  touch of that same node never calls back into this file to report
-  anything again. That is the right call for DB_RECORD_NOT_FOUND: it is
-  the expected shape of a crash that landed between two related writes,
-  and HNSW's own callers already route around a LOST node without our
-  help. It is the wrong call for DB_CORRUPTION, which is never expected
-  and should not go quiet just because the one node that surfaced it
-  will never be loaded again - every query entry point checks this flag
-  up front and refuses outright once it is set, instead of only the
-  first statement unlucky enough to fault that particular node in. */
+  Needed because both DB_CORRUPTION and DB_RECORD_NOT_FOUND leave a node
+  NODE_LOST with no way back (vector-common/hnsw.h), so a second touch
+  never calls back here to report anything again. That's fine for
+  DB_RECORD_NOT_FOUND - an expected crash artifact HNSW already routes
+  around - but not for DB_CORRUPTION, which must not go quiet just
+  because its node won't be loaded again. Every entry point checks this
+  flag up front instead of relying on the one statement that first hit
+  it. */
   std::atomic<bool> corrupted{false};
 };
 
