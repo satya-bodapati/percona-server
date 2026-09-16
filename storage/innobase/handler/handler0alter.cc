@@ -1126,6 +1126,20 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
   Instant_Type instant_type = innobase_support_instant(
       ha_alter_info, m_prebuilt->table, this->table, altered_table);
 
+  /* Phase 1 refuses ALGORITHM=INSTANT on any table owning
+  percona_vec_aux_id, index or no index: the column is retained after
+  DROP KEY and every INSERT keeps stamping it, so the label counter is
+  live either way. Deliberate conservatism, not a correctness
+  requirement - INSTANT runs its prepare phase under
+  MDL_SHARED_UPGRADABLE, so concurrent DML is live throughout, and these
+  are the DD paths we have exercised least. */
+  if (instant_type != Instant_Type::INSTANT_IMPOSSIBLE &&
+      DICT_TF2_FLAG_IS_SET(m_prebuilt->table, DICT_TF2_HAS_VEC_AUX_COL)) {
+    instant_type = Instant_Type::INSTANT_IMPOSSIBLE;
+    ha_alter_info->unsupported_reason = innobase_get_err_msg(
+        ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_INSTANT);
+  }
+
   ha_alter_info->handler_trivial_ctx =
       instant_type_to_int(Instant_Type::INSTANT_IMPOSSIBLE);
 
@@ -1510,6 +1524,23 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
         break;
       }
     }
+  }
+
+  /* No ALTER of a vector-indexed table runs with LOCK=NONE, whatever it
+  changes. A rebuild applies concurrent DML through the row log, and
+  row_log_apply maintains neither the HNSW graph nor the aux table, so a
+  row written during the rebuild would reach the new table and not the
+  index. Same reason ADD VECTOR INDEX is offline above. */
+  if (online && (innobase_vector_exist(altered_table) ||
+                 vec_aux_table_has_vector_index(m_prebuilt->table))) {
+    /* Not when INSTANT was refused above - that reason is the accurate
+    one for this statement. */
+    if (ha_alter_info->alter_info->requested_algorithm !=
+        Alter_info::ALTER_TABLE_ALGORITHM_INSTANT) {
+      ha_alter_info->unsupported_reason = innobase_get_err_msg(
+          ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_NOLOCK);
+    }
+    online = false;
   }
 
   return online ? HA_ALTER_INPLACE_NO_LOCK_AFTER_PREPARE
@@ -4602,6 +4633,10 @@ template <typename Table>
 static void dd_commit_inplace_no_change(const Alter_inplace_info *ha_alter_info,
                                         const Table *old_dd_tab,
                                         Table *new_dd_tab, bool ignore_fts) {
+  /* Before the FTS helper, which compares the two definitions' column
+  counts: a table owning percona_vec_aux_id must have it back by then. */
+  dd_add_vec_aux_id_column(new_dd_tab->table(), old_dd_tab->table());
+
   if (!ignore_fts) {
     dd_add_fts_doc_id_index(new_dd_tab->table(), old_dd_tab->table());
   }

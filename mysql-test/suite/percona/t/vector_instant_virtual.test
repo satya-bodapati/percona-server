@@ -2,17 +2,17 @@
 --echo # PS-11299: INSTANT_VIRTUAL_ONLY ALTER on a vec-indexed table
 --echo # must preserve the hidden percona_vec_aux_id column in dd::Table.
 --echo #
---echo # Trigger: ALTER ADD COLUMN ... AS (expr) VIRTUAL on a table
---echo # that has a vector index. This goes through
---echo # Instant_ddl_impl::commit_instant_ddl's INSTANT_VIRTUAL_ONLY
---echo # branch, which rebuilds the new dd::Table from altered_table->s
---echo # (which has no SE-hidden cols) and so loses percona_vec_aux_id unless
---echo # we explicitly re-add it.
+--echo # Trigger: ALTER ADD COLUMN ... AS (expr) VIRTUAL on a table that
+--echo # has a vector index. The new dd::Table is rebuilt from
+--echo # altered_table->s, which carries no SE-hidden columns, so
+--echo # percona_vec_aux_id must be re-added explicitly. A reload that
+--echo # does not find it (server restart, or any dd_open_table_one path)
+--echo # hits the vec_add_aux_id_column invariant.
 --echo #
---echo # Without the dict0inst.cc fix, the next reload (server restart
---echo # or any path that goes through dd_open_table_one) hits the
---echo # `vec_add_aux_id_column` invariant or the n_fields check —
---echo # debug crash, release misbehavior.
+--echo # Phase 1 refuses ALGORITHM=INSTANT on a vector-indexed table, so
+--echo # this ALTER takes the INPLACE path. The INSTANT_VIRTUAL_ONLY branch
+--echo # in Instant_ddl_impl::commit_instant_ddl re-adds the column for the
+--echo # day that refusal is lifted; it is not what this test exercises.
 --echo #
 
 CREATE TABLE t1 (
