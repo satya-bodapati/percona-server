@@ -52,7 +52,7 @@ EXPLAIN SELECT COUNT(*) FROM t1 FORCE INDEX (kk);
 --echo # answering.
 SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
 SELECT @@session.innodb_interpreter_output;
-SET SESSION innodb_interpreter = 'vec_knn test/t1 1 16 0,0,1,0';
-SELECT @@session.innodb_interpreter_output;
+SELECT id FROM t1
+ ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,1,0]'), 'euclidean') LIMIT 1;
 
 DROP TABLE t1;

@@ -489,27 +489,6 @@ handed over.
 @param[in]  thd              session, for opening the aux
 @return DB_SUCCESS, DB_OUT_OF_MEMORY if the graph budget is spent, or a
 storage error */
-/** Search the graph, loading it from the aux table first if needed.
-
-The raw graph search: candidates in ascending distance order, straight
-out of k_nn_search(). It applies neither MVCC check of the design's
-"How MVCC works"
-- both need the reader's transaction, which lives above this call. What
-it does supply is the node id each candidate came from, which is what
-lets check (1) be made at all.
-
-@param[in]   index      the vector index
-@param[in]   q          query vector, dims floats
-@param[in]   k          how many neighbours to return
-@param[in]   ef_search  search width
-@param[out]  out        candidates, closest first
-@param[in]   thd        session, for opening the aux
-@param[in]   exclude    node ids to skip, for a widened re-search
-@return DB_SUCCESS or a storage error */
-dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
-                       size_t ef_search, std::vector<vec_hit_t> *out, THD *thd,
-                       const std::unordered_set<uint64_t> *exclude = nullptr);
-
 /** One open streaming kNN scan.
 
 Opaque by design: it owns the class's `NNSearchContext`, which is neither
@@ -521,7 +500,8 @@ struct vec_search_t;
 
 /** Begin a streaming kNN scan.
 
-The resumable form of vec_knn_search. Where that one descends the graph,
+Descends the graph and returns candidates a batch at a time. Where a
+one-shot search would descend,
 answers "the k nearest" and throws the search away, this keeps the visited
 set and the unexplored frontier in the scan, so asking for more continues
 the traversal instead of restarting it. That is what the read path needs:

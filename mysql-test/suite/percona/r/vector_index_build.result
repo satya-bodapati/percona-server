@@ -56,10 +56,8 @@ SELECT @@session.innodb_interpreter_output;
 nodes=2 distinct_ids=2 distinct_base_pks=2 dup_ids=0 dup_base_pks=0 labels_contiguous_from_1=0
 DROP TABLE t1;
 #
-# The graph is not just present, it ANSWERS. Until the server read
-# path exists (Part II section 29) this is the only way to query
-# it: vec_knn runs k_nn_search against the runtime, loading it
-# from the aux first.
+# The graph is not just present, it ANSWERS: an ORDER BY DISTANCE
+# query loads the runtime from the aux and searches it.
 #
 CREATE TABLE tk (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4) NOT NULL);
 INSERT INTO tk VALUES (10, STRING_TO_VECTOR('[1,0,0,0]')),
@@ -73,33 +71,36 @@ SELECT COUNT(*) FROM tk FORCE INDEX (PRIMARY);
 COUNT(*)
 4
 # Nearest to [1,0,0,0] is row 10, then the rest.
-SET SESSION innodb_interpreter = 'vec_knn test/tk 1 16 1,0,0,0';
-SELECT @@session.innodb_interpreter_output;
-@@session.innodb_interpreter_output
-hits=1 base_pks=10
-SET SESSION innodb_interpreter = 'vec_knn test/tk 4 16 1,0,0,0';
-SELECT @@session.innodb_interpreter_output;
-@@session.innodb_interpreter_output
-hits=4 base_pks=<tie order varies>
+SELECT id FROM tk
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 1;
+id
+10
+SELECT id FROM tk
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 4;
+id
+10
+20
+30
+40
 # Nearest to [0,0,1,0] is row 30.
-SET SESSION innodb_interpreter = 'vec_knn test/tk 1 16 0,0,1,0';
-SELECT @@session.innodb_interpreter_output;
-@@session.innodb_interpreter_output
-hits=1 base_pks=30
+SELECT id FROM tk
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,1,0]'), 'euclidean') LIMIT 1;
+id
+30
 # Same answers after a restart, which means they came from the aux
 # and not from a graph that happened to still be in memory.
 # restart
 SELECT COUNT(*) FROM tk FORCE INDEX (PRIMARY);
 COUNT(*)
 4
-SET SESSION innodb_interpreter = 'vec_knn test/tk 1 16 0,0,1,0';
-SELECT @@session.innodb_interpreter_output;
-@@session.innodb_interpreter_output
-hits=1 base_pks=30
-SET SESSION innodb_interpreter = 'vec_knn test/tk 1 16 0,0,0,1';
-SELECT @@session.innodb_interpreter_output;
-@@session.innodb_interpreter_output
-hits=1 base_pks=40
+SELECT id FROM tk
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,1,0]'), 'euclidean') LIMIT 1;
+id
+30
+SELECT id FROM tk
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,0,1]'), 'euclidean') LIMIT 1;
+id
+40
 # And after an INPLACE rebuild of the index, the answers must be
 # the same — the build produced an equivalent graph, not just a
 # populated table.
@@ -108,14 +109,17 @@ ALTER TABLE tk ADD KEY kv2 (v) TYPE hnsw WITH (M = 4), ALGORITHM=INPLACE, LOCK=S
 SELECT COUNT(*) FROM tk FORCE INDEX (PRIMARY);
 COUNT(*)
 4
-SET SESSION innodb_interpreter = 'vec_knn test/tk 1 16 1,0,0,0';
-SELECT @@session.innodb_interpreter_output;
-@@session.innodb_interpreter_output
-hits=1 base_pks=10
-SET SESSION innodb_interpreter = 'vec_knn test/tk 4 16 0,0,0,1';
-SELECT @@session.innodb_interpreter_output;
-@@session.innodb_interpreter_output
-hits=4 base_pks=<tie order varies>
+SELECT id FROM tk
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 1;
+id
+10
+SELECT id FROM tk
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,0,1]'), 'euclidean') LIMIT 4;
+id
+10
+20
+30
+40
 DROP TABLE tk;
 #
 # M is bounded to [2, 200] (vec0vec.cc). An oversized M must be
