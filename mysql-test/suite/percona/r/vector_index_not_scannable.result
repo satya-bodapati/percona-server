@@ -67,8 +67,8 @@ SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 nodes=3 distinct_ids=3 distinct_base_pks=3 dup_ids=0 dup_base_pks=0 labels_contiguous_from_1=1
-SET SESSION innodb_interpreter = 'vec_knn test/t1 1 16 0,0,1,0';
-SELECT @@session.innodb_interpreter_output;
-@@session.innodb_interpreter_output
-hits=1 base_pks=3
+SELECT id FROM t1
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,1,0]'), 'euclidean') LIMIT 1;
+id
+3
 DROP TABLE t1;
