@@ -390,6 +390,7 @@ static UNIV_COLD void my_error_innodb(
       my_error(ER_QUERY_INTERRUPTED, MYF(0));
       break;
     case DB_OUT_OF_MEMORY:
+    case DB_VEC_OUT_OF_MEMORY:
       my_error(ER_OUT_OF_RESOURCES, MYF(0));
       break;
     case DB_OUT_OF_FILE_SPACE:
@@ -1451,32 +1452,16 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
       return HA_ALTER_INPLACE_NOT_SUPPORTED;
     }
 
-    /* Mirror the FTS refusal above for vector indexes: if the table
-    already contains a vector index, refuse to rebuild natively.
-    A native rebuild re-inserts every row into a new table_id /
-    index_id - the vector aux table would be re-minted empty and the
-    HNSW graph contents lost. ALGORITHM=COPY rebuilds the aux
-    organically because every row goes through the normal INSERT
-    stamping path. The FIRST ADD VECTOR INDEX does not reach this gate -
-    the old table has no vector index yet - which is why it is refused
-    earlier, on the added keys. An earlier revision of this comment
-    argued the first ADD was safe here because it matched FTS's
-    first-ADD-FULLTEXT rebuild; the shape matches but the outcome does
-    not, because FTS has a build pass during the rebuild and we do
-    not, so that rebuild produced an empty graph over existing rows.
-
-    This refusal is full FTS parity - no deviation today. If a later
-    phase implements aux carry-over (copy percona_vec_aux_id, re-parent the
-    aux to the new table_id/index_id atomically) or an HNSW
-    rebuild-during-copy, native/online rebuild could be re-enabled;
-    THAT would be a deliberate improvement beyond FTS (which never got
-    it) and must be justified as a deviation then. PS-11300+. */
+    /* A vector index does not refuse the rebuild - it only loses ONLINE,
+    which the `online = false` above already took care of. The reason
+    string below is what the server reports when the caller asked for
+    ALGORITHM=INPLACE, LOCK=NONE. */
     if (innobase_spatial_exist(altered_table)) {
       ha_alter_info->unsupported_reason =
           innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_GIS);
     } else if (innobase_vector_exist(altered_table)) {
-      ha_alter_info->unsupported_reason =
-          innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR);
+      ha_alter_info->unsupported_reason = innobase_get_err_msg(
+          ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_NOLOCK);
     } else {
       ha_alter_info->unsupported_reason =
           innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_FTS);
@@ -3648,11 +3633,11 @@ to column numbers in altered_table */
 #ifdef UNIV_DEBUG
   const size_t old_extra =
       (old_has_doc_id ? 1u : 0u) + (old_has_vec_aux_col ? 1u : 0u);
-  assert(i + DATA_N_SYS_COLS + old_extra == old_table->n_cols);
+  ut_ad(i + DATA_N_SYS_COLS + old_extra == old_table->n_cols);
   const size_t new_extra =
       (new_has_doc_id ? 1u : 0u) + (new_has_vec_aux_col ? 1u : 0u);
-  assert(altered_table->s->fields + DATA_N_SYS_COLS + new_extra ==
-         static_cast<ulint>(new_table->n_cols + new_table->n_v_cols));
+  ut_ad(altered_table->s->fields + DATA_N_SYS_COLS + new_extra ==
+        static_cast<ulint>(new_table->n_cols + new_table->n_v_cols));
 #endif
 
   /* The slots advance with the NEW table's hidden columns, which is not
@@ -3668,7 +3653,7 @@ to column numbers in altered_table */
   }
 
   if (old_has_vec_aux_col) {
-    assert(!strcmp(old_table->get_col_name(i), VEC_AUX_ID_COL_NAME));
+    ut_ad(!strcmp(old_table->get_col_name(i), VEC_AUX_ID_COL_NAME));
     col_map[i] = new_has_vec_aux_col ? new_hidden_slot++ : ULINT_UNDEFINED;
     i++;
   }
@@ -4808,7 +4793,7 @@ template <typename Table>
   column (or percona_vec_aux_id) is to be added, and the primary index
   definition is just copied from old table and stored in indexdefs[0] */
   assert(!add_fts_doc_id || new_clustered);
-  assert(!add_vec_aux_col || new_clustered);
+  ut_ad(!add_vec_aux_col || new_clustered);
   assert(new_clustered == (innobase_need_rebuild(ha_alter_info) ||
                            add_fts_doc_id || add_vec_aux_col));
 
@@ -5264,7 +5249,7 @@ template <typename Table>
     as FTS), and the modification-log loop below exempts vector
     indexes - so a vector index never enters ONLINE_INDEX_CREATION. */
     if (ctx->add_index[a]->is_vector()) {
-      assert(!vec_index);
+      ut_ad(!vec_index);
       vec_index = ctx->add_index[a];
       ut_ad(dict_index_get_online_status(vec_index) == ONLINE_INDEX_COMPLETE);
     }
@@ -8366,7 +8351,6 @@ rollback_trx:
       dict_table_autoinc_set_col_pos(t, field->field_index());
       dict_table_autoinc_unlock(t);
     }
-
 
     bool add_fts = false;
 

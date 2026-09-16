@@ -50,7 +50,7 @@ tables and all indexes - and every graph byte passes through
 Vec_arena::allocate(), so one counter here covers exactly that scope. */
 static std::atomic<uint64_t> vec_arena_bytes{0};
 
-uint64_t vec_arena_global_bytes() {
+uint64_t Vec_arena::global_bytes() {
   return vec_arena_bytes.load(std::memory_order_relaxed);
 }
 
@@ -71,10 +71,16 @@ Vec_arena::~Vec_arena() {
 
 void Vec_arena::recount() {
   const size_t now = mem_heap_get_size(m_heap);
-  if (now == m_bytes_allocated) return;
 
   /* The heap only grows while an arena is alive - nothing here frees a
-  block - so the delta is always positive. */
+  block - so the delta is always positive. If it ever were not, leave
+  the global counter alone rather than wrap an unsigned subtraction
+  into it. */
+  if (now <= m_bytes_allocated) {
+    ut_ad(now == m_bytes_allocated);
+    return;
+  }
+
   vec_arena_bytes.fetch_add(now - m_bytes_allocated, std::memory_order_relaxed);
   m_bytes_allocated = now;
 }

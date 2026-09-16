@@ -62,8 +62,8 @@ namespace {
 const char *alg_to_string(ha_key_alg alg) {
   switch (alg) {
     case HA_KEY_ALG_SE_SPECIFIC:
-      assert(false);
-      return nullptr;
+      ut_ad(0); /* the accepted algorithm; never named in an error */
+      return "SE-SPECIFIC";
     case HA_KEY_ALG_BTREE:
       return "BTREE";
     case HA_KEY_ALG_RTREE:
@@ -76,8 +76,8 @@ const char *alg_to_string(ha_key_alg alg) {
       return "VECTOR";
   }
 
-  assert(false);
-  return nullptr;
+  ut_ad(0); /* never nullptr: the caller passes this to my_error as %s */
+  return "UNKNOWN";
 }
 }  // namespace
 
@@ -170,8 +170,9 @@ bool validate_options(const Key_spec &index_def) {
 bool parse_options(const Key_spec &index_def, VectorIndexParam &vip) {
   if (index_def.type != KEYTYPE_VECTOR) return false;
 
-  // prepare_key() will make sure there's only one column.
-  // Possibly this check belongs there, too.
+  /* Column count is checked later by the server, not here. */
+  ut_ad(!index_def.columns.empty());
+
   if (index_def.columns[0]->get_prefix_length() != 0) {
     my_error(ER_WRONG_SUB_KEY, MYF(0));
     return true;
