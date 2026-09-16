@@ -289,11 +289,10 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
 
 /** Open the aux table for one DML operation.
 
-No MDL on the aux itself: the caller holds MDL on the BASE table, and
-every DDL that can drop an aux takes exclusive base MDL first. That is
-the same protection argument FTS relies on for its own aux DML. Fast
-path is the dict cache; fall back to the DD only when it has been
-evicted, and then take MDL because the fallback can block. */
+No MDL on the aux itself: the caller holds MDL on the BASE table, and every
+DDL that can drop an aux takes exclusive base MDL first. Fast path is the
+dict cache; fall back to the DD only when it has been evicted, and then take
+MDL because the fallback can block. */
 static dict_table_t *vec_aux_open_for_dml(dict_table_t *base,
                                           space_index_t index_id, THD *thd,
                                           MDL_ticket **mdl) {
@@ -506,15 +505,13 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
     trx_commit_for_mysql(aux_trx);
   } else {
     /* trx_rollback_to_savepoint, not trx_rollback_for_mysql: the aux
-    transaction is a BACKGROUND trx, so it is not in the MySQL trx list
-    that trx_rollback_for_mysql asserts membership of. This is the call
-    fts_sql_rollback makes, for that same reason (fts0sql.cc).
+    transaction is a BACKGROUND trx, so it is not in the MySQL trx list that
+    trx_rollback_for_mysql asserts membership of.
 
     This now rolls back only the callback that failed: everything before it
     was committed by vec_ctx_step_commit. The earlier rows stand, which is
     the orphan the design's rollback section accepts, and is the direction
-    that keeps the aux
-    tracking memory rather than diverging from it. */
+    that keeps the aux tracking memory rather than diverging from it. */
     trx_rollback_to_savepoint(aux_trx, nullptr);
   }
   trx_free_for_background(aux_trx);

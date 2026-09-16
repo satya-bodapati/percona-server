@@ -27,17 +27,13 @@ is open, hanging off dict_index_t::vec.
 
 struct dict_index_t;
 
-/** In-memory state belonging to one open vector index - the graph, the
-arena its nodes live in, the persistor, and the parameters read back from
-the DD.
+/** In-memory state belonging to one open vector index - the graph, the arena
+its nodes live in, the persistor, and the parameters read back from the DD.
 
 Per INDEX, not per table. Everything it holds is a property of a single
 index: the dimension, the distance metric, M, ef_construction, the entry
 point, the label space, the graph itself. Two vector indexes on the same
-table share none of it, and the aux table name is already keyed by index
-id. FTS hangs its state off dict_table_t because FTS genuinely has
-table-scoped state (one shared cache, one FTS_DOC_ID column, one delete
-list) plus a list of the indexes sharing it; we have no equivalent.
+table share none of it, and the aux table name is already keyed by index id.
 
 Typed as a base so that a second index TYPE is an addition rather than an
 edit: only the implementation that allocated a runtime may interpret the

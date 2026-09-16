@@ -59,17 +59,12 @@ const char *VEC_AUX_PREFIX = "percona_vec_";
 namespace {
 
 /** Extract the flags2 bits an aux table should inherit from its parent -
-file_per_table, encryption, temporary - plus DICT_TF2_VEC_AUX. Same set the
-FTS aux path preserves (see fts_get_table_flags2_for_aux_tables in fts0fts.cc;
-that helper is file-static so we re-derive it here), except that the aux
-marker is ours and not DICT_TF2_AUX.
+file_per_table, encryption, temporary - plus DICT_TF2_VEC_AUX.
 
-That distinction is load-bearing. is_aux() covers both kinds, but
-dd_table_open_on_id dispatches on is_fts_aux() and then asserts the name
-parses as an FTS aux name. Stamping DICT_TF2_AUX here would send every vec
-aux down that branch and trip the assertion on the first I_S or SYS_INDEXES
-scan that opens one. The DD reload path in dict0dd.cc reconstructs
-DICT_TF2_VEC_AUX from the on-disk name; creation has to agree with it. */
+Stamping DICT_TF2_AUX here would send every vec aux down that branch and
+trip the assertion on the first I_S or SYS_INDEXES scan that opens one. The
+DD reload path in dict0dd.cc reconstructs DICT_TF2_VEC_AUX from the on-disk
+name; creation has to agree with it. */
 inline uint32_t aux_flags2_from_parent(const dict_table_t *parent) {
   return (parent->flags2 & DICT_TF2_USE_FILE_PER_TABLE) |
          (parent->flags2 & DICT_TF2_ENCRYPTION_FILE_PER_TABLE) |
@@ -140,10 +135,8 @@ bool vec_index_type_by_token(const char *token, size_t len,
 
 /* One "<tid>" or "<iid>" field of a computed aux name.
 
-fts_read_object_id is sscanf based: it stops at the first character it
-cannot read and reports nothing about how much it consumed, so "2xyz" and
-"2_extra" both parse as 2. Check each field here instead, so a user table
-that merely begins like an aux name stays a user table. */
+Check each field here instead, so a user table that merely begins like an
+aux name stays a user table. */
 static bool vec_aux_field_is_object_id(const char *begin, const char *end) {
   if (begin >= end) return false;
   for (const char *p = begin; p < end; ++p) {
@@ -152,16 +145,14 @@ static bool vec_aux_field_is_object_id(const char *begin, const char *end) {
   return true;
 }
 
-/* Match the FULL computed shape "<db>/percona_vec_<type>_<tid>_<iid>":
-the prefix, a type token that resolves in the token table, and two
-parseable object ids. Anything else is an ordinary user table that
-merely starts the same way.
+/* Match the FULL computed shape "<db>/percona_vec_<type>_<tid>_<iid>": the
+prefix, a type token that resolves in the token table, and two parseable
+object ids. Anything else is an ordinary user table that merely starts the
+same way.
 
-Same rule as fts_is_aux_table_name, which validates
-<prefix><hex_id>_<suffix> and so leaves "fts_data" available. Matching
-on the prefix alone would reserve a slice of the user namespace
-permanently and reject existing tables on upgrade, to catch a collision
-this check catches anyway. */
+Matching on the prefix alone would reserve a slice of the user namespace
+permanently and reject existing tables on upgrade, to catch a collision this
+check catches anyway. */
 bool vec_aux_parse_table_name(const char *name, table_id_t *parent_id_out,
                               space_index_t *index_id_out,
                               Vec_index_type *type_out) {
@@ -223,8 +214,6 @@ void vec_add_aux_id_column(dict_table_t *table, mem_heap_t *heap) {
       dtype_form_prtype(DATA_NOT_NULL | DATA_UNSIGNED | DATA_BINARY_TYPE, 0),
       sizeof(uint64_t), false);
   DICT_TF2_FLAG_SET(table, DICT_TF2_HAS_VEC_AUX_COL);
-  /* Remember the ordinal position so the INSERT path can locate the
-  dfield slot in O(1) - same trick FTS uses with table->fts->doc_col. */
   table->vec_aux_col = table->n_def - 1;
 }
 
@@ -239,14 +228,6 @@ void vec_stamp_aux_id(dict_table_t *table, dtuple_t *row, byte *buf) {
   ut_ad(table->vec_aux_col < dtuple_get_n_fields(row));
 
   const uint64_t id = vec_assign_next_aux_id(table);
-
-  /* `buf` is the caller's, reserved once per handle and rewritten for
-  every row - not allocated here. fts_create_doc_id does allocate per
-  row, on a heap that lives as long as the table handle; MariaDB fixed
-  that shape in MDEV-13446 and this follows it.
-
-  Big-endian (mach format) so a clustered-index range scan on this column
-  would order numerically - matches how FTS_DOC_ID is laid out. */
   mach_write_to_8(buf, id);
 
   dfield_t *dfield = dtuple_get_nth_field(row, table->vec_aux_col);
@@ -307,8 +288,7 @@ bool vec_upd_changes_indexed_vector(const dict_table_t *table,
   const ulint vec_col = vec_indexed_col_no(table);
   if (vec_col == ULINT_UNDEFINED) return false;
 
-  /* Convert the index-specific field number to a table column number,
-  the way row_upd_changes_fts_column does. */
+  /* Convert the index-specific field number to a table column number. */
   const dict_index_t *clust = table->first_index();
   return clust->get_col_no(ufield->field_no) == vec_col;
 }
@@ -325,11 +305,8 @@ void vec_update_aux_id(dict_table_t *table, upd_field_t *ufield,
   ufield->field_no = dict_col_get_clust_pos(col, clust);
   col->copy_type(dfield_get_type(&ufield->new_val));
 
-  /* Storage byte order, written back over the trx member the label was
-  minted into - which then IS the field's buffer. Same trick as
-  fts_update_doc_id: no allocation, and the buffer lives exactly as long
-  as the statement that needs it. The hook reads it back with
-  mach_read_from_8 for the same reason FTS calls fts_read_doc_id. */
+  /* Storage byte order, written back over the trx member the label was minted
+  into - which then IS the field's buffer. */
   mach_write_to_8(reinterpret_cast<byte *>(next_label), *next_label);
 
   ufield->new_val.data = next_label;
@@ -551,13 +528,11 @@ bool vec_aux_create_dd_table(dict_table_t *parent, const dict_index_t *index) {
   ut_ad(parent != nullptr);
   ut_ad(index != nullptr && index->is_vector());
 
-  /* One named index, not every vector index the table happens to hold.
-  That distinction matters in an ALTER that drops a vector index and adds
-  another in the same statement: until it commits, the parent carries
-  both, and the dropped one's aux is on its way out - registering it
-  would open an aux that is being dropped. FTS reaches the same place
-  with a per-index `fill_dd` gate; naming the index is the same idea with
-  less state. */
+  /* One named index, not every vector index the table happens to hold. That
+  distinction matters in an ALTER that drops a vector index and adds another
+  in the same statement: until it commits, the parent carries both, and the
+  dropped one's aux is on its way out - registering it would open an aux
+  that is being dropped. */
   char aux_name[MAX_FULL_NAME_LEN];
   vec_aux_get_table_name(parent, index->id, Vec_index_type::HNSW, aux_name,
                          sizeof(aux_name));
@@ -605,15 +580,10 @@ dberr_t vec_aux_drop_one_table(trx_t *trx, const dict_table_t *parent,
 
   const bool file_per_table = dict_table_is_file_per_table(parent);
 
-  /* Open the aux with MDL before row_drop_table_for_mysql. Without
-  this, row_drop_table_for_mysql's call into dd_table_open_on_name
-  trips an assertion in dictionary_client.cc because the SQL layer never
-  acquires MDL on the hidden aux. Mirrors fts_drop_table at
-  fts0fts.cc. Callers of vec_aux_drop_one_table always
-  hold dict_sys (parent row_drop_table_for_mysql, ALTER commit
-  drop-index loop, error_handling), so pass dict_locked=true and
-  let dd_table_open_on_name handle the release-around-MDL-acquire
-  dance internally - same convention FTS uses. */
+  /* Open the aux with MDL before row_drop_table_for_mysql. Without this,
+  row_drop_table_for_mysql's call into dd_table_open_on_name trips an
+  assertion in dictionary_client.cc because the SQL layer never acquires MDL
+  on the hidden aux. */
   THD *thd = current_thd;
   MDL_ticket *aux_mdl = nullptr;
   if (thd != nullptr) {
@@ -633,21 +603,16 @@ dberr_t vec_aux_drop_one_table(trx_t *trx, const dict_table_t *parent,
     return err;
   }
 
-  /* row_drop_table_for_mysql only tears down dict_sys + the .ibd. The
-  matching dd::Table + dd::Tablespace entries created by
-  dd_create_vec_aux_table linger until we explicitly drop them; reuse
-  dd_drop_aux_table for that, which is generic across aux-table kinds.
-  dict_sys mutex must be released around the DD client call.
+  /* row_drop_table_for_mysql only tears down dict_sys + the .ibd. The matching
+  dd::Table + dd::Tablespace entries created by dd_create_vec_aux_table
+  linger until we explicitly drop them; reuse dd_drop_aux_table for that,
+  which is generic across aux-table kinds. dict_sys mutex must be released
+  around the DD client call.
 
-  DEVIATION FROM FTS: fts_drop_table drops the DD entry inline only
-  when called with aux_vec == nullptr; on the DROP TABLE path it
-  instead pushes the aux name into aux_vec and the caller
-  (row_drop_table_for_mysql's funct_exit) drops the DD entries AFTER
-  the parent drop trx commits. Vec has no aux_vec mode - the DD drop
-  always happens here, potentially under an open parent-drop trx.
-  Acceptable in phase 1 (empty aux, one aux per index, no partial-
-  batch window); the aux_vec deferral is the upgrade path if
-  PS-11300's crash-atomicity work needs it. */
+  Vec has no aux_vec mode - the DD drop always happens here, potentially
+  under an open parent-drop trx. Acceptable in phase 1 (empty aux, one aux
+  per index, no partial- batch window); the aux_vec deferral is the upgrade
+  path if PS-11300's crash-atomicity work needs it. */
   const bool dict_locked = trx->dict_operation_lock_mode == RW_X_LATCH;
   if (dict_locked) {
     dict_sys_mutex_exit();
@@ -709,10 +674,9 @@ namespace {
 /** Build the post-rename aux name. Given the OLD aux name
 "old_db/percona_vec_<type>_<tid>_<iid>" and the parent's NEW name
 "new_db/<tbl>", write "new_db/percona_vec_<type>_<tid>_<iid>" into `out`.
-Mirrors what fts_rename_one_aux_table does inline. Returns false if the
-result would not fit, or if the old name has no database part - neither
-can happen for a name this module built, but both would be a memcpy
-past the end of `out`. */
+Returns false if the result would not fit, or if the old name has no
+database part - neither can happen for a name this module built, but both
+would be a memcpy past the end of `out`. */
 [[nodiscard]] bool rebuild_aux_name_with_new_db(const char *old_aux_name,
                                                 const char *new_parent_name,
                                                 char *out, size_t out_len) {
@@ -771,11 +735,6 @@ dberr_t vec_aux_rename_tables(trx_t *trx, dict_table_t *parent,
     DD-registered with the same shape. dict_sys mutex must be released
     around the DD client call. */
     if (!replay) {
-      /* The rename above just succeeded, so the aux must be cached under
-      its new name. ut_a, not ut_ad plus a skip: releasing the build in
-      that state would leave the DD naming a file that no longer exists,
-      which is worse than stopping here. fts_rename_one_aux_table
-      dereferences without checking at all. */
       dict_table_t *aux = dict_table_check_if_in_cache_low(new_aux_name);
       ut_ad(aux != nullptr);
       aux->acquire();

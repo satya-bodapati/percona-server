@@ -8,10 +8,14 @@
 # Refusing before insert() starts touching the graph fails the
 # statement cleanly instead.
 #
+# The shipped default is a bound, not "unlimited".
 SELECT @@global.innodb_hnsw_max_memory > 0 AS has_default;
 has_default
 1
 SET @saved = @@global.innodb_hnsw_max_memory;
+# Everything below works from an explicit bound, so the test does not
+# depend on what that default happens to be. @saved only restores it.
+SET GLOBAL innodb_hnsw_max_memory = 67108864;
 CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
 v VECTOR(4) NOT NULL,
 KEY (v) TYPE hnsw WITH (M = 4));
@@ -42,7 +46,7 @@ nodes=1 distinct_ids=1 distinct_base_pks=1 dup_ids=0 dup_base_pks=0 labels_conti
 #
 # The variable is dynamic: raising it unblocks the workload with
 # no restart.
-SET GLOBAL innodb_hnsw_max_memory = @saved;
+SET GLOBAL innodb_hnsw_max_memory = 67108864;
 INSERT INTO t1 VALUES (2, STRING_TO_VECTOR('[0,1,0,0]'));
 SELECT id FROM t1 FORCE INDEX (PRIMARY) ORDER BY id;
 id
@@ -59,7 +63,7 @@ SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 nodes=3 distinct_ids=3 distinct_base_pks=3 dup_ids=0 dup_base_pks=0 labels_contiguous_from_1=0
-SET GLOBAL innodb_hnsw_max_memory = @saved;
+SET GLOBAL innodb_hnsw_max_memory = 67108864;
 DROP TABLE t1;
 #
 # The bound also covers the load path, which is where a graph grows
@@ -83,7 +87,9 @@ v VECTOR(4) NOT NULL,
 KEY (v) TYPE hnsw WITH (M = 4));
 # Both graphs are dropped by the restart.
 # restart
+# The restart reset the global and dropped the session variable.
 SET @saved = @@global.innodb_hnsw_max_memory;
+SET GLOBAL innodb_hnsw_max_memory = 67108864;
 # Warm t2 back up under the default bound. Its graph now holds more
 # than the bound we are about to set.
 SELECT id FROM t2 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 3;
@@ -104,7 +110,7 @@ id
 3
 # Raising the bound lets t3 load, and it returns the right rows -
 # so the refusal left nothing broken behind either.
-SET GLOBAL innodb_hnsw_max_memory = @saved;
+SET GLOBAL innodb_hnsw_max_memory = 67108864;
 SELECT id FROM t3 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 3;
 id
 1

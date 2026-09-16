@@ -28,9 +28,6 @@ this program; if not, write to the Free Software Foundation, Inc.,
 /** @file include/vec0dml.h
 Row-level DML on vector-index auxiliary tables through the InnoDB query-graph
 C API - insert, targeted neighbor update, and MVCC-consistent full load.
-
-DEVIATION FROM FTS: FTS performs its aux-table DML through the internal SQL
-parser (fts_parse_sql / fts_eval_sql), which serializes every operation on
 the global pars_mutex. Vector aux DML runs on every user INSERT, so it uses
 the same parser-free query-graph machinery row0mysql itself uses
 (ins_node/upd_node + pars_complete_graph_for_exec) on the user transaction:

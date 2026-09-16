@@ -56,16 +56,11 @@ constexpr ulint VEC_AUX_ID_LEN = 8;
 
 /** Number of user columns in a vector aux table.
 
-DEVIATION FROM FTS: FTS uses multiple aux table shapes selected by
-suffix - 6 per-index shapes (INDEX_1..INDEX_5, DELETED_CACHE) plus 5
-per-table common shapes (CONFIG, DELETED, ADDED, BEING_DELETED,
-BEING_DELETED_CACHE) - because FTS's inverted-index storage splits
-tokens across hash buckets and keeps per-index state separate from
-per-table state. Vector HNSW has different semantics: one aux row
-per graph vertex, all vertices in one table. A single fixed schema
-(id, vec, base_pk, level, neighbors) is sufficient and simpler. If
-phase 2 needs additional shape variance (e.g., a separate CONFIG
-aux for HNSW parameters), we'd add it symmetrically then. */
+Vector HNSW has different semantics: one aux row per graph vertex, all
+vertices in one table. A single fixed schema (id, vec, base_pk, level,
+neighbors) is sufficient and simpler. If phase 2 needs additional shape
+variance (e.g., a separate CONFIG aux for HNSW parameters), we'd add it
+symmetrically then. */
 constexpr ulint VEC_AUX_TABLE_NUM_COLS = 5;
 
 /** Column lengths in a vector aux table. */
@@ -118,15 +113,13 @@ void vec_aux_get_table_name(const dict_table_t *parent, space_index_t index_id,
 
 /** True if `name` is a complete vector aux table name (ANY type):
 VEC_AUX_PREFIX, a type token the registry knows, and exactly two hex id
-fields, the second ending the string - so "percona_vec_hnsw_1_2" is one
-of ours while a user table merely called "percona_vec_data" is not.
+fields, the second ending the string - so "percona_vec_hnsw_1_2" is one of
+ours while a user table merely called "percona_vec_data" is not.
 
-Two uses. It reserves the name at CREATE (ha_innobase::create) and at
-RENAME (ha_innobase::rename_table), and it recognises an aux table by
-its name at DD load (dd_open_table_one), where DICT_TF2_VEC_AUX and the
-parent id are reconstructed from it. It is NOT what hides the aux from
-SHOW TABLES and INFORMATION_SCHEMA.TABLES: that is the stored
-HT_HIDDEN_SE attribute the aux gets from dd_set_fts_table_options. */
+Two uses. It reserves the name at CREATE (ha_innobase::create) and at RENAME
+(ha_innobase::rename_table), and it recognises an aux table by its name at
+DD load (dd_open_table_one), where DICT_TF2_VEC_AUX and the parent id are
+reconstructed from it. */
 [[nodiscard]] bool vec_aux_is_aux_table_name(const char *name);
 
 /** Parse a "<db>/percona_vec_<type>_<parent_id>_<index_id>" name into its
@@ -162,18 +155,16 @@ only (no pars_sql).
 [[nodiscard]] dberr_t vec_aux_create_all_tables(trx_t *trx,
                                                 const dict_table_t *parent);
 
-/** DD-register every vector aux table already attached to `parent`.
-The in-memory dict_table_t entries must have been created by
+/** DD-register every vector aux table already attached to `parent`. The
+in-memory dict_table_t entries must have been created by
 @ref vec_aux_create_all_tables / @ref vec_aux_create_one_table first.
-Mirrors fts_create_index_dd_tables. Returns true on success. */
+Returns true on success. */
 [[nodiscard]] bool vec_aux_create_dd_table(dict_table_t *parent,
                                            const dict_index_t *index);
 
-/** Take an exclusive MDL on every vector aux table belonging to
-`parent`, so nothing can be reading one while we drop it. The aux
-tables are hidden, so no MDL was taken for them when the server locked
-the parent. Mirrors fts_lock_all_aux_tables, and like it must be called
-without dict_sys mutex held (the DD/MDL layer may wait).
+/** Take an exclusive MDL on every vector aux table belonging to `parent`, so
+nothing can be reading one while we drop it. The aux tables are hidden, so
+no MDL was taken for them when the server locked the parent.
 @param[in]  thd     thread taking the locks
 @param[in]  parent  parent that owns the vector indexes
 @return DB_SUCCESS, or DB_ERROR if a lock could not be taken */
@@ -189,11 +180,10 @@ without dict_sys mutex held (the DD/MDL layer may wait).
 [[nodiscard]] dberr_t vec_aux_drop_all_tables(trx_t *trx, dict_table_t *parent);
 
 /** Flip every vector aux table belonging to `parent` from pinned
-(can_be_evicted=false, the default from row_create_table_for_mysql)
-to evictable, so dict_sys can LRU them out later. Mirrors
-fts_detach_aux_tables. Called on both success and fail paths of ALTER
-prepare - the "make evictable" side of aux lifecycle. Safe on aux
-tables that aren't currently cached (skips silently).
+(can_be_evicted=false, the default from row_create_table_for_mysql) to
+evictable, so dict_sys can LRU them out later. Called on both success and
+fail paths of ALTER prepare - the "make evictable" side of aux lifecycle.
+Safe on aux tables that aren't currently cached (skips silently).
 @param[in]  parent          parent that owns the vector indexes
 @param[in]  dict_locked     true iff caller already holds dict_sys mutex */
 void vec_aux_detach_tables(const dict_table_t *parent, bool dict_locked);
@@ -201,13 +191,11 @@ void vec_aux_detach_tables(const dict_table_t *parent, bool dict_locked);
 /** True iff `table` has at least one vector index attached. */
 [[nodiscard]] bool vec_aux_table_has_vector_index(const dict_table_t *table);
 
-/** Rename every vector aux table belonging to `parent` after the parent
-itself has been renamed to `new_parent_name`. Mirrors fts_rename_aux_tables.
-Only the db-prefix portion of the aux name changes - the suffix is
-keyed by (table_id, index_id) which are invariant under RENAME. Caller
-must have verified that the schema actually changed (cross-schema
-rename); no early-out check here.
-
+/** Rename every vector aux table belonging to `parent` after the parent itself
+has been renamed to `new_parent_name`. Only the db-prefix portion of the aux
+name changes - the suffix is keyed by (table_id, index_id) which are
+invariant under RENAME. Caller must have verified that the schema actually
+changed (cross-schema rename); no early-out check here.
 @param[in,out] trx                transaction
 @param[in]     parent             dict_table_t of the parent (still
                                   registered under its OLD name in dict_sys)
@@ -220,18 +208,14 @@ rename); no early-out check here.
                                             bool replay);
 
 /** Add the hidden percona_vec_aux_id column (BIGINT UNSIGNED NOT NULL) to the
-in-memory `dict_table_t` and set DICT_TF2_HAS_VEC_AUX_COL. Mirrors
-fts_add_doc_id_column for FTS_DOC_ID. Called both at CREATE time and
-during DD load when the dd::Table has a hidden percona_vec_aux_id.
-
+in-memory `dict_table_t` and set DICT_TF2_HAS_VEC_AUX_COL. Called both at
+CREATE time and during DD load when the dd::Table has a hidden
+percona_vec_aux_id.
 @param[in,out]  table   dict_table_t under construction
 @param[in,out]  heap    memory heap for column allocation */
 void vec_add_aux_id_column(dict_table_t *table, mem_heap_t *heap);
 
 /** Read the label stamped into a row's hidden percona_vec_aux_id column.
-
-The analog of fts_get_doc_id_from_row: after the insert path has stamped
-the column, this is how the graph side learns which label the row got.
 @param[in]  table  the base table
 @param[in]  row    the row, as converted for InnoDB
 @return the label; never 0 for a stamped row */
@@ -240,12 +224,8 @@ uint64_t vec_get_aux_id_from_row(const dict_table_t *table,
 
 /** Read the label stamped into a clustered index record.
 
-The record-level form of vec_get_aux_id_from_row, and the analog of
-fts_get_doc_id_from_rec: the read path has a record and offsets in hand,
-not a converted row, so it cannot use the dtuple form. Reading straight
-from the record is what lets the label be checked without adding the
-hidden column to the MySQL row template.
-
+Reading straight from the record is what lets the label be checked without
+adding the hidden column to the MySQL row template.
 @param[in]  table  the base table
 @param[in]  rec    a record of `index` containing percona_vec_aux_id
 @param[in]  index  the index `rec` belongs to
@@ -290,9 +270,6 @@ ulint vec_indexed_col_no(const dict_table_t *table);
                                                   const upd_field_t *ufield);
 
 /** Fill an update field so it sets the hidden label column to `label`.
-
-The mirror of fts_update_doc_id: this is how a fresh label joins the
-user's UPDATE rather than being written by a second statement.
 @param[in]      table   the base table
 @param[in,out]  ufield  the update field to fill
 @param[in]      label   the new label */
@@ -323,8 +300,7 @@ uint64_t vec_assign_next_aux_id(dict_table_t *table);
 
 /** Stamp the hidden percona_vec_aux_id dfield in `row` with the next id from
 the per-table counter. No-op for tables without the hidden column.
-Allocations come from `heap` so they outlive this call. Called from
-the INSERT path (mirrors fts_create_doc_id). */
+Allocations come from `heap` so they outlive this call. */
 void vec_stamp_aux_id(dict_table_t *table, dtuple_t *row, byte *buf);
 
 #endif /* vec0aux_h */

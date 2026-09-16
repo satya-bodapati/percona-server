@@ -26,8 +26,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 *****************************************************************************/
 
 /** @file vec/vec0dml.cc
-Parser-free DML on vector-index auxiliary tables. See vec0dml.h for the
-DEVIATION FROM FTS rationale (no fts_parse_sql / pars_mutex). */
+Parser-free DML on vector-index auxiliary tables. See vec0dml.h for the */
 
 #include "vec0dml.h"
 
@@ -112,10 +111,8 @@ struct Vec_aux_bulk {
   ~Vec_aux_bulk() {
     if (heap != nullptr) mem_heap_free(heap);
     if (load != nullptr) ut::delete_(load);
-    /* The observer belongs to the DDL context, which flushes it once every
-    builder is done - the same arrangement ddl::FTS uses for its own aux
-    tables. Flushing or freeing it here would be flushing half a statement's
-    pages, and ~Flush_observer would assert on the rest. */
+    /* Flushing or freeing it here would be flushing half a statement's pages,
+    and ~Flush_observer would assert on the rest. */
   }
 
   Vec_aux_bulk(const Vec_aux_bulk &) = delete;
