@@ -1764,7 +1764,7 @@ class HNSW {
     const double u =
         std::max(std::uniform_real_distribution<double>(0.0, 1.0)(m_rng),
                  std::numeric_limits<double>::min());
-    // Throttle layer growth and avoid UB caused by double -> uint8_t overflow.
+    // Throttle layer growth and avoid UB caused by double to uint8_t overflow.
     const uint8_t layer_cap = std::min<int>(
         current_max_layer + 1, std::numeric_limits<uint8_t>::max());
     return static_cast<uint8_t>(

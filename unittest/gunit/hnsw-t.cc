@@ -791,7 +791,8 @@ TEST_F(HnswTest, AdjacentPruneShortListZeroFillsTail) {
     ++nonzero;
   }
 
-  // Skipped at least two lost neighbors → selected < Mmax → trailing zeros.
+  // Skipped at least two lost neighbors, so selected < Mmax and there are
+  // trailing zeros.
   EXPECT_LT(nonzero, 2 * kMLocal);
   EXPECT_GT(nonzero, 0U);
   EXPECT_TRUE(seen_null);
