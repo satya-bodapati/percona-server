@@ -752,3 +752,36 @@ VECTOR KEY ( v1 ) TYPE hnsw ( metric = manhattan )
 );
 ERROR 42000: This version of MySQL doesn't yet support 'HNSW indexes on anything but the EUCLIDEAN metric'
 DROP TABLE t1;
+#
+# Every vector index in the statement is checked, not just the first
+# one found. The option check used to return on the first vector key,
+# so a bad option on a later key went unreported and the statement
+# failed for some other reason - which made the error depend on the
+# order the keys were written in.
+#
+CREATE TABLE t (
+id BIGINT UNSIGNED PRIMARY KEY,
+v1 VECTOR( 8 ) NOT NULL,
+v2 VECTOR( 8 ) NOT NULL,
+KEY ( v1 ) TYPE hnsw ( M = 8 ),
+KEY ( v2 ) TYPE hnsw ( bogus = 1 )
+);
+ERROR HY000: Illegal index construction parameter: bogus.
+# Same statement, keys the other way round: same error.
+CREATE TABLE t (
+id BIGINT UNSIGNED PRIMARY KEY,
+v1 VECTOR( 8 ) NOT NULL,
+v2 VECTOR( 8 ) NOT NULL,
+KEY ( v2 ) TYPE hnsw ( bogus = 1 ),
+KEY ( v1 ) TYPE hnsw ( M = 8 )
+);
+ERROR HY000: Illegal index construction parameter: bogus.
+# An illegal VALUE on the later key is reported too.
+CREATE TABLE t (
+id BIGINT UNSIGNED PRIMARY KEY,
+v1 VECTOR( 8 ) NOT NULL,
+v2 VECTOR( 8 ) NOT NULL,
+KEY ( v1 ) TYPE hnsw ( M = 8 ),
+KEY ( v2 ) TYPE hnsw ( M = abc )
+);
+ERROR HY000: Illegal index construction parameter value: abc.
