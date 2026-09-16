@@ -228,9 +228,12 @@ bool Instant_ddl_impl<Table>::commit_instant_ddl() {
       /* Mirror the FTS_DOC_ID re-add above for the hidden percona_vec_aux_id
       column: INSTANT_VIRTUAL_ONLY may have dropped it from new_dd_tab
       because virtual-column-only ALTERs rebuild the dd::Table from
-      altered_table->s which has no SE-hidden cols. Re-attach so the
-      DD on commit still describes percona_vec_aux_id, otherwise next reload
-      crashes in vec_add_aux_id_column / dd_open_table_one. */
+      altered_table->s, which has no SE-hidden cols. Re-attach so the DD on
+      commit still describes percona_vec_aux_id, otherwise the next reload
+      crashes in vec_add_aux_id_column / dd_open_table_one.
+
+      No dd_set_hidden_unique_index call: vector search, unlike FTS, does not
+      need a unique index on the hidden field. See PS-11299 phase 1 design. */
       if (dd_find_column(&m_old_dd_tab->table(), VEC_AUX_ID_COL_NAME) &&
           !dd_find_column(&m_new_dd_tab->table(), VEC_AUX_ID_COL_NAME)) {
         dd_add_hidden_column(&m_new_dd_tab->table(), VEC_AUX_ID_COL_NAME,
