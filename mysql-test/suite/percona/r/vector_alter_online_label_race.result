@@ -1,0 +1,93 @@
+#
+# PS-11300: prepare_inplace_alter_table() (handler0alter.cc, around the
+# "Carry the label counter into the new definition" block) snapshots
+# vec_aux_autoinc_next_id into the new dd::Table before returning.
+#
+# That snapshot is only safe when nothing can advance the live counter
+# before the ALTER's own commit persists it. A rebuild that keeps the
+# vector index is always forced to at least LOCK=SHARED (see
+# vector_alter_rebuild.test), which blocks DML for exactly that reason
+# - but the snapshot itself is unconditional on
+# DICT_TF2_HAS_VEC_AUX_COL, not on the ALTER being a rebuild. A plain
+# ADD INDEX that does not touch the vector key and does not need a
+# rebuild stays online: check_if_supported_inplace_alter's online=false
+# gate only fires for ADD_PK_INDEX/rebuild-with-surviving-vector-index
+# or for adding a FULLTEXT/VECTOR key, neither of which applies here.
+#
+# So this ALTER runs with ALGORITHM=INPLACE, LOCK=NONE while the table
+# already carries a vector index. Concurrent INSERTs during its online
+# window keep minting labels via vec_assign_next_aux_id, but nothing
+# re-reads the counter after the prepare-phase snapshot: the ALTER's
+# own commit persists the pre-window value into se_private_data
+# unconditionally (dd_set_vec_next_id has no max-with-current logic).
+#
+# A plain restart is not enough to see it: a clean shutdown flushes
+# whatever dynamic metadata is still dirty in memory at THAT point,
+# under whatever table->version is current by then - and by the time
+# of a clean shutdown, the ALTER has long since committed and bumped
+# it, so that final flush lines up with the committed se_private_data
+# and nothing looks wrong.
+#
+# The window that matters is narrower: a checkpoint that lands DURING
+# the online copy phase, before the ALTER's own commit bumps the
+# version. That flush carries the correct, already-advanced counter
+# (5) tagged with the OLD table->version. Once the ALTER commits and
+# (via dd_set_autoinc, because this table also carries an unrelated
+# AUTO_INCREMENT column - see vector_alter_label_counter.test) bumps
+# DD_TABLE_VERSION "to ignore any previously buffered persistent
+# dynamic metadata", that flushed entry is orphaned: its version no
+# longer matches, so dict0dict.cc's loader discards it and falls back
+# to se_private_data's stale, pre-window snapshot (2) instead of the
+# correct 5. vector_counter_stale_buffer.test forces the same kind of
+# mid-window checkpoint for the crash-recovery variant of this bug;
+# this is the online-DDL variant, surviving a clean restart instead.
+#
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+serial BIGINT UNSIGNED AUTO_INCREMENT UNIQUE,
+v VECTOR(4) NOT NULL);
+INSERT INTO t1 (id, v) VALUES (1,STRING_TO_VECTOR('[1,0,0,0]')),
+(2,STRING_TO_VECTOR('[2,0,0,0]'));
+ALTER TABLE t1 ADD KEY (v) TYPE hnsw WITH (M = 8);
+# Labels 1,2 handed out by the index build. Confirm the invariant
+# holds before the race: contiguous, no duplicates.
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+nodes=2 distinct_ids=2 distinct_base_pks=2 dup_ids=0 dup_base_pks=0 labels_contiguous_from_1=1
+# A plain secondary index, ALGORITHM=INPLACE, LOCK=NONE - not a
+# rebuild, does not touch the vector key, so it stays genuinely
+# online. Pause it right after MySQL downgrades the lock to allow
+# concurrent writers (sql_table.cc: alter_table_inplace_after_lock_
+# downgrade), which is after ha_innobase::prepare_inplace_alter_table
+# already took the label-counter snapshot.
+SET DEBUG_SYNC = 'alter_table_inplace_after_lock_downgrade SIGNAL paused WAIT_FOR go';
+ALTER TABLE t1 ADD INDEX id_idx (id), ALGORITHM=INPLACE, LOCK=NONE;
+SET DEBUG_SYNC = 'now WAIT_FOR paused';
+# Concurrent DML in the online window: labels 3,4,5 must survive the
+# ALTER that is snapshotting the counter concurrently with these.
+INSERT INTO t1 (id, v) VALUES (3,STRING_TO_VECTOR('[3,0,0,0]')),
+(4,STRING_TO_VECTOR('[4,0,0,0]')),
+(5,STRING_TO_VECTOR('[5,0,0,0]'));
+# Flush dynamic metadata now, while the ALTER is still paused before
+# its version-bumping commit: this is what turns "recoverable" into
+# "lost", per the design note above.
+SET GLOBAL innodb_log_checkpoint_now = ON;
+SET DEBUG_SYNC = 'now SIGNAL go';
+SET DEBUG_SYNC = 'RESET';
+# Right after the online ALTER commits, in memory, everything is
+# still fine: 5 nodes, labels 1..5, no duplicates.
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+nodes=5 distinct_ids=5 distinct_base_pks=5 dup_ids=0 dup_base_pks=0 labels_contiguous_from_1=1
+# restart
+# Bug: the persisted next_id regressed to the pre-window snapshot (2),
+# so the freshly reloaded counter hands out 3 again here - a label
+# already carried by the row inserted as id=3 during the race. Once
+# fixed (counter refreshed under commit MDL, per the design note),
+# this must read id=6.
+SET SESSION innodb_interpreter = 'vec_next_id test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+id=6
+DROP TABLE t1;
