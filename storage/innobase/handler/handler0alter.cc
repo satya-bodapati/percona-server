@@ -1135,6 +1135,17 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
   Instant_Type instant_type = innobase_support_instant(
       ha_alter_info, m_prebuilt->table, this->table, altered_table);
 
+  /* An INSTANT alter never runs prepare_inplace_alter_table, which is
+  where the label counter is carried into the new definition, so the new
+  table would start over from 1 and reissue labels that live rows already
+  hold. Take the INPLACE path instead, which carries it. */
+  if (instant_type != Instant_Type::INSTANT_IMPOSSIBLE &&
+      vec_aux_table_has_vector_index(m_prebuilt->table)) {
+    instant_type = Instant_Type::INSTANT_IMPOSSIBLE;
+    ha_alter_info->unsupported_reason = innobase_get_err_msg(
+        ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_INSTANT);
+  }
+
   ha_alter_info->handler_trivial_ctx =
       instant_type_to_int(Instant_Type::INSTANT_IMPOSSIBLE);
 
@@ -1521,6 +1532,23 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
     }
   }
 
+  /* No ALTER of a vector-indexed table runs with LOCK=NONE, whatever it
+  changes. The label counter is read in the prepare phase and written to
+  the new dd::Table at commit; concurrent DML would keep minting labels
+  in between, so the committed value would be behind the labels already
+  stamped into rows, and a later mint could reissue one. */
+  if (online && (innobase_vector_exist(altered_table) ||
+                 vec_aux_table_has_vector_index(m_prebuilt->table))) {
+    /* Not when INSTANT was refused above - that reason is the accurate
+    one for this statement. */
+    if (ha_alter_info->alter_info->requested_algorithm !=
+        Alter_info::ALTER_TABLE_ALGORITHM_INSTANT) {
+      ha_alter_info->unsupported_reason = innobase_get_err_msg(
+          ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_NOLOCK);
+    }
+    online = false;
+  }
+
   return online ? HA_ALTER_INPLACE_NO_LOCK_AFTER_PREPARE
                 : HA_ALTER_INPLACE_SHARED_LOCK_AFTER_PREPARE;
 }
@@ -1797,6 +1825,15 @@ bool ha_innobase::commit_inplace_alter_table(TABLE *altered_table,
   }
 
   ut_ad(ctx == nullptr || !(ctx->need_rebuild() && is_instant(ha_alter_info)));
+
+  /* Carry the label counter into the new definition, from the live value
+  under this commit-phase MDL. The prepare phase also writes it, but an
+  INSTANT alter never runs prepare, and neither does a no-change one. */
+  if (commit &&
+      DICT_TF2_FLAG_IS_SET(m_prebuilt->table, DICT_TF2_HAS_VEC_AUX_COL)) {
+    dd_set_vec_next_id(new_dd_tab->se_private_data(),
+                       m_prebuilt->table->vec_aux_autoinc_next_id.load());
+  }
 
   if (is_instant(ha_alter_info)) {
     ut_ad(!res);
