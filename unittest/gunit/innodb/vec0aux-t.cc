@@ -41,7 +41,11 @@ TEST(vec0aux, ParseRequiresNulAfterSecondId) {
   EXPECT_FALSE(vec_aux_is_aux_table_name("test/percona_vec_hnsw_1_2_extra"));
 }
 
-/* Bug 1: innobase_build_col_map.
+/* Bug 1: innobase_build_col_map. The hidden columns are laid out
+FTS_DOC_ID then percona_vec_aux_id, and the slot cursor has to advance
+with the NEW table's hidden columns. The committed loop advanced it only
+when the OLD table had FTS_DOC_ID, so old=vec-only plus new=FTS+vec
+mapped vec onto slot 0, which is the new FTS_DOC_ID.
 
 Modelled here rather than driven through ALTER because the mapper is
 file-static; vector_alter_add_fulltext covers the SQL path. */
@@ -56,8 +60,11 @@ static size_t col_map_vec_slot(bool old_has_doc_id, bool new_has_doc_id) {
 }
 
 TEST(vec0aux, ColMapVecSlotFollowsNewTableLayout) {
+  /* old vec only, new FTS_DOC_ID + vec: vec is the second hidden column. */
   EXPECT_EQ(col_map_vec_slot(false, true), 1u);
+  /* both already had FTS_DOC_ID: unchanged. */
   EXPECT_EQ(col_map_vec_slot(true, true), 1u);
+  /* new table has no FTS_DOC_ID: vec is the only hidden column. */
   EXPECT_EQ(col_map_vec_slot(false, false), 0u);
   EXPECT_EQ(col_map_vec_slot(true, false), 0u);
 }
