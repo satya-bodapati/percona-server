@@ -21,26 +21,27 @@ BASE   = 'ecb908769a5'
 ROOT   = 'storage/innobase/'
 TOP    = ('sql/', 'unittest/', 'include/my_', 'mysys/', 'vector-common/',
           'storage/', 'share/', 'vec-hnsw', 'mysql-test/')
-NSTEPS = 11
+NSTEPS = 10
 
 TITLES = {
  1:  'vector aux tables: create, drop, rename, truncate',
  2:  'the hidden label column, and its counter in the DD',
  3:  'read an aux table back: vec_aux_verify and vec_next_id',
- 4:  'the write path: aux tables on DDL, the graph, the sub-transaction',
+ 4:  'the write path: the graph, its memory bound, and the aux sub-transaction',
  5:  'search',
  6:  'load failures: corrupt graphs and transient refusals',
- 7:  'arena accounting and innodb_hnsw_max_memory',
- 8:  'ALTER: build through ddl::Builder, and survive a rebuild',
- 9:  'ALTER: refuse INSTANT, and the combinations',
- 10: 'refuse IMPORT and EXPORT',
- 11: 'design document for HNSW aux storage',
+ 7:  'ALTER: build through ddl::Builder, and survive a rebuild',
+ 8:  'ALTER: refuse INSTANT, and the combinations',
+ 9:  'refuse IMPORT and EXPORT',
+ 10: 'design document for HNSW aux storage',
 }
 
 def norm(f):
     if f.startswith('include/') and not f.startswith('include/my_'):
         return ROOT + f
     return f if f.startswith(TOP) else ROOT + f
+
+DEFER = []          # (step, token): drop file-scope lines naming it before step
 
 def load_map(path):
     sym, whole = collections.defaultdict(dict), {}
@@ -49,10 +50,21 @@ def load_map(path):
         if not line:
             continue
         p = line.split()
+        if len(p) >= 4 and p[0] == 'DEFER':
+            DEFER.append((int(p[1]), p[2], p[3]))
+            continue
         if len(p) >= 3 and p[1] == 'FILE':
             whole[norm(p[2])] = int(p[0])
         elif len(p) >= 3 and p[0].isdigit():
             sym[norm(p[1])][p[2]] = int(p[0])
+    # A file with both a FILE entry and symbol entries silently ignores the
+    # symbols - the whole file lands at the FILE entry's step. That is a map
+    # bug, not a preference, so refuse to build rather than produce a commit
+    # carrying another commit's work.
+    both = sorted(set(sym) & set(whole))
+    if both:
+        sys.exit('map: these files have a FILE entry AND symbol entries, so the '
+                 'symbols would be ignored:\n  ' + '\n  '.join(both))
     return sym, whole
 
 def show(path, rev=ORACLE):
@@ -144,6 +156,84 @@ def base_symbols(path):
         out[short] = None if short in out and out[short] != text else text
     return {k: v for k, v in out.items() if v is not None}
 
+def prune_deferred(n, path, src):
+    """Drop whole top-level statements naming a token whose step has not come.
+
+    A sysvar registration sits at file scope, so it rides along with its file
+    and can appear commits before the variable it registers. Cutting single
+    lines would leave half a macro call behind, so this drops the complete
+    statement - from its first line to where the parentheses balance."""
+    late = [t for st, f, t in DEFER if st > n and path.endswith(f)]
+    if not late:
+        return src
+    lines, out, i = src.split('\n'), [], 0
+    while i < len(lines):
+        depth = lines[i].count('(') - lines[i].count(')')
+        j = i
+        while depth > 0 and j + 1 < len(lines):
+            j += 1
+            depth += lines[j].count('(') - lines[j].count(')')
+        stmt = lines[i:j + 1]
+        if any(t in l for t in late for l in stmt):
+            while out and (out[-1].lstrip().startswith(('/**', '/*', '*', '//'))
+                           or not out[-1].strip()):
+                out.pop()
+            i = j + 1
+            continue
+        out.extend(stmt)
+        i = j + 1
+    return '\n'.join(out)
+
+def prune_includes(n, src, sym, whole):
+    """Drop #include lines naming a branch-introduced header whose step is
+    later than n. A file emitted early otherwise carries its final include
+    list, which drags the whole runtime's headers in with it."""
+    out = []
+    for line in src.split('\n'):
+        m = re.match(r'\s*#include\s+"([\w0-9]+\.h)"', line)
+        if m and m.group(1) not in base_tree_basenames():
+            for q in list(whole) + list(sym):
+                if q.endswith('/' + m.group(1)):
+                    cat = whole.get(q) or min(sym[q].values())
+                    if cat > n:
+                        break
+            else:
+                out.append(line)
+                continue
+            continue
+        out.append(line)
+    return '\n'.join(out)
+
+BASE_BASENAMES = None
+
+def base_tree_basenames():
+    global BASE_BASENAMES
+    if BASE_BASENAMES is None:
+        BASE_BASENAMES = {f.split('/')[-1] for f in base_tree()}
+    return BASE_BASENAMES
+
+DECL = re.compile(r'^[A-Za-z_\[].*?\b(%s)\s*\(')
+
+def prune_decls(n, path, src, sym):
+    """Remove declarations of symbols whose step is later than n."""
+    late = sorted({k.split('::')[-1] for k, st in sym.get(path, {}).items() if st > n})
+    if not late:
+        return src
+    pat = re.compile(r'\b(' + '|'.join(re.escape(x) for x in late) + r')\s*\(')
+    lines, out, i = src.split('\n'), [], 0
+    while i < len(lines):
+        if pat.search(lines[i]) and '{' not in lines[i] and not lines[i].lstrip().startswith(('*', '//', 'return')):
+            j = i
+            while j < len(lines) and ';' not in lines[j]:
+                j += 1
+            if j < len(lines) and '{' not in '\n'.join(lines[i:j + 1]):
+                while out and (out[-1].lstrip().startswith(('/**', '*', '//')) or not out[-1].strip()):
+                    out.pop()
+                i = j + 1
+                continue
+        out.append(lines[i]); i += 1
+    return '\n'.join(out)
+
 def content_at(n, path, sym, whole):
     src = show(path)
     if src is None:
@@ -159,6 +249,9 @@ def content_at(n, path, sym, whole):
     if not any(c <= n for c in sym[path].values()) and whole.get(path, 99) > n:
         return None
 
+    src = prune_deferred(n, path, prune_includes(n, src, sym, whole))
+    if path.endswith('.h'):
+        src = prune_decls(n, path, src, sym)
     tmp = '/tmp/_v4gen' + os.path.splitext(path)[1]
     open(tmp, 'w').write(src)
     lines = src.split('\n')
@@ -201,17 +294,22 @@ def header_floor(paths, sym, whole):
         for m in re.finditer(r'#include\s+"([\w0-9]+\.h)"', show(p) or ''):
             for q in paths:
                 if q.endswith('/' + m.group(1)) and q not in base_files:
-                    floor[q] = min(floor.get(q, 99), cat)
+                    own = whole.get(q) or (min(sym[q].values()) if q in sym else 99)
+                    # never earlier than the header's own step: the including
+                    # file's #include line is pruned until then anyway
+                    floor[q] = min(floor.get(q, 99), max(cat, own))
     changed = True
     while changed:
         changed = False
         for h, c in list(floor.items()):
             for m in re.finditer(r'#include\s+"([\w0-9]+\.h)"', show(h) or ''):
                 for q in paths:
-                    if q.endswith('/' + m.group(1)) and q not in base_files \
-                       and floor.get(q, 99) > c:
-                        floor[q] = c
-                        changed = True
+                    if q.endswith('/' + m.group(1)) and q not in base_files:
+                        own = whole.get(q) or (min(sym[q].values()) if q in sym else 99)
+                        want = max(c, own)
+                        if floor.get(q, 99) > want:
+                            floor[q] = want
+                            changed = True
     return floor
 
 def main(mapfile, wt):

@@ -58,6 +58,14 @@ for c in $(git rev-list --reverse $BASE..$TIP); do
   cd $REPO
   VERDICT=GREEN
   [ "$F" != 0 ] && VERDICT=RED
+  # a run that executed no tests is not a pass: MTR can fail to start the
+  # server entirely, which leaves pass=0 fail=0
+  if [ "$P" = 0 ]; then
+    VERDICT=RED
+    FAILED="mtr-ran-nothing"
+    grep -m3 -iE "ERROR|Could not" /tmp/mtr_$short.log | tail -2 >> $LOG
+    cp $BLD/mysql-test/var/log/bootstrap.log /tmp/bootstrap_$short.log 2>/dev/null
+  fi
   [ "$FMT" != 0 ] && VERDICT=RED
   [ "$VERDICT" = GREEN ] && touch /tmp/green_$short
   echo "$short $VERDICT build=ok fmt=$FMT pass=$P fail=$F [$FAILED] | $subj" >> $LOG
