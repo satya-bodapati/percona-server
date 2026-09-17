@@ -3,87 +3,16 @@
 #       Its tests go where the behaviour is complete (tracked separately).
 
 # ---- vec0aux.cc : aux lifecycle (1) vs hidden column + counter (2)
-1 vec/vec0aux.cc aux_flags2_from_parent
-1 vec/vec0aux.cc db_prefix_len
-1 vec/vec0aux.cc vec_index_token
-1 vec/vec0aux.cc vec_aux_get_table_name
-1 vec/vec0aux.cc vec_index_type_by_token
-1 vec/vec0aux.cc vec_aux_field_is_object_id
-1 vec/vec0aux.cc vec_aux_parse_table_name
-1 vec/vec0aux.cc vec_aux_is_aux_table_name
-1 vec/vec0aux.cc vec_aux_table_has_vector_index
-1 vec/vec0aux.cc create_in_mem_vec_aux_table
-1 vec/vec0aux.cc vec_aux_create_one_table
-1 vec/vec0aux.cc vec_aux_create_all_tables
-1 vec/vec0aux.cc vec_aux_create_dd_table
-1 vec/vec0aux.cc vec_aux_lock_all_tables
-1 vec/vec0aux.cc vec_aux_drop_one_table
-1 vec/vec0aux.cc vec_aux_drop_all_tables
-1 vec/vec0aux.cc vec_aux_detach_tables
-1 vec/vec0aux.cc vec_aux_rename_tables
-2 vec/vec0aux.cc vec_add_aux_id_column
-2 vec/vec0aux.cc vec_stamp_aux_id
-2 vec/vec0aux.cc vec_get_aux_id_from_row
-2 vec/vec0aux.cc vec_get_aux_id_from_rec
-2 vec/vec0aux.cc vec_indexed_col_no
-2 vec/vec0aux.cc vec_upd_changes_indexed_vector
-2 vec/vec0aux.cc vec_update_aux_id
-2 vec/vec0aux.cc vec_upd_new_vector
-2 vec/vec0aux.cc vec_upd_row_pk
-2 vec/vec0aux.cc vec_assign_next_aux_id
 
 # ---- vec0vec.cc : index syntax (3)
-3 handler/vec0vec.cc alg_to_string
-3 handler/vec0vec.cc vec_metric_func
-3 handler/vec0vec.cc parse_options
-3 handler/vec0vec.cc validate_options
 
 # ---- vec0arena.cc : runtime + budget (4)
-4 vec/vec0arena.cc vec_arena_align
-4 vec/vec0arena.cc Vec_arena::allocate
-4 vec/vec0arena.cc Vec_arena::global_bytes
-4 vec/vec0arena.cc Vec_arena::recount
 
 # ---- vec0hnsw.cc : runtime (4), write (5), build (6), read (7)
-4 vec/vec0hnsw.cc vec_ctx_step_commit
-4 vec/vec0hnsw.cc vec_persist_insert
-4 vec/vec0hnsw.cc vec_persist_update_neighbors
-4 vec/vec0hnsw.cc vec_persist_entry_point
-4 vec/vec0hnsw.cc vec_runtime_open
-4 vec/vec0hnsw.cc vec_aux_open_for_dml
-4 vec/vec0hnsw.cc vec_aux_close_for_dml
-4 vec/vec0hnsw.cc vec_runtime_load
-4 vec/vec0hnsw.cc vec_runtime_load_once
-4 vec/vec0hnsw.cc vec_runtime_set_corrupted
-4 vec/vec0hnsw.cc vec_index_of
-4 vec/vec0hnsw.cc vec_index_dims
-5 vec/vec0hnsw.cc vec_row_vector_bytes
-5 vec/vec0hnsw.cc vec_add_node
-5 vec/vec0hnsw.cc vec_insert_row
-5 vec/vec0hnsw.cc vec_update_row
-6 vec/vec0hnsw.cc vec_build_start
-6 vec/vec0hnsw.cc vec_build_add_row
-6 vec/vec0hnsw.cc vec_build_write_aux
-6 vec/vec0hnsw.cc vec_build_free
-7 vec/vec0hnsw.cc vec_knn_open
-7 vec/vec0hnsw.cc vec_knn_next
-7 vec/vec0hnsw.cc vec_knn_error
-7 vec/vec0hnsw.cc vec_knn_close
 
 # ---- vec0dml.cc : aux row read/write (4), write path (5), bulk build (6)
-4 vec/vec0dml.cc vec_aux_set_dfield
-4 vec/vec0dml.cc vec_aux_set_field
-4 vec/vec0dml.cc vec_aux_neighbors_blob_len
-4 vec/vec0dml.cc vec_aux_copy_field
-4 vec/vec0dml.cc vec_aux_read_node
-4 vec/vec0dml.cc vec_aux_insert
-4 vec/vec0dml.cc vec_aux_update_row
-6 vec/vec0dml.cc vec_aux_bulk_start
-6 vec/vec0dml.cc vec_aux_bulk_insert
-6 vec/vec0dml.cc vec_aux_bulk_finish
 
 # ---- vec0index.cc
-4 vec/vec0index.cc vec_index_runtime_free
 
 # ---- vec0hnsw.h header-inline: all reached from the persistor (cat 4)
 4 include/vec0hnsw.h vec_flatten_neighbors
@@ -165,67 +94,10 @@
 
 # ---- upstream functions carrying our additions (attribution via git's cpp driver)
 # ha_innodb.cc
-7 handler/ha_innodb.cc ha_innobase::ft_read           # vec_read_first/next live here
-2 handler/ha_innodb.cc ha_innobase::get_extra_columns_and_keys
-4 handler/ha_innodb.cc ha_innobase::open
-1 handler/ha_innodb.cc create_table_info_t::enable_encryption
-2 handler/ha_innodb.cc calc_row_difference
-1 handler/ha_innodb.cc ha_innobase::rename_table
-8 handler/ha_innodb.cc ha_innobase::discard_or_import_tablespace
-7 handler/ha_innodb.cc ha_innobase::index_flags
-1 handler/ha_innodb.cc create_table_info_t::create_table_update_global_dd
-4 handler/ha_innodb.cc MYSQL_SYSVAR_BOOL              # innodb_hnsw_max_memory
-7 handler/ha_innodb.cc ha_innobase::records_in_range
-1 handler/ha_innodb.cc create_table_info_t::create_table
-1 handler/ha_innodb.cc create_table_info_t::detach
-7 handler/ha_innodb.cc ha_innobase::index_end
-7 handler/ha_innodb.cc ha_innobase::close
-9 handler/ha_innodb.cc convert_error_code_to_mysql
-5 handler/ha_innodb.cc ha_innobase::end_stmt
 # handler0alter.cc
-8 handler/handler0alter.cc ha_innobase::check_if_supported_inplace_alter
-6 handler/handler0alter.cc ha_innobase::prepare_inplace_alter_table_impl
-1 handler/handler0alter.cc commit_try_norebuild
-8 handler/handler0alter.cc innobase_support_instant
-2 handler/handler0alter.cc ha_innobase::commit_inplace_alter_table
-1 handler/handler0alter.cc innobase_fulltext_exist
-1 handler/handler0alter.cc ok_to_rename_column
-1 handler/handler0alter.cc dd_commit_inplace_alter_table
-6 handler/handler0alter.cc ha_innobase::bulk_load_check
-8 handler/handler0alter.cc dd_commit_inplace_no_change
-2 handler/handler0alter.cc innobase_build_col_map_add
 # dict0dd.cc
-1 dict/dict0dd.cc dd_create_fts_index_table           # generalised for aux kinds
-2 dict/dict0dd.cc dd_fill_dict_table
-1 dict/dict0dd.cc dd_process_dd_indexes_rec
-1 dict/dict0dd.cc dd_write_tablespace
-2 dict/dict0dd.cc dd_open_table_one                   # restores the counter
-2 dict/dict0dd.cc dd_set_autoinc
-2 dict/dict0dd.cc fill_dict_columns
-1 dict/dict0dd.cc dd_process_dd_tablespaces_rec
-1 dict/dict0dd.cc dd_create_fts_common_table
-1 dict/dict0dd.cc dd_copy_table_columns
-1 dict/dict0dd.cc copy_dropped_columns
-8 dict/dict0dd.cc dd_add_vec_aux_id_column
 # dict0dict.cc - all counter persistence
-2 dict/dict0dict.cc dict_table_autoinc_log
-2 dict/dict0dict.cc AutoIncPersister::aggregate
-2 dict/dict0dict.cc dict_persist_update_log_margin
-1 dict/dict0dict.cc dict_table_add_to_cache
-2 dict/dict0dict.cc dict_table_apply_dynamic_metadata
-2 dict/dict0dict.cc dict_init_dynamic_metadata
-2 dict/dict0dict.cc Persisters::write
-2 dict/dict0dict.cc Persisters::add
 # row0mysql.cc
-5 row/row0mysql.cc row_update_for_mysql_using_upd_graph
-1 row/row0mysql.cc row_drop_table_for_mysql
-9 row/row0mysql.cc row_mysql_handle_errors
-2 row/row0mysql.cc row_get_prebuilt_insert_row
-2 row/row0mysql.cc row_insert_for_mysql_using_ins_graph
-1 row/row0mysql.cc row_rename_table_for_mysql
-2 row/row0mysql.cc row_mysql_convert_row_to_innobase
-7 row/row0mysql.cc row_scan_index_for_mysql
-1 row/row0mysql.cc row_create_table_for_mysql
 
 # ---- sql/ : optimizer and executor integration for ORDER BY DISTANCE (read path)
 7 FILE sql/sql_optimizer.cc
@@ -242,7 +114,7 @@
 7 FILE sql/sql_select.cc
 7 FILE sql/opt_explain.cc
 7 FILE sql/range_optimizer/path_helpers.h
-7 FILE sql/handler.h
+4 FILE sql/handler.h
 # syntax: the WITH(...) grammar and STRING_TO_VECTOR
 3 FILE sql/sql_lex.h
 3 FILE sql/sql_lex.cc
@@ -262,7 +134,7 @@
 1 FILE storage/innobase/CMakeLists.txt   # the new vec/ sources
 9 FILE include/my_base.h                 # HA_ERR_ANN_FAILED
 9 FILE mysys/my_handler_errors.h
-9 FILE storage/innobase/include/db0err.h
+4 FILE storage/innobase/include/db0err.h
 10 FILE vec-hnsw-aux-sub-trx.md          # design document
 
 # ---- headers: whole-file at the EARLIEST category that needs them.
@@ -289,15 +161,16 @@
 4 FILE storage/innobase/include/vec0arena.h
 
 # ---- MTR tests: placed at the LATEST category whose behaviour they assert.
-# Derived from the commits that introduced or modified each test. The bias is
-# late, which is safe (a test cannot assert what has not landed) but can leave
-# an early category thinner than it needs to be - see cat 3.
+# Derived from BOTH the .test and its .result: a later commit often changes
+# behaviour (a new error code, a changed message) and re-records the .result
+# without touching the .test. Counting only the .test placed three tests too
+# early. A test must assert the tip behaviour, so it goes where that is true.
 8 FILE mysql-test/suite/percona/t/vector_alter.test
 8 FILE mysql-test/suite/percona/r/vector_alter.result
 6 FILE mysql-test/suite/percona/t/vector_alter_add_fulltext.test
 6 FILE mysql-test/suite/percona/r/vector_alter_add_fulltext.result
-2 FILE mysql-test/suite/percona/t/vector_alter_combinations.test
-2 FILE mysql-test/suite/percona/r/vector_alter_combinations.result
+8 FILE mysql-test/suite/percona/t/vector_alter_combinations.test
+8 FILE mysql-test/suite/percona/r/vector_alter_combinations.result
 8 FILE mysql-test/suite/percona/t/vector_alter_instant_label_race.test
 8 FILE mysql-test/suite/percona/r/vector_alter_instant_label_race.result
 2 FILE mysql-test/suite/percona/t/vector_alter_label_counter.test
@@ -352,8 +225,8 @@
 2 FILE mysql-test/suite/percona/r/vector_fk.result
 2 FILE mysql-test/suite/percona/t/vector_import_blocked.test
 2 FILE mysql-test/suite/percona/r/vector_import_blocked.result
-6 FILE mysql-test/suite/percona/t/vector_index_build.test
-6 FILE mysql-test/suite/percona/r/vector_index_build.result
+8 FILE mysql-test/suite/percona/t/vector_index_build.test
+8 FILE mysql-test/suite/percona/r/vector_index_build.result
 6 FILE mysql-test/suite/percona/t/vector_index_build_parallel.test
 6 FILE mysql-test/suite/percona/r/vector_index_build_parallel.result
 7 FILE mysql-test/suite/percona/t/vector_index_not_scannable.test
@@ -376,8 +249,8 @@
 4 FILE mysql-test/suite/percona/r/vector_max_memory.result
 1 FILE mysql-test/suite/percona/t/vector_misc_lifecycle.test
 1 FILE mysql-test/suite/percona/r/vector_misc_lifecycle.result
-1 FILE mysql-test/suite/percona/t/vector_persistence.test
-1 FILE mysql-test/suite/percona/r/vector_persistence.result
+2 FILE mysql-test/suite/percona/t/vector_persistence.test
+2 FILE mysql-test/suite/percona/r/vector_persistence.result
 8 FILE mysql-test/suite/percona/t/vector_pk_combinations.test
 8 FILE mysql-test/suite/percona/r/vector_pk_combinations.result
 4 FILE mysql-test/suite/percona/t/vector_runtime_open.test
@@ -394,3 +267,21 @@
 5 FILE mysql-test/suite/percona/r/vector_update_pk.result
 5 FILE mysql-test/suite/percona/t/vector_update_pk_lock_wait.test
 5 FILE mysql-test/suite/percona/r/vector_update_pk_lock_wait.result
+
+
+# ---- .cc files: WHOLE FILE at the earliest category that needs any
+# part of them. Symbol-level splitting fought the compiler at every turn:
+# statics without their callers (-Werror=unused-function), signatures split
+# from their callers, templates mangled by range pruning. A file-granular
+# decomposition still gives ten coherent commits and it actually builds.
+1 FILE dict/dict0dd.cc
+1 FILE dict/dict0dict.cc
+1 FILE handler/ha_innodb.cc
+1 FILE handler/handler0alter.cc
+3 FILE handler/vec0vec.cc
+1 FILE row/row0mysql.cc
+4 FILE vec/vec0arena.cc
+1 FILE vec/vec0aux.cc
+4 FILE vec/vec0dml.cc
+4 FILE vec/vec0hnsw.cc
+4 FILE vec/vec0index.cc

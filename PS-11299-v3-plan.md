@@ -59,7 +59,7 @@ test that spans categories gets split.
 | # | check | the mistake it catches |
 |---|---|---|
 | G1 | `git diff --quiet v2-verified v3-tip` - **byte-identical tips, the primary invariant** | anything lost or invented |
-| G2 | sum of per-commit insertions+deletions == D's | a hunk added then reworked later, i.e. misplaced |
+| G2 | ~~sum of per-commit churn == D's~~ **WITHDRAWN** | see below - rework is load-bearing, not a defect |
 | G3 | every `.cc`/`.h` in every commit: braces balance, file ends with `}` | truncation, at the moment it happens - **not** over-removal, which keeps braces balanced |
 | G4 | clang-format drift == 0 per commit | format churn |
 | G5 | every added `.test` has its `.result` in the same commit | half-added tests |
@@ -114,6 +114,29 @@ each one a scar:
 
 v3 replaces v2 only after the full gate is green on every commit and G1-G8
 pass. Until then v2-fallback is the branch that ships.
+
+## Why G2 was wrong, and why a re-derivation cannot work
+
+G2 demanded a rework factor of 1.00: no line written in one commit and
+rewritten in another. v2 measures 1.18x - 3446 such lines - and I read that as
+misplacement to be designed out.
+
+It is the opposite. **Those intermediate forms are what make the early commits
+compile.** A function is introduced in one shape, and reshaped later once the
+code around it exists. The finished tree holds only the late shape, which
+depends on things an early commit does not have yet. So a re-derivation from
+the final tree can emit only the late form, and the early commits cannot build
+- which is exactly what seven rebuild cycles demonstrated, one class of failure
+at a time: statics without their callers, signatures split from their callers,
+-Werror on unused functions, headers whose declarations arrive after their use.
+
+A rework factor of 1.00 is achievable only for a feature where nothing is ever
+reshaped. This is not that feature.
+
+The construction that works is squashing contiguous runs of the existing
+history: each group ends at a commit that already built and passed, so every
+squashed commit inherits that proof, and the intermediate forms survive inside
+the groups where they are needed.
 
 ## What these checks cannot do
 
