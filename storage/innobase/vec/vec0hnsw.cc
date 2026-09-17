@@ -596,64 +596,6 @@ uint32_t vec_index_dims(const dict_index_t *index) {
   return vec == nullptr ? 0 : vec->dims;
 }
 
-dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
-                       size_t ef_search, std::vector<vec_hit_t> *out, THD *thd,
-                       const std::unordered_set<uint64_t> *exclude) {
-  ut_ad(index != nullptr && index->is_vector());
-  ut_ad(q != nullptr && out != nullptr);
-  out->clear();
-
-  auto *vec = vec_runtime_get(index);
-  if (vec == nullptr) return DB_TABLE_NOT_FOUND;
-
-  MDL_ticket *mdl = nullptr;
-  dict_table_t *aux =
-      vec_aux_open_for_dml(vec->table, vec->index_id, thd, &mdl);
-  if (aux == nullptr) return DB_TABLE_NOT_FOUND;
-
-  {
-    const dberr_t lerr = vec_runtime_load_once(vec, index, aux, thd);
-    if (lerr != DB_SUCCESS) {
-      vec_aux_close_for_dml(aux, thd, &mdl);
-      return lerr;
-    }
-  }
-
-  Vec_ctx ctx;
-  ctx.trx = nullptr;
-  ctx.aux = aux;
-  ctx.thd = thd;
-  ctx.m = vec->m;
-  ctx.vec_bytes = vec->dims * sizeof(float);
-  ctx.err = DB_SUCCESS;
-
-  /* Unlocked, like the insert path. A search does mutate - it faults
-  unloaded stubs in through load_node_cb - but load_node() takes a striped
-  lock and re-checks the node state under it, so two threads faulting the
-  same node cannot collide. */
-  {
-    const size_t want = exclude == nullptr ? k : k + exclude->size();
-    const auto hits =
-        vec->hnsw->k_nn_search(reinterpret_cast<const char *>(q), want,
-                               std::max(ef_search, want), &ctx);
-    out->reserve(hits.size());
-    for (const auto &h : hits) out->push_back({h.id, h.base_pk});
-  }
-
-  if (exclude != nullptr && !out->empty()) {
-    out->erase(std::remove_if(out->begin(), out->end(),
-                              [exclude](const vec_hit_t &h) {
-                                return exclude->count(h.id) != 0;
-                              }),
-               out->end());
-  }
-
-  const dberr_t err = ctx.err;
-  if (err != DB_SUCCESS) vec_runtime_set_corrupted(vec);
-  vec_aux_close_for_dml(aux, thd, &mdl);
-  return err;
-}
-
 /* An open streaming scan. Held by the handler for the life of one
 vector scan, which is why the aux table and its MDL live here rather than
 being re-taken per batch: nn_search_next faults nodes in through

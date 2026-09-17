@@ -81,7 +81,6 @@ Tester::Tester() noexcept {
   DISPATCH(vec_aux_update_row);
   DISPATCH(vec_aux_dump);
   DISPATCH(vec_aux_verify);
-  DISPATCH(vec_knn);
   DISPATCH(vec_next_id);
   DISPATCH(vec_runtime_info);
   DISPATCH(print_dblwr_has_encrypted_pages);
@@ -617,80 +616,6 @@ Ret_t Tester::vec_runtime_info(std::vector<std::string> &tokens) noexcept {
   const auto *vec = vec_runtime_get(vindex);
   XLOG("dims=" << vec->dims << " M=" << vec->m << " ef_construction="
                << vec->ef_construction << " loaded=" << (vec->loaded ? 1 : 0));
-  set_output(sout);
-  return RET_PASS;
-}
-
-Ret_t Tester::vec_knn(std::vector<std::string> &tokens) noexcept {
-  TLOG("Tester::vec_knn()");
-  ut_ad(tokens[0] == "vec_knn");
-  std::ostringstream sout;
-  /* tokens: 0=cmd 1=db/table 2=k 3=ef_search 4=comma-separated floats */
-  if (tokens.size() != 5) {
-    XLOG("FAIL: usage: vec_knn db/table k ef v0,v1,...");
-    set_output(sout);
-    return RET_FAIL;
-  }
-
-  vec_test_tables_t tt;
-  uint32_t dims = 0;
-  if (!vec_test_open_aux(tokens[1], tt, &dims)) {
-    XLOG("FAIL: no vector aux for " << tokens[1]);
-    set_output(sout);
-    return RET_FAIL;
-  }
-  auto guard = create_scope_guard([&]() { vec_test_close_aux(tt); });
-
-  dict_index_t *vindex = nullptr;
-  for (dict_index_t *idx = tt.base->first_index(); idx != nullptr;
-       idx = idx->next()) {
-    if (idx->is_vector()) {
-      vindex = idx;
-      break;
-    }
-  }
-  if (vindex == nullptr || vec_runtime_get(vindex) == nullptr) {
-    XLOG("FAIL: no vector index runtime (open the table first)");
-    set_output(sout);
-    return RET_FAIL;
-  }
-
-  /* dims comes from the runtime: vec_test_open_aux deliberately reports
-  0, because the dict column is BLOB-typed and its length is blob
-  metadata rather than the vector width. */
-  const uint32_t idx_dims = vec_runtime_get(vindex)->dims;
-
-  const size_t k = static_cast<size_t>(std::stoul(tokens[2]));
-  const size_t ef = static_cast<size_t>(std::stoul(tokens[3]));
-
-  std::vector<float> q;
-  {
-    std::string cur;
-    std::istringstream in(tokens[4]);
-    while (std::getline(in, cur, ',')) q.push_back(std::stof(cur));
-  }
-  if (q.size() != idx_dims) {
-    XLOG("FAIL: query has " << q.size() << " dims, index has " << idx_dims);
-    set_output(sout);
-    return RET_FAIL;
-  }
-
-  std::vector<vec_hit_t> hits;
-  const dberr_t err =
-      vec_knn_search(vindex, q.data(), k, ef, &hits, current_thd);
-  if (err != DB_SUCCESS) {
-    XLOG("FAIL: err=" << err);
-    set_output(sout);
-    return RET_FAIL;
-  }
-
-  std::ostringstream line;
-  line << "hits=" << hits.size() << " base_pks=";
-  for (size_t i = 0; i < hits.size(); i++) {
-    if (i != 0) line << ",";
-    line << hits[i].base_pk;
-  }
-  XLOG(line.str());
   set_output(sout);
   return RET_PASS;
 }
@@ -1323,15 +1248,32 @@ void Tester::update_thd_variable() noexcept {
   *output2 = const_cast<char *>(m_command.c_str());
 }
 
+/* The innodb_interpreter_output variable holds a raw pointer into m_log's
+buffer, so every write to m_log has to republish it: assigning or appending
+can reallocate, which frees the buffer the variable still points at. Reading
+the variable then - SHOW VARIABLES, performance_schema.session_variables, or
+the tests' own SELECT - touches freed memory. m_thd is set at the top of
+init() and run(), and every write below happens inside one of those. */
+
 void Tester::set_output(const std::ostringstream &sout) noexcept {
   m_log = sout.str();
+  if (m_thd != nullptr) update_thd_variable();
 }
 
-void Tester::set_output(const std::string &log) noexcept { m_log = log; }
+void Tester::set_output(const std::string &log) noexcept {
+  m_log = log;
+  if (m_thd != nullptr) update_thd_variable();
+}
 
-void Tester::clear_output() noexcept { m_log = ""; }
+void Tester::clear_output() noexcept {
+  m_log = "";
+  if (m_thd != nullptr) update_thd_variable();
+}
 
-void Tester::append_output(const std::string &log) noexcept { m_log += log; }
+void Tester::append_output(const std::string &log) noexcept {
+  m_log += log;
+  if (m_thd != nullptr) update_thd_variable();
+}
 
 int interpreter_run(const char *command) noexcept {
   return (int)tl_interpreter.run(command);
