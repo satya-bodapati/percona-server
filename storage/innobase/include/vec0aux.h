@@ -233,19 +233,6 @@ adding the hidden column to the MySQL row template.
 uint64_t vec_get_aux_id_from_rec(const dict_table_t *table, const rec_t *rec,
                                  const dict_index_t *index);
 
-/** One kNN candidate: the graph node that matched, and the base row it
-names.
-
-The node id is what MVCC check (1) compares against the visible row
-version's percona_vec_aux_id. Both members are needed because a stale
-node and the node that replaced it share a base_pk - an UPDATE of the
-vector stamps a fresh label on the same row - so base_pk alone cannot
-tell the live node from the dead one. */
-struct vec_hit_t {
-  uint64_t id;
-  uint64_t base_pk;
-};
-
 /** The table column the vector index covers.
 
 The table-level form of what vec_row_vector_bytes() does per index: the
