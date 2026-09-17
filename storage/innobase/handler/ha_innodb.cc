@@ -188,7 +188,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "dict0sdi.h"
 #include "dict0upgrade.h"
 #include "sql/auth/auth_common.h"
-#include "sql/dd_table_share.h"  // dd_is_vector_index
+#include "sql/dd_table_share.h"  // is_vector_index
 #include "sql/item.h"
 #include "sql_base.h"
 #include "srv0tmp.h"
@@ -213,6 +213,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "sql-common/json_binary.h"
 #include "sql-common/json_dom.h"
 
+#include "vec0aux.h"
+#include "vec0hnsw.h"
 #include "vec0vec.h"
 
 #include "os0enc.h"
@@ -1199,6 +1201,12 @@ static MYSQL_THDVAR_STR(tmpdir,
 
 /* Default value is updated later in innodb_init_params due to the dependency on
 --container_aware startup option */
+static MYSQL_THDVAR_ULONG(
+    hnsw_ef_search, PLUGIN_VAR_RQCMDARG,
+    "Minimum candidate-list width for HNSW vector index searches (kNN"
+    " recall/latency knob; the effective width is max(ef, LIMIT))",
+    nullptr, nullptr, 40, 1, 100000, 0);
+
 static MYSQL_THDVAR_ULONG(parallel_read_threads, PLUGIN_VAR_RQCMDARG,
                           "Number of threads to do parallel read.", nullptr,
                           nullptr, 4,                   /* Default. */
@@ -4813,14 +4821,10 @@ static bool innobase_redo_set_state(THD *thd, bool enable) {
 static bool innobase_validate_vector_index_params(
     THD *thd, const char *db_name, HA_CREATE_INFO *create_info,
     const Alter_info *alter_info) {
+  /* Every vector key, so the error does not depend on key order. */
   for (const auto *key : alter_info->key_list) {
-    switch (key->type) {
-      case KEYTYPE_VECTOR:
-        return storage::innobase::vec::validate_options(*key);
-        break;
-      default:
-        break;
-    }
+    if (key->type != KEYTYPE_VECTOR) continue;
+    if (storage::innobase::vec::validate_options(*key)) return true;
   }
 
   return false;
@@ -12073,6 +12077,11 @@ next_record:
   return (HA_ERR_END_OF_FILE);
 }
 
+/** Build the clustered-index search tuple for a candidate's base_pk.
+The primary key of a vector-indexed table is a single BIGINT UNSIGNED
+(the design's "Limitations"), so its storage form is the 8 bytes
+mach_write_to_8 produces. */
+
 /*************************************************************************
  */
 
@@ -17509,6 +17518,28 @@ int ha_innobase::rename_table(const char *from, const char *to,
     return HA_ERR_UNSUPPORTED;
   }
 
+  /* A vector aux name is reserved on RENAME as well as on CREATE.
+  Without this, a user table can be renamed into the computed shape,
+  and dict0dd.cc rebuilds DICT_TF2_VEC_AUX from the name on the next DD
+  reload, so the table comes back stamped as an aux table.
+
+  The gate belongs here rather than in row_rename_table_for_mysql: our
+  own cross-schema rename moves aux tables to new aux names through that
+  function, and it does not come through the handler. */
+  {
+    char norm_to[FN_REFLEN];
+    if (!create_table_info_t::normalize_table_name(norm_to, to)) {
+      /* purecov: begin inspected */
+      ut_d(ut_error);
+      ut_o(return HA_ERR_TOO_LONG_PATH);
+      /* purecov: end */
+    }
+    if (vec_aux_is_aux_table_name(norm_to)) {
+      my_error(ER_WRONG_TABLE_NAME, MYF(0), to);
+      return HA_ERR_WRONG_TABLE_NAME;
+    }
+  }
+
   innobase_register_trx(ht, thd, trx);
 
   return innobase_basic_ddl::rename_impl<dd::Table>(
@@ -18703,7 +18734,7 @@ static bool innobase_get_index_column_cardinality(
     }
   }
 
-  if (ib_table->is_fts_aux()) {
+  if (ib_table->is_aux()) {
     /* Server should not ask for Stats for Internal Tables */
     dd_table_close(ib_table, thd, &mdl, false);
     ut_d(ut_error);
@@ -23345,6 +23376,17 @@ static MYSQL_SYSVAR_BOOL(
     nullptr, nullptr, false);
 
 static MYSQL_SYSVAR_ULONGLONG(
+    hnsw_max_memory, srv_hnsw_max_memory, PLUGIN_VAR_RQCMDARG,
+    "Upper bound, in bytes, on the node arenas of HNSW vector index"
+    " graphs, across all tables and indexes. This is where the nodes,"
+    " their vectors and their neighbour lists live; the per-graph id"
+    " lookup map is not charged against it. An INSERT, UPDATE or a query"
+    " that would start building or loading a graph while the bound is"
+    " already reached is refused with ER_OUT_OF_RESOURCES. 0 means no"
+    " limit.",
+    nullptr, nullptr, 1ULL << 30, 0, ~0ULL, 0);
+
+static MYSQL_SYSVAR_ULONGLONG(
     stats_transient_sample_pages, srv_stats_transient_sample_pages,
     PLUGIN_VAR_RQCMDARG,
     "The number of leaf index pages to sample when calculating transient"
@@ -24606,6 +24648,7 @@ static SYS_VAR *innobase_system_variables[] = {
     MYSQL_SYSVAR(fill_factor),
     MYSQL_SYSVAR(ft_cache_size),
     MYSQL_SYSVAR(ft_total_cache_size),
+    MYSQL_SYSVAR(hnsw_ef_search),
     MYSQL_SYSVAR(ft_result_cache_limit),
     MYSQL_SYSVAR(ft_enable_stopword),
     MYSQL_SYSVAR(ft_max_token_size),
@@ -24667,6 +24710,7 @@ static SYS_VAR *innobase_system_variables[] = {
     MYSQL_SYSVAR(ft_user_stopword_table),
     MYSQL_SYSVAR(disable_sort_file_cache),
     MYSQL_SYSVAR(stats_on_metadata),
+    MYSQL_SYSVAR(hnsw_max_memory),
     MYSQL_SYSVAR(stats_transient_sample_pages),
     MYSQL_SYSVAR(stats_persistent),
     MYSQL_SYSVAR(stats_persistent_sample_pages),
