@@ -1,0 +1,433 @@
+enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
+    TABLE *altered_table, Alter_inplace_info *ha_alter_info) {
+  DBUG_TRACE;
+
+  /* ADD VECTOR INDEX falls back to COPY. The in-place path would add the
+  index and never populate it, so commit_try_norebuild would find an index
+  that never reached ONLINE_INDEX_COMPLETE. The commit that builds a vector
+  index through ddl::Builder lifts this. */
+  for (uint i = 0; i < ha_alter_info->index_add_count; i++) {
+    const KEY *key =
+        &ha_alter_info->key_info_buffer[ha_alter_info->index_add_buffer[i]];
+    if (key->flags & HA_VECTOR) {
+      ha_alter_info->unsupported_reason = innobase_get_err_msg(
+          ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR);
+      return HA_ALTER_INPLACE_NOT_SUPPORTED;
+    }
+  }
+
+  /* A native rebuild - FORCE, OPTIMIZE, a primary key swap - re-creates the
+  table under a new table_id, and the aux table the graph lives in is named
+  after that id, so the graph would be left behind. COPY rebuilds it
+  organically, because every row goes through the normal insert path. The
+  same ddl::Builder commit lifts this too. */
+  if (innobase_need_rebuild(ha_alter_info) &&
+      vec_aux_table_has_vector_index(m_prebuilt->table)) {
+    ha_alter_info->unsupported_reason = innobase_get_err_msg(
+        ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR);
+    return HA_ALTER_INPLACE_NOT_SUPPORTED;
+  }
+
+
+  if (srv_sys_space.created_new_raw()) {
+    return HA_ALTER_INPLACE_NOT_SUPPORTED;
+  }
+
+  if (high_level_read_only || srv_force_recovery) {
+    if (srv_force_recovery) {
+      my_error(ER_INNODB_FORCED_RECOVERY, MYF(0));
+    } else {
+      my_error(ER_READ_ONLY_MODE, MYF(0));
+    }
+    return HA_ALTER_ERROR;
+  }
+
+  if (altered_table->s->fields > REC_MAX_N_USER_FIELDS) {
+    /* Deny the inplace ALTER TABLE. MySQL will try to
+    re-create the table and ha_innobase::create() will
+    return an error too. This is how we effectively
+    deny adding too many columns to a table. */
+    ha_alter_info->unsupported_reason =
+        innobase_get_err_msg(ER_TOO_MANY_FIELDS);
+    return HA_ALTER_INPLACE_NOT_SUPPORTED;
+  }
+
+  /* We don't support change encryption attribute with inplace algorithm. */
+  char *old_encryption = this->table->s->encrypt_type.str;
+  char *new_encryption = altered_table->s->encrypt_type.str;
+
+  if (Encryption::is_none(old_encryption) !=
+      Encryption::is_none(new_encryption)) {
+    ha_alter_info->unsupported_reason =
+        innobase_get_err_msg(ER_UNSUPPORTED_ALTER_ENCRYPTION_INPLACE);
+    return HA_ALTER_INPLACE_NOT_SUPPORTED;
+  }
+
+  update_thd();
+
+  if (ha_alter_info->handler_flags &
+      ~(INNOBASE_INPLACE_IGNORE | INNOBASE_ALTER_NOREBUILD |
+        INNOBASE_ALTER_REBUILD)) {
+    if (ha_alter_info->handler_flags &
+        Alter_inplace_info::ALTER_STORED_COLUMN_TYPE) {
+      if (ha_alter_info->alter_info->requested_algorithm ==
+          Alter_info::ALTER_TABLE_ALGORITHM_INSTANT) {
+        ha_alter_info->unsupported_reason = innobase_get_err_msg(
+            ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_COLUMN_TYPE_INSTANT);
+      } else {
+        ha_alter_info->unsupported_reason = innobase_get_err_msg(
+            ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_COLUMN_TYPE);
+      }
+    }
+    return HA_ALTER_INPLACE_NOT_SUPPORTED;
+  }
+
+  /* Only support online add foreign key constraint when check_foreigns is
+  turned off */
+  if ((ha_alter_info->handler_flags & Alter_inplace_info::ADD_FOREIGN_KEY) &&
+      m_prebuilt->trx->check_foreigns) {
+    ha_alter_info->unsupported_reason =
+        innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_FK_CHECK);
+    return HA_ALTER_INPLACE_NOT_SUPPORTED;
+  }
+
+  if (altered_table->file->ht != ht) {
+    /* Non-native partitioning table engine. No longer supported, due to
+    implementation of native InnoDB partitioning. */
+    return HA_ALTER_INPLACE_NOT_SUPPORTED;
+  }
+
+  Instant_Type instant_type = innobase_support_instant(
+      ha_alter_info, m_prebuilt->table, this->table, altered_table);
+
+  ha_alter_info->handler_trivial_ctx =
+      instant_type_to_int(Instant_Type::INSTANT_IMPOSSIBLE);
+
+  const bool is_instant_requested =
+      ha_alter_info->alter_info->requested_algorithm ==
+      Alter_info::ALTER_TABLE_ALGORITHM_INSTANT;
+
+  if (!dict_table_is_partition(m_prebuilt->table)) {
+    switch (instant_type) {
+      case Instant_Type::INSTANT_IMPOSSIBLE:
+        break;
+      case Instant_Type::INSTANT_ADD_DROP_COLUMN:
+        if (ha_alter_info->alter_info->requested_algorithm ==
+            Alter_info::ALTER_TABLE_ALGORITHM_INPLACE) {
+          /* Still fall back to INPLACE since the behaviour is different */
+          break;
+        } else if ((ha_alter_info->alter_info->requested_algorithm ==
+                    Alter_info::ALTER_TABLE_ALGORITHM_DEFAULT) &&
+                   !dict_table_is_discarded(m_prebuilt->table) &&
+                   btr_is_index_empty(m_prebuilt->table->first_index())) {
+          /* No records: prefer INPLACE to prevent bumping row version */
+          break;
+        } else if (!((m_prebuilt->table->n_def +
+                      get_num_cols_added(ha_alter_info)) <=
+                     REC_MAX_N_USER_FIELDS + DATA_N_SYS_COLS)) {
+          if (is_instant_requested) {
+            my_error(ER_INNODB_INSTANT_ADD_NOT_SUPPORTED_MAX_FIELDS, MYF(0),
+                     m_prebuilt->table->name.m_name);
+            return HA_ALTER_ERROR;
+          }
+          /* INSTANT can't be done any more. Fall back to INPLACE. */
+          break;
+        } else if (!is_valid_row_version(
+                       m_prebuilt->table->current_row_version + 1)) {
+          ut_ad(is_valid_row_version(m_prebuilt->table->current_row_version));
+          if (is_instant_requested) {
+            my_error(ER_INNODB_MAX_ROW_VERSION, MYF(0),
+                     m_prebuilt->table->name.m_name);
+            return HA_ALTER_ERROR;
+          }
+
+          /* INSTANT can't be done any more. Fall back to INPLACE. */
+          break;
+        } else if (!Instant_ddl_impl<dd::Table>::is_instant_add_drop_possible(
+                       ha_alter_info, table, altered_table,
+                       m_prebuilt->table)) {
+          if (is_instant_requested) {
+            /* Return error if either max possible row size already crosses max
+            permissible row size or may cross it after add. */
+            my_error(ER_INNODB_INSTANT_ADD_DROP_NOT_SUPPORTED_MAX_SIZE, MYF(0));
+            return HA_ALTER_ERROR;
+          }
+
+          /* INSTANT can't be done. Fall back to INPLACE. */
+          break;
+        } else if (ha_alter_info->error_if_not_empty) {
+          /* In this case, it can't be instant because the table
+          may not be empty. Have to fall back to INPLACE */
+          break;
+        }
+        [[fallthrough]];
+      case Instant_Type::INSTANT_NO_CHANGE:
+      case Instant_Type::INSTANT_VIRTUAL_ONLY:
+      case Instant_Type::INSTANT_COLUMN_RENAME:
+        ha_alter_info->handler_trivial_ctx = instant_type_to_int(instant_type);
+        return HA_ALTER_INPLACE_INSTANT;
+    }
+  }
+
+  /* Only support NULL -> NOT NULL change if strict table sql_mode
+  is set. Fall back to COPY for conversion if not strict tables.
+  In-Place will fail with an error when trying to convert
+  NULL to a NOT NULL value. */
+  if ((ha_alter_info->handler_flags &
+       Alter_inplace_info::ALTER_COLUMN_NOT_NULLABLE) &&
+      !thd_is_strict_mode(m_user_thd)) {
+    ha_alter_info->unsupported_reason =
+        innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_NOT_NULL);
+    return HA_ALTER_INPLACE_NOT_SUPPORTED;
+  }
+
+  /* DROP PRIMARY KEY is only allowed in combination with ADD
+  PRIMARY KEY. */
+  if ((ha_alter_info->handler_flags & (Alter_inplace_info::ADD_PK_INDEX |
+                                       Alter_inplace_info::DROP_PK_INDEX)) ==
+      Alter_inplace_info::DROP_PK_INDEX) {
+    ha_alter_info->unsupported_reason =
+        innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_NOPK);
+    return HA_ALTER_INPLACE_NOT_SUPPORTED;
+  }
+
+  /* If a column change from NOT NULL to NULL,
+  and there's a implicit pk on this column. the
+  table should be rebuild. The change should
+  only go through the "Copy" method. */
+  if ((ha_alter_info->handler_flags &
+       Alter_inplace_info::ALTER_COLUMN_NULLABLE)) {
+    const uint my_primary_key = altered_table->s->primary_key;
+
+    /* See if MYSQL table has no pk but we do. */
+    if (UNIV_UNLIKELY(my_primary_key >= MAX_KEY) &&
+        !row_table_got_default_clust_index(m_prebuilt->table)) {
+      ha_alter_info->unsupported_reason =
+          innobase_get_err_msg(ER_PRIMARY_CANT_HAVE_NULL);
+      return HA_ALTER_INPLACE_NOT_SUPPORTED;
+    }
+  }
+
+  bool add_drop_v_cols = false;
+
+  /* If there is add or drop virtual columns, we will support operations
+  with these 3 options alone with inplace interface for now */
+  if (ha_alter_info->handler_flags &
+      (Alter_inplace_info::ADD_VIRTUAL_COLUMN |
+       Alter_inplace_info::DROP_VIRTUAL_COLUMN |
+       Alter_inplace_info::ALTER_VIRTUAL_COLUMN_ORDER)) {
+    ulonglong flags = ha_alter_info->handler_flags;
+
+    /* TODO: uncomment the flags below, once we start to
+    support them */
+    flags &=
+        ~(Alter_inplace_info::ADD_VIRTUAL_COLUMN |
+          Alter_inplace_info::DROP_VIRTUAL_COLUMN |
+          Alter_inplace_info::ALTER_VIRTUAL_COLUMN_ORDER
+          /*
+          | Alter_inplace_info::ALTER_STORED_COLUMN_ORDER
+          | Alter_inplace_info::ADD_STORED_BASE_COLUMN
+          | Alter_inplace_info::DROP_STORED_COLUMN
+          | Alter_inplace_info::ALTER_STORED_COLUMN_ORDER
+          | Alter_inplace_info::ADD_UNIQUE_INDEX
+          */
+          | Alter_inplace_info::ADD_INDEX | Alter_inplace_info::DROP_INDEX);
+
+    if (flags != 0 ||
+        (altered_table->s->partition_info_str &&
+         altered_table->s->partition_info_str_len) ||
+        (!check_v_col_in_order(this->table, altered_table, ha_alter_info))) {
+      ha_alter_info->unsupported_reason =
+          innobase_get_err_msg(ER_UNSUPPORTED_ALTER_INPLACE_ON_VIRTUAL_COLUMN);
+      return HA_ALTER_INPLACE_NOT_SUPPORTED;
+    }
+
+    add_drop_v_cols = true;
+  }
+
+  /* We should be able to do the operation in-place.
+  See if we can do it online (LOCK=NONE). */
+  bool online = true;
+
+  List_iterator_fast<Create_field> cf_it(
+      ha_alter_info->alter_info->create_list);
+
+  /* Fix the key parts. */
+  for (KEY *new_key = ha_alter_info->key_info_buffer;
+       new_key < ha_alter_info->key_info_buffer + ha_alter_info->key_count;
+       new_key++) {
+    /* Do not support adding/dropping a virtual column, while
+    there is a table rebuild caused by adding a new FTS_DOC_ID */
+    if ((new_key->flags & HA_FULLTEXT) && add_drop_v_cols &&
+        !DICT_TF2_FLAG_IS_SET(m_prebuilt->table, DICT_TF2_FTS_HAS_DOC_ID)) {
+      ha_alter_info->unsupported_reason =
+          innobase_get_err_msg(ER_UNSUPPORTED_ALTER_INPLACE_ON_VIRTUAL_COLUMN);
+      return HA_ALTER_INPLACE_NOT_SUPPORTED;
+    }
+
+    for (KEY_PART_INFO *key_part = new_key->key_part;
+         key_part < new_key->key_part + new_key->user_defined_key_parts;
+         key_part++) {
+      const Create_field *new_field = nullptr;
+
+      assert(key_part->fieldnr < altered_table->s->fields);
+
+      cf_it.rewind();
+      for (auto fieldnr = 0; fieldnr != key_part->fieldnr + 1; fieldnr++) {
+        new_field = cf_it++;
+        assert(new_field);
+      }
+
+      key_part->field = altered_table->field[key_part->fieldnr];
+      /* In some special cases InnoDB emits "false"
+      duplicate key errors with NULL key values. Let
+      us play safe and ensure that we can correctly
+      print key values even in such cases. */
+      key_part->null_offset = key_part->field->null_offset();
+      key_part->null_bit = key_part->field->null_bit;
+
+      if (new_field->field) {
+        /* This is an existing column. */
+        continue;
+      }
+
+      /* This is an added column. */
+      assert(ha_alter_info->handler_flags & Alter_inplace_info::ADD_COLUMN);
+
+      /* We cannot replace a hidden FTS_DOC_ID
+      with a user-visible FTS_DOC_ID. */
+      if (m_prebuilt->table->fts && innobase_fulltext_exist(altered_table) &&
+          !my_strcasecmp(system_charset_info, key_part->field->field_name,
+                         FTS_DOC_ID_COL_NAME)) {
+        ha_alter_info->unsupported_reason = innobase_get_err_msg(
+            ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_HIDDEN_FTS);
+        return HA_ALTER_INPLACE_NOT_SUPPORTED;
+      }
+
+      assert(((key_part->field->auto_flags & Field::NEXT_NUMBER) != 0) ==
+             key_part->field->is_flag_set(AUTO_INCREMENT_FLAG));
+
+      if (key_part->field->is_flag_set(AUTO_INCREMENT_FLAG)) {
+        /* We cannot assign an AUTO_INCREMENT
+        column values during online ALTER. */
+        assert(key_part->field == altered_table->found_next_number_field);
+        ha_alter_info->unsupported_reason = innobase_get_err_msg(
+            ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_AUTOINC);
+        online = false;
+      }
+
+      if (key_part->field->is_virtual_gcol()) {
+        /* Do not support adding index on newly added
+        virtual column, while there is also a drop
+        virtual column in the same clause */
+        if (ha_alter_info->handler_flags &
+            Alter_inplace_info::DROP_VIRTUAL_COLUMN) {
+          ha_alter_info->unsupported_reason = innobase_get_err_msg(
+              ER_UNSUPPORTED_ALTER_INPLACE_ON_VIRTUAL_COLUMN);
+
+          return HA_ALTER_INPLACE_NOT_SUPPORTED;
+        }
+
+        ha_alter_info->unsupported_reason =
+            innobase_get_err_msg(ER_UNSUPPORTED_ALTER_ONLINE_ON_VIRTUAL_COLUMN);
+        online = false;
+      }
+    }
+  }
+
+  assert(!m_prebuilt->table->fts ||
+         m_prebuilt->table->fts->doc_col <= table->s->fields);
+  assert(!m_prebuilt->table->fts || m_prebuilt->table->fts->doc_col <
+                                        m_prebuilt->table->get_n_user_cols());
+
+  if (ha_alter_info->handler_flags & Alter_inplace_info::ADD_SPATIAL_INDEX) {
+    ha_alter_info->unsupported_reason =
+        innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_GIS);
+    online = false;
+  }
+
+  if (m_prebuilt->table->fts && innobase_fulltext_exist(altered_table)) {
+    /* FULLTEXT indexes are supposed to remain. */
+    /* Disallow DROP INDEX FTS_DOC_ID_INDEX */
+
+    for (uint i = 0; i < ha_alter_info->index_drop_count; i++) {
+      if (!my_strcasecmp(system_charset_info,
+                         ha_alter_info->index_drop_buffer[i]->name,
+                         FTS_DOC_ID_INDEX_NAME)) {
+        ha_alter_info->unsupported_reason = innobase_get_err_msg(
+            ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_CHANGE_FTS);
+        return HA_ALTER_INPLACE_NOT_SUPPORTED;
+      }
+    }
+
+    /* InnoDB can have a hidden FTS_DOC_ID_INDEX on a
+    visible FTS_DOC_ID column as well. Prevent dropping or
+    renaming the FTS_DOC_ID. */
+
+    for (Field **fp = table->field; *fp; fp++) {
+      if (!((*fp)->is_flag_set(FIELD_IS_RENAMED) ||
+            (*fp)->is_flag_set(FIELD_IS_DROPPED))) {
+        continue;
+      }
+
+      if (!my_strcasecmp(system_charset_info, (*fp)->field_name,
+                         FTS_DOC_ID_COL_NAME)) {
+        ha_alter_info->unsupported_reason = innobase_get_err_msg(
+            ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_CHANGE_FTS);
+        return HA_ALTER_INPLACE_NOT_SUPPORTED;
+      }
+    }
+  }
+
+  m_prebuilt->trx->will_lock++;
+
+  if (!online) {
+    /* We already determined that only a non-locking
+    operation is possible. */
+  } else if (((ha_alter_info->handler_flags &
+               Alter_inplace_info::ADD_PK_INDEX) ||
+              innobase_need_rebuild(ha_alter_info)) &&
+             (innobase_fulltext_exist(altered_table) ||
+              innobase_spatial_exist(altered_table))) {
+    /* Refuse to rebuild the table online, if
+    FULLTEXT OR SPATIAL indexes are to survive the rebuild. */
+    online = false;
+    /* If the table already contains fulltext indexes,
+    refuse to rebuild the table natively altogether. */
+    if (m_prebuilt->table->fts) {
+      ha_alter_info->unsupported_reason =
+          innobase_get_err_msg(ER_INNODB_FT_LIMIT);
+      return HA_ALTER_INPLACE_NOT_SUPPORTED;
+    }
+
+    if (innobase_spatial_exist(altered_table)) {
+      ha_alter_info->unsupported_reason =
+          innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_GIS);
+    } else {
+      ha_alter_info->unsupported_reason =
+          innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_FTS);
+    }
+  } else if ((ha_alter_info->handler_flags & Alter_inplace_info::ADD_INDEX)) {
+    /* Building a full-text index requires a lock.
+    We could do without a lock if the table already contains
+    an FTS_DOC_ID column, but in that case we would have
+    to apply the modification log to the full-text indexes. */
+
+    for (uint i = 0; i < ha_alter_info->index_add_count; i++) {
+      const KEY *key =
+          &ha_alter_info->key_info_buffer[ha_alter_info->index_add_buffer[i]];
+      if (key->flags & HA_FULLTEXT) {
+        assert(!(key->flags & HA_KEYFLAG_MASK &
+                 ~(HA_FULLTEXT | HA_PACK_KEY | HA_GENERATED_KEY |
+                   HA_BINARY_PACK_KEY)));
+        ha_alter_info->unsupported_reason =
+            innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_FTS);
+        online = false;
+        break;
+      }
+    }
+  }
+
+  return online ? HA_ALTER_INPLACE_NO_LOCK_AFTER_PREPARE
+                : HA_ALTER_INPLACE_SHARED_LOCK_AFTER_PREPARE;
+}

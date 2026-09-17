@@ -1,0 +1,492 @@
+int ha_innobase::open(const char *name, int, uint open_flags,
+                      const dd::Table *table_def) {
+  dict_table_t *ib_table;
+  char norm_name[FN_REFLEN];
+  THD *thd;
+  bool cached = false;
+
+  DBUG_TRACE;
+  assert(table_share == table->s);
+
+  thd = ha_thd();
+
+  if (!normalize_table_name(norm_name, name)) {
+    /* purecov: begin inspected */
+    ut_d(ut_error);
+    ut_o(return (HA_ERR_TOO_LONG_PATH));
+    /* purecov: end */
+  }
+
+  m_user_thd = nullptr;
+  m_share = nullptr;
+
+  /* Will be allocated if it is needed in ::update_row() */
+  m_upd_buf = nullptr;
+  m_upd_buf_size = 0;
+
+  /* Get pointer to a table object in InnoDB dictionary cache.
+  For intrinsic table, get it from session private data */
+  ib_table = thd_to_innodb_session(thd)->lookup_table_handler(norm_name);
+
+  if (ib_table == nullptr) {
+    DEBUG_SYNC_C("ha_innobase_open");
+
+    dict_sys_mutex_enter();
+    ib_table = dict_table_check_if_in_cache_low(norm_name);
+    if (ib_table != nullptr) {
+      if (ib_table->is_corrupted()) {
+        /* Optionally remove this corrupted table from cache now
+        if no other thread is still using it. If not, the corrupted bit
+        will keep it from being used.*/
+        if (ib_table->get_ref_count() == 0) {
+          dict_table_remove_from_cache(ib_table);
+        }
+        ib_table = nullptr;
+        cached = true;
+      } else if (ib_table->refresh_fk) {
+        ib_table->acquire_with_lock();
+
+        dict_names_t fk_tables;
+        dict_sys_mutex_exit();
+        dd::cache::Dictionary_client *client = dd::get_dd_client(thd);
+        dd::cache::Dictionary_client::Auto_releaser releaser(client);
+
+        dberr_t err = dd_table_load_fk(
+            client, ib_table->name.m_name, nullptr, ib_table,
+            &table_def->table(), thd, false,
+            !thd_test_options(thd, OPTION_NO_FOREIGN_KEY_CHECKS), &fk_tables);
+
+        dict_sys_mutex_enter();
+        ib_table->refresh_fk = false;
+
+        if (err != DB_SUCCESS) {
+          ib_table->release();
+          goto reload;
+        }
+
+        cached = true;
+      } else if (ib_table->discard_after_ddl) {
+      reload:
+        btr_drop_ahi_for_table(ib_table);
+        dict_table_remove_from_cache(ib_table);
+        ib_table = nullptr;
+      } else {
+        cached = true;
+        if (!dd_table_match(ib_table, table_def)) {
+          dict_set_corrupted(ib_table->first_index());
+          dict_table_remove_from_cache(ib_table);
+          ib_table = nullptr;
+        } else {
+          ib_table->acquire_with_lock();
+        }
+      }
+
+      /* If the table is in-memory, always get the latest
+      version, in case this is open table after DDL */
+      if (ib_table != nullptr && table_def != nullptr) {
+        ib_table->version = dd_get_version(table_def);
+      }
+
+      if (ib_table != nullptr) {
+        dict_table_ddl_release(ib_table);
+      }
+    }
+
+    dict_sys_mutex_exit();
+
+    if (!cached) {
+      dd::cache::Dictionary_client *client = dd::get_dd_client(thd);
+      dd::cache::Dictionary_client::Auto_releaser releaser(client);
+
+      ib_table = dd_open_table(client, table, norm_name, table_def, thd);
+      if (!ib_table) {
+        set_my_errno(ENOENT);
+        return HA_ERR_NO_SUCH_TABLE;
+      }
+    }
+  } else {
+    ib_table->acquire();
+    ut_ad(ib_table->is_intrinsic());
+  }
+
+  if (ib_table != nullptr) {
+    /* Make sure table->is_dd_table is set */
+    std::string db_str;
+    std::string tbl_str;
+    dict_name::get_table(ib_table->name.m_name, db_str, tbl_str);
+
+    ib_table->is_dd_table =
+        dd::get_dictionary()->is_dd_table_name(db_str.c_str(), tbl_str.c_str());
+  }
+
+  /* m_share might hold pointers to dict table indexes without any pin.
+  We must always allocate m_share after opening the dict_table_t object
+  and free it before de-allocating dict_table_t to avoid race. */
+  if (ib_table != nullptr) {
+    m_share = get_share(name);
+    if (m_share == nullptr) {
+      dict_table_close(ib_table, false, false);
+      return HA_ERR_SE_OUT_OF_MEMORY;
+    }
+
+    if (UNIV_UNLIKELY(m_share->ib_table && m_share->ib_table->is_corrupt &&
+                      srv_pass_corrupt_table <= 1)) {
+      free_share_and_nullify(&m_share);
+      dict_table_close(ib_table, false, false);
+      return HA_ERR_CRASHED_ON_USAGE;
+    }
+  }
+
+  /* Each InnoDB-owned hidden auxiliary column (FTS_DOC_ID, percona_vec_aux_id)
+  contributes one extra column on the InnoDB side; subtract before
+  comparing against table->s->fields. */
+  size_t innodb_hidden_extra = 0;
+  if (ib_table != nullptr) {
+    innodb_hidden_extra =
+        DICT_TF2_FLAG_IS_SET(ib_table, DICT_TF2_FTS_HAS_DOC_ID) +
+        DICT_TF2_FLAG_IS_SET(ib_table, DICT_TF2_HAS_VEC_AUX_COL);
+  }
+
+  if (ib_table != nullptr &&
+      table->s->fields !=
+          dict_table_get_n_tot_u_cols(ib_table) - innodb_hidden_extra) {
+    ib::warn(ER_IB_MSG_556)
+        << "Table " << norm_name << " contains " << ib_table->get_n_user_cols()
+        << " user"
+           " defined columns in InnoDB, but "
+        << table->s->fields
+        << " columns in MySQL. Please check"
+           " INFORMATION_SCHEMA.INNODB_COLUMNS and " REFMAN
+           "innodb-troubleshooting.html for how to resolve the"
+           " issue.";
+
+    /* Mark this table as corrupted, so the drop table
+    or force recovery can still use it, but not others. */
+    ib_table->first_index()->type |= DICT_CORRUPT;
+    free_share_and_nullify(&m_share);
+    dict_table_close(ib_table, false, false);
+    ib_table = nullptr;
+  }
+
+  if (UNIV_UNLIKELY(ib_table && ib_table->is_corrupt &&
+                    srv_pass_corrupt_table <= 1)) {
+    free_share_and_nullify(&m_share);
+    dict_table_close(ib_table, false, false);
+    return HA_ERR_CRASHED_ON_USAGE;
+  }
+
+  /* For encrypted table, check if the encryption info in data
+  file can't be retrieved properly, mark it as corrupted. */
+  if (ib_table != nullptr && ib_table->ibd_file_missing &&
+      !dict_table_is_discarded(ib_table) &&
+      dd_is_table_in_encrypted_tablespace(ib_table)) {
+    /* Mark this table as corrupted, so the drop table
+    or force recovery can still use it, but not others. */
+
+    dict_table_close(ib_table, false, false);
+    ib_table = nullptr;
+
+    free_share_and_nullify(&m_share);
+    my_error(ER_CANNOT_FIND_KEY_IN_KEYRING, MYF(0));
+
+    return HA_ERR_TABLE_CORRUPT;
+  }
+
+  if (nullptr == ib_table) {
+    ib::warn(ER_IB_MSG_557)
+        << "Cannot open table " << norm_name << TROUBLESHOOTING_MSG;
+
+    set_my_errno(ENOENT);
+
+    return HA_ERR_NO_SUCH_TABLE;
+  }
+
+  innobase_copy_frm_flags_from_table_share(ib_table, table->s);
+
+  dict_stats_init(ib_table);
+
+  MONITOR_INC(MONITOR_TABLE_OPEN);
+
+  bool no_tablespace;
+
+  if (dict_table_is_discarded(ib_table)) {
+    /* If the op is an IMPORT, open the space without this warning. */
+    if (thd_tablespace_op(thd) != Alter_info::ALTER_IMPORT_TABLESPACE) {
+      ib_senderrf(thd, IB_LOG_LEVEL_WARN, ER_TABLESPACE_DISCARDED,
+                  table->s->table_name.str);
+    }
+
+    /* Allow an open because a proper DISCARD should have set
+    all the flags and index root page numbers to FIL_NULL that
+    should prevent any DML from running but it should allow DDL
+    operations. */
+    no_tablespace = false;
+
+  } else if (ib_table->ibd_file_missing) {
+    ib_senderrf(thd, IB_LOG_LEVEL_WARN, ER_TABLESPACE_MISSING, norm_name);
+
+    /* This means we have no idea what happened to the tablespace
+    file, best to play it safe. */
+
+    no_tablespace = true;
+  } else {
+    no_tablespace = false;
+  }
+
+  if (!thd_tablespace_op(thd) && no_tablespace) {
+    free_share_and_nullify(&m_share);
+    set_my_errno(ENOENT);
+
+    dict_table_close(ib_table, false, false);
+
+    return HA_ERR_TABLESPACE_MISSING;
+  }
+
+  m_prebuilt = row_create_prebuilt(ib_table, table->s->reclength);
+
+  m_prebuilt->default_rec = table->s->default_values;
+  ut_ad(m_prebuilt->default_rec);
+
+  m_prebuilt->m_mysql_table = table;
+  m_prebuilt->m_mysql_handler = this;
+
+  if (ib_table->is_intrinsic()) {
+    ut_ad(open_flags & HA_OPEN_INTERNAL_TABLE);
+
+    m_prebuilt->m_temp_read_shared = table_share->ref_count() >= 2;
+
+    if (m_prebuilt->m_temp_read_shared) {
+      if (ib_table->temp_prebuilt == nullptr) {
+        ib_table->temp_prebuilt =
+            ut::new_withkey<temp_prebuilt_vec>(UT_NEW_THIS_FILE_PSI_KEY);
+      }
+
+      ib_table->temp_prebuilt->push_back(m_prebuilt);
+    }
+    m_prebuilt->m_temp_tree_modified = false;
+  }
+
+  key_used_on_scan = table_share->primary_key;
+
+  if (ib_table->n_v_cols) {
+    dict_sys_mutex_enter();
+    if (ib_table->vc_templ == nullptr) {
+      ib_table->vc_templ =
+          ut::new_withkey<dict_vcol_templ_t>(UT_NEW_THIS_FILE_PSI_KEY);
+      ib_table->vc_templ->vtempl = nullptr;
+    } else if (ib_table->get_ref_count() == 1) {
+      /* Clean and refresh the template if no one else
+      get hold on it */
+      dict_free_vc_templ(ib_table->vc_templ);
+      ib_table->vc_templ->vtempl = nullptr;
+    }
+
+    if (ib_table->vc_templ->vtempl == nullptr) {
+      innobase_build_v_templ(table, ib_table, ib_table->vc_templ, nullptr, true,
+                             m_share->table_name);
+    }
+
+    dict_sys_mutex_exit();
+  }
+
+  if (!innobase_build_index_translation(table, ib_table, m_share)) {
+    log_errlog(ERROR_LEVEL, ER_INNODB_CANT_BUILD_INDEX_XLATION_TABLE_FOR, name);
+  }
+
+  /* Allocate a buffer for a 'row reference'. A row reference is
+  a string of bytes of length ref_length which uniquely specifies
+  a row in our table. Note that MySQL may also compare two row
+  references for equality by doing a simple memcmp on the strings
+  of length ref_length! */
+
+  if (!row_table_got_default_clust_index(ib_table)) {
+    m_prebuilt->clust_index_was_generated = false;
+
+    if (table_share->is_missing_primary_key()) {
+      log_errlog(ERROR_LEVEL, ER_INNODB_PK_NOT_IN_MYSQL, name);
+
+      /* This mismatch could cause further problems
+      if not attended, bring this to the user's attention
+      by printing a warning in addition to log a message
+      in the errorlog */
+      push_warning_printf(thd, Sql_condition::SL_WARNING, ER_NO_SUCH_INDEX,
+                          "InnoDB: Table %s has a"
+                          " primary key in InnoDB data"
+                          " dictionary, but not in"
+                          " MySQL!",
+                          name);
+
+      /* If table_share->is_missing_primary_key(),
+      the table_share->primary_key
+      value could be out of bound if continue to index
+      into key_info[] array. Find InnoDB primary index,
+      and assign its key_length to ref_length.
+      In addition, since MySQL indexes are sorted starting
+      with primary index, unique index etc., initialize
+      ref_length to the first index key length in
+      case we fail to find InnoDB cluster index.
+
+      Please note, this will not resolve the primary
+      index mismatch problem, other side effects are
+      possible if users continue to use the table.
+      However, we allow this table to be opened so
+      that user can adopt necessary measures for the
+      mismatch while still being accessible to the table
+      date. */
+      if (!table->key_info) {
+        ut_ad(!table->s->keys);
+        ref_length = 0;
+      } else {
+        ref_length = table->key_info[0].key_length;
+      }
+
+      /* Find corresponding cluster index
+      key length in MySQL's key_info[] array */
+      for (uint i = 0; i < table->s->keys; i++) {
+        dict_index_t *index;
+        index = innobase_get_index(i);
+        if (index->is_clustered()) {
+          ref_length = table->key_info[i].key_length;
+        }
+      }
+    } else {
+      /* MySQL allocates the buffer for ref.
+      key_info->key_length includes space for all key
+      columns + one byte for each column that may be
+      NULL. ref_length must be as exact as possible to
+      save space, because all row reference buffers are
+      allocated based on ref_length. */
+
+      ref_length = table->key_info[table_share->primary_key].key_length;
+    }
+  } else {
+    if (!table_share->is_missing_primary_key()) {
+      log_errlog(ERROR_LEVEL, ER_INNODB_PK_ONLY_IN_MYSQL, name);
+
+      /* This mismatch could cause further problems
+      if not attended, bring this to the user attention
+      by printing a warning in addition to log a message
+      in the errorlog */
+      push_warning_printf(thd, Sql_condition::SL_WARNING, ER_NO_SUCH_INDEX,
+                          "InnoDB: Table %s has no"
+                          " primary key in InnoDB data"
+                          " dictionary, but has one in"
+                          " MySQL!",
+                          name);
+    }
+
+    m_prebuilt->clust_index_was_generated = true;
+
+    ref_length = DATA_ROW_ID_LEN;
+
+    /* If we automatically created the clustered index, then
+    MySQL does not know about it, and MySQL must NOT be aware
+    of the index used on scan, to make it avoid checking if we
+    update the column of the index. That is why we assert below
+    that key_used_on_scan is the undefined value MAX_KEY.
+    The column is the row id in the automatic generation case,
+    and it will never be updated anyway. */
+
+    if (key_used_on_scan != MAX_KEY) {
+      log_errlog(WARNING_LEVEL, ER_INNODB_CLUSTERED_INDEX_PRIVATE, name,
+                 (ulong)key_used_on_scan);
+    }
+  }
+
+  /* Index block size in InnoDB: used by MySQL in query optimization */
+  stats.block_size = UNIV_PAGE_SIZE;
+
+  /* Only if the table has an AUTOINC column. */
+  if (m_prebuilt->table != nullptr && !m_prebuilt->table->ibd_file_missing &&
+      table->found_next_number_field != nullptr) {
+    dict_table_t *ib_table = m_prebuilt->table;
+
+    dict_table_autoinc_lock(ib_table);
+
+    uint64_t autoinc = dict_table_autoinc_read(ib_table);
+    uint64_t autoinc_persisted = 0;
+
+    mutex_enter(ib_table->autoinc_persisted_mutex);
+    autoinc_persisted = ib_table->autoinc_persisted;
+    mutex_exit(ib_table->autoinc_persisted_mutex);
+
+    /* Since a table can already be "open" in InnoDB's internal
+    data dictionary, we only init the autoinc counter once, the
+    first time the table is loaded. We can safely reuse the
+    autoinc value from a previous MySQL open. */
+    if (autoinc == 0 || autoinc == autoinc_persisted) {
+      /* If autoinc is 0, it means the counter was never
+      used or imported from a tablespace without .cfg file.
+      We have to search the index to get proper counter.
+      If only the second condition is true, it means it's
+      the first time open for the table, we just want to
+      calculate the next counter */
+      innobase_initialize_autoinc();
+    }
+
+    dict_table_autoinc_set_col_pos(
+        ib_table, table->found_next_number_field->field_index());
+    ut_ad(dict_table_has_autoinc_col(ib_table));
+
+    dict_table_autoinc_unlock(ib_table);
+  }
+
+  /* Set plugin parser for fulltext index / handle vector index. */
+  for (uint i = 0; i < table->s->keys; i++) {
+    if (table->key_info[i].flags & HA_USES_PARSER) {
+      dict_index_t *index = innobase_get_index(i);
+      plugin_ref parser = table->key_info[i].parser;
+
+      ut_ad(index->type & DICT_FTS);
+      index->parser =
+          static_cast<st_mysql_ftparser *>(plugin_decl(parser)->info);
+
+      index->is_ngram = strncmp(plugin_name(parser)->str, FTS_NGRAM_PARSER_NAME,
+                                plugin_name(parser)->length) == 0;
+
+      DBUG_EXECUTE_IF("fts_instrument_use_default_parser",
+                      index->parser = &fts_default_parser;);
+    }
+  }
+
+  info(HA_STATUS_NO_LOCK | HA_STATUS_VARIABLE | HA_STATUS_CONST);
+
+  dberr_t err =
+      dict_set_compression(m_prebuilt->table, table->s->compress.str, false);
+
+  switch (err) {
+    case DB_NOT_FOUND:
+    case DB_UNSUPPORTED:
+      /* We will do another check before the create
+      table and push the error to the client there. */
+      break;
+
+    case DB_IO_NO_PUNCH_HOLE_TABLESPACE:
+      /* We did the check in the 'if' above. */
+
+    case DB_IO_NO_PUNCH_HOLE_FS:
+      /* During open we can't check whether the FS supports
+      punch hole or not, at least on Linux. */
+      break;
+
+    default:
+      ut_error;
+
+    case DB_SUCCESS:
+      break;
+  }
+
+#ifdef UNIV_DEBUG
+  fts_aux_table_t aux_table;
+
+  if (fts_is_aux_table_name(&aux_table, norm_name, strlen(norm_name))) {
+    ut_ad(m_prebuilt->table->is_fts_aux());
+  }
+#endif /* UNIV_DEBUG */
+
+  if (m_prebuilt->table->is_fts_aux()) {
+    dict_table_close(m_prebuilt->table, false, false);
+  }
+
+  return 0;
+}

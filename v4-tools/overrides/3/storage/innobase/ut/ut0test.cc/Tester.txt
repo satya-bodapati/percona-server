@@ -1,0 +1,22 @@
+Tester::Tester() noexcept {
+  /* Kindly keep the commands in alphabetical order. */
+  DISPATCH(corrupt_ondisk_page0);
+  DISPATCH(corrupt_ondisk_root_page);
+  DISPATCH(count_page_type);
+  DISPATCH(count_used_and_free);
+  DISPATCH(dblwr_force_crash);
+  DISPATCH(find_fil_page_lsn);
+  DISPATCH(find_flush_sync_lsn);
+  DISPATCH(find_ondisk_page_type);
+  DISPATCH(find_root_page_no);
+  DISPATCH(find_space_id);
+  DISPATCH(find_tablespace_file_name);
+  DISPATCH(find_tablespace_physical_page_size);
+  DISPATCH(make_ondisk_root_page_zeroes);
+  DISPATCH(make_page_dirty);
+  DISPATCH(open_table);
+  DISPATCH(vec_aux_verify);
+  DISPATCH(vec_next_id);
+  DISPATCH(print_dblwr_has_encrypted_pages);
+  DISPATCH(print_tree);
+}
