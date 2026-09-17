@@ -1420,10 +1420,10 @@ matches the in memory table definition.
 dberr_t row_import::match_schema(THD *thd,
                                  const dd::Table *dd_table) UNIV_NOTHROW {
   /* Refuse a source that carried the hidden percona_vec_aux_id column,
-  with or without a vector index on it. Its rows hold labels minted
+  with or without a vector index on it. Its rows hold labels assigned
   against the source table's counter, and that counter lives in the
   source's data dictionary entry rather than in the tablespace, so it
-  does not travel with the .ibd. The target would keep minting from its
+  does not travel with the .ibd. The target would keep assigning from its
   own counter and hand out a label an imported row already holds. */
   for (ulint i = 0; m_col_names != nullptr && i < m_n_cols; ++i) {
     const char *col_name = reinterpret_cast<const char *>(m_col_names[i]);

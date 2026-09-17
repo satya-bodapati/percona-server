@@ -732,7 +732,7 @@ dberr_t Builder::init(Cursor &cursor, size_t n_threads) noexcept {
   };
 
   if (is_vector_index()) {
-    /* TODO(PS-11300): scaffolding. vector_index_build_parallel.test greps
+    /* TODO: scaffolding. vector_index_build_parallel.test greps
     this to prove the build really got a parallel scan, because nothing
     else reports it. Replace with a status variable or a counter in
     Parallel_reader when there is one, and drop this.
@@ -969,14 +969,14 @@ dberr_t Builder::copy_columns(Copy_ctx &ctx, size_t &mv_rows_added,
     const auto col = ifield->col;
     const auto col_no = dict_col_get_no(col);
 
-    /* A rebuild that INTRODUCES percona_vec_aux_id would have to mint a
+    /* A rebuild that INTRODUCES percona_vec_aux_id would have to assign a
     label for every copied row. No such rebuild reaches the builder:
     check_if_supported_inplace_alter returns HA_ALTER_INPLACE_NOT_SUPPORTED
     when the column does not exist yet, so the first ADD VECTOR INDEX goes
     through COPY, and every rebuild the builder does see already has the
     column and copies it like any other. Asserting that here would be
     asserting on a condition no caller can produce; the branch that used
-    to mint is gone instead.
+    to assign is gone instead.
 
     The copy case below carries existing ids through untouched, which is
     what keeps base-to-aux linkage intact across a rebuild - exactly like

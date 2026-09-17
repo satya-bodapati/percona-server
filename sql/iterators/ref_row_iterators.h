@@ -76,7 +76,7 @@ class RefIterator final : public TableRowIterator {
 /**
   Approximate kNN over a vector index: DoRead() returns base rows in
   ascending distance from a constant query vector, via the handler's
-  vec_read_first/vec_read_next (PS-11300).
+  vec_read_first/vec_read_next.
 */
 class VectorSearchIterator final : public TableRowIterator {
  public:

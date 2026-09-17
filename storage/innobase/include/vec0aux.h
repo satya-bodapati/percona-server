@@ -72,8 +72,9 @@ constexpr ulint VEC_AUX_NEIGHBORS_COL_LEN = 0; /* BLOB: 0 = variable */
 
 /** Registered index TYPEs. Adding one is adding an enumerator plus a
 row in the name table in vec0aux.cc - the type token is part of every
-aux table name, so the datadir stays self-describing. */
-/* Numbering starts at 1 so a zeroed or otherwise uninitialized value is
+aux table name, so the datadir stays self-describing.
+
+Numbering starts at 1 so a zeroed or otherwise uninitialized value is
 not a valid TYPE. */
 enum class Vec_index_type : uint8_t { HNSW = 1 };
 
@@ -215,21 +216,21 @@ percona_vec_aux_id.
 @param[in,out]  heap    memory heap for column allocation */
 void vec_add_aux_id_column(dict_table_t *table, mem_heap_t *heap);
 
-/** Read the label stamped into a row's hidden percona_vec_aux_id column.
+/** Read the label written into a row's hidden percona_vec_aux_id column.
 @param[in]  table  the base table
 @param[in]  row    the row, as converted for InnoDB
-@return the label; never 0 for a stamped row */
+@return the label; never 0 for a written row */
 uint64_t vec_get_aux_id_from_row(const dict_table_t *table,
                                  const dtuple_t *row);
 
-/** Read the label stamped into a clustered index record.
+/** Read the label written into a clustered index record.
 
 Reading straight from the record is what lets the label be checked without
 adding the hidden column to the MySQL row template.
 @param[in]  table  the base table
 @param[in]  rec    a record of `index` containing percona_vec_aux_id
 @param[in]  index  the index `rec` belongs to
-@return the label; never 0 for a stamped row */
+@return the label; never 0 for a written row */
 uint64_t vec_get_aux_id_from_rec(const dict_table_t *table, const rec_t *rec,
                                  const dict_index_t *index);
 
@@ -239,7 +240,7 @@ names.
 The node id is what MVCC check (1) compares against the visible row
 version's percona_vec_aux_id. Both members are needed because a stale
 node and the node that replaced it share a base_pk - an UPDATE of the
-vector stamps a fresh label on the same row - so base_pk alone cannot
+vector writes a fresh label on the same row - so base_pk alone cannot
 tell the live node from the dead one. */
 struct vec_hit_t {
   uint64_t id;
@@ -293,14 +294,14 @@ const char *vec_upd_new_vector(const dict_table_t *table, const upd_t *update,
                                   const upd_node_t *node, uint64_t *pk);
 
 /** Atomically assign the next percona_vec_aux_id for a row about to be
-inserted. Valid ids start at 1. Stamped into the hidden percona_vec_aux_id
+inserted. Valid ids start at 1. Written into the hidden percona_vec_aux_id
 dfield by the INSERT path. See the implementation comment for the phase-1
 persistence caveat. */
 uint64_t vec_assign_next_aux_id(dict_table_t *table);
 
-/** Stamp the hidden percona_vec_aux_id dfield in `row` with the next id from
+/** Write the hidden percona_vec_aux_id dfield in `row` with the next id from
 the per-table counter. No-op for tables without the hidden column.
 Allocations come from `heap` so they outlive this call. */
-void vec_stamp_aux_id(dict_table_t *table, dtuple_t *row, byte *buf);
+void vec_write_aux_id(dict_table_t *table, dtuple_t *row, byte *buf);
 
 #endif /* vec0aux_h */

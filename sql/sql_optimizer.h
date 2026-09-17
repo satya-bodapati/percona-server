@@ -879,7 +879,7 @@ class JOIN {
   /**
     Activate JT_VECTOR access for the canonical approximate-kNN shape:
     single table, ORDER BY <distance-func>(vector_col, const) with a
-    finite LIMIT, L2-servable metric (PS-11300).
+    finite LIMIT, L2-servable metric.
   */
   bool optimize_vector_query();
 

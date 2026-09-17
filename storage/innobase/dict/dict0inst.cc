@@ -233,7 +233,7 @@ bool Instant_ddl_impl<Table>::commit_instant_ddl() {
       crashes in vec_add_aux_id_column / dd_open_table_one.
 
       No dd_set_hidden_unique_index call: vector search, unlike FTS, does not
-      need a unique index on the hidden field. See PS-11299 phase 1 design. */
+      need a unique index on the hidden field. See phase 1 design. */
       if (dd_find_column(&m_old_dd_tab->table(), VEC_AUX_ID_COL_NAME) &&
           !dd_find_column(&m_new_dd_tab->table(), VEC_AUX_ID_COL_NAME)) {
         dd_add_hidden_column(&m_new_dd_tab->table(), VEC_AUX_ID_COL_NAME,

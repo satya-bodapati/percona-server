@@ -21,7 +21,7 @@
 CREATE TABLE ta1 (
   id BIGINT UNSIGNED PRIMARY KEY,
   v VECTOR(8) NOT NULL,
-  KEY (v) TYPE hnsw WITH (M = 6)
+  VECTOR KEY (v) TYPE hnsw (M = 6)
 );
 
 --echo # A.1 ADD COLUMN ... ALGORITHM=INSTANT — blocked on vec-indexed tables
@@ -61,7 +61,7 @@ CREATE TABLE tb1 (
   id BIGINT UNSIGNED PRIMARY KEY,
   v VECTOR(8) NOT NULL,
   c1 INT, c2 INT, c3 INT,
-  KEY (v) TYPE hnsw WITH (M = 6)
+  VECTOR KEY (v) TYPE hnsw (M = 6)
 );
 
 --echo # B.1 DROP COLUMN ... ALGORITHM=INSTANT — blocked (see A.1 note)
@@ -84,7 +84,7 @@ CREATE TABLE tc1 (
   id BIGINT UNSIGNED PRIMARY KEY,
   v VECTOR(8) NOT NULL,
   c INT,
-  KEY (v) TYPE hnsw WITH (M = 6)
+  VECTOR KEY (v) TYPE hnsw (M = 6)
 );
 
 --echo # C.1 ADD a non-vector secondary index
@@ -116,7 +116,7 @@ ALTER TABLE td1 ADD COLUMN c1 INT, ALGORITHM=INSTANT;
 ALTER TABLE td1 ADD COLUMN c2 INT, ALGORITHM=INSTANT;
 
 --echo # D.2 Adding the first vector index now succeeds — rebuild forced.
-CREATE INDEX vix ON td1 (v) TYPE hnsw WITH (M = 6);
+CREATE VECTOR INDEX vix ON td1 (v) TYPE hnsw (M = 6);
 SHOW CREATE TABLE td1;
 --replace_regex /percona_vec_hnsw_[0-9a-f]+_[0-9a-f]+\.ibd/percona_vec_hnsw_<TID>_<IID>.ibd/
 --list_files $MYSQLD_DATADIR/test percona_vec_*.ibd
@@ -134,7 +134,7 @@ CREATE TABLE te1 (
 );
 
 ALTER TABLE te1 DROP COLUMN c1, ALGORITHM=INSTANT;
-CREATE INDEX vix ON te1 (v) TYPE hnsw WITH (M = 6);
+CREATE VECTOR INDEX vix ON te1 (v) TYPE hnsw (M = 6);
 SHOW CREATE TABLE te1;
 DROP TABLE te1;
 
@@ -153,7 +153,7 @@ DROP TABLE te1;
 CREATE TABLE tf1 (
   id BIGINT UNSIGNED PRIMARY KEY,
   v VECTOR(8) NOT NULL,
-  KEY (v) TYPE hnsw WITH (M = 6)
+  VECTOR KEY (v) TYPE hnsw (M = 6)
 );
 ALTER TABLE tf1 DROP KEY v;
 --error ER_ALTER_OPERATION_NOT_SUPPORTED,ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
@@ -167,14 +167,14 @@ DROP TABLE tf1;
 --echo # === Section G: native rebuild refused on vec-indexed tables ===
 --echo # Mirrors FTS's ER_INNODB_FT_LIMIT policy: a native (INPLACE)
 --echo # rebuild re-inserts every row under a new table_id/index_id, so
---echo # the vec aux table would be re-minted empty and the HNSW graph
+--echo # the vec aux table would be recreated empty and the HNSW graph
 --echo # lost. ALGORITHM=COPY rebuilds the aux organically via per-row
---echo # INSERT stamping.
+--echo # INSERT writing.
 
 CREATE TABLE tg1 (
   id BIGINT UNSIGNED PRIMARY KEY,
   v VECTOR(8) NOT NULL,
-  KEY (v) TYPE hnsw WITH (M = 6)
+  VECTOR KEY (v) TYPE hnsw (M = 6)
 );
 INSERT INTO tg1 VALUES (1, STRING_TO_VECTOR('[1,1,1,1,1,1,1,1]'));
 
@@ -194,19 +194,19 @@ SELECT id, VECTOR_TO_STRING(v) FROM tg1 FORCE INDEX (PRIMARY);
 
 --echo # G.4 First ADD INDEX is refused for INPLACE and falls back to
 --echo # COPY. This case previously asserted the opposite — that the
---echo # native rebuild was fine because the gate checks the OLD table,
+--echo # native rebuild was fine because the check checks the OLD table,
 --echo # "mirroring FTS's first-ADD-FULLTEXT rebuild". The shape does
 --echo # mirror FTS; the outcome does not. FTS populates its index
 --echo # during that rebuild (row0ft); we had no build pass, so the
---echo # rebuild stamped percona_vec_aux_id on every row and left the
+--echo # rebuild written percona_vec_aux_id on every row and left the
 --echo # graph empty — a silently incomplete index. See
 --echo # vector_index_build.test for the full contract.
 CREATE TABLE tg2 (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(8) NOT NULL);
 INSERT INTO tg2 VALUES (1, STRING_TO_VECTOR('[2,2,2,2,2,2,2,2]'));
 --error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
-ALTER TABLE tg2 ADD KEY vk (v) TYPE hnsw, ALGORITHM=INPLACE;
+ALTER TABLE tg2 ADD VECTOR KEY vk (v) TYPE hnsw, ALGORITHM=INPLACE;
 --echo # Server-picked algorithm succeeds via COPY, and populates.
-ALTER TABLE tg2 ADD KEY vk (v) TYPE hnsw;
+ALTER TABLE tg2 ADD VECTOR KEY vk (v) TYPE hnsw;
 SET SESSION innodb_interpreter = 'vec_aux_verify test/tg2';
 SELECT @@session.innodb_interpreter_output;
 SELECT id, VECTOR_TO_STRING(v) FROM tg2 FORCE INDEX (PRIMARY);
@@ -219,7 +219,7 @@ DROP TABLE tg1, tg2;
 --echo #
 --echo # LOAD DATA ALGORITHM=BULK is refused for a table with the hidden
 --echo # column, mirroring the FULLTEXT refusal beside it: BULK builds index
---echo # entries directly and never reaches the row-insert path that stamps
+--echo # entries directly and never reaches the row-insert path that writes
 --echo # percona_vec_aux_id. There is no test for it here because BULK is not
 --echo # in the community build; if it is ever published, this is where the
 --echo # refusal belongs.

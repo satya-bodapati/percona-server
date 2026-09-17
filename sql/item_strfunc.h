@@ -1326,9 +1326,10 @@ class Item_func_vector_distance final : public Item_real_func {
 
   /** @return true if an L2 (euclidean) HNSW index orders rows the same
   way this call does - EUCLIDEAN is a monotonic (sqrt) transform of the
-  index's native squared metric, so both are servable (PS-11300). */
+  index's native squared metric, so both are servable. */
   bool l2_index_servable() const {
-    return m_metric == EUCLIDEAN || m_metric == EUCLIDEAN_SQUARED;
+    return m_metric == Metric::kEuclidean ||
+           m_metric == Metric::kEuclideanSquared;
   }
 };
 

@@ -23,7 +23,8 @@ Per-index vector runtime: the in-memory state a vector index needs while it
 is open, hanging off dict_index_t::vec.
 */
 
-#pragma once
+#ifndef vec0index_h
+#define vec0index_h
 
 struct dict_index_t;
 
@@ -51,3 +52,5 @@ so dict_index_t::vec is a raw pointer that starts null for free and has to
 be released by hand here, the way destroy_fields_array() already is.
 @param[in,out]  index  index whose runtime is to be freed */
 void vec_index_runtime_free(dict_index_t *index);
+
+#endif /* vec0index_h */

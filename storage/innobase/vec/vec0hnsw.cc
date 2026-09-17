@@ -82,11 +82,11 @@ time - and it is the better direction to diverge in, because the in-memory
 rewire cannot be undone either. Rolling the whole insert back left memory
 holding a node the aux had discarded.
 
-An index build opts out via ctx->commit_steps: there trx is the ALTER's own
+An index build opts out via ctx->commit_aux_trx: there trx is the ALTER's own
 transaction, not a sub-transaction, and committing it per callback would
 commit the DDL a node at a time. */
 static void vec_ctx_step_commit(Vec_ctx *ctx) {
-  if (!ctx->commit_steps) return;
+  if (!ctx->commit_aux_trx) return;
   trx_commit_for_mysql(ctx->trx);
   trx_start_internal(ctx->trx, UT_LOCATION_HERE);
 }
@@ -430,11 +430,6 @@ static const char *vec_row_vector_bytes(const dict_index_t *index,
   return static_cast<const char *>(dfield_get_data(df));
 }
 
-/** Insert one node into the graph and, through the persistor, the aux.
-
-Shared by INSERT and by a vector-column UPDATE, because to the graph
-they are the same operation: a node is immutable, so a changed vector is
-a new node rather than an edit of the old one. */
 /** Load the graph once, under load_mutex.
 
 A corrupt aux is sticky: it will not read correctly next time either, so the
@@ -478,6 +473,11 @@ static void vec_runtime_set_corrupted(vec_t *vec) {
   vec->corrupted_hnsw.store(true, std::memory_order_release);
 }
 
+/** Insert one node into the graph and, through the persistor, the aux.
+
+Shared by INSERT and by a vector-column UPDATE, because to the graph
+they are the same operation: a node is immutable, so a changed vector is
+a new node rather than an edit of the old one. */
 static dberr_t vec_add_node(vec_t *vec, dict_index_t *index,
                             dict_table_t *table, uint64_t label,
                             uint64_t base_pk, const char *q, THD *thd) {
@@ -816,7 +816,7 @@ dberr_t vec_build_add_row(Vec_build *b, dict_table_t *table,
   if (vec_len != b->dims * sizeof(float)) return DB_CORRUPTION;
 
   /* Label 0 is the empty-slot sentinel and can never be a node. A row
-  carrying it means the stamping path missed it. */
+  carrying it means the writing path missed it. */
   const uint64_t id = vec_get_aux_id_from_row(table, row);
   ut_ad(id != 0);
 
@@ -941,7 +941,7 @@ dberr_t vec_insert_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
 
     const uint64_t label = vec_get_aux_id_from_row(table, row);
     /* 0 is impossible per this column's contract - the aux reserves it
-    for its metadata record. Skip the row rather than mint a node under
+    for its metadata record. Skip the row rather than create a node under
     it. */
     if (label == 0) {
       continue;

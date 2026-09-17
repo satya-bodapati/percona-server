@@ -23,7 +23,8 @@ The HNSW runtime: the graph, its persistor, and the state one open
 vector index keeps in memory.
 */
 
-#pragma once
+#ifndef vec0hnsw_h
+#define vec0hnsw_h
 
 #include <atomic>
 #include <cstdint>
@@ -85,7 +86,7 @@ struct Vec_ctx {
   transaction internal so its GTID is no longer persisted. Nothing is
   gained either, because an index under construction is invisible, so
   there is no second writer to deadlock against. */
-  bool commit_steps{true};
+  bool commit_aux_trx{true};
 };
 
 /* The persistor's shims forward here. Ordinary functions, so their
@@ -244,8 +245,6 @@ struct Vec_persistor {
     }
     return true;
   }
-
- private:
 };
 
 /** A Persistor that writes nothing.
@@ -277,11 +276,6 @@ struct Vec_null_persistor {
   }
 };
 
-/** The instantiation. This line is the whole "registration": the
-compiler substitutes our types, m_persistor becomes a real Vec_persistor,
-and every callback call inside the class is ordinary name resolution. A
-signature that does not match is a compile error, which is the only
-registration check there is. */
 /** UniformRandomBitGenerator for the graph's layer draw, over InnoDB's RNG.
 
 HNSW does not synchronise RandomEngine access, and its contract requires a
@@ -315,6 +309,11 @@ class Vec_random_engine {
   result_type operator()() { return ut::random_64(); }
 };
 
+/** The instantiation. This line is the whole "registration": the
+compiler substitutes our types, m_persistor becomes a real Vec_persistor,
+and every callback call inside the class is ordinary name resolution. A
+signature that does not match is a compile error, which is the only
+registration check there is. */
 using Vec_hnsw = HNSW<Vec_arena, Vec_persistor, Vec_random_engine>;
 
 /** The same graph, built without persisting anything: what an index build
@@ -374,7 +373,7 @@ struct vec_t : public Vec_runtime {
   const uint32_t ef_construction;
   /** The distance kernel this index's metric selects, resolved once by
   parse_options. The graph is built with it rather than with a kernel
-  chosen here, so WITH (metric = ...) is what decides. */
+  chosen here, so the index's metric option is what decides. */
   vec_dist_func_t *const dist;
   /** True once the graph has been built from the aux table. Atomic, with
   release/acquire ordering: it publishes the `hnsw` pointer to every thread
@@ -393,16 +392,6 @@ struct vec_t : public Vec_runtime {
   std::atomic<bool> corrupted_hnsw{false};
 };
 
-/** Open (lazily create) the runtime for a vector index.
-
-Takes the KEY because that is where the parameters are: M, metric and
-ef_construction come back from the DD on the KEY the SQL layer builds,
-and the row-level code that needs the graph has only dict objects.
-@param[in,out]  index  the vector index
-@param[in]      key    the KEY describing it
-@param[in]      form   the open TABLE, for the vector column's dimension
-@param[in]      thd    session, for error reporting
-@return the runtime, or nullptr if the parameters could not be read */
 /** The runtime attached to `index`, or nullptr if it has none yet.
 
 dict_index_t::vec is written by whichever session opens the table first
@@ -422,13 +411,23 @@ with a real constructor would not have one called.
   return static_cast<vec_t *>(slot.load(std::memory_order_acquire));
 }
 
+/** Open (lazily create) the runtime for a vector index.
+
+Takes the KEY because that is where the parameters are: M, metric and
+ef_construction come back from the DD on the KEY the SQL layer builds,
+and the row-level code that needs the graph has only dict objects.
+@param[in,out]  index  the vector index
+@param[in]      key    the KEY describing it
+@param[in]      form   the open TABLE, for the vector column's dimension
+@param[in]      thd    session, for error reporting
+@return the runtime, or nullptr if the parameters could not be read */
 vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
                         THD *thd);
 
 /** Add one row's vector to every vector index on the table.
 
 Called after the base row is inserted, with the row that carries the
-label already stamped into its hidden column.
+label already written into its hidden column.
 
 The aux writes ride a SUB-TRANSACTION, not the caller's. That is the
 whole point of the design: the graph is an in-memory cache whose only
@@ -439,56 +438,12 @@ the aux is a superset of the committed base rows. Orphans are filtered
 at read time by looking base_pk up under the reader's view.
 @param[in,out]  trx    the user's transaction (for the base row, not the aux)
 @param[in,out]  table  the base table
-@param[in]      row    the inserted row, label already stamped
+@param[in]      row    the inserted row, label already written
 @param[in]      thd    session
 @return DB_SUCCESS, or an error */
 dberr_t vec_insert_row(trx_t *trx, dict_table_t *table, const dtuple_t *row,
                        THD *thd);
 
-/** Add the new node for a vector-column UPDATE.
-
-A node is immutable, so a changed vector is an INSERT of a new node
-under the label calc_row_difference already put into the update vector.
-The superseded node is left exactly as it is - it is still the right
-answer for read views that predate this statement, and removing it would
-break their isolation rather than tidy up.
-@param[in,out]  trx    the user's transaction
-@param[in,out]  table  the base table
-@param[in]      label  the fresh label, from trx->vec_next_label
-@param[in]      q      the new vector, dims * sizeof(float) bytes
-@param[in]      base_pk  the row's primary key, unchanged by this update
-@param[in]      thd    session
-@return DB_SUCCESS, or an error */
-/** Populate a newly added vector index from the rows already in the
-table - the ddl0fts analog for HNSW.
-
-Runs during ALGORITHM=INPLACE ADD, from one clustered scan, without
-rebuilding the table or writing a single base row. Each row is inserted
-into a PRIVATE graph under the label already stamped in its
-percona_vec_aux_id column, so a rebuild preserves labels rather than
-minting new ones, and the ordinary persistence callbacks write the aux
-rows.
-
-Those writes ride @p trx - the ALTER's own transaction, not a
-sub-transaction as DML uses. That is deliberate and is the opposite of
-the sub-transaction rule in the design: the aux does not exist yet
-outside this ALTER, so if the ALTER fails its rows must disappear with
-it. There is no committed base row for them to be a superset of until
-the ALTER commits.
-
-The private graph is discarded on return. The index's runtime is built
-lazily from the committed aux on first access, so nothing has to be
-handed over.
-
-@param[in]  trx              the ALTER's transaction
-@param[in]  table            base table
-@param[in]  vec_index        the index being built
-@param[in]  dims             vector dimensions
-@param[in]  m                HNSW M
-@param[in]  ef_construction  HNSW ef_construction
-@param[in]  thd              session, for opening the aux
-@return DB_SUCCESS, DB_OUT_OF_MEMORY if the graph budget is spent, or a
-storage error */
 /** One open streaming kNN scan.
 
 Opaque by design: it owns the class's `NNSearchContext`, which is neither
@@ -594,5 +549,21 @@ of the statement.
 /** Release the build state and the graph it holds. Safe on nullptr. */
 void vec_build_free(Vec_build *b);
 
+/** Add the new node for a vector-column UPDATE.
+
+A node is immutable, so a changed vector is an INSERT of a new node
+under the label calc_row_difference already put into the update vector.
+The superseded node is left exactly as it is - it is still the right
+answer for read views that predate this statement, and removing it would
+break their isolation rather than tidy up.
+@param[in,out]  trx    the user's transaction
+@param[in,out]  table  the base table
+@param[in]      label  the fresh label, from trx->vec_next_label
+@param[in]      q      the new vector, dims * sizeof(float) bytes
+@param[in]      base_pk  the row's primary key, unchanged by this update
+@param[in]      thd    session
+@return DB_SUCCESS, or an error */
 dberr_t vec_update_row(trx_t *trx, dict_table_t *table, uint64_t label,
                        const char *q, ulint q_len, uint64_t base_pk, THD *thd);
+
+#endif /* vec0hnsw_h */

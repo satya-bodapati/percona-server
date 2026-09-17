@@ -238,7 +238,7 @@ bool dict_table_autoinc_log(dict_table_t *table, uint64_t value, mtr_t *mtr);
 
 /** Write redo logs for the hidden vec_idx_id counter of a
 vector-indexed table when it advances past the persisted watermark -
-the dict_table_autoinc_log analog (PS-11300).
+the dict_table_autoinc_log analog.
 @param[in,out]  table   table whose counter advanced
 @param[in]      value   counter value AFTER the assignment
 @param[in,out]  mtr     mini-transaction carrying the redo record

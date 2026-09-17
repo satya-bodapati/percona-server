@@ -6154,7 +6154,7 @@ class handler {
   int ha_ft_read(uchar *buf);
   int ha_read_first_row(uchar *buf, uint primary_key);
 
-  /** Approximate kNN read path over a vector index (PS-11300): rows
+  /** Approximate kNN read path over a vector index: rows
   are produced in ascending distance from the constant query vector.
   `limit` is the initial batch size (the query's LIMIT); readers must
   keep producing past it - the engine widens the search - because

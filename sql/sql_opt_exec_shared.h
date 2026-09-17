@@ -230,7 +230,7 @@ enum join_type {
   JT_INDEX_MERGE,
   /**
     Approximate kNN over an HNSW vector index: rows are produced in
-    ascending distance order from a constant query vector (PS-11300).
+    ascending distance order from a constant query vector.
   */
   JT_VECTOR
 };

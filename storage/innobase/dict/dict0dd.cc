@@ -5362,8 +5362,6 @@ dict_table_t *dd_open_table_one(dd::cache::Dictionary_client *client,
     if (m_table->fts && dict_table_has_fts_index(m_table)) {
       fts_optimize_add_table(m_table);
     }
-    /* Vector indexes have no background optimize thread to register
-    with: the HNSW graph is maintained on the DML path. */
 
     if (dict_sys->dynamic_metadata != nullptr) {
       dict_table_load_dynamic_metadata(m_table);
@@ -6147,31 +6145,31 @@ bool dd_process_dd_indexes_rec(mem_heap_t *heap, const rec_t *rec,
       return false;
     }
 
-    /* For FTS or vec aux table, we need to acquire mdl lock on parent.
-    is_aux() is true for BOTH FTS and vec aux tables - dispatch by the
-    specific predicate. Without the split, the FTS-only ut_ad(is_fts)
-    would trip on any I_S / SYS_INDEXES scan that hits a vec aux. */
-    if (table->is_aux()) {
-      table_id_t parent_id = 0;
+    /* For an FTS or vector aux table, we need to acquire mdl lock on
+    parent. Only the name parse differs between the two; the reopen below
+    is shared. A parent id of 0 means this is not an aux table at all. */
+    table_id_t parent_id = 0;
 
-      if (table->is_fts_aux()) {
-        fts_aux_table_t fts_table;
-        ut_d(bool is_fts =) fts_is_aux_table_name(
-            &fts_table, table->name.m_name, strlen(table->name.m_name));
-        ut_ad(is_fts);
-        parent_id = fts_table.parent_id;
-      } else {
-        /* DICT_TF2_VEC_AUX is only ever set on a name this parser
-        accepts: creation computes the name itself, and the DD reload
-        path gates on vec_aux_is_aux_table_name, which is this same
-        parse. So the parent id is always recoverable, exactly as it is
-        for FTS above. */
-        ut_ad(table->is_vec_aux());
-        ut_d(bool is_vec =)
-            vec_aux_parse_table_name(table->name.m_name, &parent_id, nullptr);
-        ut_ad(is_vec);
-      }
+    if (table->is_fts_aux()) {
+      fts_aux_table_t fts_table;
 
+      /* Find the parent ID. */
+      ut_d(bool is_fts =) fts_is_aux_table_name(&fts_table, table->name.m_name,
+                                                strlen(table->name.m_name));
+      ut_ad(is_fts);
+
+      parent_id = fts_table.parent_id;
+    } else if (table->is_vec_aux()) {
+      /* DICT_TF2_VEC_AUX is only ever set on a name this parser accepts:
+      creation computes the name itself, and the DD reload path checks
+      vec_aux_is_aux_table_name, which is this same parse. So the parent
+      id is always recoverable, exactly as it is for FTS above. */
+      ut_d(bool is_vec =)
+          vec_aux_parse_table_name(table->name.m_name, &parent_id, nullptr);
+      ut_ad(is_vec);
+    }
+
+    if (parent_id != 0) {
       dd_table_close(table, thd, mdl, true);
 
       *parent = dd_table_open_on_id(parent_id, thd, parent_mdl, true, true);

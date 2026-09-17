@@ -29,6 +29,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
  DDL implementation misc functions.
 Created 2020-11-01 by Sunny Bains. */
 
+#include <tuple>
+
 #include "btr0load.h"
 #include "ddl0fts.h"
 #include "ddl0impl-cursor.h"
@@ -417,7 +419,7 @@ static void mark_secondary_indexes(trx_t *trx, dict_table_t *table) noexcept {
           /* Mirror the FTS branch above for a completed-but-uncommitted
           vector index: drop its aux table and remove it from the cache
           immediately. Safe for the same reason as FTS - ADD VECTOR
-          INDEX is not allowed with LOCK=NONE (see the HA_VECTOR gate
+          INDEX is not allowed with LOCK=NONE (see the HA_VECTOR check
           in innobase_support_inplace_alter), so no concurrent thread
           holds an entry_list referencing this index. Deferring to the
           ABORTED/CORRUPT path below would leak the aux .ibd: the
@@ -426,7 +428,10 @@ static void mark_secondary_indexes(trx_t *trx, dict_table_t *table) noexcept {
           auto prev = UT_LIST_GET_PREV(indexes, index);
           ut_ad(prev != nullptr);
 
-          (void)vec_aux_drop_one_table(trx, table, index->id);
+          /* Best effort: the callee logs the aux name and the reason
+          itself, and this path is already unwinding a failed ALTER,
+          so there is nothing left to recover to. */
+          std::ignore = vec_aux_drop_one_table(trx, table, index->id);
 
           dict_index_remove_from_cache(table, index);
 
@@ -501,7 +506,9 @@ static void drop_secondary_indexes(trx_t *trx, dict_table_t *table) noexcept {
       below without this call would orphan the aux .ibd in dict_sys
       and on disk. */
       if (index->is_vector()) {
-        (void)vec_aux_drop_one_table(trx, table, index->id);
+        /* Best effort, as above: already logged, and this is the
+        prepare-failure path. */
+        std::ignore = vec_aux_drop_one_table(trx, table, index->id);
       }
 
       switch (dict_index_get_online_status(index)) {
