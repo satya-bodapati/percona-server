@@ -44,6 +44,7 @@ Parser-free DML on vector-index auxiliary tables. See vec0dml.h for the */
 #include "row0mysql.h"
 #include "row0upd.h"
 #include "row0vers.h"
+#include "scope_guard.h"
 #include "trx0roll.h"
 #include "vec0aux.h"
 
@@ -74,7 +75,7 @@ static void vec_aux_set_field(dtuple_t *tuple, ulint col_no, const void *data,
   dfield_t *df = dtuple_get_nth_field(tuple, col_no);
 
   /* Every column of the aux table is NOT NULL, so there is no SQL NULL
-  case to handle here — and mapping a zero-length value onto NULL would
+  case to handle here - and mapping a zero-length value onto NULL would
   be wrong rather than merely unused: a node with no neighbours yet has
   an EMPTY neighbour blob, not a missing one, and handing SQL_NULL to a
   NOT NULL column trips rec_get_converted_size_comp_prefix_low. Length 0
@@ -95,7 +96,7 @@ dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
   ut_a(aux != nullptr);
   /* Record 0 is index metadata, not a node: it names the graph's entry
   point and legitimately carries no vector and no neighbours. Every real
-  node has both — id 0 is reserved as the empty-slot sentinel, so a node
+  node has both - id 0 is reserved as the empty-slot sentinel, so a node
   can never occupy record 0. */
   ut_a(row.vec != nullptr || (row.id == 0 && row.dims == 0));
   ut_a(row.neighbors != nullptr || row.neighbors_len == 0);
@@ -112,7 +113,7 @@ dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
   /* Mirror of row_get_prebuilt_insert_row + row_insert_for_mysql's run
   loop (row0mysql.cc), minus the prebuilt: build an INS_DIRECT node on a
   private heap, complete a query graph for it (pars_complete_graph_for_
-  exec builds the fork/thr only — no SQL parser involved), fill the row,
+  exec builds the fork/thr only - no SQL parser involved), fill the row,
   and drive row_ins_step with the standard error handling. */
   ins_node_t *node = ins_node_create(INS_DIRECT, aux, heap);
 
@@ -135,11 +136,23 @@ dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
                     row.neighbors_len, heap);
 
   que_thr_t *thr = pars_complete_graph_for_exec(node, trx, heap, nullptr);
+
+  /* que_graph_free() is the standard, complete teardown for a graph
+  built this way: it recurses per node type (freeing, for
+  QUE_NODE_INSERT, node->entry_sys_heap -- an allocation of its own,
+  independent of heap above, made by ins_node_create in row0ins.cc)
+  and then frees the graph's own heap, which que_fork_create pointed
+  at our heap. A parser-free path like this one never runs that
+  recursion on its own, so without this guard node->entry_sys_heap
+  leaks on every call. */
+  auto graph_guard =
+      create_scope_guard([thr]() { que_graph_free(thr->graph); });
+
   /* Activate the fork, as every other MySQL-interface caller does
   (row0mysql.cc does it for ins_graph, sel_graph and upd_graph).
   pars_complete_graph_for_exec leaves the fork QUE_FORK_COMMAND_WAIT, and
   that is the first thing que_thr_stop() tests (que0que.cc), so it
-  reports "stop this thread" — which RecLock::prepare treats as impossible
+  reports "stop this thread" - which RecLock::prepare treats as impossible
   and answers with ut_error (lock0lock.cc).
 
   A lock that is granted immediately never enqueues and never reaches that
@@ -174,7 +187,6 @@ dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
     thr->lock_state = QUE_THR_LOCK_NOLOCK;
 
     if (!was_lock_wait) {
-      mem_heap_free(heap);
       return err;
     }
     ut_ad(node->state == INS_NODE_INSERT_ENTRIES ||
@@ -182,7 +194,6 @@ dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
   }
 
   que_thr_stop_for_mysql_no_error(thr, trx);
-  mem_heap_free(heap);
   return DB_SUCCESS;
 }
 
@@ -196,13 +207,13 @@ dberr_t vec_aux_update_row(trx_t *trx, dict_table_t *aux, uint64_t id,
   mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
   dict_index_t *clust = aux->first_index();
 
-  /* Standard update machinery — the same upd_node + row_upd_step every
+  /* Standard update machinery - the same upd_node + row_upd_step every
   SQL UPDATE runs on. In a regular UPDATE the preceding row_search_mvcc
   read positions the cursor and takes the locks; we know the PK and
   skip the search, so we position and lock ourselves below.
   (Self-positioned-upd_node implementation reference: the FK-cascade
   code, row0ins.cc; its run loop touches thr->prebuilt, which we
-  don't have — hence a private loop.) */
+  don't have - hence a private loop.) */
   upd_node_t *node = row_create_update_node_for_mysql(aux, heap);
 
   /* Search tuple for the target row's PK. */
@@ -213,11 +224,25 @@ dberr_t vec_aux_update_row(trx_t *trx, dict_table_t *aux, uint64_t id,
   dfield_set_data(dtuple_get_nth_field(ref, 0), id_buf, sizeof(id_buf));
 
   que_thr_t *thr = pars_complete_graph_for_exec(node, trx, heap, nullptr);
+
+  /* que_graph_free() is the standard, complete teardown for a graph
+  built this way: it recurses per node type (freeing, for
+  QUE_NODE_UPDATE, node->pcur -- including the record buffer
+  store_position() below populates -- node->update->per_stmt_heap and
+  node->heap, all allocations of their own, independent of heap above,
+  made by row_create_update_node_for_mysql/upd_node_create in
+  row0mysql.cc/row0upd.cc) and then frees the graph's own heap, which
+  que_fork_create pointed at our heap. A parser-free path like this
+  one never runs that recursion on its own, so without this guard all
+  three leak on every call. */
+  auto graph_guard =
+      create_scope_guard([thr]() { que_graph_free(thr->graph); });
+
   /* Activate the fork, as every other MySQL-interface caller does
   (row0mysql.cc does it for ins_graph, sel_graph and upd_graph).
   pars_complete_graph_for_exec leaves the fork QUE_FORK_COMMAND_WAIT, and
   that is the first thing que_thr_stop() tests (que0que.cc), so it
-  reports "stop this thread" — which RecLock::prepare treats as impossible
+  reports "stop this thread" - which RecLock::prepare treats as impossible
   and answers with ut_error (lock0lock.cc).
 
   A lock that is granted immediately never enqueues and never reaches that
@@ -248,7 +273,6 @@ dberr_t vec_aux_update_row(trx_t *trx, dict_table_t *aux, uint64_t id,
       if (offset_heap != nullptr) {
         mem_heap_free(offset_heap);
       }
-      mem_heap_free(heap);
       return DB_RECORD_NOT_FOUND;
     }
 
@@ -287,7 +311,6 @@ dberr_t vec_aux_update_row(trx_t *trx, dict_table_t *aux, uint64_t id,
       if (offset_heap != nullptr) {
         mem_heap_free(offset_heap);
       }
-      mem_heap_free(heap);
       return lerr;
     }
   }
@@ -304,15 +327,19 @@ dberr_t vec_aux_update_row(trx_t *trx, dict_table_t *aux, uint64_t id,
     upd_field_t *uf = upd_get_nth_field(update, n_fields++);
     const dict_col_t *col = aux->get_col(VEC_AUX_COL_NEIGHBORS);
     upd_field_set_field_no(uf, dict_col_get_clust_pos(col, clust), clust);
+    /* Length 0 still needs a non-null data pointer, same as
+    vec_aux_set_field: dfield_set_data (and, downstream,
+    rec_set_nth_field_low's memcpy) must never see a null source. */
+    static const byte empty_neighbors = 0;
     void *copy = neighbors_len != 0
                      ? mem_heap_dup(heap, neighbors, neighbors_len)
-                     : nullptr;
+                     : const_cast<byte *>(&empty_neighbors);
     dfield_set_data(&uf->new_val, copy, neighbors_len);
     col->copy_type(dfield_get_type(&uf->new_val));
   }
 
   /* A primary-key change on the base row re-points the node at the new
-  key (design §10). DELETE does NOT come through here: it writes nothing
+  key (design: "UPDATE"). DELETE does NOT come through here: it writes nothing
   at all, because the node has to stay for read views still entitled to
   the row. The old branch nulled a row_ref column here as a tombstone;
   this design has no tombstone and base_pk is NOT NULL. */
@@ -350,13 +377,11 @@ dberr_t vec_aux_update_row(trx_t *trx, dict_table_t *aux, uint64_t id,
     thr->lock_state = QUE_THR_LOCK_NOLOCK;
 
     if (!was_lock_wait) {
-      mem_heap_free(heap);
       return err;
     }
   }
 
   que_thr_stop_for_mysql_no_error(thr, trx);
-  mem_heap_free(heap);
   return DB_SUCCESS;
 }
 
@@ -397,8 +422,8 @@ static bool vec_aux_copy_field(const dict_index_t *clust, const rec_t *rec,
   return true;
 }
 
-dberr_t vec_base_collect_rows(dict_table_t *base,
-                              const dict_index_t *vec_index, uint32_t dims,
+dberr_t vec_base_collect_rows(dict_table_t *base, const dict_index_t *vec_index,
+                              uint32_t dims,
                               std::vector<vec_base_row_t> *rows) {
   ut_a(base != nullptr);
   ut_a(vec_index != nullptr);
@@ -410,7 +435,7 @@ dberr_t vec_base_collect_rows(dict_table_t *base,
 
   dict_index_t *clust = base->first_index();
 
-  /* The column comes from the index, never from a scan for a BLOB —
+  /* The column comes from the index, never from a scan for a BLOB -
   VECTOR, BLOB, TEXT and JSON all collapse to DATA_BLOB. See
   vec_indexed_col_no(). */
   ut_a(vec_index->n_fields == 1);

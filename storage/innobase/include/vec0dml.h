@@ -27,7 +27,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 /** @file include/vec0dml.h
 Row-level DML on vector-index auxiliary tables through the InnoDB query-graph
-C API — insert, targeted neighbor update, and MVCC-consistent full load.
+C API - insert, targeted neighbor update, and MVCC-consistent full load.
 the global pars_mutex. Vector aux DML runs on every user INSERT, so it uses
 the same parser-free query-graph machinery row0mysql itself uses
 (ins_node/upd_node + pars_complete_graph_for_exec) on the user transaction:
@@ -56,7 +56,7 @@ struct vec_aux_row_t {
   /** vector data, dims * sizeof(float) bytes */
   const float *vec;
   uint32_t dims;
-  /** the base row this node describes. NOT NULL — there is no tombstone
+  /** the base row this node describes. NOT NULL - there is no tombstone
   in this design: a deleted base row keeps its node, and the read path
   filters it by looking base_pk up under the caller's read view. */
   uint64_t base_pk;
@@ -98,7 +98,7 @@ searched UPDATE's read would have taken: IX on the table and an explicit
 X on the record.
 
 Passing new_base_pk re-points the node at a new primary key, which is
-what a base-row primary-key change needs (design section 10). DELETE does
+what a base-row primary-key change needs (design: "UPDATE"). DELETE does
 not come through here at all: it writes nothing, because the node has to
 stay for read views still entitled to the row.
 @param[in,out]  trx            transaction to update on
@@ -116,7 +116,7 @@ dberr_t vec_aux_update_row(trx_t *trx, dict_table_t *aux, uint64_t id,
 supplied heap and live as long as it does. */
 /** One base-table row, as the index build needs it. */
 struct vec_base_row_t {
-  /** The row's already-stamped percona_vec_aux_id — reused as the graph
+  /** The row's already-stamped percona_vec_aux_id - reused as the graph
   label, so a rebuild preserves the labels rather than minting new ones. */
   uint64_t id;
   /** The vector, materialised (an off-page BLOB is fetched, not a
@@ -130,8 +130,8 @@ struct vec_base_row_t {
 
 One clustered scan of the base table. Delete-marked records are skipped:
 they are committed deletes pending purge, not rows. Uncommitted changes
-cannot be present — the ALTER holds at least a shared lock and waited out
-prior writers at MDL upgrade — which is what lets this read records
+cannot be present - the ALTER holds at least a shared lock and waited out
+prior writers at MDL upgrade - which is what lets this read records
 directly rather than through a read view.
 
 @param[in]   base       base table
@@ -140,9 +140,8 @@ directly rather than through a read view.
 @param[in]   dims       expected dimensions, for validation
 @param[out]  rows       the collected rows
 @return DB_SUCCESS, or DB_CORRUPTION if a vector is the wrong width */
-dberr_t vec_base_collect_rows(dict_table_t *base,
-                              const dict_index_t *vec_index, uint32_t dims,
-                              std::vector<vec_base_row_t> *rows);
+dberr_t vec_base_collect_rows(dict_table_t *base, const dict_index_t *vec_index,
+                              uint32_t dims, std::vector<vec_base_row_t> *rows);
 
 struct vec_aux_read_t {
   const byte *vec{nullptr};

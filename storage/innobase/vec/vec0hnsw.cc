@@ -45,7 +45,7 @@ The HNSW runtime and the persistence callbacks behind it.
 
 vec_t::~vec_t() {
   /* Destroying the graph destroys the arena it holds by value, which
-  frees every node in one go — the arena has no per-block free and does
+  frees every node in one go - the arena has no per-block free and does
   not need one. */
   ut::delete_(hnsw);
   hnsw = nullptr;
@@ -57,14 +57,14 @@ no row lock taken by a callback outlives that callback.
 This is what keeps concurrent INSERTs from aborting each other. One
 transaction spanning the whole graph insert holds an X lock on every row it
 touches until `insert()` returns, and the rows nearest the entry point are
-rewired by almost every insert — so inserts queue on them and are rolled back
+rewired by almost every insert - so inserts queue on them and are rolled back
 by the deadlock detector or the lock wait timeout. Six connections inserting
 120 rows each committed 286 of 720 before this; afterwards, 720 of 720 with no
 lock waits at all.
 
 Deadlock becomes impossible rather than merely rarer. Each mini-transaction
 takes one row lock, having waited for it holding nothing, and then commits, so
-no transaction ever waits while holding — which is the precondition for a
+no transaction ever waits while holding - which is the precondition for a
 cycle.
 
 The graph is unaffected: `lock_node` already serialises every callback
@@ -73,11 +73,17 @@ transaction contributes undo and redo, not exclusion.
 
 What is given up is per-insert atomicity: a callback failing midway leaves the
 earlier callbacks committed, so the aux keeps a node whose base row may never
-commit. That is the orphan section 13 already accepts and filters at read
-time — and it is the better direction to diverge in, because the in-memory
+commit. That is the orphan the design's "Rollback, and why orphans are
+acceptable" accepts and filters at read
+time - and it is the better direction to diverge in, because the in-memory
 rewire cannot be undone either. Rolling the whole insert back left memory
-holding a node the aux had discarded. */
+holding a node the aux had discarded.
+
+An index build opts out via ctx->commit_steps: there trx is the ALTER's own
+transaction, not a sub-transaction, and committing it per callback would
+commit the DDL a node at a time. */
 static void vec_ctx_step_commit(Vec_ctx *ctx) {
+  if (!ctx->commit_steps) return;
   trx_commit_for_mysql(ctx->trx);
   trx_start_internal(ctx->trx, UT_LOCATION_HERE);
 }
@@ -114,7 +120,7 @@ dberr_t vec_persist_update_neighbors(Vec_ctx *ctx, uint64_t id,
   concurrent inserts see each other's nodes in memory the moment they are
   linked, but each writes its own rows on its own sub-transaction. So this
   insert can be asked to rewire a neighbour whose row belongs to an insert
-  that rolled back — or, in the window before its callback commits, one that
+  that rolled back - or, in the window before its callback commits, one that
   has not committed yet.
 
   Skipping costs one edge on disk, which is the divergence section 13
@@ -133,8 +139,8 @@ dberr_t vec_persist_entry_point(Vec_ctx *ctx, uint64_t id) {
   /* This callback commits on its own, after the node's row already has
   (vec_ctx_step_commit), so a crash between the two leaves record 0 naming
   the *previous* entry point while a higher node exists. HNSW::validate()
-  reports that as inconsistent — "entry point must sit on the highest
-  layer" — so a debug build can flag it. It is not a bug, for three
+  reports that as inconsistent - "entry point must sit on the highest
+  layer" - so a debug build can flag it. It is not a bug, for three
   reasons.
 
   The lag is bounded at one layer. random_layer() caps a draw at
@@ -159,7 +165,7 @@ dberr_t vec_persist_entry_point(Vec_ctx *ctx, uint64_t id) {
   point's id; vec and neighbors are empty, level is 0.
 
   Update first, insert on miss. After the very first node, update is the
-  common case, and this fires only when the graph's top layer changes —
+  common case, and this fires only when the graph's top layer changes -
   a couple of hundred times over an index's life at most. */
   byte buf[8];
   mach_write_to_8(buf, id);
@@ -199,17 +205,27 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
   DD and parsed by the open-time overload added for exactly this. */
   storage::innobase::vec::VectorIndexParam vip;
   if (storage::innobase::vec::parse_options(*key, vip)) {
+    ib::error(ER_IB_MSG_456)
+        << "Failed to open vector runtime for index " << index->name
+        << " on table " << index->table->name << ": could not parse the"
+        << " index's WITH(...) options; vector search on it will not"
+        << " work until the table is reopened.";
     return nullptr;
   }
   const auto *hnsw_param = std::get_if<storage::innobase::vec::HnswParam>(&vip);
   if (hnsw_param == nullptr) {
+    ib::error(ER_IB_MSG_456)
+        << "Failed to open vector runtime for index " << index->name
+        << " on table " << index->table->name << ": WITH(...) options do"
+        << " not describe an HNSW index; vector search on it will not"
+        << " work until the table is reopened.";
     return nullptr;
   }
 
   /* Dimension is a property of the column, not of WITH(...), so it has
   to come from the Field.
 
-  key_part[0].field is not usable directly — for a vector key part
+  key_part[0].field is not usable directly - for a vector key part
   get_index_prefix_len() reports 1, so the KEY_PART_INFO describes a
   1-byte prefix rather than the column. Its field_index() is still
   correct, though, and indexing form->field with it is exactly the dance
@@ -217,16 +233,35 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
   field. */
   ut_a(key->user_defined_key_parts == 1);
   const Field *f = form->field[key->key_part[0].field->field_index()];
-  if (f == nullptr || f->type() != MYSQL_TYPE_VECTOR) return nullptr;
+  if (f == nullptr || f->type() != MYSQL_TYPE_VECTOR) {
+    ib::error(ER_IB_MSG_456)
+        << "Failed to open vector runtime for index " << index->name
+        << " on table " << index->table->name << ": the indexed column is"
+        << " not a VECTOR column; vector search on it will not work"
+        << " until the table is reopened.";
+    return nullptr;
+  }
   const Field_vector *field = down_cast<const Field_vector *>(f);
 
   const uint32_t dims = field->get_max_dimensions();
   if (dims == 0 || dims == UINT32_MAX) {
+    ib::error(ER_IB_MSG_456)
+        << "Failed to open vector runtime for index " << index->name
+        << " on table " << index->table->name << ": invalid vector"
+        << " dimension " << dims << "; vector search on it will not work"
+        << " until the table is reopened.";
     return nullptr;
   }
 
   auto *vec = ut::new_withkey<vec_t>(UT_NEW_THIS_FILE_PSI_KEY);
-  if (vec == nullptr) return nullptr;
+  if (vec == nullptr) {
+    ib::error(ER_IB_MSG_456)
+        << "Failed to open vector runtime for index " << index->name
+        << " on table " << index->table->name << ": out of memory;"
+        << " vector search on it will not work until the table is"
+        << " reopened.";
+    return nullptr;
+  }
 
   vec->index_id = index->id;
   vec->table = index->table;
@@ -271,7 +306,7 @@ static void vec_aux_close_for_dml(dict_table_t *aux, THD *thd,
 
 Only the entry point is read here. Every other node is faulted in on
 demand when traversal reaches it, which is what init_from_entry_point
-means — the alternative, reading every row at startup, is the "huge load
+means - the alternative, reading every row at startup, is the "huge load
 operation at the moment the index is first used after restart" this
 design exists to avoid.
 
@@ -333,14 +368,14 @@ static const char *vec_row_vector_bytes(const dict_index_t *index,
   dict_index_add_col() runs for it on the CREATE path (create_index,
   ha_innodb.cc) and on the DD-open path (dd_fill_one_dict_index,
   dict0dd.cc), and dict_index_build_internal_vec() copies those fields
-  into the cached index, zeroing only n_uniq — a vector index has no
+  into the cached index, zeroing only n_uniq - a vector index has no
   B-tree ordering, but it does have its field.
 
   Searching for the column instead cannot work: VECTOR, BLOB, TEXT and
   JSON all map to DATA_BLOB in the dictionary, so any blob ordered ahead
   of the vector column would win.
 
-  Ignore the field's prefix_len — get_index_prefix_len() reports 1 for a
+  Ignore the field's prefix_len - get_index_prefix_len() reports 1 for a
   vector key part, which describes nothing about the column. */
   ut_a(index->n_fields == 1);
   const ulint col_no = dict_col_get_no(index->get_field(0)->col);
@@ -362,7 +397,7 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
   /* innodb_hnsw_max_memory, checked BEFORE insert() starts mutating.
 
   Vec_arena::allocate() is the single point every graph byte passes
-  through and would be the natural place to refuse — but refusing there
+  through and would be the natural place to refuse - but refusing there
   returns nullptr, which hnsw.h turns into a throw (four sites, e.g.
   Node::create) partway through a rewire, with neighbours already
   relinked and no per-block free to unwind with. So the refusal happens
@@ -371,7 +406,7 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
 
   This is a charge check, not a prediction: it asks whether the budget is
   already spent, not whether this insert would fit. Sizing the insert is
-  not possible from outside the class — sizeof(Node) is private, and one
+  not possible from outside the class - sizeof(Node) is private, and one
   insert also allocates stubs for lazily loaded neighbours and a copy of
   the query vector. The budget can therefore be exceeded by at most what
   one insert allocates, which is the price of refusing before mutating
@@ -403,12 +438,12 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
   everything below durable, ours included. The invariant "aux superset of
   committed base rows" therefore holds by LSN ordering, and a flush here
   buys nothing. If the user's transaction never commits, the aux rows are an
-  orphan at worst, which section 13 accepts.
+  orphan at worst, which the design's rollback section accepts.
 
   This is what makes committing per callback affordable. Measured on an idle
   128-core box, RelWithDebInfo, 40000 single-threaded inserts: 8.5s for one
   commit per insert, 17.7s for one per callback, and 8.55s for one per
-  callback with this flag — the entire cost of the extra commits was the
+  callback with this flag - the entire cost of the extra commits was the
   fsync.
 
   trx_commit_low honours it by setting must_flush_log_later instead of
@@ -444,11 +479,11 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
   }
 
   /* Unlocked: the class is thread-safe for concurrent insert() and search,
-  and the only operation it is not thread-safe for — init_from_entry_point —
+  and the only operation it is not thread-safe for - init_from_entry_point -
   cannot be running, because reaching here means `loaded` is already true. */
   vec->hnsw->insert(label, base_pk, q, &ctx);
 
-  /* Commits whatever the last callback left open — often nothing, since
+  /* Commits whatever the last callback left open - often nothing, since
   each callback commits its own work. */
   if (ctx.err == DB_SUCCESS) {
     trx_commit_for_mysql(aux_trx);
@@ -459,7 +494,8 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
 
     This now rolls back only the callback that failed: everything before it
     was committed by vec_ctx_step_commit. The earlier rows stand, which is
-    the orphan section 13 accepts, and is the direction that keeps the aux
+    the orphan the design's rollback section accepts, and is the direction
+    that keeps the aux
     tracking memory rather than diverging from it. */
     trx_rollback_to_savepoint(aux_trx, nullptr);
   }
@@ -481,7 +517,6 @@ uint32_t vec_index_dims(const dict_index_t *index) {
   if (index == nullptr || index->vec == nullptr) return 0;
   return static_cast<const vec_t *>(index->vec)->dims;
 }
-
 
 dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
                        size_t ef_search, std::vector<vec_hit_t> *out, THD *thd,
@@ -517,8 +552,8 @@ dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
   ctx.vec_bytes = vec->dims * sizeof(float);
   ctx.err = DB_SUCCESS;
 
-  /* Unlocked, like the insert path. A search does mutate — it faults
-  unloaded stubs in through load_node_cb — but load_node() takes a striped
+  /* Unlocked, like the insert path. A search does mutate - it faults
+  unloaded stubs in through load_node_cb - but load_node() takes a striped
   lock and re-checks the node state under it, so two threads faulting the
   same node cannot collide. */
   {
@@ -647,7 +682,7 @@ dberr_t vec_build_index(trx_t *trx, dict_table_t *table,
   ut_a(vec_index != nullptr && vec_index->is_vector());
   ut_a(dims != 0 && m != 0);
 
-  /* Same pre-flight as the DML path (design section 17a): refuse before
+  /* Same pre-flight as the DML path (design: "Memory limits"): refuse before
   building anything rather than throwing partway through. */
   if (srv_hnsw_max_memory != 0 &&
       vec_arena_global_bytes() >= srv_hnsw_max_memory) {
@@ -670,13 +705,17 @@ dberr_t vec_build_index(trx_t *trx, dict_table_t *table,
   ctx.m = m;
   ctx.vec_bytes = dims * sizeof(float);
   ctx.err = DB_SUCCESS;
+  /* trx here is the ALTER's own transaction, so the callbacks must not
+  commit it. The whole build lands in one transaction and rolls back with
+  the ALTER. */
+  ctx.commit_steps = false;
 
   /* A private graph, discarded below. It is not installed on the index:
   a half-built graph must never be reachable, and if the ALTER fails
   there is nothing to unwind. */
   auto *graph = ut::new_withkey<Vec_hnsw>(UT_NEW_THIS_FILE_PSI_KEY, dims,
-                                          &vector_distance_euclidean_squared,
-                                          m, ef_construction);
+                                          &vector_distance_euclidean_squared, m,
+                                          ef_construction);
   if (graph == nullptr) {
     vec_aux_close_for_dml(aux, thd, &mdl);
     return DB_OUT_OF_MEMORY;

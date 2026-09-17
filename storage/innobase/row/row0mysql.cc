@@ -2923,13 +2923,13 @@ run_again:
 
   /* A vector-column UPDATE adds the new node. calc_row_difference has
   already minted the label and put it into the update vector, so the row
-  written above already names the new node — this only has to create it.
+  written above already names the new node - this only has to create it.
 
   DELETE deliberately does nothing here: the node has to stay for read
   views still entitled to the row, and the read path filters it by
   resolving base_pk under the reader's own view. */
   {
-    /* Storage byte order — vec_update_aux_id wrote it back over this
+    /* Storage byte order - vec_update_aux_id wrote it back over this
     member so it could double as the update field's buffer. */
     const uint64_t label =
         mach_read_from_8(reinterpret_cast<const byte *>(&trx->vec_next_label));
@@ -3304,10 +3304,9 @@ dberr_t row_create_table_for_mysql(dict_table_t *&table,
     case TRX_DICT_OP_INDEX:
       /* If the transaction was previously flagged as
       TRX_DICT_OP_INDEX, we should be creating auxiliary tables for
-      full-text or vector indexes. Vec aux names start with
-      "<db>/vec_" — see VEC_AUX_PREFIX / vec_aux_get_table_name. */
+      full-text or vector indexes. */
       ut_ad(strstr(table->name.m_name, "/fts_") != nullptr ||
-            strstr(table->name.m_name, "/vec_") != nullptr);
+            vec_aux_is_aux_table_name(table->name.m_name));
   }
 
   /* Assign table id and build table space. */
@@ -4363,6 +4362,26 @@ dberr_t row_drop_table_for_mysql(const char *name, trx_t *trx, bool nonatomic,
         goto funct_exit;
       }
     }
+
+    /* Same for the vector aux tables. They are hidden, so the server
+    took no MDL on them when it locked the parent, and a concurrent
+    reader can still be scanning one. See PS-11299. */
+    if (table != nullptr &&
+        DICT_TF2_FLAG_IS_SET(table, DICT_TF2_HAS_VEC_AUX_COL)) {
+      dict_sys_mutex_exit();
+      err = vec_aux_lock_all_tables(thd, table);
+      /* Signalled with the aux MDL held and no dict latch, so a test can
+      look the lock up in performance_schema.metadata_locks. */
+      if (err == DB_SUCCESS) {
+        DEBUG_SYNC(thd, "vec_aux_mdl_acquired");
+      }
+      dict_sys_mutex_enter();
+
+      if (err != DB_SUCCESS) {
+        dd_table_close(table, nullptr, nullptr, true);
+        goto funct_exit;
+      }
+    }
   } else {
     table->acquire();
     ut_ad(table->is_intrinsic());
@@ -4549,10 +4568,9 @@ dberr_t row_drop_table_for_mysql(const char *name, trx_t *trx, bool nonatomic,
     case TRX_DICT_OP_INDEX:
       /* If the transaction was previously flagged as
       TRX_DICT_OP_INDEX, we should be dropping auxiliary tables for
-      full-text or vector indexes, or temp tables. Vec aux names
-      start with "<db>/vec_". */
+      full-text or vector indexes, or temp tables. */
       ut_ad(strstr(table->name.m_name, "/fts_") != nullptr ||
-            strstr(table->name.m_name, "/vec_") != nullptr ||
+            vec_aux_is_aux_table_name(table->name.m_name) ||
             strstr(table->name.m_name, TEMP_FILE_PREFIX_INNODB) != nullptr);
   }
 
@@ -4617,7 +4635,7 @@ dberr_t row_drop_table_for_mysql(const char *name, trx_t *trx, bool nonatomic,
   }
 
   /* Drop the per-vector-index auxiliary tables. Symmetric with the FTS
-  ancillary drop above — same flag-style gate. See PS-11299. */
+  ancillary drop above - same flag-style gate. See PS-11299. */
   if (DICT_TF2_FLAG_IS_SET(table, DICT_TF2_HAS_VEC_AUX_COL)) {
     ut_ad(!is_temp);
     err = vec_aux_drop_all_tables(trx, table);
@@ -4780,7 +4798,8 @@ dberr_t row_rename_table_for_mysql(const char *old_name, const char *new_name,
     err = fts_rename_aux_tables(table, new_name, trx, replay);
   }
 
-  /* Vector aux tables are named "<db>/vec_<table_id>_<index_id>" — keyed
+  /* Vector aux tables are named
+  "<db>/percona_vec_<type>_<table_id>_<index_id>" - keyed
   by ids, so SAME-schema RENAME is a no-op. CROSS-schema RENAME needs
   each aux's dd::Table reparented to the new schema and its
   dd::Tablespace file path updated; vec_aux_rename_tables does both
@@ -5146,7 +5165,7 @@ dberr_t row_scan_index_for_mysql(row_prebuilt_t *prebuilt, dict_index_t *index,
   } else if (dict_index_is_online_ddl(index) || (index->type & DICT_FTS) ||
              index->is_vector()) {
     /* Full Text and Vector indexes are implemented by auxiliary tables,
-    not the B-tree — page == FIL_NULL. We also skip secondary indexes
+    not the B-tree - page == FIL_NULL. We also skip secondary indexes
     that are being created online. */
     return (DB_SUCCESS);
   }

@@ -27,10 +27,11 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 /** @file vec/vec0aux.cc
 Auxiliary tables for vector (HNSW) indexes. Phase 1: creation, drop, rename,
-naming. No population — that lands in PS-11300. */
+naming. No population - that lands in PS-11300. */
 
 #include "vec0aux.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 
@@ -55,8 +56,8 @@ const char *VEC_AUX_PREFIX = "percona_vec_";
 
 namespace {
 
-/** Extract the flags2 bits an aux table should inherit from its parent —
-file_per_table, encryption, temporary — plus DICT_TF2_VEC_AUX.
+/** Extract the flags2 bits an aux table should inherit from its parent -
+file_per_table, encryption, temporary - plus DICT_TF2_VEC_AUX.
 
 Stamping DICT_TF2_AUX here would send every vec aux down that branch and
 trip the assertion on the first I_S or SYS_INDEXES scan that opens one. The
@@ -68,7 +69,7 @@ inline uint32_t aux_flags2_from_parent(const dict_table_t *parent) {
          (parent->flags2 & DICT_TF2_TEMPORARY) | DICT_TF2_VEC_AUX;
 }
 
-/** Build the database-prefix portion of a parent name "db/tbl" — returns
+/** Build the database-prefix portion of a parent name "db/tbl" - returns
 the byte length of "db/" (including the slash) or 0 if `parent_name` has no
 slash. */
 size_t db_prefix_len(const char *parent_name) {
@@ -98,7 +99,7 @@ void vec_aux_get_table_name(const dict_table_t *parent, space_index_t index_id,
   const size_t db_len = db_prefix_len(parent_name);
 
   const char *token = vec_index_token(type);
-  /* '_' is the field separator — a token containing it would make the
+  /* '_' is the field separator - a token containing it would make the
   name unparseable (contract in vec0aux.h). */
   ut_ad(strchr(token, '_') == nullptr);
 
@@ -117,14 +118,6 @@ void vec_aux_get_table_name(const dict_table_t *parent, space_index_t index_id,
   ut_a(static_cast<size_t>(written) < name_out_len);
 }
 
-
-
-
-
-
-
-
-
 bool vec_index_type_by_token(const char *token, size_t len,
                              Vec_index_type *type_out) {
   static constexpr Vec_index_type known[] = {Vec_index_type::HNSW};
@@ -136,6 +129,18 @@ bool vec_index_type_by_token(const char *token, size_t len,
     }
   }
   return false;
+}
+
+/* One "<tid>" or "<iid>" field of a computed aux name.
+
+Check each field here instead, so a user table that merely begins like an
+aux name stays a user table. */
+static bool vec_aux_field_is_object_id(const char *begin, const char *end) {
+  if (begin >= end) return false;
+  for (const char *p = begin; p < end; ++p) {
+    if (isxdigit(static_cast<unsigned char>(*p)) == 0) return false;
+  }
+  return true;
 }
 
 /* Match the FULL computed shape "<db>/percona_vec_<type>_<tid>_<iid>": the
@@ -152,10 +157,10 @@ bool vec_aux_parse_table_name(const char *name, table_id_t *parent_id_out,
   if (name == nullptr) return false;
   const char *slash = strchr(name, '/');
   const char *after_db = slash != nullptr ? slash + 1 : name;
-  if (strncmp(after_db, VEC_AUX_PREFIX, strlen(VEC_AUX_PREFIX)) != 0) {
-    return false;
-  }
-  const char *token = after_db + strlen(VEC_AUX_PREFIX);
+  const size_t prefix_len = strlen(VEC_AUX_PREFIX);
+  if (strlen(after_db) < prefix_len) return false;
+  if (memcmp(after_db, VEC_AUX_PREFIX, prefix_len) != 0) return false;
+  const char *token = after_db + prefix_len;
 
   const char *token_end = strchr(token, '_');
   if (token_end == nullptr || token_end == token) return false;
@@ -165,11 +170,17 @@ bool vec_aux_parse_table_name(const char *name, table_id_t *parent_id_out,
     return false;
   }
 
+  /* Exactly two id fields, the second ending the string. Without that
+  last requirement "percona_vec_hnsw_1_2xyz" and
+  "percona_vec_hnsw_1_2_extra" are both read as aux tables. */
   const char *tail = token_end + 1;
-  table_id_t pid = 0;
-  if (!fts_read_object_id(&pid, tail)) return false;
   const char *sep = strchr(tail, '_');
   if (sep == nullptr) return false;
+  if (!vec_aux_field_is_object_id(tail, sep)) return false;
+  if (!vec_aux_field_is_object_id(sep + 1, tail + strlen(tail))) return false;
+
+  table_id_t pid = 0;
+  if (!fts_read_object_id(&pid, tail)) return false;
   space_index_t iid = 0;
   if (!fts_read_object_id(&iid, sep + 1)) return false;
 
@@ -292,7 +303,7 @@ void vec_update_aux_id(dict_table_t *table, upd_field_t *ufield,
   col->copy_type(dfield_get_type(&ufield->new_val));
 
   /* Storage byte order, written back over the trx member the label was minted
-  into — which then IS the field's buffer. */
+  into - which then IS the field's buffer. */
   mach_write_to_8(reinterpret_cast<byte *>(next_label), *next_label);
 
   ufield->new_val.data = next_label;
@@ -324,7 +335,7 @@ bool vec_upd_row_pk(const dict_table_t *table, const upd_node_t *node,
   /* Where the primary key comes from, and why not from node->row.
 
   row_upd_store_row() is what fills node->row, and row_upd_clust_step()
-  skips it entirely under UPD_NODE_NO_ORD_CHANGE — which is exactly the
+  skips it entirely under UPD_NODE_NO_ORD_CHANGE - which is exactly the
   case here, because a vector column is in no B-tree ordering. So
   node->row is nullptr on every UPDATE we care about.
 
@@ -376,7 +387,7 @@ uint64_t vec_assign_next_aux_id(dict_table_t *table) {
 
   /* Persist the advance as dynamic metadata, autoinc-style: the redo
   record makes the id durable the moment it is consumed, so a label can
-  never be reissued — not across restart, not across crash, and whether
+  never be reissued - not across restart, not across crash, and whether
   or not the id ever reaches the aux table. Rolled-back inserts consume
   ids that the aux maximum cannot see, which is why the aux cannot be
   the source of truth for this.
@@ -436,7 +447,7 @@ dict_table_t *create_in_mem_vec_aux_table(const char *aux_name,
       (DATA_MTYPE_MAX << 16) | DATA_BINARY_TYPE | DATA_NOT_NULL,
       VEC_AUX_VEC_COL_LEN, true);
 
-  /* base_pk BIGINT UNSIGNED NOT NULL — the base row this node describes.
+  /* base_pk BIGINT UNSIGNED NOT NULL - the base row this node describes.
   Stored here rather than reached through a secondary index on the base
   table: a secondary index carries no per-record trx_id, so its MVCC leans
   on PAGE_MAX_TRX_ID with a clustered fallback. Keeping the primary key in
@@ -445,7 +456,7 @@ dict_table_t *create_in_mem_vec_aux_table(const char *aux_name,
                          DATA_NOT_NULL | DATA_UNSIGNED, VEC_AUX_BASE_PK_COL_LEN,
                          true);
 
-  /* level TINYINT NOT NULL — stored as 1-byte INT */
+  /* level TINYINT NOT NULL - stored as 1-byte INT */
   dict_mem_table_add_col(t, heap, "level", DATA_INT, DATA_NOT_NULL,
                          VEC_AUX_LEVEL_COL_LEN, true);
 
@@ -511,7 +522,7 @@ bool vec_aux_create_dd_tables(dict_table_t *parent) {
   ut_a(parent != nullptr);
 
   /* Vec has no `fill_dd` per- index gate because PS-11264 currently allows at
-  most one vector index per table (see dd::create_dd_table validation) — so
+  most one vector index per table (see dd::create_dd_table validation) - so
   the loop either finds zero vec indexes or exactly one, and idempotency
   isn't a concern. If phase 2 lifts the one-vec-index cap AND supports
   partial DD materialization, mirror fts's fill_dd gate here. */
@@ -529,6 +540,31 @@ bool vec_aux_create_dd_tables(dict_table_t *parent) {
     if (!ok) return false;
   }
   return true;
+}
+
+dberr_t vec_aux_lock_all_tables(THD *thd, const dict_table_t *parent) {
+  ut_a(parent != nullptr);
+
+  for (const dict_index_t *idx = UT_LIST_GET_FIRST(parent->indexes);
+       idx != nullptr; idx = UT_LIST_GET_NEXT(indexes, idx)) {
+    if (!idx->is_vector()) continue;
+
+    char aux_name[MAX_FULL_NAME_LEN];
+    vec_aux_get_table_name(parent, idx->id, Vec_index_type::HNSW, aux_name,
+                           sizeof(aux_name));
+
+    std::string db_n;
+    std::string table_n;
+    dict_name::get_table(aux_name, db_n, table_n);
+
+    MDL_ticket *exclusive_mdl = nullptr;
+    if (dd::acquire_exclusive_table_mdl(thd, db_n.c_str(), table_n.c_str(),
+                                        false, &exclusive_mdl)) {
+      return DB_ERROR;
+    }
+  }
+
+  return DB_SUCCESS;
 }
 
 dberr_t vec_aux_drop_one_table(trx_t *trx, const dict_table_t *parent,
@@ -567,11 +603,11 @@ dberr_t vec_aux_drop_one_table(trx_t *trx, const dict_table_t *parent,
 
   /* row_drop_table_for_mysql only tears down dict_sys + the .ibd. The matching
   dd::Table + dd::Tablespace entries created by dd_create_vec_aux_table
-  linger until we explicitly drop them; reuse dd_drop_fts_table for that,
+  linger until we explicitly drop them; reuse dd_drop_aux_table for that,
   which is generic across aux-table kinds. dict_sys mutex must be released
   around the DD client call.
 
-  Vec has no aux_vec mode — the DD drop always happens here, potentially
+  Vec has no aux_vec mode - the DD drop always happens here, potentially
   under an open parent-drop trx. Acceptable in phase 1 (empty aux, one aux
   per index, no partial- batch window); the aux_vec deferral is the upgrade
   path if PS-11300's crash-atomicity work needs it. */
@@ -579,12 +615,12 @@ dberr_t vec_aux_drop_one_table(trx_t *trx, const dict_table_t *parent,
   if (dict_locked) {
     dict_sys_mutex_exit();
   }
-  (void)dd_drop_fts_table(aux_name, file_per_table);
+  (void)dd_drop_aux_table(aux_name, file_per_table);
   if (dict_locked) {
     dict_sys_mutex_enter();
   }
 
-  /* Treat NOT_FOUND from the in-memory drop as success — covers tables
+  /* Treat NOT_FOUND from the in-memory drop as success - covers tables
   created before this code landed. */
   return err == DB_TABLE_NOT_FOUND ? DB_SUCCESS : err;
 }
@@ -634,8 +670,8 @@ void vec_aux_detach_tables(const dict_table_t *parent, bool dict_locked) {
 namespace {
 
 /** Build the post-rename aux name. Given the OLD aux name
-"old_db/vec_<tid>_<iid>" and the parent's NEW name "new_db/<tbl>", write
-"new_db/vec_<tid>_<iid>" into `out`. */
+"old_db/percona_vec_<type>_<tid>_<iid>" and the parent's NEW name
+"new_db/<tbl>", write "new_db/percona_vec_<type>_<tid>_<iid>" into `out`. */
 void rebuild_aux_name_with_new_db(const char *old_aux_name,
                                   const char *new_parent_name, char *out,
                                   size_t out_len) {
@@ -676,29 +712,27 @@ dberr_t vec_aux_rename_tables(trx_t *trx, dict_table_t *parent,
                                              nullptr, trx, replay);
     if (err != DB_SUCCESS) {
       ib::warn(ER_IB_MSG_466)
-          << "Failed to rename vector aux table " << old_aux_name << " -> "
+          << "Failed to rename vector aux table " << old_aux_name << " to "
           << new_aux_name << " err=" << static_cast<int>(err);
       return err;
     }
 
     /* Update the DD entry (dd::Table parent schema_id + dd::Tablespace
-    file_name) — reuses dd_rename_fts_table since aux tables are
+    file_name) - reuses dd_rename_aux_table since aux tables are
     DD-registered with the same shape. dict_sys mutex must be released
     around the DD client call. */
     if (!replay) {
       dict_table_t *aux = dict_table_check_if_in_cache_low(new_aux_name);
-      ut_ad(aux != nullptr);
-      if (aux != nullptr) {
-        aux->acquire();
-        dict_sys_mutex_exit();
-        const bool ok = dd_rename_fts_table(aux, old_aux_name);
-        dict_sys_mutex_enter();
-        aux->release();
-        if (!ok) {
-          ib::warn(ER_IB_MSG_466)
-              << "Failed to rename DD entry for vector aux " << old_aux_name;
-          return DB_ERROR;
-        }
+      ut_a(aux != nullptr);
+      aux->acquire();
+      dict_sys_mutex_exit();
+      const bool ok = dd_rename_aux_table(aux, old_aux_name);
+      dict_sys_mutex_enter();
+      aux->release();
+      if (!ok) {
+        ib::warn(ER_IB_MSG_466)
+            << "Failed to rename DD entry for vector aux " << old_aux_name;
+        return DB_ERROR;
       }
     }
   }

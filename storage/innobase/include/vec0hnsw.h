@@ -49,9 +49,9 @@ class THD;
 
 /** Everything a callback needs that is NOT a property of the index.
 
-The class requires the persistor itself to be stateless — "no mutable
+The class requires the persistor itself to be stateless - "no mutable
 per-call, per-transaction, or per-thread fields... callbacks must not
-rely on data written to Persistor members during a prior call" — because
+rely on data written to Persistor members during a prior call" - because
 one persistor instance is stored by value for the index's lifetime and
 serves every caller. So all of it lives here and is passed in. */
 struct Vec_ctx {
@@ -70,6 +70,20 @@ struct Vec_ctx {
   report: each one short-circuits when it is already set, and the caller
   inspects it once insert() returns. */
   dberr_t err{DB_SUCCESS};
+  /** Whether a callback may commit trx and start it again.
+
+  True for DML, where trx is a background sub-transaction and committing
+  per callback is what stops concurrent inserts deadlocking on each
+  other's neighbour rows.
+
+  False for an index build, where trx is the ALTER's own transaction.
+  Committing there would commit the DDL itself a node at a time: it ends
+  the transaction the dictionary changes are being made in, clears
+  trx->dict_operation, drops the locks the ALTER holds, and marks a user
+  transaction internal so its GTID is no longer persisted. Nothing is
+  gained either, because an index under construction is invisible, so
+  there is no second writer to deadlock against. */
+  bool commit_steps{true};
 };
 
 /* The persistor's shims forward here. Ordinary functions, so their
@@ -88,10 +102,10 @@ dberr_t vec_persist_entry_point(Vec_ctx *ctx, uint64_t id);
 /** Fill an unloaded node from its aux row.
 
 A template only because LoadNodeHandle is nested in the instantiation,
-which also means it must be defined wherever it is instantiated — the
+which also means it must be defined wherever it is instantiated - the
 graph's search path can call it, so the definition cannot live in a .cc.
 
-A node is faulted in when traversal reaches a stub — one created by a
+A node is faulted in when traversal reaches a stub - one created by a
 neighbour list naming an id whose node has not been read yet. */
 template <typename Hnsw>
 dberr_t vec_persist_load_node(Vec_ctx *ctx, Hnsw &hnsw,
@@ -140,7 +154,7 @@ dberr_t vec_persist_load_node(Vec_ctx *ctx, Hnsw &hnsw,
 
 /** Sink for the graph's persistence callbacks.
 
-Stateless by contract — every member of the "state" a callback needs is
+Stateless by contract - every member of the "state" a callback needs is
 in Vec_ctx. The callbacks are member templates because the neighbour
 range type is nested inside the instantiation that needs this class, so
 naming it here would be circular; each one is a thin shim that converts
@@ -206,14 +220,14 @@ registration check there is. */
 /** UniformRandomBitGenerator for the graph's layer draw, over InnoDB's RNG.
 
 HNSW does not synchronise RandomEngine access, and its contract requires a
-thread-safe one once inserts may run concurrently (hnsw.h) — which
+thread-safe one once inserts may run concurrently (hnsw.h) - which
 they now may. Its default, std::default_random_engine, is not, so the graph
 would race on the RNG state inside random_layer().
 
 ut::random_64() is thread-safe by construction rather than by locking: its
 state is `extern thread_local uint64_t random_seed` (ut0rnd.h), seeded
 per thread from this_thread_hash + my_timer_cycles(). Each thread draws
-from its own stream, so there is no shared state and no mutex — which is
+from its own stream, so there is no shared state and no mutex - which is
 why this is preferable to wrapping a std:: engine, and why it is what the
 rest of InnoDB uses.
 
@@ -244,7 +258,7 @@ struct vec_t : public Vec_runtime {
 
   /** The graph. Owns its arena and its persistor by value. */
   Vec_hnsw *hnsw{nullptr};
-  /** Serialises the one-time build of the graph. Cold path only — nothing
+  /** Serialises the one-time build of the graph. Cold path only - nothing
   on this object is locked once `loaded` is true.
 
   The HNSW class is thread-safe for everything we do afterwards: concurrent
@@ -253,7 +267,7 @@ struct vec_t : public Vec_runtime {
   node state under it). None of that needs a latch from us.
 
   The one thing the class declines is init_from_entry_point() running
-  alongside insert or search (hnsw.h) — it mutates m_nodes and the arena
+  alongside insert or search (hnsw.h) - it mutates m_nodes and the arena
   without taking m_global_lock, which insert() does take. This mutex makes
   that unreachable rather than merely unlikely: `loaded` goes false to true
   exactly once, and only after the graph is fully built, so no thread can
@@ -262,7 +276,7 @@ struct vec_t : public Vec_runtime {
 
   Not std::call_once: vec_runtime_load reports failure by *returning*
   DB_OUT_OF_MEMORY rather than throwing, and call_once would consume the
-  flag on a normal return — leaving the index permanently unloaded after a
+  flag on a normal return - leaving the index permanently unloaded after a
   transient failure. Here a failure simply leaves `loaded` false and the
   next statement retries. */
   std::mutex load_mutex;
@@ -301,7 +315,7 @@ The aux writes ride a SUB-TRANSACTION, not the caller's. That is the
 whole point of the design: the graph is an in-memory cache whose only
 durable form is the aux table, and a node that survives in memory while
 its aux rows roll back would leave the two permanently disagreeing. So
-the aux commits independently, and the invariant is one-directional —
+the aux commits independently, and the invariant is one-directional -
 the aux is a superset of the committed base rows. Orphans are filtered
 at read time by looking base_pk up under the reader's view.
 @param[in,out]  trx    the user's transaction (for the base row, not the aux)
@@ -316,7 +330,7 @@ dberr_t vec_insert_row(trx_t *trx, dict_table_t *table, const dtuple_t *row,
 
 A node is immutable, so a changed vector is an INSERT of a new node
 under the label calc_row_difference already put into the update vector.
-The superseded node is left exactly as it is — it is still the right
+The superseded node is left exactly as it is - it is still the right
 answer for read views that predate this statement, and removing it would
 break their isolation rather than tidy up.
 @param[in,out]  trx    the user's transaction
@@ -327,7 +341,7 @@ break their isolation rather than tidy up.
 @param[in]      thd    session
 @return DB_SUCCESS, or an error */
 /** Populate a newly added vector index from the rows already in the
-table — the ddl0fts analog for HNSW.
+table - the ddl0fts analog for HNSW.
 
 Runs during ALGORITHM=INPLACE ADD, from one clustered scan, without
 rebuilding the table or writing a single base row. Each row is inserted
@@ -336,7 +350,7 @@ percona_vec_aux_id column, so a rebuild preserves labels rather than
 minting new ones, and the ordinary persistence callbacks write the aux
 rows.
 
-Those writes ride @p trx — the ALTER's own transaction, not a
+Those writes ride @p trx - the ALTER's own transaction, not a
 sub-transaction as DML uses. That is deliberate and is the opposite of
 the sub-transaction rule in the design: the aux does not exist yet
 outside this ALTER, so if the ALTER fails its rows must disappear with
@@ -359,8 +373,9 @@ storage error */
 /** Search the graph, loading it from the aux table first if needed.
 
 The raw graph search: candidates in ascending distance order, straight
-out of k_nn_search(). It applies neither MVCC check of design section 14
-— both need the reader's transaction, which lives above this call. What
+out of k_nn_search(). It applies neither MVCC check of the design's
+"How MVCC works"
+- both need the reader's transaction, which lives above this call. What
 it does supply is the node id each candidate came from, which is what
 lets check (1) be made at all.
 
@@ -380,7 +395,7 @@ dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
 
 Opaque by design: it owns the class's `NNSearchContext`, which is neither
 copyable nor movable, plus the aux table and the MDL ticket that have to
-stay alive for the whole scan — `nn_search_next` faults nodes in through
+stay alive for the whole scan - `nn_search_next` faults nodes in through
 `load_node_cb`, which reads the aux. Allocated by vec_knn_open and
 released by vec_knn_close; the handler holds only the pointer. */
 struct vec_search_t;
@@ -406,7 +421,7 @@ dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
 
 /** Take the next candidate from a scan.
 
-Candidates arrive in non-decreasing distance order and never repeat — the
+Candidates arrive in non-decreasing distance order and never repeat - the
 scan's own visited set guarantees it, so there is no exclusion list to
 keep. Ordering is enforced by the class, which drops a refilled candidate
 closer than one already yielded rather than emitting it out of order.
@@ -424,7 +439,7 @@ dberr_t vec_knn_error(const vec_search_t *s);
 /** End a scan and release the aux table and its MDL. Safe on nullptr. */
 void vec_knn_close(vec_search_t *s);
 
-/** The vector index on @p table, or nullptr. At most one exists (§23). */
+/** The vector index on @p table, or nullptr. At most one exists. */
 dict_index_t *vec_index_of(dict_table_t *table);
 
 /** Dimensions the index was built with; 0 if it has no runtime yet. */
