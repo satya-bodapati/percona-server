@@ -31,9 +31,12 @@ The HNSW runtime and the persistence callbacks behind it.
 #include "srv0srv.h"
 
 #include <variant>
+#include "btr0pcur.h"
 #include "dict0dd.h"
 #include "dict0dict.h"
+#include "lock0lock.h"
 #include "mach0data.h"
+#include "my_dbug.h"
 #include "sql/field.h"
 #include "sql/table.h"
 #include "trx0roll.h"
@@ -91,8 +94,8 @@ static void vec_ctx_step_commit(Vec_ctx *ctx) {
 dberr_t vec_persist_insert(Vec_ctx *ctx, uint64_t id, uint64_t base_pk,
                            const char *q, uint8_t layer,
                            const std::vector<byte> &neighbors) {
-  ut_a(ctx->aux != nullptr);
-  ut_a(id != 0); /* 0 is the empty-slot sentinel; record 0 is metadata */
+  ut_ad(ctx->aux != nullptr);
+  ut_ad(id != 0); /* 0 is the empty-slot sentinel; record 0 is metadata */
 
   vec_aux_row_t row;
   row.id = id;
@@ -110,7 +113,7 @@ dberr_t vec_persist_insert(Vec_ctx *ctx, uint64_t id, uint64_t base_pk,
 
 dberr_t vec_persist_update_neighbors(Vec_ctx *ctx, uint64_t id,
                                      const std::vector<byte> &neighbors) {
-  ut_a(ctx->aux != nullptr);
+  ut_ad(ctx->aux != nullptr);
   const dberr_t err = vec_aux_update_row(ctx->trx, ctx->aux, id,
                                          neighbors.data(), neighbors.size());
 
@@ -134,7 +137,7 @@ dberr_t vec_persist_update_neighbors(Vec_ctx *ctx, uint64_t id,
 }
 
 dberr_t vec_persist_entry_point(Vec_ctx *ctx, uint64_t id) {
-  ut_a(ctx->aux != nullptr);
+  ut_ad(ctx->aux != nullptr);
 
   /* This callback commits on its own, after the node's row already has
   (vec_ctx_step_commit), so a crash between the two leaves record 0 naming
@@ -193,9 +196,9 @@ dberr_t vec_persist_entry_point(Vec_ctx *ctx, uint64_t id) {
 
 vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
                         THD *thd) {
-  ut_a(index != nullptr);
-  ut_a(index->is_vector());
-  ut_a(key != nullptr);
+  ut_ad(index != nullptr);
+  ut_ad(index->is_vector());
+  ut_ad(key != nullptr);
 
   if (vec_t *existing = vec_runtime_get(index); existing != nullptr) {
     return existing;
@@ -231,7 +234,7 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
   correct, though, and indexing form->field with it is exactly the dance
   create_index() does (ha_innodb.cc) to see past a forged prefix
   field. */
-  ut_a(key->user_defined_key_parts == 1);
+  ut_ad(key->user_defined_key_parts == 1);
   const Field *f = form->field[key->key_part[0].field->field_index()];
   if (f == nullptr || f->type() != MYSQL_TYPE_VECTOR) {
     ib::error(ER_IB_MSG_456)
@@ -326,7 +329,7 @@ An aux with no record 0 is an EMPTY index, not a broken one: record 0 is
 written when the first node is inserted, so its absence means no node
 has ever been inserted. */
 static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
-  ut_a(vec->hnsw == nullptr);
+  ut_ad(vec->hnsw == nullptr);
 
   /* innodb_hnsw_max_memory, at the entry to the load. Same charge check
   as vec_add_node: is the budget already spent, not would this fit. What
@@ -336,8 +339,8 @@ static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
   needed - this one so a cold index cannot start loading into a budget
   that is already gone, that one so the load cannot run past it. */
   if (srv_hnsw_max_memory != 0 &&
-      vec_arena_global_bytes() >= srv_hnsw_max_memory) {
-    return DB_OUT_OF_MEMORY;
+      Vec_arena::global_bytes() >= srv_hnsw_max_memory) {
+    return DB_VEC_OUT_OF_MEMORY;
   }
 
   vec->hnsw =
@@ -401,9 +404,9 @@ static const char *vec_row_vector_bytes(const dict_index_t *index,
 
   Ignore the field's prefix_len - get_index_prefix_len() reports 1 for a
   vector key part, which describes nothing about the column. */
-  ut_a(index->n_fields == 1);
+  ut_ad(index->n_fields == 1);
   const ulint col_no = dict_col_get_no(index->get_field(0)->col);
-  ut_a(col_no < dtuple_get_n_fields(row));
+  ut_ad(col_no < dtuple_get_n_fields(row));
 
   const dfield_t *df = dtuple_get_nth_field(row, col_no);
   if (dfield_is_null(df)) return nullptr;
@@ -416,28 +419,60 @@ static const char *vec_row_vector_bytes(const dict_index_t *index,
 Shared by INSERT and by a vector-column UPDATE, because to the graph
 they are the same operation: a node is immutable, so a changed vector is
 a new node rather than an edit of the old one. */
-static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
+/** Load the graph once, under load_mutex.
+
+A corrupt aux is sticky: it will not read correctly next time either, so the
+index is marked corrupt and every statement on it fails with
+ER_INDEX_CORRUPT until DROP and re-ADD rebuild it. Any other failure is
+treated as transient - the runtime stays unloaded and the next statement
+retries.
+
+Also refuses a graph already known to be short of nodes.
+@param[in,out]  vec    the runtime
+@param[in]      index  the index owning it, for marking it corrupt
+@param[in]      aux    the aux table, already open
+@param[in]      thd    session
+@return DB_SUCCESS, or the reason the graph is not usable */
+static dberr_t vec_runtime_load_once(vec_t *vec, dict_index_t *index,
+                                     dict_table_t *aux, THD *thd) {
+  if (vec->corrupted_hnsw.load(std::memory_order_acquire)) return DB_CORRUPTION;
+
+  if (vec->loaded.load(std::memory_order_acquire)) return DB_SUCCESS;
+
+  std::lock_guard<std::mutex> g(vec->load_mutex);
+  if (vec->loaded.load(std::memory_order_relaxed)) return DB_SUCCESS;
+
+  const dberr_t err = vec_runtime_load(vec, aux, thd);
+  if (err == DB_CORRUPTION) {
+    dict_set_corrupted(index);
+  }
+  return err;
+}
+
+/** Record that a node failed to load mid-statement. HNSW has marked it lost
+and will not retry, so the graph can no longer answer correctly. The graph
+is not freed here - searches may be walking it - so a flag stands in until
+the runtime is built again.
+@param[in,out]  vec  the runtime */
+static void vec_runtime_set_corrupted(vec_t *vec) {
+  vec->corrupted_hnsw.store(true, std::memory_order_release);
+}
+
+static dberr_t vec_add_node(vec_t *vec, dict_index_t *index,
+                            dict_table_t *table, uint64_t label,
                             uint64_t base_pk, const char *q, THD *thd) {
   /* innodb_hnsw_max_memory, checked BEFORE insert() starts mutating.
 
-  Vec_arena::allocate() is the single point every graph byte passes
-  through and would be the natural place to refuse - but refusing there
-  returns nullptr, which hnsw.h turns into a throw (four sites, e.g.
-  Node::create) partway through a rewire, with neighbours already
-  relinked and no per-block free to unwind with. So the refusal happens
-  here instead, at the entry to the operation, where nothing has been
-  touched yet and DB_OUT_OF_MEMORY simply fails the statement.
+  Refused here, at the entry to the operation, rather than in
+  Vec_arena::allocate(): the arena has no per-block free, so a refusal
+  partway through a rewire cannot be unwound.
 
-  This is a charge check, not a prediction: it asks whether the budget is
-  already spent, not whether this insert would fit. Sizing the insert is
-  not possible from outside the class - sizeof(Node) is private, and one
-  insert also allocates stubs for lazily loaded neighbours and a copy of
-  the query vector. The budget can therefore be exceeded by at most what
-  one insert allocates, which is the price of refusing before mutating
-  rather than during. */
+  A charge check, not a prediction - it asks whether the budget is spent,
+  not whether this insert fits. Taken outside the graph's lock, so the
+  overshoot is one insert's allocation per thread already past it. */
   if (srv_hnsw_max_memory != 0 &&
-      vec_arena_global_bytes() >= srv_hnsw_max_memory) {
-    return DB_OUT_OF_MEMORY;
+      Vec_arena::global_bytes() >= srv_hnsw_max_memory) {
+    return DB_VEC_OUT_OF_MEMORY;
   }
 
   MDL_ticket *mdl = nullptr;
@@ -487,18 +522,13 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
   ctx.vec_bytes = vec->dims * sizeof(float);
   ctx.err = DB_SUCCESS;
 
-  /* Lazy build, once. Double-checked on the atomic, so a warm index takes
-  no lock here and none at all below. */
-  if (!vec->loaded.load(std::memory_order_acquire)) {
-    std::lock_guard<std::mutex> g(vec->load_mutex);
-    if (!vec->loaded.load(std::memory_order_relaxed)) {
-      const dberr_t lerr = vec_runtime_load(vec, aux, thd);
-      if (lerr != DB_SUCCESS) {
-        trx_rollback_to_savepoint(aux_trx, nullptr);
-        trx_free_for_background(aux_trx);
-        vec_aux_close_for_dml(aux, thd, &mdl);
-        return lerr;
-      }
+  {
+    const dberr_t lerr = vec_runtime_load_once(vec, index, aux, thd);
+    if (lerr != DB_SUCCESS) {
+      trx_rollback_to_savepoint(aux_trx, nullptr);
+      trx_free_for_background(aux_trx);
+      vec_aux_close_for_dml(aux, thd, &mdl);
+      return lerr;
     }
   }
 
@@ -512,6 +542,10 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
   if (ctx.err == DB_SUCCESS) {
     trx_commit_for_mysql(aux_trx);
   } else {
+    /* Whatever went wrong, a node may have failed to load on the way in
+    and HNSW will not retry it. */
+    vec_runtime_set_corrupted(vec);
+
     /* trx_rollback_to_savepoint, not trx_rollback_for_mysql: the aux
     transaction is a BACKGROUND trx, so it is not in the MySQL trx list that
     trx_rollback_for_mysql asserts membership of.
@@ -546,8 +580,8 @@ uint32_t vec_index_dims(const dict_index_t *index) {
 dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
                        size_t ef_search, std::vector<vec_hit_t> *out, THD *thd,
                        const std::unordered_set<uint64_t> *exclude) {
-  ut_a(index != nullptr && index->is_vector());
-  ut_a(q != nullptr && out != nullptr);
+  ut_ad(index != nullptr && index->is_vector());
+  ut_ad(q != nullptr && out != nullptr);
   out->clear();
 
   auto *vec = vec_runtime_get(index);
@@ -558,14 +592,11 @@ dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
       vec_aux_open_for_dml(vec->table, vec->index_id, thd, &mdl);
   if (aux == nullptr) return DB_TABLE_NOT_FOUND;
 
-  if (!vec->loaded.load(std::memory_order_acquire)) {
-    std::lock_guard<std::mutex> g(vec->load_mutex);
-    if (!vec->loaded.load(std::memory_order_relaxed)) {
-      const dberr_t lerr = vec_runtime_load(vec, aux, thd);
-      if (lerr != DB_SUCCESS) {
-        vec_aux_close_for_dml(aux, thd, &mdl);
-        return lerr;
-      }
+  {
+    const dberr_t lerr = vec_runtime_load_once(vec, index, aux, thd);
+    if (lerr != DB_SUCCESS) {
+      vec_aux_close_for_dml(aux, thd, &mdl);
+      return lerr;
     }
   }
 
@@ -599,6 +630,7 @@ dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
   }
 
   const dberr_t err = ctx.err;
+  if (err != DB_SUCCESS) vec_runtime_set_corrupted(vec);
   vec_aux_close_for_dml(aux, thd, &mdl);
   return err;
 }
@@ -618,9 +650,9 @@ struct vec_search_t {
 
 dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
                      size_t ef_search, THD *thd, vec_search_t **out) {
-  ut_a(index != nullptr && index->is_vector());
-  ut_a(q != nullptr && out != nullptr);
-  ut_a(batch_size > 0);
+  ut_ad(index != nullptr && index->is_vector());
+  ut_ad(q != nullptr && out != nullptr);
+  ut_ad(batch_size > 0);
   *out = nullptr;
 
   auto *vec = vec_runtime_get(index);
@@ -631,14 +663,11 @@ dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
       vec_aux_open_for_dml(vec->table, vec->index_id, thd, &mdl);
   if (aux == nullptr) return DB_TABLE_NOT_FOUND;
 
-  if (!vec->loaded.load(std::memory_order_acquire)) {
-    std::lock_guard<std::mutex> g(vec->load_mutex);
-    if (!vec->loaded.load(std::memory_order_relaxed)) {
-      const dberr_t lerr = vec_runtime_load(vec, aux, thd);
-      if (lerr != DB_SUCCESS) {
-        vec_aux_close_for_dml(aux, thd, &mdl);
-        return lerr;
-      }
+  {
+    const dberr_t lerr = vec_runtime_load_once(vec, index, aux, thd);
+    if (lerr != DB_SUCCESS) {
+      vec_aux_close_for_dml(aux, thd, &mdl);
+      return lerr;
     }
   }
 
@@ -675,7 +704,7 @@ dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
 }
 
 bool vec_knn_next(vec_search_t *s, vec_hit_t *hit) {
-  ut_a(s != nullptr && hit != nullptr);
+  ut_ad(s != nullptr && hit != nullptr);
   if (s->ctx.err != DB_SUCCESS) return false;
 
   const auto next = s->vec->hnsw->nn_search_next(&s->nn);
@@ -725,14 +754,33 @@ struct Vec_build {
   dict_index_t *index{nullptr};
 };
 
-Vec_build *vec_build_start(dict_index_t *index, const TABLE *altered_table) {
-  ut_a(index != nullptr && index->is_vector());
-  if (altered_table == nullptr) return nullptr;
+Vec_build *vec_build_start(dict_index_t *index, const TABLE *altered_table,
+                           dberr_t *err) {
+  ut_ad(index != nullptr && index->is_vector());
+
+  /* Anything below this point that is not the memory check is this index's
+  own KEY not being where it should be - a defect in the caller or in the
+  DD round-trip, never a resource shortage. Reporting it as
+  DB_OUT_OF_MEMORY would send whoever reads the error chasing free memory
+  that was never the problem, so every such branch reports DB_ERROR
+  instead and logs which check failed. */
+  const auto fail_config = [&](const char *why) -> Vec_build * {
+    *err = DB_ERROR;
+    ib::error(ER_IB_MSG_456)
+        << "Failed to start the vector index build for index " << index->name
+        << " on table " << index->table->name << ": " << why
+        << "; the build cannot proceed.";
+    return nullptr;
+  };
+
+  if (altered_table == nullptr) return fail_config("no altered table");
 
   /* Same pre-flight as the DML path (design: "Memory limits"): refuse
-  before building anything rather than throwing partway through. */
+  before building anything rather than throwing partway through. This is
+  the one branch that is an actual resource shortage. */
   if (srv_hnsw_max_memory != 0 &&
-      vec_arena_global_bytes() >= srv_hnsw_max_memory) {
+      Vec_arena::global_bytes() >= srv_hnsw_max_memory) {
+    *err = DB_VEC_OUT_OF_MEMORY;
     return nullptr;
   }
 
@@ -748,38 +796,58 @@ Vec_build *vec_build_start(dict_index_t *index, const TABLE *altered_table) {
       break;
     }
   }
-  if (vkey == nullptr) return nullptr;
+
+  /* Test-only: let an MTR test force the "KEY not found" branch below
+  without needing a genuinely corrupt DD round-trip. */
+  DBUG_EXECUTE_IF("vec_build_start_key_not_found", vkey = nullptr;);
+
+  if (vkey == nullptr) {
+    return fail_config("no matching vector KEY in the altered table");
+  }
 
   storage::innobase::vec::VectorIndexParam vip;
-  if (storage::innobase::vec::parse_options(*vkey, vip)) return nullptr;
+  if (storage::innobase::vec::parse_options(*vkey, vip)) {
+    return fail_config("could not parse the index's WITH(...) options");
+  }
 
   const auto *hp = std::get_if<storage::innobase::vec::HnswParam>(&vip);
-  if (hp == nullptr) return nullptr;
+  if (hp == nullptr) {
+    return fail_config("WITH(...) options do not describe an HNSW index");
+  }
 
   /* Same resolution as vec_runtime_open: the key part describes a 1-byte
   prefix, but its field_index() is correct. */
   const Field *f = altered_table->field[vkey->key_part[0].field->field_index()];
-  if (f == nullptr || f->type() != MYSQL_TYPE_VECTOR) return nullptr;
+  if (f == nullptr || f->type() != MYSQL_TYPE_VECTOR) {
+    return fail_config("the indexed column is not a VECTOR column");
+  }
 
   const uint32_t dims =
       down_cast<const Field_vector *>(f)->get_max_dimensions();
-  if (dims == 0 || hp->M == 0) return nullptr;
+  if (dims == 0 || hp->M == 0) {
+    return fail_config("invalid vector dimensions or M");
+  }
 
   auto *b = ut::new_withkey<Vec_build>(
       UT_NEW_THIS_FILE_PSI_KEY, dims, static_cast<uint32_t>(hp->M),
       static_cast<uint32_t>(hp->ef_construction), hp->dist, index);
 
-  if (b == nullptr) return nullptr;
-  if (b->graph == nullptr) {
-    ut::delete_(b);
+  if (b == nullptr) {
+    *err = DB_OUT_OF_MEMORY;
     return nullptr;
   }
+  if (b->graph == nullptr) {
+    ut::delete_(b);
+    *err = DB_OUT_OF_MEMORY;
+    return nullptr;
+  }
+  *err = DB_SUCCESS;
   return b;
 }
 
 dberr_t vec_build_add_row(Vec_build *b, dict_table_t *table,
                           const dtuple_t *row) {
-  ut_a(b != nullptr && b->graph != nullptr);
+  ut_ad(b != nullptr && b->graph != nullptr);
 
   ulint vec_len = 0;
   const char *q = vec_row_vector_bytes(b->index, row, &vec_len);
@@ -789,13 +857,13 @@ dberr_t vec_build_add_row(Vec_build *b, dict_table_t *table,
   /* Label 0 is the empty-slot sentinel and can never be a node. A row
   carrying it means the stamping path missed it. */
   const uint64_t id = vec_get_aux_id_from_row(table, row);
-  ut_a(id != 0);
+  ut_ad(id != 0);
 
   const dfield_t *pk_df = nullptr;
   const dict_index_t *clust = table->first_index();
-  ut_a(dict_index_get_n_unique(clust) == 1);
+  ut_ad(dict_index_get_n_unique(clust) == 1);
   pk_df = dtuple_get_nth_field(row, clust->get_col_no(0));
-  ut_a(!dfield_is_null(pk_df) && dfield_get_len(pk_df) == 8);
+  ut_ad(!dfield_is_null(pk_df) && dfield_get_len(pk_df) == 8);
   const uint64_t base_pk =
       mach_read_from_8(static_cast<const byte *>(dfield_get_data(pk_df)));
 
@@ -806,16 +874,16 @@ dberr_t vec_build_add_row(Vec_build *b, dict_table_t *table,
   threads can pass this together and overshoot by a node each, which is
   bounded by the thread count and cheaper than serialising them. */
   if (srv_hnsw_max_memory != 0 &&
-      vec_arena_global_bytes() >= srv_hnsw_max_memory) {
-    return DB_OUT_OF_MEMORY;
+      Vec_arena::global_bytes() >= srv_hnsw_max_memory) {
+    return DB_VEC_OUT_OF_MEMORY;
   }
   return DB_SUCCESS;
 }
 
 dberr_t vec_build_write_aux(Vec_build *b, trx_t *trx, dict_table_t *table,
                             THD *thd, Flush_observer *observer) {
-  ut_a(b != nullptr && b->graph != nullptr);
-  ut_a(trx != nullptr);
+  ut_ad(b != nullptr && b->graph != nullptr);
+  ut_ad(trx != nullptr);
 
   if (b->graph->size() == 0) return DB_SUCCESS;
 
@@ -882,7 +950,7 @@ void vec_build_free(Vec_build *b) {
 dberr_t vec_update_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
                        uint64_t label, const char *q, ulint q_len,
                        uint64_t base_pk, THD *thd) {
-  ut_a(label != 0);
+  ut_ad(label != 0);
 
   for (dict_index_t *index = table->first_index(); index != nullptr;
        index = index->next()) {
@@ -890,7 +958,7 @@ dberr_t vec_update_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
     vec_t *vec = vec_runtime_get(index);
     if (vec == nullptr) continue;
     if (q_len != vec->dims * sizeof(float)) return DB_CORRUPTION;
-    const dberr_t err = vec_add_node(vec, table, label, base_pk, q, thd);
+    const dberr_t err = vec_add_node(vec, index, table, label, base_pk, q, thd);
     if (err != DB_SUCCESS) return err;
   }
   return DB_SUCCESS;
@@ -911,7 +979,12 @@ dberr_t vec_insert_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
     if (vec_len != vec->dims * sizeof(float)) return DB_CORRUPTION;
 
     const uint64_t label = vec_get_aux_id_from_row(table, row);
-    ut_a(label != 0);
+    /* 0 is impossible per this column's contract - the aux reserves it
+    for its metadata record. Skip the row rather than mint a node under
+    it. */
+    if (label == 0) {
+      continue;
+    }
 
     /* base_pk is the base row's PRIMARY KEY, not the label. A search
     returns base_pk so the caller can fetch the row; the label
@@ -919,14 +992,14 @@ dberr_t vec_insert_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
     row's hidden column. The design allows a single-column BIGINT
     UNSIGNED primary key, so it is the first clustered field. */
     const dict_index_t *clust = table->first_index();
-    ut_a(dict_index_get_n_unique(clust) == 1);
+    ut_ad(dict_index_get_n_unique(clust) == 1);
     const ulint pk_col = clust->get_col_no(0);
     const dfield_t *pk_df = dtuple_get_nth_field(row, pk_col);
-    ut_a(!dfield_is_null(pk_df) && dfield_get_len(pk_df) == 8);
+    ut_ad(!dfield_is_null(pk_df) && dfield_get_len(pk_df) == 8);
     const uint64_t base_pk =
         mach_read_from_8(static_cast<const byte *>(dfield_get_data(pk_df)));
 
-    const dberr_t err = vec_add_node(vec, table, label, base_pk, q, thd);
+    const dberr_t err = vec_add_node(vec, index, table, label, base_pk, q, thd);
     if (err != DB_SUCCESS) return err;
   }
   return DB_SUCCESS;

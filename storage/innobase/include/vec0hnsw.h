@@ -113,14 +113,23 @@ template <typename Hnsw>
 dberr_t vec_persist_load_node(Vec_ctx *ctx, Hnsw &hnsw,
                               typename Hnsw::LoadNodeHandle handle) {
   const uint64_t id = hnsw.load_node_id(handle);
-  ut_a(id != 0); /* record 0 is metadata, never a node */
+
+  /* Record 0 is the metadata record, never a node. The id comes off a
+  neighbour list read from the aux table, so a 0 here means the aux is
+  corrupt - report it rather than fault in the metadata as a node. */
+  ut_ad(id != 0);
+  if (id == 0) return DB_CORRUPTION;
 
   mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
   vec_aux_read_t node;
   dberr_t err = vec_aux_read_node(ctx->aux, id, heap, &node);
   if (err != DB_SUCCESS) {
     mem_heap_free(heap);
-    return err;
+    /* A miss here is never benign: this id came off a neighbour list, so
+    the graph says the node must exist. DB_RECORD_NOT_FOUND would reach
+    the client as HA_ERR_NO_ACTIVE_RECORD, indistinguishable from an
+    ordinary missing row. Report it as what it is. */
+    return err == DB_RECORD_NOT_FOUND ? DB_ANN_NODE_NOT_FOUND : err;
   }
 
   if (node.vec_len != ctx->vec_bytes) {
@@ -371,6 +380,17 @@ struct vec_t : public Vec_runtime {
   release/acquire ordering: it publishes the `hnsw` pointer to every thread
   that sees it true, which is what lets the hot paths run unlocked. */
   std::atomic<bool> loaded{false};
+
+  /** Set when a node failed to load during a search or an insert. HNSW has
+  marked that node lost and never retries it, so this graph would answer
+  later queries with fewer rows and no error. Once set, every statement on
+  this index fails instead. Cleared only by building the runtime again -
+  a reopen after eviction, DROP and re-ADD, or a restart.
+
+  A flag rather than freeing and reloading the graph: readers do not take
+  load_mutex once `loaded` is true, so freeing `hnsw` here would run
+  concurrently with searches already walking it. */
+  std::atomic<bool> corrupted_hnsw{false};
 };
 
 /** Open (lazily create) the runtime for a vector index.
@@ -552,11 +572,18 @@ struct Vec_build;
 /** Start building `index`. The HNSW parameters come from the index's own
 definition in `altered_table`, which is the only place they exist during
 an ALTER - nothing in the dictionary carries M or ef_construction.
-@param[in]  index          the vector index being built
-@param[in]  altered_table  the MySQL table definition the ALTER produces
+@param[in]   index          the vector index being built
+@param[in]   altered_table  the MySQL table definition the ALTER produces
+@param[out]  err            DB_SUCCESS on success; on failure, DB_OUT_OF_MEMORY
+                            only for an actual allocation/memory-budget
+                            failure, DB_ERROR for anything else (the index's
+                            own KEY could not be found or parsed) - the two
+                            are not interchangeable to the caller, which
+                            reports err to the user
 @return the build state, or nullptr if it could not be created */
 [[nodiscard]] Vec_build *vec_build_start(dict_index_t *index,
-                                         const TABLE *altered_table);
+                                         const TABLE *altered_table,
+                                         dberr_t *err);
 
 /** Add one base row to the graph. Called from the DDL scan's per-row
 callback, concurrently from every scan thread: HNSW::insert serialises

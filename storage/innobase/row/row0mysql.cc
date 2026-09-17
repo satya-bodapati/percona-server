@@ -1161,11 +1161,8 @@ handle_new_error:
     case DB_CANNOT_ADD_CONSTRAINT:
     case DB_TOO_MANY_CONCURRENT_TRXS:
     case DB_OUT_OF_FILE_SPACE:
-    /* A resource ceiling was reached, not a corrupt engine: roll the
-    statement back and report it, the same as running out of file space.
-    Reaching the default branch below would call ib::fatal and take the
-    server down. innodb_hnsw_max_memory refuses here. */
-    case DB_OUT_OF_MEMORY:
+    /* A ceiling, not a failed allocation: fail the statement. */
+    case DB_VEC_OUT_OF_MEMORY:
     case DB_READ_ONLY:
     case DB_FTS_INVALID_DOCID:
     case DB_INTERRUPTED:
@@ -1227,6 +1224,19 @@ handle_new_error:
              " the startup or when you dump the tables. "
           << FORCE_RECOVERY_MSG;
       break;
+
+    case DB_ANN_NODE_NOT_FOUND:
+      /* A vector index's persisted graph named a node its aux table no
+      longer has. Recoverable at the statement level - nothing here says
+      the base table or the rest of the graph is unreadable - so fail the
+      statement rather than fall through to the ib::fatal that an
+      unhandled code would reach. */
+      ib::error(ER_IB_MSG_973)
+          << "A vector index's ANN search found the persisted graph and"
+             " its aux table out of sync. DROP and re-create the vector"
+             " index.";
+      break;
+
     case DB_FOREIGN_EXCEED_MAX_CASCADE:
       ib::error(ER_IB_MSG_974)
           << "Cannot delete/update rows with cascading"
@@ -2951,14 +2961,21 @@ run_again:
     if (!node->is_delete && label != 0) {
       /* Both of these were established by calc_row_difference before it
       minted the label, so a miss here means the row now names a node
-      that will never exist. Assert rather than skip, matching
-      vec_insert_row. */
+      that will never exist. Fail the statement rather than leave the
+      graph behind the table. */
       ulint q_len = 0;
       const char *q = vec_upd_new_vector(table, node->update, &q_len);
-      ut_a(q != nullptr);
 
       uint64_t base_pk = 0;
-      ut_a(vec_upd_row_pk(table, node, &base_pk));
+      const bool have_pk = vec_upd_row_pk(table, node, &base_pk);
+
+      ut_ad(q != nullptr);
+      ut_ad(have_pk);
+
+      if (q == nullptr || !have_pk) {
+        err = DB_ERROR;
+        goto error;
+      }
 
       err =
           vec_update_row(trx, table, label, q, q_len, base_pk, trx->mysql_thd);
