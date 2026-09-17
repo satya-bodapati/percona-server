@@ -4633,6 +4633,10 @@ template <typename Table>
 static void dd_commit_inplace_no_change(const Alter_inplace_info *ha_alter_info,
                                         const Table *old_dd_tab,
                                         Table *new_dd_tab, bool ignore_fts) {
+  /* Before the FTS helper, which compares the two definitions' column
+  counts: a table owning percona_vec_aux_id must have it back by then. */
+  dd_add_vec_aux_id_column(new_dd_tab->table(), old_dd_tab->table());
+
   if (!ignore_fts) {
     dd_add_fts_doc_id_index(new_dd_tab->table(), old_dd_tab->table());
   }
