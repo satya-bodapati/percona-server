@@ -214,9 +214,43 @@ def base_tree_basenames():
 
 DECL = re.compile(r'^[A-Za-z_\[].*?\b(%s)\s*\(')
 
+GLOBAL_STEP = {}
+
+def global_steps(sym):
+    """symbol name -> the earliest step anything defines it.
+
+    Only names the branch introduces. A declaration that already exists in the
+    base tree must never be pruned, however late its definition is mapped -
+    removing it deletes upstream code."""
+    if not GLOBAL_STEP:
+        base_names = set()
+        for path in sym:
+            src = show(path, BASE)
+            if src is None:
+                continue
+            tmp = '/tmp/_gsbase' + os.path.splitext(path)[1]
+            open(tmp, 'w').write(src)
+            base_names |= {n.split('::')[-1] for n, _, _ in ranges(tmp)}
+        # a declaration follows its definition, so a step recorded against a
+        # .cc wins over one recorded against a header
+        for src_is_cc in (False, True):
+            for path, d in sym.items():
+                if path.endswith('.cc') != src_is_cc:
+                    continue
+                for k, st in d.items():
+                    short = k.split('::')[-1]
+                    if short in base_names:
+                        continue
+                    if src_is_cc:
+                        GLOBAL_STEP[short] = st
+                    else:
+                        GLOBAL_STEP.setdefault(short, st)
+    return GLOBAL_STEP
+
 def prune_decls(n, path, src, sym):
-    """Remove declarations of symbols whose step is later than n."""
-    late = sorted({k.split('::')[-1] for k, st in sym.get(path, {}).items() if st > n})
+    """Remove declarations of symbols whose definition arrives later than n."""
+    g = global_steps(sym)
+    late = sorted({k for k, st in g.items() if st > n})
     if not late:
         return src
     pat = re.compile(r'\b(' + '|'.join(re.escape(x) for x in late) + r')\s*\(')
@@ -236,12 +270,16 @@ def prune_decls(n, path, src, sym):
 
 def content_at(n, path, sym, whole):
     src = show(path)
+    final = (n >= NSTEPS)
     if src is None:
         return None
     if path in CMAKE:
         return cmake_at(n, path, sym, whole) if whole.get(path, 99) <= n else None
     if path in whole and path not in sym:
         if whole[path] <= n:
+            if path.endswith('.h') and not final:
+                src = prune_deferred(n, path, prune_includes(n, src, sym, whole))
+                return prune_decls(n, path, src, sym)
             return src
         return file_override(n, path)      # a shortened form, if one exists
     if path not in sym:
@@ -249,9 +287,10 @@ def content_at(n, path, sym, whole):
     if not any(c <= n for c in sym[path].values()) and whole.get(path, 99) > n:
         return None
 
-    src = prune_deferred(n, path, prune_includes(n, src, sym, whole))
-    if path.endswith('.h'):
-        src = prune_decls(n, path, src, sym)
+    if not final:
+        src = prune_deferred(n, path, prune_includes(n, src, sym, whole))
+        if path.endswith('.h'):
+            src = prune_decls(n, path, src, sym)
     tmp = '/tmp/_v4gen' + os.path.splitext(path)[1]
     open(tmp, 'w').write(src)
     lines = src.split('\n')

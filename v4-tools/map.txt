@@ -123,8 +123,8 @@
 # ---- other
 4  FILE vector-common/hnsw.h
 1  FILE storage/innobase/CMakeLists.txt
-4  FILE include/my_base.h
-4  FILE mysys/my_handler_errors.h
+6  FILE include/my_base.h
+6  FILE mysys/my_handler_errors.h
 4  FILE storage/innobase/include/db0err.h
 10 FILE vec-hnsw-aux-sub-trx.md
 # ---- headers: whole-file at the EARLIEST category that needs them.
@@ -448,3 +448,7 @@ DEFER 2 include/dict0mem.h PM_TABLE_VEC_IDX_ID
 DEFER 2 include/dict0mem.h VecIdxIdPersister
 DEFER 2 include/dict0mem.h vec_idx_id
 DEFER 2 include/dict0mem.h m_vec_next_id
+
+# A session variable read only by the kNN read path, but registered at file
+# scope in ha_innodb.cc, so it would otherwise arrive in the first commit.
+DEFER 5 handler/ha_innodb.cc hnsw_ef_search
