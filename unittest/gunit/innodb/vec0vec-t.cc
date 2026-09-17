@@ -94,7 +94,7 @@ TEST_F(Vec0VecTest, HnswEfConstructionIsRefused) {
       parse("CREATE TABLE t1 ("
             "  id BIGINT UNSIGNED PRIMARY KEY,"
             "  v1 VECTOR(128) NOT NULL,"
-            "  KEY(v1) TYPE hnsw WITH (ef_construction = 300)"
+            "  VECTOR KEY(v1) TYPE hnsw (ef_construction = 300)"
             ")",
             ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER));
 }
@@ -105,26 +105,26 @@ TEST_F(Vec0VecTest, HnswAllSupportedParams) {
       parse("CREATE TABLE t1 ("
             "  id BIGINT UNSIGNED PRIMARY KEY,"
             "  v1 VECTOR(128) NOT NULL,"
-            "  KEY(v1) TYPE hnsw WITH (M = 8, metric = euclidean)"
+            "  VECTOR KEY(v1) TYPE hnsw (M = 8, metric = euclidean)"
             ")"));
   ASSERT_TRUE(holds_alternative<HnswParam>(m_vip));
   EXPECT_EQ(8, get<HnswParam>(m_vip).M);
-  EXPECT_EQ("euclidean"s, get<HnswParam>(m_vip).metric);
+  EXPECT_EQ(vector_constants::Metric::kEuclidean, get<HnswParam>(m_vip).metric);
   /* Untouched by the parser, so still the header's default. */
   EXPECT_EQ(200, get<HnswParam>(m_vip).ef_construction);
 }
 
-/* No WITH(...) at all: every parameter keeps its default. Worth its own
+/* No option list at all: every parameter keeps its default. Worth its own
 case because the parameter container (Vector_index_params_YY, a
 Mem_root_array_YY of name/value pairs) is then empty and its backing
 array is null - both overloads reach the parser that way, and parsing
 must leave every default alone. */
-TEST_F(Vec0VecTest, HnswNoWithClause) {
+TEST_F(Vec0VecTest, HnswNoOptionList) {
   EXPECT_FALSE(
       parse("CREATE TABLE t1 ("
             "  id BIGINT UNSIGNED PRIMARY KEY,"
             "  v1 VECTOR(128) NOT NULL,"
-            "  KEY(v1) TYPE hnsw"
+            "  VECTOR KEY(v1) TYPE hnsw"
             ")"));
   ASSERT_TRUE(holds_alternative<HnswParam>(m_vip));
   EXPECT_EQ(25, get<HnswParam>(m_vip).M);

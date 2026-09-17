@@ -1190,9 +1190,9 @@ struct trx_t {
                             with FTS indexes (yet). */
   doc_id_t fts_next_doc_id; /* The document id used for updates */
 
-  /** Label minted for a vector-column UPDATE in this statement, or 0.
+  /** Label assigned for a vector-column UPDATE in this statement, or 0.
 
-  The analog of fts_next_doc_id: calc_row_difference mints it and writes
+  The analog of fts_next_doc_id: calc_row_difference assigns it and writes
   it into the update vector, and the post-update hook needs it to create
   the matching graph node. Cleared by the hook, and reset by
   calc_row_difference on every UPDATE, so it never spans statements. */

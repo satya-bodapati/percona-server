@@ -1,6 +1,6 @@
 # Persisting the HNSW Vector Index
 
-*Percona Server · InnoDB · `KEY (v) TYPE hnsw`*
+*Percona Server · InnoDB · `VECTOR KEY (v) TYPE hnsw`*
 
 ---
 
@@ -25,7 +25,7 @@ The vector *type* and its surface syntax are in place. A user can already write:
 ```sql
 CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY,
                 v  VECTOR(4) NOT NULL,
-                KEY vk (v) TYPE hnsw WITH (M = 16));
+                VECTOR KEY vk (v) TYPE hnsw (M = 16));
 ```
 
 and the parser, the data dictionary and the distance kernels all understand it.
@@ -34,7 +34,7 @@ and the parser, the data dictionary and the distance kernels all understand it.
 |---|---|
 | **Vector data type** | `VECTOR(n)` columns, `STRING_TO_VECTOR()`, `DISTANCE()` |
 | **Distance functions** | L2 / inner-product kernels, with AVX-512 paths |
-| **Index syntax** (PS-11203) | `KEY (v) TYPE hnsw WITH (M = 16)`, its validation and error codes |
+| **Index syntax** (PS-11203) | `VECTOR KEY (v) TYPE hnsw (M = 16)`, its validation and error codes |
 | **Data dictionary** (PS-11264) | the index `TYPE` and its `WITH (…)` parameters are stored in, and restored from, the DD |
 
 There is no `VECTOR KEY` keyword: a key becomes `KEYTYPE_VECTOR` because it named a `TYPE` that
@@ -93,7 +93,7 @@ half-supported.
 ### How it fits together
 
 ```
-        SQL           CREATE TABLE … KEY (v) TYPE hnsw       SELECT … ORDER BY DISTANCE(…) LIMIT k
+        SQL           CREATE TABLE … VECTOR KEY (v) TYPE hnsw       SELECT … ORDER BY DISTANCE(…) LIMIT k
          │                        │                                        │
          ▼                        ▼                                        ▼
    ┌───────────────────────────────────────────────────────────────────────────────┐
@@ -133,7 +133,7 @@ story.
 | **neighbours** | A node's outgoing edges, one list per layer. The graph *is* these lists. |
 | **entry point** | The node searches start from — the first node inserted on the topmost layer. The analogue of a B-tree root. |
 | **aux table** | The InnoDB table holding one row per node. |
-| **fresh label** | Changing a row's vector mints a *new* label rather than editing the existing node. |
+| **fresh label** | Changing a row's vector assigns a *new* label rather than editing the existing node. |
 | **orphan** | A node that no visible base row claims. |
 
 ---
@@ -148,7 +148,7 @@ statement that reads it is `ORDER BY DISTANCE(...) LIMIT k`.
 ```sql
 CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY,
                 v  VECTOR(4) NOT NULL,
-                KEY vk (v) TYPE hnsw WITH (M = 16));
+                VECTOR KEY vk (v) TYPE hnsw (M = 16));
 
 SELECT id FROM t ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 5;
 ```
@@ -157,8 +157,8 @@ SELECT id FROM t ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN'
 
 | Operation | Effect on the index |
 |---|---|
-| `CREATE TABLE … KEY (v) TYPE hnsw` | adds the hidden label column, creates the aux table, registers it in the DD |
-| `ALTER TABLE … ADD KEY (v) TYPE hnsw` | COPY only; builds the graph from a clustered scan (§11) |
+| `CREATE TABLE … VECTOR KEY (v) TYPE hnsw` | adds the hidden label column, creates the aux table, registers it in the DD |
+| `ALTER TABLE … ADD VECTOR KEY (v) TYPE hnsw` | COPY only; builds the graph from a clustered scan (§11) |
 | `DROP INDEX` | drops that index's aux table; the hidden column is **retained**, until something rebuilds the table |
 | `DROP TABLE` | drops the aux table with the parent, under an exclusive MDL taken on each aux first |
 | `TRUNCATE TABLE` | drop and recreate — the aux comes back empty and the label counter restarts |
@@ -363,7 +363,7 @@ INSERT INTO t (id, v) VALUES (7, STRING_TO_VECTOR('[1,0,0,0]'));
 ```
 
 **1. The server assigns a label.** Before the base row is written, the counter hands out the
-next label — say 10 — and it is stamped into the row's hidden `percona_vec_aux_id` column. The row is
+next label — say 10 — and it is written into the row's hidden `percona_vec_aux_id` column. The row is
 inserted by the ordinary InnoDB path, on the user's transaction.
 
 **2. We start a sub-transaction and call the graph.**
@@ -440,7 +440,7 @@ index on a nullable column, so an indexed vector always has a value.
 ## 8. UPDATE
 
 **Changing the vector** does not edit the node. Nodes are immutable: HNSW cannot safely move a
-point once its neighbours are linked to it. So a new label is minted and inserted, and the old
+point once its neighbours are linked to it. So a new label is assigned and inserted, and the old
 node is left alone.
 
 ```sql
@@ -462,7 +462,7 @@ stale-snapshot reader may still walk to; once the key moves, the clustered recor
 key is this UPDATE's own delete-mark and the record at the NEW key is this UPDATE's own insert,
 both invisible to a read view that predates the statement. Rewriting the existing node's
 `base_pk` to the new key would make that reader's lookup land on the fresh insert — invisible,
-`DB_RECORD_NOT_FOUND` — and lose the row outright, worse than doing nothing. So a PK change mints
+`DB_RECORD_NOT_FOUND` — and lose the row outright, worse than doing nothing. So a PK change assigns
 a fresh label exactly as a vector change does, and the new node carries the *unchanged* vector
 together with the *new* key:
 
@@ -477,7 +477,7 @@ graph:         node 10 stays (vector [1,0,0,0], base_pk = 7)
 aux:           row 10 untouched; row 21 inserted (same neighbour build as any insert)
 ```
 
-A statement that changes both the vector and the key mints one label for the combined
+A statement that changes both the vector and the key assigns one label for the combined
 change, not two: the new node carries the new vector and the new key together.
 
 Mechanically this rides on what InnoDB already does. A change to a clustered ordering field
@@ -606,7 +606,7 @@ results under concurrency — one invisible candidate would end the scan while v
 still to come.
 
 Check ① runs at the same point, on the record step 3 just read. The scan returns a node id per
-candidate (§26); the visible row version carries the label it was stamped with. Equal means
+candidate (§26); the visible row version carries the label it was written with. Equal means
 the node still describes this version.
 
 Reading the label belongs to the engine. `percona_vec_aux_id` exists only inside InnoDB and is
@@ -713,7 +713,7 @@ This works because of four properties that each exist for their own reason:
 
 | Property | Why it exists | What it also gives |
 |---|---|---|
-| a vector change mints a fresh label | nodes are immutable | every historical vector is a distinct node — in effect, a version |
+| a vector change assigns a fresh label | nodes are immutable | every historical vector is a distinct node — in effect, a version |
 | nodes are never removed | HNSW cannot delete safely | that version history is retained |
 | `percona_vec_aux_id` is an ordinary column | it is the `FTS_DOC_ID` device | it is **versioned by undo**, so the row version a reader sees names the node that represents it |
 | edges are navigation, not data | HNSW rewires freely | the path taken to a candidate never affects what may be returned |
@@ -920,7 +920,7 @@ first, so a crash in between leaves an orphan node, never a committed row withou
 
 ---
 
-## 15. `ALTER TABLE … ADD KEY (v) TYPE hnsw`
+## 15. `ALTER TABLE … ADD VECTOR KEY (v) TYPE hnsw`
 
 There are two routes, and which one runs depends on a single question: **does the table already
 have the hidden label column?**
@@ -928,12 +928,12 @@ have the hidden label column?**
 ### The first vector index: table copy
 
 ```sql
-ALTER TABLE t ADD KEY vk (v) TYPE hnsw WITH (M = 16);   -- t has no vector index yet
+ALTER TABLE t ADD VECTOR KEY vk (v) TYPE hnsw (M = 16);   -- t has no vector index yet
 ```
 
 The hidden column has to be added, and adding a column to every row is a table rebuild by
 definition. So this is a COPY, and `ALGORITHM=INPLACE` is **refused** rather than silently
-downgraded — a native in-place rebuild would stamp a label on every row and leave the graph
+downgraded — a native in-place rebuild would write a label on every row and leave the graph
 empty, which is a silently incomplete index.
 
 The copy path rewrites every row into the new table, and each of those rows travels the ordinary
@@ -944,13 +944,13 @@ graph is built as a side effect of the copy, with no separate build phase.
 
 ```sql
 ALTER TABLE t DROP KEY vk;                                        -- column is retained
-ALTER TABLE t ADD KEY vk2 (v) TYPE hnsw WITH (M = 4),
+ALTER TABLE t ADD VECTOR KEY vk2 (v) TYPE hnsw (M = 4),
               ALGORITHM=INPLACE, LOCK=SHARED;                     -- supported
 ```
 
 Once the column exists there is nothing to rebuild, so `vec_build_index` does the work directly:
 one clustered scan of the base table, feeding each row into a private graph, **reusing the label
-already stamped on that row** rather than issuing a new one.
+already written on that row** rather than issuing a new one.
 
 The scan streams, and the graph is built **without persisting anything**. Both matter:
 
@@ -1030,7 +1030,7 @@ for real.
 ### What supporting them takes
 
 FTS solves the same problem engine-side, and its shape is the one to copy. It calls
-`fts_trx_add_op()` from inside the cascade handling (`row0ins.cc`), gated on a per-foreign
+`fts_trx_add_op()` from inside the cascade handling (`row0ins.cc`), checked on a per-foreign
 -key predicate `foreign->is_fts_col_affected()`, and — the important part — it **queues** the
 operation on the transaction rather than doing I/O inline.
 
@@ -1114,7 +1114,7 @@ or not a vector index is still on it, and a `.cfg` describing that column is ref
 by a target that does not carry it. Two things stand in the way. The aux `.ibd` holding the graph
 is a sibling tablespace and does not travel with the base one. And the label counter lives in the
 table's data dictionary entry while the labels it handed out live in the rows, so an imported
-`.ibd` brings labels the target's counter knows nothing about and the next mint reissues one.
+`.ibd` brings labels the target's counter knows nothing about and the next assignment reissues one.
 Lifting the block needs the counter carried with the tablespace and reconciled against the highest
 label in the imported rows.
 
@@ -1403,7 +1403,7 @@ The callbacks do not interleave with the graph mutations. `insert()` rewires the
 neighbourhood first, collecting the touched nodes, and only then walks that set calling
 `update_neighbors_cb` with each node's *final* state — so a node rewired at three layers is
 persisted once, correctly. There is no older-overwrites-newer race, and therefore nothing for a
-per-node mutation-order stamp to protect against.
+per-node mutation-order write to protect against.
 
 What that ordering does create is the failure gap in §13: by the time a callback can fail, the
 in-memory rewire is already done and cannot be undone. That is a divergence question rather than
@@ -1463,13 +1463,13 @@ They still **change whenever the branch is rebased** — the subjects are the st
 | `ecb908769a5` | **TEMPORARY.** Phase-2 post-push fix, carried from `dlenev/vector-mvp-11267`. |
 | `64e15e3e0e9` | The aux module and the table lifecycle that does not involve ALTER: one aux table per vector index named `percona_vec_hnsw_<table_id>_<index_id>`, plus CREATE, RENAME (a no-op within a schema) and TRUNCATE. |
 | `8aff4d15266` | ALTER manages the aux per index — created inside the ALTER's transaction on ADD, dropped on DROP INDEX, with both error paths covered by injection. DISCARD/IMPORT refused. |
-| `baccd1f249b` | The hidden `percona_vec_aux_id` column: stamped on INSERT, carried across a rebuild, retained on DROP INDEX. Plus the DDL it restricts — INSTANT ADD/DROP COLUMN, BULK LOAD, native rebuild, CASCADE foreign keys, and COPY-only for the first ADD. |
+| `baccd1f249b` | The hidden `percona_vec_aux_id` column: written on INSERT, carried across a rebuild, retained on DROP INDEX. Plus the DDL it restricts — INSTANT ADD/DROP COLUMN, BULK LOAD, native rebuild, CASCADE foreign keys, and COPY-only for the first ADD. |
 | `d431cf11d16` | Split `parse_options` so the same parse serves DDL (`Key_spec`) and table open (`KEY`) — previously the parameters were validated and thrown away, so the engine never saw `M`. |
 | `40201328b89` | The runtime, and everything needed to be a correct *user* of the HNSW class: the per-index anchor on `dict_index_t`, the arena, parser-free aux DML, the persisted label counter, the persistor — plus `Vec_random_engine` over `ut::random_64()`, `load_node_cb` returning `bool`, and `QUE_FORK_ACTIVE` on the aux DML forks. Each of those is a defect from the moment the code is written, so they belong where the class is first instantiated. |
-| `112b9e552f8` | The write path. INSERT builds the graph on a sub-transaction; the load path rebuilds it from the aux one node at a time, lazily and exactly once behind `load_mutex`; UPDATE mints a fresh label and re-points the row, because a node is immutable. Also the two things the aux writes must get right: rolling the background trx back with `trx_rollback_to_savepoint`, and treating a not-yet-committed neighbour's `DB_RECORD_NOT_FOUND` as success. |
+| `112b9e552f8` | The write path. INSERT builds the graph on a sub-transaction; the load path rebuilds it from the aux one node at a time, lazily and exactly once behind `load_mutex`; UPDATE assigns a fresh label and re-points the row, because a node is immutable. Also the two things the aux writes must get right: rolling the background trx back with `trx_rollback_to_savepoint`, and treating a not-yet-committed neighbour's `DB_RECORD_NOT_FOUND` as success. |
 | `d9ef8e8bcce` | When the sub-transaction commits, and why it need not flush. Each callback commits it and starts it again, so a row lock cannot outlive the callback that took it — which makes deadlock impossible rather than merely rare. `flush_log_later` then removes the fsync those extra commits would otherwise pay, because the user's commit already flushes past our LSN. 20000 of 20000 rows under 8 connections, against 5074 before. |
 | `a58ac9f3253` | The `vec_aux_verify` interpreter command, `vector_concurrent_insert` and `vector_insert_contention`. All assert the result rather than the serialisation — one node per committed row, no id issued twice, no two nodes naming the same row — which is the property that holds however the inserts interleave. |
-| `9e6f4d5b814` | ADD VECTOR INDEX populates the graph: a clustered scan builds it in place on the INPLACE path, reusing each row's stamped label. Plus `vec_knn` so the graph can be queried in tests. |
+| `9e6f4d5b814` | ADD VECTOR INDEX populates the graph: a clustered scan builds it in place on the INPLACE path, reusing each row's written label. Plus `vec_knn` so the graph can be queried in tests. |
 | `85899e38df8` | `innodb_hnsw_max_memory`: a server-wide byte budget, refused at the entry to an insert and at each step of a build rather than inside the arena. |
 | `18b4efd99ae` | Regression test for `SELECT COUNT(*)` returning 0 when the optimizer picked the vector index. The fix itself is upstream's; this keeps it from coming back. |
 | `ec0e164a9d5` | `ORDER BY DISTANCE(...) LIMIT k` served from the graph — optimizer recognition, the `vec_init` / `vec_read_first` / `vec_read_next` handler family, a streaming scan of the graph, and `innodb_hnsw_ef_search`. Both MVCC checks of §12: ② is the primary-key read under the session's own view, ① compares the node id against the label `row_sel_store_mysql_rec` lifts off the visible record into `prebuilt->vec_aux_id`, the way it already lifts `fts_doc_id`. |
@@ -1813,7 +1813,7 @@ retirement events, because a rolled-back insert leaves no trace anywhere else in
 
 ```sql
 mysql> CREATE TABLE ch (id BIGINT UNSIGNED PRIMARY KEY, p BIGINT UNSIGNED,
-    ->                  v VECTOR(4) NOT NULL, KEY (v) TYPE hnsw WITH (M=4),
+    ->                  v VECTOR(4) NOT NULL, VECTOR KEY (v) TYPE hnsw (M=4),
     ->                  FOREIGN KEY (p) REFERENCES par(id) ON UPDATE CASCADE);
 ERROR 1235 (42000): This version of MySQL doesn't yet support
                     'vector indexes on tables with a CASCADE foreign key'
@@ -1831,7 +1831,7 @@ moves a `base_pk` — is the follow-up.
 **Example.**
 
 ```sql
-mysql> ALTER TABLE t1 ADD KEY k2 (v) TYPE hnsw WITH (M = 4);
+mysql> ALTER TABLE t1 ADD VECTOR KEY k2 (v) TYPE hnsw (M = 4);
 ERROR 1235 (42000): This version of MySQL doesn't yet support
                     'multiple vector indexes on a single table'
 ```

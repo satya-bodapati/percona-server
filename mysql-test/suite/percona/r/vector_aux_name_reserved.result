@@ -2,7 +2,7 @@
 # PS-11299: the fully-formed name "percona_vec_<type>_<tid>_<iid>"
 # is reserved for InnoDB-managed vector auxiliary tables. CREATE
 # TABLE with such a name is refused at the ha_innobase::create
-# gate, mirroring the reservation FTS enforces for its own
+# check, mirroring the reservation FTS enforces for its own
 # computed names.
 #
 # The check matches the COMPLETE shape, not the prefix. Reserving

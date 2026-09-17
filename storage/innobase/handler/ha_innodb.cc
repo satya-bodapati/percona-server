@@ -8439,7 +8439,10 @@ int ha_innobase::open(const char *name, int, uint open_flags,
     }
     if (key == nullptr) continue;
 
-    (void)vec_runtime_open(index, key, table, thd);
+    /* A failure has already reported itself on the THD, and an index
+    with no runtime simply has no graph yet - the next open tries
+    again. Opening the table must not fail for it. */
+    vec_runtime_open(index, key, table, thd);
   }
 
   return 0;
@@ -11437,7 +11440,7 @@ int ha_innobase::change_active_index(
   Note: for vector indexes we take the "else" branch below - the
   setup work is wasted (subsequent fetch is blocked at line 11058)
   but harmless. Not worth an extra branch here; keeping FTS-only
-  gate for minimal churn. See PS-11299 audit N2. */
+  check for minimal churn. */
   if ((m_prebuilt->index->type & DICT_FTS)) {
     if (table->fts_doc_id_field &&
         bitmap_is_set(table->read_set,
@@ -12293,7 +12296,7 @@ int ha_innobase::vec_read_next(uchar *buf) {
     if (ret == DB_SUCCESS) {
       /* MVCC check (1). The row exists and is visible, but the version
       this reader sees need not be the one the graph node describes: an
-      UPDATE of the vector stamps a fresh label and leaves the old node
+      UPDATE of the vector writes a fresh label and leaves the old node
       behind, so the node is stale for anyone whose view has the new
       version. row_search_for_mysql has just read the label out of the
       visible record; the node id is what the graph returned for it.
@@ -12536,10 +12539,10 @@ dberr_t create_table_info_t::enable_encryption(dict_table_t *table) {
 
   /* Same reservation for vector auxiliary table names. Internal vec aux
   creation bypasses ha_innobase::create entirely (goes through
-  vec_aux_create_one_table calls row_create_table_for_mysql), so this gate
+  vec_aux_create_one_table calls row_create_table_for_mysql), so this check
   only ever fires on user-supplied names.
 
-  Like the FTS gate above, this matches the full computed shape rather
+  Like the FTS check above, this matches the full computed shape rather
   than the prefix: "percona_vec_hnsw_<tid>_<iid>" is refused, plain
   "percona_vec_data" is not. */
   if (vec_aux_is_aux_table_name(m_table_name)) {
@@ -15084,7 +15087,7 @@ int create_table_info_t::create_table(const dd::Table *dd_table,
 
   /* Create one auxiliary table per vector index. Must run after the index
   creation loop so DICT_VECTOR is set on every vector
-  index attached to m_table. See PS-11299. */
+  index attached to m_table. */
   if (DICT_TF2_FLAG_IS_SET(m_table, DICT_TF2_HAS_VEC_AUX_COL)) {
     dberr_t verr = vec_aux_create_all_tables(m_trx, m_table);
     if (verr != DB_SUCCESS) {
@@ -15303,7 +15306,7 @@ int create_table_info_t::create_table_update_global_dd(Table *dd_table) {
   }
 
   /* Register the per-vector-index aux table in the DD too, mirroring
-  fts_create_index_dd_tables above - same flag-style gate. The table was
+  fts_create_index_dd_tables above - same flag-style check. The table was
   just created, so its vector index is the one to register. */
   if (DICT_TF2_FLAG_IS_SET(m_table, DICT_TF2_HAS_VEC_AUX_COL)) {
     dict_index_t *vec_index = vec_index_of(m_table);
@@ -16156,7 +16159,7 @@ int ha_innobase::get_extra_columns_and_keys(const HA_CREATE_INFO *,
   /* The column name is reserved on EVERY table, whether or not it has a
   vector index today. The reservation cannot be deferred the way an aux
   TABLE name can: an aux table name is computed from ids, so a collision
-  is detectable exactly at the moment we mint one, but the hidden column
+  is detectable exactly at the moment we assign one, but the hidden column
   has a fixed name. Allowing a user column called percona_vec_aux_id on a
   table without a vector index only moves the failure to the ALTER that
   later adds one, where it surfaces as a confusing mid-DDL error on a
@@ -16193,14 +16196,14 @@ int ha_innobase::get_extra_columns_and_keys(const HA_CREATE_INFO *,
     ALTER.
 
     A user-declared column of this name is rejected outright, on every
-    table, vector index or not (see the reservation gate above). The
+    table, vector index or not (see the reservation check above). The
     column carries no user-visible value - it is pure bookkeeping - and
     rejecting it even without a vector index removes the case where a
     pre-existing user column would collide with the hidden one at
-    ALTER ... ADD KEY ... TYPE hnsw time. */
+    ALTER ... ADD VECTOR KEY ... TYPE hnsw time. */
     const dd::Column *existing = dd_find_column(dd_table, VEC_AUX_ID_COL_NAME);
     if (existing != nullptr) {
-      /* Present and SE-hidden (the gate above rejected any other kind) -
+      /* Present and SE-hidden (the check above rejected any other kind) -
       carried forward from an earlier CREATE or ALTER. Reuse it: never
       recreate, never error. */
     } else {
@@ -16466,7 +16469,7 @@ int ha_innobase::discard_or_import_tablespace(bool discard,
   does not travel with the base tablespace, and the label counter lives
   in this table's data dictionary entry while the labels it handed out
   live in the rows - an imported .ibd brings rows whose labels the
-  target's counter knows nothing about, so the next mint reissues one.
+  target's counter knows nothing about, so the next assignment reissues one.
   Lifting the block needs the counter carried with the tablespace and
   reconciled against the highest label in the imported rows. */
   if (DICT_TF2_FLAG_IS_SET(dict_table, DICT_TF2_HAS_VEC_AUX_COL)) {
@@ -17899,23 +17902,22 @@ int ha_innobase::rename_table(const char *from, const char *to,
   /* A vector aux name is reserved on RENAME as well as on CREATE.
   Without this, a user table can be renamed into the computed shape,
   and dict0dd.cc rebuilds DICT_TF2_VEC_AUX from the name on the next DD
-  reload, so the table comes back stamped as an aux table.
+  reload, so the table comes back marked as an aux table.
 
-  The gate belongs here rather than in row_rename_table_for_mysql: our
+  The check belongs here rather than in row_rename_table_for_mysql: our
   own cross-schema rename moves aux tables to new aux names through that
   function, and it does not come through the handler. */
-  {
-    char norm_to[FN_REFLEN];
-    if (!create_table_info_t::normalize_table_name(norm_to, to)) {
-      /* purecov: begin inspected */
-      ut_d(ut_error);
-      ut_o(return HA_ERR_TOO_LONG_PATH);
-      /* purecov: end */
-    }
-    if (vec_aux_is_aux_table_name(norm_to)) {
-      my_error(ER_WRONG_TABLE_NAME, MYF(0), to);
-      return HA_ERR_WRONG_TABLE_NAME;
-    }
+  char norm_to[FN_REFLEN];
+  if (!create_table_info_t::normalize_table_name(norm_to, to)) {
+    /* purecov: begin inspected */
+    ut_d(ut_error);
+    ut_o(return HA_ERR_TOO_LONG_PATH);
+    /* purecov: end */
+  }
+
+  if (vec_aux_is_aux_table_name(norm_to)) {
+    my_error(ER_WRONG_TABLE_NAME, MYF(0), to);
+    return HA_ERR_WRONG_TABLE_NAME;
   }
 
   innobase_register_trx(ht, thd, trx);
@@ -18078,7 +18080,7 @@ ha_rows ha_innobase::records_in_range(
   /* Vector keys are still considered by the optimizer, which lacks an
   HA_VECTOR exclusion in its cost paths. Without this guard a range
   estimate would walk the vec index's nonexistent B-tree
-  (page == FIL_NULL). Return "no estimate" instead. PS-11300 tracks
+  (page == FIL_NULL). Return "no estimate" instead. tracks
   teaching the optimizer to skip vector indexes for regular scans. */
   if (index->is_vector()) {
     n_rows = HA_POS_ERROR;

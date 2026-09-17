@@ -18,7 +18,7 @@
 #
 ALTER TABLE t1 FORCE, ALGORITHM=INPLACE;
 INSERT INTO t1 (id, alt, v) VALUES (9,109,STRING_TO_VECTOR('[9,0,0,0]'));
-# The new table copied its labels from the old rows without minting
+# The new table copied its labels from the old rows without assigning
 # any, so its own counter is zero and the old table holding the real
 # one is already freed. A counter that did not come across reissues a
 # label the INSERT above still holds.
@@ -244,7 +244,7 @@ aux_tables
 # ---- the aux follows the new table_id and index_id ----
 #
 # The aux is named percona_vec_hnsw_<table_id>_<index_id>. A rebuild
-# mints both afresh, so the name must change and the old one must not
+# assigns both afresh, so the name must change and the old one must not
 # be left behind.
 CREATE TABLE aux_before AS
 SELECT name FROM information_schema.innodb_tables
@@ -273,7 +273,7 @@ WHERE name LIKE '%percona_vec_hnsw%';
 aux_after_drop_index
 0
 # And adding one back creates exactly one again.
-ALTER TABLE t1 ADD KEY (v) TYPE hnsw WITH (M = 8);
+ALTER TABLE t1 ADD VECTOR KEY (v) TYPE hnsw (M = 8);
 SELECT COUNT(*) AS aux_after_readd FROM information_schema.innodb_tables
 WHERE name LIKE '%percona_vec_hnsw%';
 aux_after_readd

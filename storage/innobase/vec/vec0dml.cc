@@ -26,7 +26,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 *****************************************************************************/
 
 /** @file vec/vec0dml.cc
-Parser-free DML on vector-index auxiliary tables. See vec0dml.h for the */
+Parser-free DML on vector-index auxiliary tables. See vec0dml.h for why the
+internal SQL parser is not used. */
 
 #include "vec0dml.h"
 

@@ -2268,7 +2268,7 @@ static bool test_if_skip_sort_order(JOIN_TAB *tab, ORDER_with_src &order,
 
   /* JT_VECTOR produces rows in ascending distance order - exactly the
   single ORDER BY expression optimize_vector_query activated it for.
-  The sort is redundant (PS-11300). */
+  The sort is redundant. */
   if (tab->type() == JT_VECTOR) {
     assert(order.order != nullptr && order.order->next == nullptr &&
            order.order->direction != ORDER_DESC &&

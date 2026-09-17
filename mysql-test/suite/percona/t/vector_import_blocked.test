@@ -9,12 +9,12 @@
 --echo # tablespace, and the label counter lives in the table's data
 --echo # dictionary entry while the labels it handed out live in the rows.
 --echo # An imported .ibd would bring rows whose labels the target's counter
---echo # knows nothing about, so the next mint would reissue one.
+--echo # knows nothing about, so the next assignment would reissue one.
 --echo #
 
 CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
                  v VECTOR(4) NOT NULL,
-                 KEY vk (v) TYPE hnsw WITH (M = 8));
+                 VECTOR KEY vk (v) TYPE hnsw (M = 8));
 INSERT INTO t1 VALUES (1,STRING_TO_VECTOR('[1,0,0,0]')),
                       (2,STRING_TO_VECTOR('[2,0,0,0]'));
 

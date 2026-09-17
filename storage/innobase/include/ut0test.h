@@ -240,7 +240,7 @@ struct Tester {
       std::vector<std::string> &tokens) noexcept;
 
   /** Insert one row into a vector-index aux table via the parser-free
-  vec0dml layer (PS-11300 test surface).
+  vec0dml layer ( test surface).
   Usage: vec_aux_insert_row db/table id level f1,f2,.. nb_spec
   nb_spec is per-level neighbor labels: "1:2|3" = level0 {1,2},
   level1 {3}; "-" = none. row_ref is written as the 8-byte image of id.

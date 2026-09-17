@@ -1,5 +1,5 @@
 --echo #
---echo # Review 64e15e3e: vec_aux_parse_table_name does not require end-of-string.
+--echo # vec_aux_parse_table_name does not require end-of-string.
 --echo # fts_read_object_id is sscanf(UINT64PFx), so "2xyz" and "2_extra" parse
 --echo # as object ids. Trailing junk after a type token + id pair is not an
 --echo # aux table. CREATE must succeed — same rule that leaves fts_data legal.

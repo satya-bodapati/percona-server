@@ -88,9 +88,10 @@ the TYPE token and the WITH(...) list - so the same parse serves DDL,
 where they arrive on a Key_spec, and table open, where they arrive on a
 KEY. */
 namespace {
-/** Every metric the syntax accepts, and the kernel it selects. One list:
-adding a metric is one row here, and nothing downstream chooses a kernel
-for itself. */
+/** The metrics InnoDB can build a graph for, and the kernel each one
+selects. The server owns the list of names the syntax accepts; this is
+the subset we implement, and nothing downstream chooses a kernel for
+itself. */
 struct Vec_metric {
   vector_constants::Metric metric;
   vec_metric_func_t dist;

@@ -27,7 +27,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 /** @file vec/vec0aux.cc
 Auxiliary tables for vector (HNSW) indexes. Phase 1: creation, drop, rename,
-naming. No population - that lands in PS-11300. */
+naming. Population of the graph lands with the write path. */
 
 #include "vec0aux.h"
 
@@ -61,7 +61,7 @@ namespace {
 /** Extract the flags2 bits an aux table should inherit from its parent -
 file_per_table, encryption, temporary - plus DICT_TF2_VEC_AUX.
 
-Stamping DICT_TF2_AUX here would send every vec aux down that branch and
+Writing DICT_TF2_AUX here would send every vec aux down that branch and
 trip the assertion on the first I_S or SYS_INDEXES scan that opens one. The
 DD reload path in dict0dd.cc reconstructs DICT_TF2_VEC_AUX from the on-disk
 name; creation has to agree with it. */
@@ -217,7 +217,7 @@ void vec_add_aux_id_column(dict_table_t *table, mem_heap_t *heap) {
   table->vec_aux_col = table->n_def - 1;
 }
 
-void vec_stamp_aux_id(dict_table_t *table, dtuple_t *row, byte *buf) {
+void vec_write_aux_id(dict_table_t *table, dtuple_t *row, byte *buf) {
   ut_ad(table != nullptr);
   ut_ad(row != nullptr);
   ut_ad(buf != nullptr);
@@ -306,7 +306,7 @@ void vec_update_aux_id(dict_table_t *table, upd_field_t *ufield,
   ufield->field_no = dict_col_get_clust_pos(col, clust);
   col->copy_type(dfield_get_type(&ufield->new_val));
 
-  /* Storage byte order, written back over the trx member the label was minted
+  /* Storage byte order, written back over the trx member the label was assigned
   into - which then IS the field's buffer. */
   mach_write_to_8(reinterpret_cast<byte *>(next_label), *next_label);
 
@@ -396,12 +396,12 @@ uint64_t vec_assign_next_aux_id(dict_table_t *table) {
   ids that the aux maximum cannot see, which is why the aux cannot be
   the source of truth for this.
 
-  The stamp runs outside any active mini-transaction, so it gets a
+  The write runs outside any active mini-transaction, so it gets a
   dedicated one. Upstream avoids that by logging into the row's own mtr
   (WL#6204: "we should not introduce a new mtr ... mtr_commit would be
   time consuming"), which we could do from row_ins_clust_index_entry_low -
   at the price of covering the paths that never reach it, the DDL builder
-  among them. Logging where the id is minted covers every one of them. */
+  among them. Logging where the id is assigned covers every one of them. */
   mtr_t mtr;
   mtr.start();
   const bool persist = dict_table_vec_next_id_log(table, id, &mtr);
@@ -620,7 +620,7 @@ dberr_t vec_aux_drop_one_table(trx_t *trx, const dict_table_t *parent,
   Vec has no aux_vec mode - the DD drop always happens here, potentially
   under an open parent-drop trx. Acceptable in phase 1 (empty aux, one aux
   per index, no partial- batch window); the aux_vec deferral is the upgrade
-  path if PS-11300's crash-atomicity work needs it. */
+  path if crash-atomicity later needs it. */
   const bool dict_locked = trx->dict_operation_lock_mode == RW_X_LATCH;
   if (dict_locked) {
     dict_sys_mutex_exit();

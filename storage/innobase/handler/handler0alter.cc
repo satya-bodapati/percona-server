@@ -31,6 +31,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include <algorithm>
 #include <bit>
+#include <tuple>
 
 /* Include necessary SQL headers */
 #include <assert.h>
@@ -893,7 +894,7 @@ static inline Instant_Type innobase_support_instant(
   ALLOWED: rename, virtual-column only, and rebuild-shape ALTERs -
   the rebuild path reshuffles cols and avoids the mismatch entirely.
 
-  TODO PS-11300: fix build_template to skip HT_HIDDEN_SE cols when
+  TODO fix build_template to skip HT_HIDDEN_SE cols when
   computing the InnoDB-to-MySQL column map, then remove this block. */
   if (DICT_TF2_FLAG_IS_SET(table, DICT_TF2_HAS_VEC_AUX_COL)) {
     const auto flags = alter_inplace_flags;
@@ -1056,13 +1057,13 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
   after an IMPORT.
 
   When it does, vec_build_index() populates the graph and the aux from
-  one clustered scan, reusing each row's already-stamped id as its label,
+  one clustered scan, reusing each row's already-written id as its label,
   without rebuilding the table or writing a base row. That is the ddl0fts
   analog for HNSW.
 
   The FIRST ever ADD is different and must fall back to COPY: the hidden
   column has to materialize in the clustered record, and adding a column
-  means rewriting every row. The native rebuild would stamp the column on
+  means rewriting every row. The native rebuild would write the column on
   each copied row and stop there - no HNSW build pass - leaving an index
   that silently returns nothing for every pre-existing row. COPY routes
   each row through write_row instead, which builds the graph organically. */
@@ -1128,7 +1129,7 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
 
   /* Phase 1 refuses ALGORITHM=INSTANT on any table owning
   percona_vec_aux_id, index or no index: the column is retained after
-  DROP KEY and every INSERT keeps stamping it, so the label counter is
+  DROP KEY and every INSERT keeps writing it, so the label counter is
   live either way. Deliberate conservatism, not a correctness
   requirement - INSTANT runs its prepare phase under
   MDL_SHARED_UPGRADABLE, so concurrent DML is live throughout, and these
@@ -1422,7 +1423,7 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
   m_prebuilt->trx->will_lock++;
 
   /* A table with a vector index used to be refused a native rebuild here,
-  on the grounds that the rebuild mints a new table_id and index_id and
+  on the grounds that the rebuild assigns a new table_id and index_id and
   the aux the graph lives in is named after them - so the graph would be
   lost. That stopped being true when the build moved into ddl::Builder:
   a rebuild recreates every index on the new table, the vector index among
@@ -1801,9 +1802,9 @@ bool ha_innobase::commit_inplace_alter_table(TABLE *altered_table,
 
   Captured now because a rebuild frees the old table in
   commit_inplace_alter_table_impl, and the new table it leaves behind
-  copied its labels from the old rows without minting any, so its own
+  copied its labels from the old rows without assigning any, so its own
   counter is zero. Read in this phase rather than in prepare because
-  commit runs under MDL_EXCLUSIVE, where no writer can still be minting. */
+  commit runs under MDL_EXCLUSIVE, where no writer can still be assigning. */
   uint64_t vec_next_id = 0;
   {
     const dict_table_t *vec_src = (ctx != nullptr && ctx->old_table != nullptr)
@@ -5278,11 +5279,11 @@ template <typename Table>
 
     /* Remember the added vector index for the aux-table creation and
     DD-registration blocks below - mirror of the fts_index capture
-    above. At most one vector index per table (PS-11264).
+    above. At most one vector index per table.
 
     No ONLINE-status handling is needed here: indexes are created in
     ONLINE_INDEX_COMPLETE (the default), ADD VECTOR INDEX is always
-    offline (HA_VECTOR gate in check_if_supported_inplace_alter, same
+    offline (HA_VECTOR check in check_if_supported_inplace_alter, same
     as FTS), and the modification-log loop below exempts vector
     indexes - so a vector index never enters ONLINE_INDEX_CREATION. */
     if (ctx->add_index[a]->is_vector()) {
@@ -5307,7 +5308,7 @@ template <typename Table>
     } else if (ctx->add_index[a]->is_vector()) {
       /* Vector indexes have no online build path in phase 1, so they
       need no modification log either - same exemption shape as FTS
-      above. The aux .ibd is the persistence for HNSW (PS-11300). */
+      above. The aux .ibd is the persistence for HNSW. */
     } else {
       DBUG_EXECUTE_IF("innodb_OOM_prepare_inplace_alter",
                       error = DB_OUT_OF_MEMORY;
@@ -5600,9 +5601,11 @@ error_handled:
       }
 
       /* Mirror the FTS aux drop above for vector aux - same shape,
-      same flag-based gate. */
+      same flag-based check. */
       if (DICT_TF2_FLAG_IS_SET(ctx->new_table, DICT_TF2_HAS_VEC_AUX_COL)) {
-        (void)vec_aux_drop_all_tables(ctx->trx, ctx->new_table);
+        /* Best effort: each failure is logged inside, and the rebuild
+        is being torn down - there is no state left to preserve. */
+        std::ignore = vec_aux_drop_all_tables(ctx->trx, ctx->new_table);
       }
 
       dict_table_close_and_drop(ctx->trx, ctx->new_table);
@@ -7775,7 +7778,7 @@ after a successful commit_try_norebuild() call.
       which releases dict_sys around the DD client call. Acceptable in
       phase 1: the aux is empty, commit_cache_norebuild runs past the
       point where the norebuild ALTER can fail, and a single aux means
-      no partial-batch window. Revisit with PS-11300's crash-atomicity
+      no partial-batch window. Revisit when the aux gains crash-atomicity
       work. */
       if (index->is_vector()) {
         const dberr_t vec_err =
@@ -11706,7 +11709,7 @@ bool ha_innobase::bulk_load_check(THD *) const {
   }
 
   /* Vector index - mirror the FTS block above. The hidden percona_vec_aux_id
-  column requires per-row stamping via vec_stamp_aux_id, and BULK bypasses
+  column requires per-row writing via vec_write_aux_id, and BULK bypasses
   the row-insert path. Retention (Option A) keeps the flag sticky, so
   once-vec-indexed tables remain blocked even after all vec indexes are
   dropped - same lifecycle as DICT_TF2_FTS_HAS_DOC_ID above. */

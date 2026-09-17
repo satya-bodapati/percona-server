@@ -9,9 +9,9 @@
 --echo # from row_ins_clust_index_entry(); the second pass, after the lock is
 --echo # granted, does the insert. Only the second one may build a graph node.
 --echo #
---echo # The first pass has already minted a label by then, and it is not
+--echo # The first pass has already assigned a label by then, and it is not
 --echo # reused: row_upd_clust_step() calls row_upd_store_row() again on
---echo # re-entry, which rebuilds the row it was stamped into. So the label is
+--echo # re-entry, which rebuilds the row it was written into. So the label is
 --echo # consumed without ever reaching the aux table - the same thing that
 --echo # happens to a rolled-back INSERT's label - and the node that is finally
 --echo # built carries the second one. The skipped id below is how this test
@@ -20,7 +20,7 @@
 
 CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY,
                 v VECTOR(2) NOT NULL,
-                KEY vk (v) TYPE hnsw WITH (M = 4));
+                VECTOR KEY vk (v) TYPE hnsw (M = 4));
 INSERT INTO t VALUES (1, STRING_TO_VECTOR('[0,0]'));
 INSERT INTO t VALUES (2, STRING_TO_VECTOR('[10,0]'));
 
@@ -51,7 +51,7 @@ ROLLBACK;
 COMMIT;
 
 --echo # ONE new node for the two labels the statement consumed: id 3 was
---echo # minted by the pass that hit the lock wait and never reached the aux,
+--echo # assigned by the pass that hit the lock wait and never reached the aux,
 --echo # id 4 is the node the retry built. The old node 1 stays, naming the
 --echo # key the row no longer has.
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t';
@@ -70,7 +70,7 @@ CHECK TABLE t;
 --echo # Same wait, but the statement changes the vector too. The label then
 --echo # comes from calc_row_difference and lives in the update vector, so
 --echo # row_upd_store_row's rebuild reproduces it rather than losing it -
---echo # this pass must NOT mint a second one. Where the PK-only case above
+--echo # this pass must NOT assign a second one. Where the PK-only case above
 --echo # skipped an id, this one does not.
 --echo #
 --connection blocker

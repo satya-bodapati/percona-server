@@ -1,6 +1,6 @@
 #
 # dict0dd.cc rebuilds DICT_TF2_VEC_AUX from the table name alone, so a
-# user table renamed into the computed aux shape comes back stamped as
+# user table renamed into the computed aux shape comes back marked as
 # an aux table after a DD reload: ha_innobase::open extra-closes it and
 # handler close trips ut_ad(!prebuilt->table->is_aux()) / the refcount.
 #

@@ -25,7 +25,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 *****************************************************************************/
 
-#pragma once
+#ifndef vec0vec_h
+#define vec0vec_h
 
 #include <variant>
 #include "key.h"
@@ -86,3 +87,5 @@ shape was settled at DDL time - contents only. */
 bool parse_options(const KEY &key, VectorIndexParam &vip);
 
 }  // namespace storage::innobase::vec
+
+#endif /* vec0vec_h */

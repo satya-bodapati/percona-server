@@ -2583,19 +2583,19 @@ static inline bool row_upd_clust_rec_by_insert_inherit(
   /* On a table with a vector index this is, as far as the graph is
   concerned, a delete and an insert of the row: a node names its base row
   by primary key, and the primary key is what is moving. So the new
-  clustered record gets a fresh label - stamped before the entry is built
+  clustered record gets a fresh label - written before the entry is built
   from upd_row, so the record carries it - and the node is added once the
   insert has landed.
 
   A statement that also changed the vector column arrives with a label
-  already minted - calc_row_difference put it in the update vector, so
+  already assigned - calc_row_difference put it in the update vector, so
   upd_row carries it and the test below sees the two rows disagree. Don't
-  mint a second one for that case.
+  assign a second one for that case.
 
   A re-entry after DB_LOCK_WAIT is different: row_upd_clust_step calls
   row_upd_store_row again, which empties node->heap and rebuilds row and
   upd_row from the record, so the first pass's label is gone and this
-  mints another. That is fine - the first is simply consumed, the way a
+  assigns another. That is fine - the first is simply consumed, the way a
   rolled-back insert consumes one, and only the label that reaches the
   inserted record gets a node. The first pass cannot have built one: it
   only gets that far on DB_SUCCESS. */
@@ -2607,7 +2607,7 @@ static inline bool row_upd_clust_rec_by_insert_inherit(
                           vec_get_aux_id_from_row(table, node->row)) {
     /* The label buffer has to outlive `entry`, which points into it, and
     upd_row, which keeps naming it - node->heap is emptied with both. */
-    vec_stamp_aux_id(
+    vec_write_aux_id(
         table, node->upd_row,
         static_cast<byte *>(mem_heap_alloc(node->heap, VEC_AUX_ID_LEN)));
   }

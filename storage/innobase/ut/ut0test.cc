@@ -369,7 +369,7 @@ Ret_t Tester::find_ondisk_page_type(std::vector<std::string> &tokens) noexcept {
   return RET_PASS;
 }
 
-/* ---------- PS-11300 vector aux DML test surface ---------- */
+/* --------- vector aux DML test surface ---------- */
 
 /** Locate the vector aux dict_table_t for a base table.
 @return aux table (opened, caller closes) or nullptr */

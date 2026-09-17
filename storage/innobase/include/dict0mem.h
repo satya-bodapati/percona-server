@@ -2863,7 +2863,7 @@ enum persistent_type_t {
   PM_TABLESPACE_MAX_TRX_ID = 5, */
 
   /** Persistent metadata type for the hidden vec_idx_id counter of
-  vector-indexed tables (PS-11300). Deliberately far from the dense
+  vector-indexed tables. Deliberately far from the dense
   upstream range: upstream owns this namespace and allocates small
   values (3..5 are already earmarked above), so a distant byte can
   never be misparsed as a future upstream type on a crossed-over
@@ -2935,7 +2935,7 @@ class PersistentTableMetadata {
   uint64_t get_autoinc() const { return (m_autoinc); }
 
   /** Set the hidden vec_idx_id counter of the table if it's bigger
-  (the exact analog of set_autoinc_if_bigger; PS-11300)
+  (the exact analog of set_autoinc_if_bigger;)
   @param[in]    value   vec_idx_id counter */
   void set_vec_next_id_if_bigger(uint64_t value) {
     if (value > m_vec_next_id) {
@@ -2964,7 +2964,7 @@ class PersistentTableMetadata {
   /** Autoinc counter of the table */
   uint64_t m_autoinc;
 
-  /** Hidden vec_idx_id counter of vector-indexed tables (PS-11300);
+  /** Hidden vec_idx_id counter of vector-indexed tables;
   0 when the table never consumed one */
   uint64_t m_vec_next_id;
 
@@ -3104,8 +3104,8 @@ class AutoIncPersister : public Persister {
 };
 
 /** Persister for the hidden vec_idx_id counter of vector-indexed
-tables (PS-11300) - the structural twin of AutoIncPersister: the
-counter is a hidden per-table autoinc stamped into the vec_idx_id
+tables - the structural twin of AutoIncPersister: the
+counter is a hidden per-table autoinc written into the vec_idx_id
 column, and it must survive restart AND crash so labels are never
 reissued (an id consumed by a NULL-vector row or a rolled-back insert
 exists nowhere the aux-table maximum can see). */

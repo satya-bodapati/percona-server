@@ -1118,9 +1118,9 @@ static void row_mysql_convert_row_to_innobase(
 
   /* Same pattern for the hidden percona_vec_aux_id column (vector indexes).
   The SQL layer leaves the dfield set to SQL_NULL because the column
-  is HT_HIDDEN_SE; without this stamp, rec_get_converted_size_*
+  is HT_HIDDEN_SE; without this write, rec_get_converted_size_*
   asserts on NOT-NULL + SQL_NULL. */
-  vec_stamp_aux_id(prebuilt->table, row,
+  vec_write_aux_id(prebuilt->table, row,
                    prebuilt->ins_upd_rec_buff + prebuilt->mysql_row_len);
 }
 
@@ -1555,7 +1555,7 @@ static dtuple_t *row_get_prebuilt_insert_row(
 
   if (prebuilt->ins_upd_rec_buff == nullptr) {
     /* An 8-byte tail for the hidden percona_vec_aux_id, written afresh
-    for every row by vec_stamp_aux_id. It is reserved once here rather
+    for every row by vec_write_aux_id. It is reserved once here rather
     than allocated per row on prebuilt->heap, which is freed only when
     the handle is closed - 8 bytes a row for the life of a connection.
 
@@ -2945,7 +2945,7 @@ run_again:
   }
 
   /* A vector-column UPDATE adds the new node. calc_row_difference has
-  already minted the label and put it into the update vector, so the row
+  already assigned the label and put it into the update vector, so the row
   written above already names the new node - this only has to create it.
 
   DELETE deliberately does nothing here: the node has to stay for read
@@ -2960,7 +2960,7 @@ run_again:
 
     if (!node->is_delete && label != 0) {
       /* Both of these were established by calc_row_difference before it
-      minted the label, so a miss here means the row now names a node
+      assigned the label, so a miss here means the row now names a node
       that will never exist. Fail the statement rather than leave the
       graph behind the table. */
       ulint q_len = 0;
@@ -4395,7 +4395,7 @@ dberr_t row_drop_table_for_mysql(const char *name, trx_t *trx, bool nonatomic,
 
     /* Same for the vector aux tables. They are hidden, so the server
     took no MDL on them when it locked the parent, and a concurrent
-    reader can still be scanning one. See PS-11299. */
+    reader can still be scanning one. */
     if (table != nullptr &&
         DICT_TF2_FLAG_IS_SET(table, DICT_TF2_HAS_VEC_AUX_COL)) {
       dict_sys_mutex_exit();
@@ -4665,7 +4665,7 @@ dberr_t row_drop_table_for_mysql(const char *name, trx_t *trx, bool nonatomic,
   }
 
   /* Drop the per-vector-index auxiliary tables. Symmetric with the FTS
-  ancillary drop above - same flag-style gate. See PS-11299. */
+  ancillary drop above - same flag-style check. */
   if (DICT_TF2_FLAG_IS_SET(table, DICT_TF2_HAS_VEC_AUX_COL)) {
     ut_ad(!is_temp);
     err = vec_aux_drop_all_tables(trx, table);

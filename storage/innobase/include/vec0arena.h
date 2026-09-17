@@ -22,7 +22,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 Arena allocator for HNSW graph nodes.
 */
 
-#pragma once
+#ifndef vec0arena_h
+#define vec0arena_h
 
 #include <cstddef>
 #include <cstdint>
@@ -107,3 +108,5 @@ class Vec_arena {
   /** Bytes the heap holds, as last charged to the global total. */
   size_t m_bytes_allocated{0};
 };
+
+#endif /* vec0arena_h */

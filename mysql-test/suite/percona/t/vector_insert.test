@@ -4,13 +4,13 @@
 --echo # Before this commit, INSERT crashed:
 --echo #   - rec_get_converted_size_comp_prefix_low at rem0rec.cc:406
 --echo #     (percona_vec_aux_id NOT NULL field had SQL_NULL value —
---echo #      the column was never stamped)
+--echo #      the column was never written)
 --echo #   - btr_cur_search_to_nth_level at dict0dict.cc:3664
 --echo #     (row_ins tried to insert into vector index B-tree which
 --echo #      has page=FIL_NULL by design)
 --echo #
 --echo # The fix:
---echo #   1. Auto-stamp percona_vec_aux_id from a per-table atomic counter in
+--echo #   1. Auto-assign percona_vec_aux_id from a per-table atomic counter in
 --echo #      row_mysql_convert_row_to_innobase (mirrors fts_create_doc_id).
 --echo #   2. Skip vector indexes in row_ins entry loop (mirrors the
 --echo #      DICT_FTS skip there).
@@ -35,7 +35,7 @@ CREATE TABLE t1 (
   id BIGINT UNSIGNED PRIMARY KEY,
   k INT,
   v VECTOR(8) NOT NULL,
-  KEY (v) TYPE hnsw WITH (M = 6)
+  VECTOR KEY (v) TYPE hnsw (M = 6)
 );
 
 --echo # === Multiple INSERTs round-trip ===

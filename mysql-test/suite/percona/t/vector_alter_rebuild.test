@@ -26,7 +26,7 @@ BEGIN
   INSERT INTO t1 VALUES (1,101,10,STRING_TO_VECTOR('[1,0,0,0]')),
                         (2,102,20,STRING_TO_VECTOR('[2,0,0,0]')),
                         (3,103,30,STRING_TO_VECTOR('[3,0,0,0]'));
-  ALTER TABLE t1 ADD KEY (v) TYPE hnsw WITH (M = 8);
+  ALTER TABLE t1 ADD VECTOR KEY (v) TYPE hnsw (M = 8);
 END|
 DELIMITER ;|
 --enable_query_log
@@ -41,7 +41,7 @@ CALL seed();
 ALTER TABLE t1 FORCE, ALGORITHM=INPLACE;
 INSERT INTO t1 (id, alt, v) VALUES (9,109,STRING_TO_VECTOR('[9,0,0,0]'));
 
---echo # The new table copied its labels from the old rows without minting
+--echo # The new table copied its labels from the old rows without assigning
 --echo # any, so its own counter is zero and the old table holding the real
 --echo # one is already freed. A counter that did not come across reissues a
 --echo # label the INSERT above still holds.
@@ -207,7 +207,7 @@ SELECT COUNT(*) AS aux_tables FROM information_schema.innodb_tables
 --echo # ---- the aux follows the new table_id and index_id ----
 --echo #
 --echo # The aux is named percona_vec_hnsw_<table_id>_<index_id>. A rebuild
---echo # mints both afresh, so the name must change and the old one must not
+--echo # assigns both afresh, so the name must change and the old one must not
 --echo # be left behind.
 --disable_query_log
 CALL seed();
@@ -235,7 +235,7 @@ SELECT COUNT(*) AS aux_after_drop_index FROM information_schema.innodb_tables
  WHERE name LIKE '%percona_vec_hnsw%';
 
 --echo # And adding one back creates exactly one again.
-ALTER TABLE t1 ADD KEY (v) TYPE hnsw WITH (M = 8);
+ALTER TABLE t1 ADD VECTOR KEY (v) TYPE hnsw (M = 8);
 SELECT COUNT(*) AS aux_after_readd FROM information_schema.innodb_tables
  WHERE name LIKE '%percona_vec_hnsw%';
 

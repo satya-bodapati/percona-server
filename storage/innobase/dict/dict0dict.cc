@@ -4070,7 +4070,7 @@ static void dict_init_dynamic_metadata(dict_table_t *table,
     metadata->set_autoinc(table->autoinc_persisted);
   }
 
-  /* The hidden vec_idx_id counter of vector-indexed tables (PS-11300).
+  /* The hidden vec_idx_id counter of vector-indexed tables.
   Nonzero only when the table ever consumed one, so ordinary tables
   never carry the entry. */
   if (table->vec_aux_autoinc_persisted.load() != 0) {
@@ -4151,7 +4151,7 @@ static bool dict_table_apply_dynamic_metadata(
     get_dirty = true;
   }
 
-  /* The hidden vec_idx_id counter (PS-11300) - same discipline as
+  /* The hidden vec_idx_id counter - same discipline as
   autoinc above: only ever moves forward. */
   const uint64_t vec_next_id = metadata->get_vec_next_id();
   if (vec_next_id > table->vec_aux_autoinc_persisted.load()) {
@@ -4429,7 +4429,7 @@ to stop user threads when redo log is running out of space and they
 do not hold latches (log.free_check_limit_lsn). */
 static void dict_persist_update_log_margin() {
   /* Below variables basically considers only the AUTO_INCREMENT counter,
-  the hidden vec_idx_id counter (PS-11300), and a small margin for
+  the hidden vec_idx_id counter, and a small margin for
   corrupted indexes. */
 
   /* Worst case bytes for one PM_TABLE_VEC_IDX_ID entry, matching

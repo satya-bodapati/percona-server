@@ -9,7 +9,7 @@
 --echo #
 --echo # Every ADD after that runs INPLACE: the column was retained on
 --echo # DROP INDEX, so vec_build_index populates the graph and the aux
---echo # from one clustered scan, reusing each row's stamped label and
+--echo # from one clustered scan, reusing each row's existing label and
 --echo # without rewriting a single base row.
 --echo #
 
@@ -20,11 +20,11 @@ INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]')),
 
 --echo # First ADD, explicit INPLACE: refused, not silently empty.
 --error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
-ALTER TABLE t1 ADD KEY (v) TYPE hnsw WITH (M = 4), ALGORITHM=INPLACE;
+ALTER TABLE t1 ADD VECTOR KEY (v) TYPE hnsw (M = 4), ALGORITHM=INPLACE;
 
 --echo # First ADD, default algorithm: falls back to COPY and builds a
 --echo # node per row. This is the case that used to give nodes=0.
-ALTER TABLE t1 ADD KEY k1 (v) TYPE hnsw WITH (M = 4);
+ALTER TABLE t1 ADD VECTOR KEY k1 (v) TYPE hnsw (M = 4);
 SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
 SELECT @@session.innodb_interpreter_output;
 
@@ -37,7 +37,7 @@ ALTER TABLE t1 DROP KEY k1;
 
 --echo # Re-ADD with explicit INPLACE: now allowed, and populated by the
 --echo # clustered-scan build.
-ALTER TABLE t1 ADD KEY k2 (v) TYPE hnsw WITH (M = 4), ALGORITHM=INPLACE;
+ALTER TABLE t1 ADD VECTOR KEY k2 (v) TYPE hnsw (M = 4), ALGORITHM=INPLACE;
 SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
 SELECT @@session.innodb_interpreter_output;
 
@@ -61,7 +61,7 @@ SELECT @@session.innodb_interpreter_output;
 --echo # index.
 DELETE FROM t1 WHERE id = 2;
 ALTER TABLE t1 DROP KEY k2;
-ALTER TABLE t1 ADD KEY k3 (v) TYPE hnsw WITH (M = 4), ALGORITHM=INPLACE;
+ALTER TABLE t1 ADD VECTOR KEY k3 (v) TYPE hnsw (M = 4), ALGORITHM=INPLACE;
 SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
 SELECT @@session.innodb_interpreter_output;
 
@@ -76,7 +76,7 @@ INSERT INTO tk VALUES (10, STRING_TO_VECTOR('[1,0,0,0]')),
                      (20, STRING_TO_VECTOR('[0,1,0,0]')),
                      (30, STRING_TO_VECTOR('[0,0,1,0]')),
                      (40, STRING_TO_VECTOR('[0,0,0,1]'));
-ALTER TABLE tk ADD KEY kv (v) TYPE hnsw WITH (M = 4);
+ALTER TABLE tk ADD VECTOR KEY kv (v) TYPE hnsw (M = 4);
 --echo # Touch the table so the handler opens it and creates the runtime
 --echo # (vec_runtime_open runs in ha_innobase::open).
 SELECT COUNT(*) FROM tk FORCE INDEX (PRIMARY);
@@ -108,7 +108,7 @@ SELECT id FROM tk
 --echo # the same — the build produced an equivalent graph, not just a
 --echo # populated table.
 ALTER TABLE tk DROP KEY kv;
-ALTER TABLE tk ADD KEY kv2 (v) TYPE hnsw WITH (M = 4), ALGORITHM=INPLACE, LOCK=SHARED;
+ALTER TABLE tk ADD VECTOR KEY kv2 (v) TYPE hnsw (M = 4), ALGORITHM=INPLACE, LOCK=SHARED;
 SELECT COUNT(*) FROM tk FORCE INDEX (PRIMARY);
 SELECT id FROM tk
  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 1;
@@ -119,6 +119,16 @@ SELECT id FROM tk
 # traversal breaks however the layer draws fell. The LIMIT 1 query above
 # asserts the nearest row deterministically; this one is sorted so only the
 # set of rows returned is asserted, not their order.
+
+--echo # A row inserted after the rebuild is reachable through the rebuilt
+--echo # index, and the index and a plain table scan agree on the answer.
+--echo # vec_aux_verify only says the aux is well formed; this says the
+--echo # graph it describes returns what the data says it should.
+INSERT INTO tk VALUES (50, STRING_TO_VECTOR('[0.9,0,0,0]'));
+SELECT id FROM tk FORCE INDEX (kv2)
+ ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 2;
+SELECT id FROM tk IGNORE INDEX (kv2)
+ ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 2;
 
 DROP TABLE tk;
 
@@ -132,14 +142,14 @@ CREATE TABLE tm (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4) NOT NULL);
 INSERT INTO tm VALUES (1, STRING_TO_VECTOR('[1,0,0,0]'));
 
 --error ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER_VALUE
-ALTER TABLE tm ADD KEY km (v) TYPE hnsw WITH (M = 201);
+ALTER TABLE tm ADD VECTOR KEY km (v) TYPE hnsw (M = 201);
 
 --echo # Same for CREATE INDEX on the populated table.
 --error ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER_VALUE
-CREATE INDEX kmi ON tm(v) TYPE hnsw WITH (M = 201);
+CREATE VECTOR INDEX kmi ON tm(v) TYPE hnsw (M = 201);
 
 --echo # M at the bound still builds normally on a populated table.
-ALTER TABLE tm ADD KEY km (v) TYPE hnsw WITH (M = 200);
+ALTER TABLE tm ADD VECTOR KEY km (v) TYPE hnsw (M = 200);
 SET SESSION innodb_interpreter = 'vec_aux_verify test/tm';
 SELECT @@session.innodb_interpreter_output;
 DROP TABLE tm;
