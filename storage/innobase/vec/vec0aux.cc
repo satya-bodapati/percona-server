@@ -31,6 +31,8 @@ naming. No population - that lands in PS-11300. */
 
 #include "vec0aux.h"
 
+#include <debug_sync.h>
+
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -91,9 +93,9 @@ const char *vec_index_token(Vec_index_type type) {
 void vec_aux_get_table_name(const dict_table_t *parent, space_index_t index_id,
                             Vec_index_type type, char *name_out,
                             size_t name_out_len) {
-  ut_a(parent != nullptr);
-  ut_a(name_out != nullptr);
-  ut_a(name_out_len >= MAX_FULL_NAME_LEN);
+  ut_ad(parent != nullptr);
+  ut_ad(name_out != nullptr);
+  ut_ad(name_out_len >= MAX_FULL_NAME_LEN);
 
   const char *parent_name = parent->name.m_name;
   const size_t db_len = db_prefix_len(parent_name);
@@ -197,15 +199,6 @@ bool vec_aux_is_aux_table_name(const char *name) {
   return vec_aux_parse_table_name(name, nullptr, nullptr, nullptr);
 }
 
-size_t vec_aux_count_indexes(const dict_table_t *table) {
-  if (table == nullptr) return 0;
-  size_t n = 0;
-  for (const dict_index_t *idx = UT_LIST_GET_FIRST(table->indexes);
-       idx != nullptr; idx = UT_LIST_GET_NEXT(indexes, idx)) {
-    if (idx->is_vector()) n++;
-  }
-  return n;
-}
 
 bool vec_aux_table_has_vector_index(const dict_table_t *table) {
   if (table == nullptr) return false;
@@ -225,10 +218,10 @@ void vec_add_aux_id_column(dict_table_t *table, mem_heap_t *heap) {
   table->vec_aux_col = table->n_def - 1;
 }
 
-void vec_stamp_aux_id(dict_table_t *table, dtuple_t *row, mem_heap_t *heap) {
+void vec_stamp_aux_id(dict_table_t *table, dtuple_t *row, byte *buf) {
   ut_a(table != nullptr);
   ut_a(row != nullptr);
-  ut_a(heap != nullptr);
+  ut_a(buf != nullptr);
   if (!DICT_TF2_FLAG_IS_SET(table, DICT_TF2_HAS_VEC_AUX_COL)) {
     return;
   }
@@ -236,11 +229,10 @@ void vec_stamp_aux_id(dict_table_t *table, dtuple_t *row, mem_heap_t *heap) {
   ut_a(table->vec_aux_col < dtuple_get_n_fields(row));
 
   const uint64_t id = vec_assign_next_aux_id(table);
-  uint64_t *buf = static_cast<uint64_t *>(mem_heap_alloc(heap, sizeof(*buf)));
-  mach_write_to_8(reinterpret_cast<byte *>(buf), id);
+  mach_write_to_8(buf, id);
 
   dfield_t *dfield = dtuple_get_nth_field(row, table->vec_aux_col);
-  dfield_set_data(dfield, buf, sizeof(*buf));
+  dfield_set_data(dfield, buf, VEC_AUX_ID_LEN);
 }
 
 uint64_t vec_get_aux_id_from_row(const dict_table_t *table,
@@ -386,6 +378,7 @@ bool vec_upd_row_pk(const dict_table_t *table, const upd_node_t *node,
   return ok;
 }
 
+
 uint64_t vec_assign_next_aux_id(dict_table_t *table) {
   ut_a(table != nullptr);
   ut_a(DICT_TF2_FLAG_IS_SET(table, DICT_TF2_HAS_VEC_AUX_COL));
@@ -406,17 +399,21 @@ uint64_t vec_assign_next_aux_id(dict_table_t *table) {
   the source of truth for this.
 
   The stamp runs outside any active mini-transaction, so it gets a
-  dedicated one, and the watermark check inside the log call keeps redo
-  traffic to one record per new maximum. */
+  dedicated one. Upstream avoids that by logging into the row's own mtr
+  (WL#6204: "we should not introduce a new mtr ... mtr_commit would be
+  time consuming"), which we could do from row_ins_clust_index_entry_low -
+  at the price of covering the paths that never reach it, the DDL builder
+  among them. Logging where the id is minted covers every one of them. */
   mtr_t mtr;
   mtr.start();
   const bool persist = dict_table_vec_next_id_log(table, id, &mtr);
   mtr.commit();
 
-  /* Only now, with the record committed to the log, may the watermark
-  move: a later assigner that sees it raised can safely conclude a
-  covering record is already ordered at a lower LSN. */
-  dict_table_vec_next_id_persisted_advance(table, id);
+  /* The record for `id` is committed to the log and the watermark was
+  raised before it was written, so a checkpoint landing here sees a
+  watermark that already covers the record. Parking a test here is how
+  vector_counter_stale_buffer.test pins that. */
+  DEBUG_SYNC_C("vec_id_record_committed");
 
   if (persist) {
     dict_table_persist_to_dd_table_buffer(table);
@@ -531,28 +528,24 @@ dberr_t vec_aux_create_all_tables(trx_t *trx, const dict_table_t *parent) {
   return DB_SUCCESS;
 }
 
-bool vec_aux_create_dd_tables(dict_table_t *parent) {
+bool vec_aux_create_dd_table(dict_table_t *parent, const dict_index_t *index) {
   ut_a(parent != nullptr);
+  ut_a(index != nullptr && index->is_vector());
 
-  /* Vec has no `fill_dd` per- index gate because PS-11264 currently allows at
-  most one vector index per table (see dd::create_dd_table validation) - so
-  the loop either finds zero vec indexes or exactly one, and idempotency
-  isn't a concern. If phase 2 lifts the one-vec-index cap AND supports
-  partial DD materialization, mirror fts's fill_dd gate here. */
-  for (const dict_index_t *idx = UT_LIST_GET_FIRST(parent->indexes);
-       idx != nullptr; idx = UT_LIST_GET_NEXT(indexes, idx)) {
-    if (!idx->is_vector()) continue;
+  /* One named index, not every vector index the table happens to hold. That
+  distinction matters in an ALTER that drops a vector index and adds another
+  in the same statement: until it commits, the parent carries both, and the
+  dropped one's aux is on its way out - registering it would open an aux
+  that is being dropped. */
+  char aux_name[MAX_FULL_NAME_LEN];
+  vec_aux_get_table_name(parent, index->id, Vec_index_type::HNSW, aux_name,
+                         sizeof(aux_name));
 
-    char aux_name[MAX_FULL_NAME_LEN];
-    vec_aux_get_table_name(parent, idx->id, Vec_index_type::HNSW, aux_name,
-                           sizeof(aux_name));
-    dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, false);
-    ut_a(aux != nullptr);
-    const bool ok = dd_create_vec_aux_table(parent, aux);
-    dd_table_close(aux, nullptr, nullptr, false);
-    if (!ok) return false;
-  }
-  return true;
+  dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, false);
+  ut_a(aux != nullptr);
+  const bool ok = dd_create_vec_aux_table(parent, aux);
+  dd_table_close(aux, nullptr, nullptr, false);
+  return ok;
 }
 
 dberr_t vec_aux_lock_all_tables(THD *thd, const dict_table_t *parent) {

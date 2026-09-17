@@ -1406,6 +1406,22 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
 
   m_prebuilt->trx->will_lock++;
 
+  /* A table with a vector index used to be refused a native rebuild here,
+  on the grounds that the rebuild mints a new table_id and index_id and
+  the aux the graph lives in is named after them - so the graph would be
+  lost. That stopped being true when the build moved into ddl::Builder:
+  a rebuild recreates every index on the new table, the vector index among
+  them, so the graph is rebuilt from the copied rows with their labels
+  intact and base_pk following the new primary key.
+
+  What remains is that such a rebuild is not ONLINE - the branch below
+  still clears `online` for it, because the row log cannot maintain a
+  graph while DML runs against it. LOCK=SHARED it is.
+
+  vector_alter_rebuild.test covers the shapes: FORCE, OPTIMIZE,
+  ENGINE=InnoDB, ROW_FORMAT, a primary key swap, ADD and DROP COLUMN, and
+  the AUTO_INCREMENT ones that need the label counter to survive. */
+
   if (!online) {
     /* We already determined that only a non-locking
     operation is possible. */
@@ -1446,12 +1462,6 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
     rebuild-during-copy, native/online rebuild could be re-enabled;
     THAT would be a deliberate improvement beyond FTS (which never got
     it) and must be justified as a deviation then. PS-11300+. */
-    if (vec_aux_table_has_vector_index(m_prebuilt->table)) {
-      ha_alter_info->unsupported_reason =
-          innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR);
-      return HA_ALTER_INPLACE_NOT_SUPPORTED;
-    }
-
     if (innobase_spatial_exist(altered_table)) {
       ha_alter_info->unsupported_reason =
           innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_GIS);
@@ -1510,7 +1520,7 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
         supported. Reason:" and then nothing, because every other branch
         here sets a reason and this one did not. */
         ha_alter_info->unsupported_reason = innobase_get_err_msg(
-            ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR);
+            ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_NOLOCK);
         online = false;
         break;
       }
@@ -1770,6 +1780,26 @@ bool ha_innobase::commit_inplace_alter_table(TABLE *altered_table,
     ut_d(old_info_updated = true);
   }
 
+  /* The live label counter, captured here and written into the new
+  definition after the branch below.
+
+  Captured now because a rebuild frees the old table in
+  commit_inplace_alter_table_impl, and the new table it leaves behind
+  copied its labels from the old rows without minting any, so its own
+  counter is zero. Read in this phase rather than in prepare because
+  commit runs under MDL_EXCLUSIVE, where no writer can still be minting. */
+  uint64_t vec_next_id = 0;
+  {
+    const dict_table_t *vec_src = (ctx != nullptr && ctx->old_table != nullptr)
+                                      ? ctx->old_table
+                                      : m_prebuilt->table;
+
+    if (vec_src != nullptr &&
+        DICT_TF2_FLAG_IS_SET(vec_src, DICT_TF2_HAS_VEC_AUX_COL)) {
+      vec_next_id = vec_src->vec_aux_autoinc_next_id.load();
+    }
+  }
+
   bool res = commit_inplace_alter_table_impl<dd::Table>(
       altered_table, ha_alter_info, commit, new_dd_tab);
 
@@ -1811,6 +1841,12 @@ bool ha_innobase::commit_inplace_alter_table(TABLE *altered_table,
     }
     ut_ad(dd_table_match(ctx->new_table, new_dd_tab));
   }
+
+  /* Written here, after the branch above, because the INSTANT and
+  no-change paths clear se_private_data and refill it from the old
+  definition - that copy restores autoinc and version by name, and would
+  otherwise drop this. A zero is no counter to carry, and is ignored. */
+  dd_set_vec_next_id(new_dd_tab->se_private_data(), vec_next_id);
 
 #ifdef UNIV_DEBUG
   /* Inplace ALTERs for expanded fast index creation can only be about
@@ -5462,14 +5498,15 @@ template <typename Table>
     column; once the column exists a later ADD is INPLACE with no
     rebuild, and then ctx->new_table is the table that was already there
     (vector_index_build.test asserts the TABLE_ID does not change across
-    such an ADD). Iterating its vector indexes is still right, because
-    PS-11264 caps a table at one - so when vec_index is set there is
-    exactly one to register and it is the one this ALTER added. The
-    assertion below is what would catch that cap being lifted without
-    this code being revisited. */
+    such an ADD).
+
+    So register vec_index itself rather than whatever vector indexes the
+    table holds: DROP KEY v, ADD KEY v2 in one statement leaves both on
+    the parent until commit, and the dropped one's aux is already on its
+    way out. vec_index is the one this ALTER added - the loop above
+    asserts there is only ever one. */
     if (vec_index) {
-      ut_a(vec_aux_count_indexes(ctx->new_table) == 1);
-      if (!vec_aux_create_dd_tables(ctx->new_table)) {
+      if (!vec_aux_create_dd_table(ctx->new_table, vec_index)) {
         error = DB_ERROR;
         goto error_handling;
       }
@@ -8321,6 +8358,7 @@ rollback_trx:
       dict_table_autoinc_set_col_pos(t, field->field_index());
       dict_table_autoinc_unlock(t);
     }
+
 
     bool add_fts = false;
 
