@@ -100,6 +100,21 @@ statement commits: it is what flushes them. */
 class Flush_observer;
 struct Vec_aux_bulk;
 
+/** Begin a bulk build into `aux`, which must be empty.
+@return the handle, or nullptr */
+[[nodiscard]] Vec_aux_bulk *vec_aux_bulk_start(trx_t *trx, dict_table_t *aux,
+                                               Flush_observer *observer);
+
+/** Append one row. Ascending `row.id` across calls.
+@return DB_SUCCESS or an error */
+[[nodiscard]] dberr_t vec_aux_bulk_insert(Vec_aux_bulk *b,
+                                          const vec_aux_row_t &row);
+
+/** Finish the tree, flush its pages and release the handle. Pass the error
+so far, or DB_SUCCESS.
+@return DB_SUCCESS or an error */
+[[nodiscard]] dberr_t vec_aux_bulk_finish(Vec_aux_bulk *b, dberr_t err);
+
 /** Update one node's neighbour slots, and optionally its base_pk.
 
 Positioned by primary key rather than by search, so it takes the locks a
