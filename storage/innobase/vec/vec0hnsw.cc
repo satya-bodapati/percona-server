@@ -197,8 +197,8 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
   ut_a(index->is_vector());
   ut_a(key != nullptr);
 
-  if (index->vec != nullptr) {
-    return static_cast<vec_t *>(index->vec);
+  if (vec_t *existing = vec_runtime_get(index); existing != nullptr) {
+    return existing;
   }
 
   /* The values the user wrote in WITH(...), round-tripped through the
@@ -253,7 +253,10 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
     return nullptr;
   }
 
-  auto *vec = ut::new_withkey<vec_t>(UT_NEW_THIS_FILE_PSI_KEY);
+  auto *vec = ut::new_withkey<vec_t>(
+      UT_NEW_THIS_FILE_PSI_KEY, index->id, index->table, dims,
+      static_cast<uint32_t>(hnsw_param->M),
+      static_cast<uint32_t>(hnsw_param->ef_construction), hnsw_param->dist);
   if (vec == nullptr) {
     ib::error(ER_IB_MSG_456)
         << "Failed to open vector runtime for index " << index->name
@@ -263,15 +266,24 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
     return nullptr;
   }
 
-  vec->index_id = index->id;
-  vec->table = index->table;
-  vec->dims = dims;
-  vec->m = static_cast<uint32_t>(hnsw_param->M);
-  vec->ef_construction = static_cast<uint32_t>(hnsw_param->ef_construction);
-  vec->loaded = false;
+  /* Publish, or lose the race and use the winner. Two sessions opening
+  the same table both find dict_index_t::vec null - ha_innobase::open
+  takes no latch that would order them - so both build a runtime and one
+  of them must give way. Before this was a compare-exchange the loser's
+  object was simply overwritten and leaked, and had any caller used the
+  returned pointer there would have been two graphs on one index: two
+  arenas both charging innodb_hnsw_max_memory, inserts landing in one
+  graph and searches reading the other.
 
-  (void)thd;
-  index->vec = vec;
+  The loser's object is safe to destroy: nothing has been loaded into it
+  yet, so ~vec_t deletes a null graph and no arena bytes are involved. */
+  std::atomic_ref<Vec_runtime *> slot(index->vec);
+  Vec_runtime *expected = nullptr;
+  if (!slot.compare_exchange_strong(expected, vec, std::memory_order_release,
+                                    std::memory_order_acquire)) {
+    ut::delete_(vec);
+    return static_cast<vec_t *>(expected);
+  }
   return vec;
 }
 
@@ -316,9 +328,21 @@ has ever been inserted. */
 static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
   ut_a(vec->hnsw == nullptr);
 
-  vec->hnsw = ut::new_withkey<Vec_hnsw>(UT_NEW_THIS_FILE_PSI_KEY, vec->dims,
-                                        &vector_distance_euclidean_squared,
-                                        vec->m, vec->ef_construction);
+  /* innodb_hnsw_max_memory, at the entry to the load. Same charge check
+  as vec_add_node: is the budget already spent, not would this fit. What
+  this call allocates directly is the graph object and the entry-point
+  node; the rest of the graph arrives node by node through
+  Vec_persistor::load_node_cb, which checks again per node. Both are
+  needed - this one so a cold index cannot start loading into a budget
+  that is already gone, that one so the load cannot run past it. */
+  if (srv_hnsw_max_memory != 0 &&
+      vec_arena_global_bytes() >= srv_hnsw_max_memory) {
+    return DB_OUT_OF_MEMORY;
+  }
+
+  vec->hnsw =
+      ut::new_withkey<Vec_hnsw>(UT_NEW_THIS_FILE_PSI_KEY, vec->dims, vec->dist,
+                                vec->m, vec->ef_construction);
   if (vec->hnsw == nullptr) return DB_OUT_OF_MEMORY;
 
   mem_heap_t *heap = mem_heap_create(256, UT_LOCATION_HERE);
@@ -514,8 +538,9 @@ dict_index_t *vec_index_of(dict_table_t *table) {
 }
 
 uint32_t vec_index_dims(const dict_index_t *index) {
-  if (index == nullptr || index->vec == nullptr) return 0;
-  return static_cast<const vec_t *>(index->vec)->dims;
+  if (index == nullptr) return 0;
+  const vec_t *vec = vec_runtime_get(index);
+  return vec == nullptr ? 0 : vec->dims;
 }
 
 dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
@@ -525,8 +550,8 @@ dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
   ut_a(q != nullptr && out != nullptr);
   out->clear();
 
-  if (index->vec == nullptr) return DB_TABLE_NOT_FOUND;
-  auto *vec = static_cast<vec_t *>(index->vec);
+  auto *vec = vec_runtime_get(index);
+  if (vec == nullptr) return DB_TABLE_NOT_FOUND;
 
   MDL_ticket *mdl = nullptr;
   dict_table_t *aux =
@@ -598,8 +623,8 @@ dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
   ut_a(batch_size > 0);
   *out = nullptr;
 
-  if (index->vec == nullptr) return DB_TABLE_NOT_FOUND;
-  auto *vec = static_cast<vec_t *>(index->vec);
+  auto *vec = vec_runtime_get(index);
+  if (vec == nullptr) return DB_TABLE_NOT_FOUND;
 
   MDL_ticket *mdl = nullptr;
   dict_table_t *aux =
@@ -675,71 +700,183 @@ void vec_knn_close(vec_search_t *s) {
   ut::delete_(s);
 }
 
-dberr_t vec_build_index(trx_t *trx, dict_table_t *table,
-                        dict_index_t *vec_index, uint32_t dims, uint32_t m,
-                        uint32_t ef_construction, THD *thd) {
-  ut_a(trx != nullptr);
-  ut_a(vec_index != nullptr && vec_index->is_vector());
-  ut_a(dims != 0 && m != 0);
+struct Vec_build {
+  Vec_build(uint32_t dims_, uint32_t m_, uint32_t ef_construction_,
+            vec_dist_func_t *dist_, dict_index_t *index_)
+      : dims(dims_), index(index_) {
+    graph = ut::new_withkey<Vec_build_hnsw>(UT_NEW_THIS_FILE_PSI_KEY, dims_,
+                                            dist_, m_, ef_construction_);
+  }
 
-  /* Same pre-flight as the DML path (design: "Memory limits"): refuse before
-  building anything rather than throwing partway through. */
+  ~Vec_build() {
+    if (graph != nullptr) ut::delete_(graph);
+  }
+
+  Vec_build(const Vec_build &) = delete;
+  Vec_build &operator=(const Vec_build &) = delete;
+
+  /* The graph is built with a persistor that writes nothing, and the aux
+  is written afterwards from a walk of the finished graph. Persisting as
+  we insert would rewrite a node's row every time a later insert rewires
+  it; the walk writes each row once, with its final neighbour list. */
+  Vec_build_hnsw *graph{nullptr};
+  Vec_null_persistor::Context null_ctx{};
+  uint32_t dims{};
+  dict_index_t *index{nullptr};
+};
+
+Vec_build *vec_build_start(dict_index_t *index, const TABLE *altered_table) {
+  ut_a(index != nullptr && index->is_vector());
+  if (altered_table == nullptr) return nullptr;
+
+  /* Same pre-flight as the DML path (design: "Memory limits"): refuse
+  before building anything rather than throwing partway through. */
+  if (srv_hnsw_max_memory != 0 &&
+      vec_arena_global_bytes() >= srv_hnsw_max_memory) {
+    return nullptr;
+  }
+
+  /* M and ef_construction exist only in the index definition the ALTER is
+  producing - the dictionary carries neither - so they are read from the
+  KEY here rather than plumbed down from the handler. */
+  const KEY *vkey = nullptr;
+  for (uint k = 0; k < altered_table->s->keys; k++) {
+    if ((altered_table->key_info[k].flags & HA_VECTOR) != 0 &&
+        innobase_strcasecmp(altered_table->key_info[k].name, index->name) ==
+            0) {
+      vkey = &altered_table->key_info[k];
+      break;
+    }
+  }
+  if (vkey == nullptr) return nullptr;
+
+  storage::innobase::vec::VectorIndexParam vip;
+  if (storage::innobase::vec::parse_options(*vkey, vip)) return nullptr;
+
+  const auto *hp = std::get_if<storage::innobase::vec::HnswParam>(&vip);
+  if (hp == nullptr) return nullptr;
+
+  /* Same resolution as vec_runtime_open: the key part describes a 1-byte
+  prefix, but its field_index() is correct. */
+  const Field *f = altered_table->field[vkey->key_part[0].field->field_index()];
+  if (f == nullptr || f->type() != MYSQL_TYPE_VECTOR) return nullptr;
+
+  const uint32_t dims =
+      down_cast<const Field_vector *>(f)->get_max_dimensions();
+  if (dims == 0 || hp->M == 0) return nullptr;
+
+  auto *b = ut::new_withkey<Vec_build>(
+      UT_NEW_THIS_FILE_PSI_KEY, dims, static_cast<uint32_t>(hp->M),
+      static_cast<uint32_t>(hp->ef_construction), hp->dist, index);
+
+  if (b == nullptr) return nullptr;
+  if (b->graph == nullptr) {
+    ut::delete_(b);
+    return nullptr;
+  }
+  return b;
+}
+
+dberr_t vec_build_add_row(Vec_build *b, dict_table_t *table,
+                          const dtuple_t *row) {
+  ut_a(b != nullptr && b->graph != nullptr);
+
+  ulint vec_len = 0;
+  const char *q = vec_row_vector_bytes(b->index, row, &vec_len);
+  if (q == nullptr) return DB_SUCCESS;
+  if (vec_len != b->dims * sizeof(float)) return DB_CORRUPTION;
+
+  /* Label 0 is the empty-slot sentinel and can never be a node. A row
+  carrying it means the stamping path missed it. */
+  const uint64_t id = vec_get_aux_id_from_row(table, row);
+  ut_a(id != 0);
+
+  const dfield_t *pk_df = nullptr;
+  const dict_index_t *clust = table->first_index();
+  ut_a(dict_index_get_n_unique(clust) == 1);
+  pk_df = dtuple_get_nth_field(row, clust->get_col_no(0));
+  ut_a(!dfield_is_null(pk_df) && dfield_get_len(pk_df) == 8);
+  const uint64_t base_pk =
+      mach_read_from_8(static_cast<const byte *>(dfield_get_data(pk_df)));
+
+  b->graph->insert(id, base_pk, q, &b->null_ctx);
+
+  /* innodb_hnsw_max_memory. The whole graph is in memory before any of it
+  is durable, so this is the only thing bounding a build. Several scan
+  threads can pass this together and overshoot by a node each, which is
+  bounded by the thread count and cheaper than serialising them. */
   if (srv_hnsw_max_memory != 0 &&
       vec_arena_global_bytes() >= srv_hnsw_max_memory) {
     return DB_OUT_OF_MEMORY;
   }
+  return DB_SUCCESS;
+}
 
-  std::vector<vec_base_row_t> rows;
-  dberr_t err = vec_base_collect_rows(table, vec_index, dims, &rows);
-  if (err != DB_SUCCESS) return err;
-  if (rows.empty()) return DB_SUCCESS;
+dberr_t vec_build_write_aux(Vec_build *b, trx_t *trx, dict_table_t *table,
+                            THD *thd, Flush_observer *observer) {
+  ut_a(b != nullptr && b->graph != nullptr);
+  ut_a(trx != nullptr);
+
+  if (b->graph->size() == 0) return DB_SUCCESS;
 
   MDL_ticket *mdl = nullptr;
-  dict_table_t *aux = vec_aux_open_for_dml(table, vec_index->id, thd, &mdl);
+  dict_table_t *aux = vec_aux_open_for_dml(table, b->index->id, thd, &mdl);
   if (aux == nullptr) return DB_TABLE_NOT_FOUND;
 
-  Vec_ctx ctx;
-  ctx.trx = trx;
-  ctx.aux = aux;
-  ctx.thd = thd;
-  ctx.m = m;
-  ctx.vec_bytes = dims * sizeof(float);
-  ctx.err = DB_SUCCESS;
-  /* trx here is the ALTER's own transaction, so the callbacks must not
-  commit it. The whole build lands in one transaction and rolls back with
-  the ALTER. */
-  ctx.commit_steps = false;
+  /* Record 0 first, then one row per node in ascending id order. The aux
+  table is keyed by id, so the whole sequence is an append and the tree is
+  built left to right instead of being inserted into at random. All on the
+  ALTER's transaction, so a failure here rolls the aux back with the rest
+  of the statement.
 
-  /* A private graph, discarded below. It is not installed on the index:
-  a half-built graph must never be reachable, and if the ALTER fails
-  there is nothing to unwind. */
-  auto *graph = ut::new_withkey<Vec_hnsw>(UT_NEW_THIS_FILE_PSI_KEY, dims,
-                                          &vector_distance_euclidean_squared, m,
-                                          ef_construction);
-  if (graph == nullptr) {
+  Record 0 is not a node: id 0 is the empty-slot sentinel, so the row is
+  free to hold the entry point in base_pk. */
+  vec_aux_row_t meta;
+  meta.id = 0;
+  meta.vec = nullptr;
+  meta.dims = 0;
+  meta.base_pk = b->graph->entry_point_id();
+  meta.level = 0;
+  meta.neighbors = nullptr;
+  meta.neighbors_len = 0;
+
+  Vec_aux_bulk *bulk = vec_aux_bulk_start(trx, aux, observer);
+
+  if (bulk == nullptr) {
     vec_aux_close_for_dml(aux, thd, &mdl);
     return DB_OUT_OF_MEMORY;
   }
 
-  for (const vec_base_row_t &row : rows) {
-    /* Label 0 is the empty-slot sentinel and can never be a node. A row
-    carrying it means the stamping path missed it. */
-    ut_a(row.id != 0);
-    graph->insert(row.id, row.base_pk,
-                  reinterpret_cast<const char *>(row.vec.data()), &ctx);
-    if (ctx.err != DB_SUCCESS) break;
+  dberr_t err = vec_aux_bulk_insert(bulk, meta);
+  std::vector<byte> neighbors;
 
-    if (srv_hnsw_max_memory != 0 &&
-        vec_arena_global_bytes() >= srv_hnsw_max_memory) {
-      ctx.err = DB_OUT_OF_MEMORY;
-      break;
-    }
-  }
+  b->graph->for_each_node_sorted([&](uint64_t id, uint64_t base_pk,
+                                     const char *vec, uint8_t layer,
+                                     Vec_build_hnsw::NeighborIdRange nbrs) {
+    if (err != DB_SUCCESS) return;
 
-  err = ctx.err;
-  ut::delete_(graph);
+    vec_flatten_neighbors(nbrs, neighbors);
+
+    vec_aux_row_t row;
+    row.id = id;
+    row.vec = reinterpret_cast<const float *>(vec);
+    row.dims = b->dims;
+    row.base_pk = base_pk;
+    row.level = layer;
+    row.neighbors = neighbors.data();
+    row.neighbors_len = neighbors.size();
+
+    err = vec_aux_bulk_insert(bulk, row);
+  });
+
+  err = vec_aux_bulk_finish(bulk, err);
+
   vec_aux_close_for_dml(aux, thd, &mdl);
   return err;
+}
+
+void vec_build_free(Vec_build *b) {
+  if (b != nullptr) ut::delete_(b);
 }
 
 dberr_t vec_update_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
@@ -749,8 +886,9 @@ dberr_t vec_update_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
 
   for (dict_index_t *index = table->first_index(); index != nullptr;
        index = index->next()) {
-    if (!index->is_vector() || index->vec == nullptr) continue;
-    auto *vec = static_cast<vec_t *>(index->vec);
+    if (!index->is_vector()) continue;
+    vec_t *vec = vec_runtime_get(index);
+    if (vec == nullptr) continue;
     if (q_len != vec->dims * sizeof(float)) return DB_CORRUPTION;
     const dberr_t err = vec_add_node(vec, table, label, base_pk, q, thd);
     if (err != DB_SUCCESS) return err;
@@ -762,9 +900,10 @@ dberr_t vec_insert_row(trx_t *trx [[maybe_unused]], dict_table_t *table,
                        const dtuple_t *row, THD *thd) {
   for (dict_index_t *index = table->first_index(); index != nullptr;
        index = index->next()) {
-    if (!index->is_vector() || index->vec == nullptr) continue;
+    if (!index->is_vector()) continue;
 
-    auto *vec = static_cast<vec_t *>(index->vec);
+    vec_t *vec = vec_runtime_get(index);
+    if (vec == nullptr) continue;
 
     ulint vec_len = 0;
     const char *q = vec_row_vector_bytes(index, row, &vec_len);

@@ -37,6 +37,7 @@ full redo/undo/locking, no global mutex. */
 #define vec0dml_h
 
 #include <cstdint>
+#include <functional>
 #include <tuple>
 #include <vector>
 
@@ -91,6 +92,29 @@ prebuilt and without pars_sql (which would take the global pars_mutex).
 @return DB_SUCCESS, or an error */
 dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux, const vec_aux_row_t &row);
 
+/** Bottom-up build of a vector aux table, for an index build.
+
+Rows must arrive in ascending id order - this appends, it does not sort.
+The pages carry no redo, so vec_aux_bulk_finish must run before the
+statement commits: it is what flushes them. */
+class Flush_observer;
+struct Vec_aux_bulk;
+
+/** Begin a bulk build into `aux`, which must be empty.
+@return the handle, or nullptr */
+[[nodiscard]] Vec_aux_bulk *vec_aux_bulk_start(trx_t *trx, dict_table_t *aux,
+                                               Flush_observer *observer);
+
+/** Append one row. Ascending `row.id` across calls.
+@return DB_SUCCESS or an error */
+[[nodiscard]] dberr_t vec_aux_bulk_insert(Vec_aux_bulk *b,
+                                          const vec_aux_row_t &row);
+
+/** Finish the tree, flush its pages and release the handle. Pass the error
+so far, or DB_SUCCESS.
+@return DB_SUCCESS or an error */
+[[nodiscard]] dberr_t vec_aux_bulk_finish(Vec_aux_bulk *b, dberr_t err);
+
 /** Update one node's neighbour slots, and optionally its base_pk.
 
 Positioned by primary key rather than by search, so it takes the locks a
@@ -114,35 +138,6 @@ dberr_t vec_aux_update_row(trx_t *trx, dict_table_t *aux, uint64_t id,
 
 /** One node read back from the aux table. Pointers are into a caller
 supplied heap and live as long as it does. */
-/** One base-table row, as the index build needs it. */
-struct vec_base_row_t {
-  /** The row's already-stamped percona_vec_aux_id - reused as the graph
-  label, so a rebuild preserves the labels rather than minting new ones. */
-  uint64_t id;
-  /** The vector, materialised (an off-page BLOB is fetched, not a
-  20-byte reference). */
-  std::vector<float> vec;
-  /** The row's primary key, in storage form. */
-  uint64_t base_pk;
-};
-
-/** Collect every committed row that the index build should insert.
-
-One clustered scan of the base table. Delete-marked records are skipped:
-they are committed deletes pending purge, not rows. Uncommitted changes
-cannot be present - the ALTER holds at least a shared lock and waited out
-prior writers at MDL upgrade - which is what lets this read records
-directly rather than through a read view.
-
-@param[in]   base       base table
-@param[in]   vec_index  the vector index being built; its field 0 names
-                        the column to read
-@param[in]   dims       expected dimensions, for validation
-@param[out]  rows       the collected rows
-@return DB_SUCCESS, or DB_CORRUPTION if a vector is the wrong width */
-dberr_t vec_base_collect_rows(dict_table_t *base, const dict_index_t *vec_index,
-                              uint32_t dims, std::vector<vec_base_row_t> *rows);
-
 struct vec_aux_read_t {
   const byte *vec{nullptr};
   ulint vec_len{0};

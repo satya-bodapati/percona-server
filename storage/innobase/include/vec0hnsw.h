@@ -34,6 +34,7 @@ vector index keeps in memory.
 
 #include "db0err.h"
 #include "dict0mem.h"
+#include "srv0srv.h"
 #include "trx0trx.h"
 #include "univ.i"
 #include "ut0rnd.h"
@@ -46,6 +47,7 @@ vector index keeps in memory.
 #include "vector-common/hnsw.h"
 
 class THD;
+class Flush_observer;
 
 /** Everything a callback needs that is NOT a property of the index.
 
@@ -152,6 +154,22 @@ dberr_t vec_persist_load_node(Vec_ctx *ctx, Hnsw &hnsw,
   return DB_SUCCESS;
 }
 
+/** Flatten a neighbour range into the on-disk blob: one big-endian id per
+slot, 0 for an empty slot, no header. Shared by the two writers - the
+persistor, which writes a node as it is inserted, and the build, which
+writes it once at the end from a walk - so the layout has one definition.
+@param[in]   nbrs  neighbour ids, in slot order
+@param[out]  out   the blob, cleared first */
+template <typename NeighborIds>
+inline void vec_flatten_neighbors(NeighborIds nbrs, std::vector<byte> &out) {
+  out.clear();
+  for (uint64_t id : nbrs) {
+    byte buf[8];
+    mach_write_to_8(buf, id);
+    out.insert(out.end(), buf, buf + 8);
+  }
+}
+
 /** Sink for the graph's persistence callbacks.
 
 Stateless by contract - every member of the "state" a callback needs is
@@ -191,6 +209,25 @@ struct Vec_persistor {
   bool load_node_cb(Context *ctx, Hnsw &hnsw,
                     typename Hnsw::LoadNodeHandle handle) {
     if (ctx->err != DB_SUCCESS) return false;
+
+    /* NOT the place for the innodb_hnsw_max_memory check, however much
+    it looks like it: this is where a cold graph grows, but a false
+    return here is indistinguishable from "this node is gone". load_node
+    (hnsw.h) calls set_lost() on it, NODE_LOST is never retried, and
+    every later search skips that node - so refusing one fault for a
+    transient reason leaves the graph permanently short of nodes and
+    answering queries with fewer rows and no error at all. Measured:
+    with the check here, a search after a refused load returned one row
+    where three were correct.
+
+    So the budget is checked at the entry to a load or an insert instead
+    (vec_runtime_load, vec_add_node), which bounds when a graph may
+    start growing but lets one statement overshoot by whatever it
+    faults. Metering each fault needs a load_node_cb that can say
+    "failed, try again later" as opposed to "lost" - the same API gap
+    Pawel Olchawa raised on vec0hnsw.h, where the callback is to be
+    reworked to report errors properly. This check belongs there. */
+
     const dberr_t err = vec_persist_load_node(ctx, hnsw, handle);
     if (err != DB_SUCCESS) {
       ctx->err = err;
@@ -200,15 +237,34 @@ struct Vec_persistor {
   }
 
  private:
-  /** Flatten a neighbour range into the on-disk blob: one big-endian id
-  per slot, 0 for an empty slot, no header. */
+};
+
+/** A Persistor that writes nothing.
+
+An index build inserts every row into a graph that no reader can see yet,
+and persisting during that build is wasted work: each insert rewires its
+neighbours, so a node's row would be rewritten every time a later insert
+touches it - O(N x M x log N) row updates to arrive at a state that is
+only correct once the last row is in. Building against this persistor and
+then walking the finished graph (HNSW::for_each_node) writes each node
+once, with its final neighbour list.
+
+Context is an empty tag: there is no error to carry, because none of
+these can fail. load_node_cb asserts because a build never faults a node
+in - every node it has, it inserted. */
+struct Vec_null_persistor {
+  struct Context {};
+
   template <typename NeighborIds>
-  static void vec_flatten_neighbors(NeighborIds nbrs, std::vector<byte> &out) {
-    for (uint64_t id : nbrs) {
-      byte buf[8];
-      mach_write_to_8(buf, id);
-      out.insert(out.end(), buf, buf + 8);
-    }
+  void insert_cb(Context *, uint64_t, uint64_t, const char *, uint8_t,
+                 NeighborIds) {}
+  template <typename NeighborIds>
+  void update_neighbors_cb(Context *, uint64_t, NeighborIds) {}
+  void update_entry_point_cb(Context *, uint64_t) {}
+  template <typename Hnsw>
+  bool load_node_cb(Context *, Hnsw &, typename Hnsw::LoadNodeHandle) {
+    ut_error;
+    return false;
   }
 };
 
@@ -252,8 +308,28 @@ class Vec_random_engine {
 
 using Vec_hnsw = HNSW<Vec_arena, Vec_persistor, Vec_random_engine>;
 
+/** The same graph, built without persisting anything: what an index build
+uses before writing the aux in one pass. Same arena and same RNG, so it
+behaves identically - only the persistor differs. */
+using Vec_build_hnsw = HNSW<Vec_arena, Vec_null_persistor, Vec_random_engine>;
+
 /** In-memory state of one open vector index. */
 struct vec_t : public Vec_runtime {
+  /** Everything the runtime knows about its index is settled here, before
+  the object is published into dict_index_t::vec, and const afterwards.
+  That is not tidiness: publication is the only synchronisation these
+  fields get, so a later assignment to any of them would be a data race
+  against every reader. Making them const means such a patch does not
+  compile. */
+  vec_t(space_index_t index_id_, dict_table_t *table_, uint32_t dims_,
+        uint32_t m_, uint32_t ef_construction_, vec_dist_func_t *dist_)
+      : index_id(index_id_),
+        table(table_),
+        dims(dims_),
+        m(m_),
+        ef_construction(ef_construction_),
+        dist(dist_) {}
+
   ~vec_t() override;
 
   /** The graph. Owns its arena and its persistor by value. */
@@ -281,12 +357,16 @@ struct vec_t : public Vec_runtime {
   next statement retries. */
   std::mutex load_mutex;
   /** The index this runtime belongs to. */
-  space_index_t index_id{0};
+  const space_index_t index_id;
   /** Base table, for opening the aux and reading the label counter. */
-  dict_table_t *table{nullptr};
-  uint32_t dims{0};
-  uint32_t m{0};
-  uint32_t ef_construction{0};
+  dict_table_t *const table;
+  const uint32_t dims;
+  const uint32_t m;
+  const uint32_t ef_construction;
+  /** The distance kernel this index's metric selects, resolved once by
+  parse_options. The graph is built with it rather than with a kernel
+  chosen here, so WITH (metric = ...) is what decides. */
+  vec_dist_func_t *const dist;
   /** True once the graph has been built from the aux table. Atomic, with
   release/acquire ordering: it publishes the `hnsw` pointer to every thread
   that sees it true, which is what lets the hot paths run unlocked. */
@@ -303,6 +383,25 @@ and the row-level code that needs the graph has only dict objects.
 @param[in]      form   the open TABLE, for the vector column's dimension
 @param[in]      thd    session, for error reporting
 @return the runtime, or nullptr if the parameters could not be read */
+/** The runtime attached to `index`, or nullptr if it has none yet.
+
+dict_index_t::vec is written by whichever session opens the table first
+and read by every session after it, with no latch between them, so the
+access is atomic: a release store publishes the object and an acquire
+load here guarantees that a reader seeing the pointer also sees the
+fields written before it. std::atomic_ref rather than making the member
+std::atomic because dict_index_t is never constructed - it is zeroed and
+dict_mem_fill_index_struct() stands in for a constructor - so a member
+with a real constructor would not have one called.
+@param[in]  index  vector index
+@return the runtime, or nullptr */
+[[nodiscard]] inline vec_t *vec_runtime_get(const dict_index_t *index) {
+  /* const_cast: atomic_ref needs a non-const lvalue, and the read itself
+  does not modify the index. */
+  std::atomic_ref<Vec_runtime *> slot(const_cast<dict_index_t *>(index)->vec);
+  return static_cast<vec_t *>(slot.load(std::memory_order_acquire));
+}
+
 vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
                         THD *thd);
 
@@ -445,9 +544,48 @@ dict_index_t *vec_index_of(dict_table_t *table);
 /** Dimensions the index was built with; 0 if it has no runtime yet. */
 uint32_t vec_index_dims(const dict_index_t *index);
 
-dberr_t vec_build_index(trx_t *trx, dict_table_t *table,
-                        dict_index_t *vec_index, uint32_t dims, uint32_t m,
-                        uint32_t ef_construction, THD *thd);
+/** State of one vector index build, owned by the ddl::Builder that is
+building that index. Opaque so the DDL layer needs none of the graph's
+headers. */
+struct Vec_build;
+
+/** Start building `index`. The HNSW parameters come from the index's own
+definition in `altered_table`, which is the only place they exist during
+an ALTER - nothing in the dictionary carries M or ef_construction.
+@param[in]  index          the vector index being built
+@param[in]  altered_table  the MySQL table definition the ALTER produces
+@return the build state, or nullptr if it could not be created */
+[[nodiscard]] Vec_build *vec_build_start(dict_index_t *index,
+                                         const TABLE *altered_table);
+
+/** Add one base row to the graph. Called from the DDL scan's per-row
+callback, concurrently from every scan thread: HNSW::insert serialises
+allocation on its own lock and guards neighbour lists with striped
+per-node locks. Writes nothing - the build persistor is
+Vec_null_persistor - so this takes no latches and calls no row API.
+@param[in,out]  b      build state
+@param[in]      table  base table the row belongs to
+@param[in]      row    the base row, as the scan built it
+@return DB_SUCCESS, or DB_OUT_OF_MEMORY once innodb_hnsw_max_memory is
+reached */
+[[nodiscard]] dberr_t vec_build_add_row(Vec_build *b, dict_table_t *table,
+                                        const dtuple_t *row);
+
+/** Walk the finished graph and write the aux table: one row per node with
+the neighbours it ended up with, then record 0 naming the entry point. On
+the ALTER's own transaction, so a failure rolls the aux back with the rest
+of the statement.
+@param[in,out]  b      build state
+@param[in]      trx    the ALTER's transaction
+@param[in]      table  base table being altered
+@param[in]      thd    connection, for the aux MDL
+@return DB_SUCCESS or an error */
+[[nodiscard]] dberr_t vec_build_write_aux(Vec_build *b, trx_t *trx,
+                                          dict_table_t *table, THD *thd,
+                                          Flush_observer *observer);
+
+/** Release the build state and the graph it holds. Safe on nullptr. */
+void vec_build_free(Vec_build *b);
 
 dberr_t vec_update_row(trx_t *trx, dict_table_t *table, uint64_t label,
                        const char *q, ulint q_len, uint64_t base_pk, THD *thd);
