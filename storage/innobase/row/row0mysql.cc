@@ -80,6 +80,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "trx0undo.h"
 #include "ut0cpu_cache.h"
 #include "ut0new.h"
+#include "vec0aux.h"
 #include "zlib.h"
 
 #include "current_thd.h"
@@ -1113,6 +1114,12 @@ static void row_mysql_convert_row_to_innobase(
 
     fts_create_doc_id(prebuilt->table, row, prebuilt->heap);
   }
+
+  /* Same pattern for the hidden percona_vec_aux_id column (vector indexes).
+  The SQL layer leaves the dfield set to SQL_NULL because the column
+  is HT_HIDDEN_SE; without this stamp, rec_get_converted_size_*
+  asserts on NOT-NULL + SQL_NULL. */
+  vec_stamp_aux_id(prebuilt->table, row, prebuilt->heap);
 }
 
 /** Handles user errors and lock waits detected by the database engine.
@@ -1461,7 +1468,7 @@ void row_prebuilt_free(row_prebuilt_t *prebuilt, bool dict_locked) {
   }
 
   if (prebuilt->table) {
-    ut_ad(!prebuilt->table->is_fts_aux());
+    ut_ad(!prebuilt->table->is_aux());
     dd_table_close(prebuilt->table, nullptr, nullptr, dict_locked);
   }
 
@@ -3244,9 +3251,11 @@ dberr_t row_create_table_for_mysql(dict_table_t *&table,
       break;
     case TRX_DICT_OP_INDEX:
       /* If the transaction was previously flagged as
-      TRX_DICT_OP_INDEX, we should be creating auxiliary
-      tables for full-text indexes. */
-      ut_ad(strstr(table->name.m_name, "/fts_") != nullptr);
+      TRX_DICT_OP_INDEX, we should be creating auxiliary tables for
+      full-text or vector indexes. Vec aux names start with
+      "<db>/vec_" — see VEC_AUX_PREFIX / vec_aux_get_table_name. */
+      ut_ad(strstr(table->name.m_name, "/fts_") != nullptr ||
+            strstr(table->name.m_name, "/vec_") != nullptr);
   }
 
   /* Assign table id and build table space. */
@@ -4364,7 +4373,7 @@ dberr_t row_drop_table_for_mysql(const char *name, trx_t *trx, bool nonatomic,
   /* make sure background stats thread is not running on the table */
   ut_ad(!(table->stats_bg_flag & BG_STAT_IN_PROGRESS));
 
-  if (!table->is_temporary() && !table->is_fts_aux()) {
+  if (!table->is_temporary() && !table->is_aux()) {
     if (srv_thread_is_active(srv_threads.m_dict_stats)) {
       dict_stats_recalc_pool_del(table);
     }
@@ -4487,9 +4496,11 @@ dberr_t row_drop_table_for_mysql(const char *name, trx_t *trx, bool nonatomic,
       break;
     case TRX_DICT_OP_INDEX:
       /* If the transaction was previously flagged as
-      TRX_DICT_OP_INDEX, we should be dropping auxiliary
-      tables for full-text indexes or temp tables. */
+      TRX_DICT_OP_INDEX, we should be dropping auxiliary tables for
+      full-text or vector indexes, or temp tables. Vec aux names
+      start with "<db>/vec_". */
       ut_ad(strstr(table->name.m_name, "/fts_") != nullptr ||
+            strstr(table->name.m_name, "/vec_") != nullptr ||
             strstr(table->name.m_name, TEMP_FILE_PREFIX_INNODB) != nullptr);
   }
 
@@ -4549,6 +4560,19 @@ dberr_t row_drop_table_for_mysql(const char *name, trx_t *trx, bool nonatomic,
 
     err = row_drop_ancillary_fts_tables(table, &aux_vec, trx);
     if (err != DB_SUCCESS) {
+      goto funct_exit;
+    }
+  }
+
+  /* Drop the per-vector-index auxiliary tables. Symmetric with the FTS
+  ancillary drop above — same flag-style gate. See PS-11299. */
+  if (DICT_TF2_FLAG_IS_SET(table, DICT_TF2_HAS_VEC_AUX_COL)) {
+    ut_ad(!is_temp);
+    err = vec_aux_drop_all_tables(trx, table);
+    if (err != DB_SUCCESS) {
+      ib::error(ER_IB_MSG_988)
+          << " Unable to remove vector aux tables for table " << table->name
+          << " : " << ut_strerr(err);
       goto funct_exit;
     }
   }
@@ -4702,6 +4726,17 @@ dberr_t row_rename_table_for_mysql(const char *old_name, const char *new_name,
        DICT_TF2_FLAG_IS_SET(table, DICT_TF2_FTS_HAS_DOC_ID)) &&
       !dict_tables_have_same_db(old_name, new_name)) {
     err = fts_rename_aux_tables(table, new_name, trx, replay);
+  }
+
+  /* Vector aux tables are named "<db>/vec_<table_id>_<index_id>" — keyed
+  by ids, so SAME-schema RENAME is a no-op. CROSS-schema RENAME needs
+  each aux's dd::Table reparented to the new schema and its
+  dd::Tablespace file path updated; vec_aux_rename_tables does both
+  through the same plumbing FTS aux uses. */
+  if (err == DB_SUCCESS &&
+      DICT_TF2_FLAG_IS_SET(table, DICT_TF2_HAS_VEC_AUX_COL) &&
+      !dict_tables_have_same_db(old_name, new_name)) {
+    err = vec_aux_rename_tables(trx, table, new_name, replay);
   }
   if (err != DB_SUCCESS) {
     if (err == DB_DUPLICATE_KEY) {
@@ -5056,10 +5091,11 @@ dberr_t row_scan_index_for_mysql(row_prebuilt_t *prebuilt, dict_index_t *index,
     indexes of the old table will remain valid and the new
     table will be unaccessible to MySQL until the
     completion of the ALTER TABLE. */
-  } else if (dict_index_is_online_ddl(index) || (index->type & DICT_FTS)) {
-    /* Full Text index are implemented by auxiliary tables,
-    not the B-tree. We also skip secondary indexes that are
-    being created online. */
+  } else if (dict_index_is_online_ddl(index) || (index->type & DICT_FTS) ||
+             index->is_vector()) {
+    /* Full Text and Vector indexes are implemented by auxiliary tables,
+    not the B-tree — page == FIL_NULL. We also skip secondary indexes
+    that are being created online. */
     return (DB_SUCCESS);
   }
 
