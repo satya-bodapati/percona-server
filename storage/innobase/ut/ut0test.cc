@@ -1248,15 +1248,32 @@ void Tester::update_thd_variable() noexcept {
   *output2 = const_cast<char *>(m_command.c_str());
 }
 
+/* The innodb_interpreter_output variable holds a raw pointer into m_log's
+buffer, so every write to m_log has to republish it: assigning or appending
+can reallocate, which frees the buffer the variable still points at. Reading
+the variable then - SHOW VARIABLES, performance_schema.session_variables, or
+the tests' own SELECT - touches freed memory. m_thd is set at the top of
+init() and run(), and every write below happens inside one of those. */
+
 void Tester::set_output(const std::ostringstream &sout) noexcept {
   m_log = sout.str();
+  if (m_thd != nullptr) update_thd_variable();
 }
 
-void Tester::set_output(const std::string &log) noexcept { m_log = log; }
+void Tester::set_output(const std::string &log) noexcept {
+  m_log = log;
+  if (m_thd != nullptr) update_thd_variable();
+}
 
-void Tester::clear_output() noexcept { m_log = ""; }
+void Tester::clear_output() noexcept {
+  m_log = "";
+  if (m_thd != nullptr) update_thd_variable();
+}
 
-void Tester::append_output(const std::string &log) noexcept { m_log += log; }
+void Tester::append_output(const std::string &log) noexcept {
+  m_log += log;
+  if (m_thd != nullptr) update_thd_variable();
+}
 
 int interpreter_run(const char *command) noexcept {
   return (int)tl_interpreter.run(command);
