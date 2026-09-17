@@ -26,6 +26,10 @@ The HNSW runtime and the persistence callbacks behind it.
 
 #include "vec0hnsw.h"
 
+#include <algorithm>
+
+#include "srv0srv.h"
+
 #include <variant>
 #include "dict0dd.h"
 #include "dict0dict.h"
@@ -355,6 +359,28 @@ they are the same operation: a node is immutable, so a changed vector is
 a new node rather than an edit of the old one. */
 static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
                             uint64_t base_pk, const char *q, THD *thd) {
+  /* innodb_hnsw_max_memory, checked BEFORE insert() starts mutating.
+
+  Vec_arena::allocate() is the single point every graph byte passes
+  through and would be the natural place to refuse — but refusing there
+  returns nullptr, which hnsw.h turns into a throw (four sites, e.g.
+  Node::create) partway through a rewire, with neighbours already
+  relinked and no per-block free to unwind with. So the refusal happens
+  here instead, at the entry to the operation, where nothing has been
+  touched yet and DB_OUT_OF_MEMORY simply fails the statement.
+
+  This is a charge check, not a prediction: it asks whether the budget is
+  already spent, not whether this insert would fit. Sizing the insert is
+  not possible from outside the class — sizeof(Node) is private, and one
+  insert also allocates stubs for lazily loaded neighbours and a copy of
+  the query vector. The budget can therefore be exceeded by at most what
+  one insert allocates, which is the price of refusing before mutating
+  rather than during. */
+  if (srv_hnsw_max_memory != 0 &&
+      vec_arena_global_bytes() >= srv_hnsw_max_memory) {
+    return DB_OUT_OF_MEMORY;
+  }
+
   MDL_ticket *mdl = nullptr;
   dict_table_t *aux = vec_aux_open_for_dml(table, vec->index_id, thd, &mdl);
   if (aux == nullptr) return DB_TABLE_NOT_FOUND;
@@ -441,6 +467,240 @@ static dberr_t vec_add_node(vec_t *vec, dict_table_t *table, uint64_t label,
   vec_aux_close_for_dml(aux, thd, &mdl);
 
   return ctx.err;
+}
+
+dict_index_t *vec_index_of(dict_table_t *table) {
+  for (dict_index_t *index = table->first_index(); index != nullptr;
+       index = index->next()) {
+    if (index->is_vector()) return index;
+  }
+  return nullptr;
+}
+
+uint32_t vec_index_dims(const dict_index_t *index) {
+  if (index == nullptr || index->vec == nullptr) return 0;
+  return static_cast<const vec_t *>(index->vec)->dims;
+}
+
+
+dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
+                       size_t ef_search, std::vector<vec_hit_t> *out, THD *thd,
+                       const std::unordered_set<uint64_t> *exclude) {
+  ut_a(index != nullptr && index->is_vector());
+  ut_a(q != nullptr && out != nullptr);
+  out->clear();
+
+  if (index->vec == nullptr) return DB_TABLE_NOT_FOUND;
+  auto *vec = static_cast<vec_t *>(index->vec);
+
+  MDL_ticket *mdl = nullptr;
+  dict_table_t *aux =
+      vec_aux_open_for_dml(vec->table, vec->index_id, thd, &mdl);
+  if (aux == nullptr) return DB_TABLE_NOT_FOUND;
+
+  if (!vec->loaded.load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> g(vec->load_mutex);
+    if (!vec->loaded.load(std::memory_order_relaxed)) {
+      const dberr_t lerr = vec_runtime_load(vec, aux, thd);
+      if (lerr != DB_SUCCESS) {
+        vec_aux_close_for_dml(aux, thd, &mdl);
+        return lerr;
+      }
+    }
+  }
+
+  Vec_ctx ctx;
+  ctx.trx = nullptr;
+  ctx.aux = aux;
+  ctx.thd = thd;
+  ctx.m = vec->m;
+  ctx.vec_bytes = vec->dims * sizeof(float);
+  ctx.err = DB_SUCCESS;
+
+  /* Unlocked, like the insert path. A search does mutate — it faults
+  unloaded stubs in through load_node_cb — but load_node() takes a striped
+  lock and re-checks the node state under it, so two threads faulting the
+  same node cannot collide. */
+  {
+    const size_t want = exclude == nullptr ? k : k + exclude->size();
+    const auto hits =
+        vec->hnsw->k_nn_search(reinterpret_cast<const char *>(q), want,
+                               std::max(ef_search, want), &ctx);
+    out->reserve(hits.size());
+    for (const auto &h : hits) out->push_back({h.id, h.base_pk});
+  }
+
+  if (exclude != nullptr && !out->empty()) {
+    out->erase(std::remove_if(out->begin(), out->end(),
+                              [exclude](const vec_hit_t &h) {
+                                return exclude->count(h.id) != 0;
+                              }),
+               out->end());
+  }
+
+  const dberr_t err = ctx.err;
+  vec_aux_close_for_dml(aux, thd, &mdl);
+  return err;
+}
+
+/* An open streaming scan. Held by the handler for the life of one
+vector scan, which is why the aux table and its MDL live here rather than
+being re-taken per batch: nn_search_next faults nodes in through
+load_node_cb, and that reads ctx.aux. */
+struct vec_search_t {
+  vec_t *vec{nullptr};
+  dict_table_t *aux{nullptr};
+  MDL_ticket *mdl{nullptr};
+  THD *thd{nullptr};
+  Vec_ctx ctx;
+  Vec_hnsw::NNSearchContext nn;
+};
+
+dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
+                     size_t ef_search, THD *thd, vec_search_t **out) {
+  ut_a(index != nullptr && index->is_vector());
+  ut_a(q != nullptr && out != nullptr);
+  ut_a(batch_size > 0);
+  *out = nullptr;
+
+  if (index->vec == nullptr) return DB_TABLE_NOT_FOUND;
+  auto *vec = static_cast<vec_t *>(index->vec);
+
+  MDL_ticket *mdl = nullptr;
+  dict_table_t *aux =
+      vec_aux_open_for_dml(vec->table, vec->index_id, thd, &mdl);
+  if (aux == nullptr) return DB_TABLE_NOT_FOUND;
+
+  if (!vec->loaded.load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> g(vec->load_mutex);
+    if (!vec->loaded.load(std::memory_order_relaxed)) {
+      const dberr_t lerr = vec_runtime_load(vec, aux, thd);
+      if (lerr != DB_SUCCESS) {
+        vec_aux_close_for_dml(aux, thd, &mdl);
+        return lerr;
+      }
+    }
+  }
+
+  auto *s = ut::new_withkey<vec_search_t>(UT_NEW_THIS_FILE_PSI_KEY);
+  if (s == nullptr) {
+    vec_aux_close_for_dml(aux, thd, &mdl);
+    return DB_OUT_OF_MEMORY;
+  }
+  s->vec = vec;
+  s->aux = aux;
+  s->mdl = mdl;
+  s->thd = thd;
+  s->ctx.trx = nullptr;
+  s->ctx.aux = aux;
+  s->ctx.thd = thd;
+  s->ctx.m = vec->m;
+  s->ctx.vec_bytes = vec->dims * sizeof(float);
+  s->ctx.err = DB_SUCCESS;
+
+  /* Unlocked, like every other graph access: the class is thread-safe for
+  concurrent search, and a search mutates only by faulting stubs in, which
+  load_node() serialises under its own striped lock. */
+  vec->hnsw->nn_search_start(&s->nn, reinterpret_cast<const char *>(q),
+                             batch_size, std::max(ef_search, batch_size),
+                             &s->ctx);
+  if (s->ctx.err != DB_SUCCESS) {
+    const dberr_t err = s->ctx.err;
+    vec_knn_close(s);
+    return err;
+  }
+
+  *out = s;
+  return DB_SUCCESS;
+}
+
+bool vec_knn_next(vec_search_t *s, vec_hit_t *hit) {
+  ut_a(s != nullptr && hit != nullptr);
+  if (s->ctx.err != DB_SUCCESS) return false;
+
+  const auto next = s->vec->hnsw->nn_search_next(&s->nn);
+  if (s->ctx.err != DB_SUCCESS) return false;
+  if (!next.first) return false;
+
+  hit->id = next.second.id;
+  hit->base_pk = next.second.base_pk;
+  return true;
+}
+
+dberr_t vec_knn_error(const vec_search_t *s) {
+  return s == nullptr ? DB_SUCCESS : s->ctx.err;
+}
+
+void vec_knn_close(vec_search_t *s) {
+  if (s == nullptr) return;
+  s->nn.reset();
+  if (s->aux != nullptr) {
+    vec_aux_close_for_dml(s->aux, s->thd, &s->mdl);
+  }
+  ut::delete_(s);
+}
+
+dberr_t vec_build_index(trx_t *trx, dict_table_t *table,
+                        dict_index_t *vec_index, uint32_t dims, uint32_t m,
+                        uint32_t ef_construction, THD *thd) {
+  ut_a(trx != nullptr);
+  ut_a(vec_index != nullptr && vec_index->is_vector());
+  ut_a(dims != 0 && m != 0);
+
+  /* Same pre-flight as the DML path (design section 17a): refuse before
+  building anything rather than throwing partway through. */
+  if (srv_hnsw_max_memory != 0 &&
+      vec_arena_global_bytes() >= srv_hnsw_max_memory) {
+    return DB_OUT_OF_MEMORY;
+  }
+
+  std::vector<vec_base_row_t> rows;
+  dberr_t err = vec_base_collect_rows(table, vec_index, dims, &rows);
+  if (err != DB_SUCCESS) return err;
+  if (rows.empty()) return DB_SUCCESS;
+
+  MDL_ticket *mdl = nullptr;
+  dict_table_t *aux = vec_aux_open_for_dml(table, vec_index->id, thd, &mdl);
+  if (aux == nullptr) return DB_TABLE_NOT_FOUND;
+
+  Vec_ctx ctx;
+  ctx.trx = trx;
+  ctx.aux = aux;
+  ctx.thd = thd;
+  ctx.m = m;
+  ctx.vec_bytes = dims * sizeof(float);
+  ctx.err = DB_SUCCESS;
+
+  /* A private graph, discarded below. It is not installed on the index:
+  a half-built graph must never be reachable, and if the ALTER fails
+  there is nothing to unwind. */
+  auto *graph = ut::new_withkey<Vec_hnsw>(UT_NEW_THIS_FILE_PSI_KEY, dims,
+                                          &vector_distance_euclidean_squared,
+                                          m, ef_construction);
+  if (graph == nullptr) {
+    vec_aux_close_for_dml(aux, thd, &mdl);
+    return DB_OUT_OF_MEMORY;
+  }
+
+  for (const vec_base_row_t &row : rows) {
+    /* Label 0 is the empty-slot sentinel and can never be a node. A row
+    carrying it means the stamping path missed it. */
+    ut_a(row.id != 0);
+    graph->insert(row.id, row.base_pk,
+                  reinterpret_cast<const char *>(row.vec.data()), &ctx);
+    if (ctx.err != DB_SUCCESS) break;
+
+    if (srv_hnsw_max_memory != 0 &&
+        vec_arena_global_bytes() >= srv_hnsw_max_memory) {
+      ctx.err = DB_OUT_OF_MEMORY;
+      break;
+    }
+  }
+
+  err = ctx.err;
+  ut::delete_(graph);
+  vec_aux_close_for_dml(aux, thd, &mdl);
+  return err;
 }
 
 dberr_t vec_update_row(trx_t *trx [[maybe_unused]], dict_table_t *table,

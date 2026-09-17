@@ -29,6 +29,7 @@ vector index keeps in memory.
 #include <cstdint>
 #include <limits>
 #include <mutex>
+#include <unordered_set>
 #include <vector>
 
 #include "db0err.h"
@@ -37,6 +38,7 @@ vector index keeps in memory.
 #include "univ.i"
 #include "ut0rnd.h"
 #include "vec0arena.h"
+#include "vec0aux.h"
 #include "vec0dml.h"
 #include "vec0index.h"
 #include "vec0vec.h"
@@ -264,11 +266,6 @@ struct vec_t : public Vec_runtime {
   transient failure. Here a failure simply leaves `loaded` false and the
   next statement retries. */
   std::mutex load_mutex;
-  /* No latch yet. The class is not thread-safe, so writers will have to
-  be serialised (design section 17) — but nothing calls insert() until
-  the DML hooks land, and a latch here would be an unused field with
-  four points of PFS registration behind it. It arrives with the first
-  caller that can race. */
   /** The index this runtime belongs to. */
   space_index_t index_id{0};
   /** Base table, for opening the aux and reading the label counter. */
@@ -329,5 +326,113 @@ break their isolation rather than tidy up.
 @param[in]      base_pk  the row's primary key, unchanged by this update
 @param[in]      thd    session
 @return DB_SUCCESS, or an error */
+/** Populate a newly added vector index from the rows already in the
+table — the ddl0fts analog for HNSW.
+
+Runs during ALGORITHM=INPLACE ADD, from one clustered scan, without
+rebuilding the table or writing a single base row. Each row is inserted
+into a PRIVATE graph under the label already stamped in its
+percona_vec_aux_id column, so a rebuild preserves labels rather than
+minting new ones, and the ordinary persistence callbacks write the aux
+rows.
+
+Those writes ride @p trx — the ALTER's own transaction, not a
+sub-transaction as DML uses. That is deliberate and is the opposite of
+the sub-transaction rule in the design: the aux does not exist yet
+outside this ALTER, so if the ALTER fails its rows must disappear with
+it. There is no committed base row for them to be a superset of until
+the ALTER commits.
+
+The private graph is discarded on return. The index's runtime is built
+lazily from the committed aux on first access, so nothing has to be
+handed over.
+
+@param[in]  trx              the ALTER's transaction
+@param[in]  table            base table
+@param[in]  vec_index        the index being built
+@param[in]  dims             vector dimensions
+@param[in]  m                HNSW M
+@param[in]  ef_construction  HNSW ef_construction
+@param[in]  thd              session, for opening the aux
+@return DB_SUCCESS, DB_OUT_OF_MEMORY if the graph budget is spent, or a
+storage error */
+/** Search the graph, loading it from the aux table first if needed.
+
+The raw graph search: candidates in ascending distance order, straight
+out of k_nn_search(). It applies neither MVCC check of design section 14
+— both need the reader's transaction, which lives above this call. What
+it does supply is the node id each candidate came from, which is what
+lets check (1) be made at all.
+
+@param[in]   index      the vector index
+@param[in]   q          query vector, dims floats
+@param[in]   k          how many neighbours to return
+@param[in]   ef_search  search width
+@param[out]  out        candidates, closest first
+@param[in]   thd        session, for opening the aux
+@param[in]   exclude    node ids to skip, for a widened re-search
+@return DB_SUCCESS or a storage error */
+dberr_t vec_knn_search(dict_index_t *index, const float *q, size_t k,
+                       size_t ef_search, std::vector<vec_hit_t> *out, THD *thd,
+                       const std::unordered_set<uint64_t> *exclude = nullptr);
+
+/** One open streaming kNN scan.
+
+Opaque by design: it owns the class's `NNSearchContext`, which is neither
+copyable nor movable, plus the aux table and the MDL ticket that have to
+stay alive for the whole scan — `nn_search_next` faults nodes in through
+`load_node_cb`, which reads the aux. Allocated by vec_knn_open and
+released by vec_knn_close; the handler holds only the pointer. */
+struct vec_search_t;
+
+/** Begin a streaming kNN scan.
+
+The resumable form of vec_knn_search. Where that one descends the graph,
+answers "the k nearest" and throws the search away, this keeps the visited
+set and the unexplored frontier in the scan, so asking for more continues
+the traversal instead of restarting it. That is what the read path needs:
+a filter above the iterator consumes candidates, so how many are required
+is not known when the scan starts.
+
+@param[in]   index       the vector index
+@param[in]   q           query vector, dims floats (copied into the scan)
+@param[in]   batch_size  candidates fetched per internal batch; must be > 0
+@param[in]   ef_search   search width, clamped to at least batch_size
+@param[in]   thd         session, for opening the aux
+@param[out]  out         the scan, on success; caller must vec_knn_close it
+@return DB_SUCCESS or a storage error */
+dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
+                     size_t ef_search, THD *thd, vec_search_t **out);
+
+/** Take the next candidate from a scan.
+
+Candidates arrive in non-decreasing distance order and never repeat — the
+scan's own visited set guarantees it, so there is no exclusion list to
+keep. Ordering is enforced by the class, which drops a refilled candidate
+closer than one already yielded rather than emitting it out of order.
+
+@param[in,out]  s    an open scan
+@param[out]     hit  the candidate, when true is returned
+@return false when the graph is exhausted */
+bool vec_knn_next(vec_search_t *s, vec_hit_t *hit);
+
+/** The first storage error a scan hit, or DB_SUCCESS. A lazy node load
+failing during vec_knn_next reports here, since that call returns only
+"is there another candidate". */
+dberr_t vec_knn_error(const vec_search_t *s);
+
+/** End a scan and release the aux table and its MDL. Safe on nullptr. */
+void vec_knn_close(vec_search_t *s);
+
+/** The vector index on @p table, or nullptr. At most one exists (§23). */
+dict_index_t *vec_index_of(dict_table_t *table);
+
+/** Dimensions the index was built with; 0 if it has no runtime yet. */
+uint32_t vec_index_dims(const dict_index_t *index);
+
+dberr_t vec_build_index(trx_t *trx, dict_table_t *table,
+                        dict_index_t *vec_index, uint32_t dims, uint32_t m,
+                        uint32_t ef_construction, THD *thd);
+
 dberr_t vec_update_row(trx_t *trx, dict_table_t *table, uint64_t label,
                        const char *q, ulint q_len, uint64_t base_pk, THD *thd);
