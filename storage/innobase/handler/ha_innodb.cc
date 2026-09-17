@@ -8055,7 +8055,6 @@ int ha_innobase::open(const char *name, int, uint open_flags,
         DICT_TF2_FLAG_IS_SET(ib_table, DICT_TF2_FTS_HAS_DOC_ID) +
         DICT_TF2_FLAG_IS_SET(ib_table, DICT_TF2_HAS_VEC_AUX_COL);
   }
-
   if (ib_table != nullptr &&
       table->s->fields !=
           dict_table_get_n_tot_u_cols(ib_table) - innodb_hidden_extra) {
@@ -8389,12 +8388,44 @@ int ha_innobase::open(const char *name, int, uint open_flags,
   fts_aux_table_t aux_table;
 
   if (fts_is_aux_table_name(&aux_table, norm_name, strlen(norm_name))) {
-    ut_ad(m_prebuilt->table->is_fts_aux());
+    ut_ad(m_prebuilt->table->is_aux());
   }
 #endif /* UNIV_DEBUG */
 
-  if (m_prebuilt->table->is_fts_aux()) {
+  if (m_prebuilt->table->is_aux()) {
     dict_table_close(m_prebuilt->table, false, false);
+  }
+
+  /* Give every vector index on this table its runtime, if it has none
+  yet. Here rather than deeper down because this is where the index
+  PARAMETERS are reachable: M, ef_construction and the metric come from
+  the DD through KEY, and the row-level code that will need the graph
+  (row0mysql) has only dict objects. The runtime itself is per index and
+  lives on dict_index_t, so it outlives this handler and is shared by
+  every session that opens the table.
+
+  A failure here is not fatal to the open: without a runtime the index
+  simply has no graph, and the DML path reports the problem when it
+  tries to use one. Refusing the open would take the whole table
+  offline for a vector index that may not even be queried. */
+  for (dict_index_t *index = m_prebuilt->table->first_index(); index != nullptr;
+       index = index->next()) {
+    if (!index->is_vector() || vec_runtime_get(index) != nullptr) continue;
+
+    /* Match by name, which is how InnoDB pairs a KEY with a
+    dict_index_t everywhere else - dict_table_get_index_on_name() is the
+    same lookup. Index names are unique within a table, so this is exact. */
+    const KEY *key = nullptr;
+    for (uint i = 0; i < table->s->keys; i++) {
+      if ((table->key_info[i].flags & HA_VECTOR) != 0 &&
+          innobase_strcasecmp(table->key_info[i].name, index->name) == 0) {
+        key = &table->key_info[i];
+        break;
+      }
+    }
+    if (key == nullptr) continue;
+
+    (void)vec_runtime_open(index, key, table, thd);
   }
 
   return 0;
@@ -10135,6 +10166,7 @@ static dberr_t calc_row_difference(
   dict_index_t *clust_index;
   uint i;
   bool changes_fts_column = false;
+  bool changes_vec_column = false;
   bool changes_fts_doc_col = false;
   trx_t *trx = thd_to_trx(thd);
   doc_id_t doc_id = FTS_NULL_DOC_ID;
@@ -10459,6 +10491,17 @@ static dberr_t calc_row_difference(
           changes_fts_doc_col = row_upd_changes_doc_id(innodb_table, ufield);
         }
       }
+
+      /* Same question for a vector index: did this UPDATE move the
+      indexed vector? A node is immutable - HNSW cannot move a point
+      once its neighbours link to it - so a changed vector becomes a
+      NEW node under a fresh label, and the row has to be re-pointed at
+      it. That re-point rides this same update vector, below. */
+      if (!changes_vec_column && !is_virtual &&
+          DICT_TF2_FLAG_IS_SET(prebuilt->table, DICT_TF2_HAS_VEC_AUX_COL)) {
+        changes_vec_column =
+            vec_upd_changes_indexed_vector(prebuilt->table, ufield);
+      }
     } else if (is_virtual) {
       dfield_t *vfield = dtuple_get_nth_v_field(uvect->old_vrow, num_v);
       col->copy_type(dfield_get_type(vfield));
@@ -10538,6 +10581,23 @@ static dberr_t calc_row_difference(
     fts_next_doc_id to UINT64_UNDEFINED, which means do not
     update the Doc ID column */
     trx->fts_next_doc_id = UINT64_UNDEFINED;
+  }
+
+  /* Piggyback the label change onto the user's UPDATE, exactly as FTS
+  does with its Doc ID above, and for the same reason: the row and the
+  new node have to become visible together. Adding the node afterwards
+  and leaving the row pointing at the old one would make a search answer
+  from the superseded vector.
+
+  Capacity is not a concern - the vector is created with
+  get_n_cols() + n_v_cols entries, which already counts this hidden
+  column. */
+  trx->vec_next_label = 0;
+  if (changes_vec_column) {
+    trx->vec_next_label = vec_assign_next_aux_id(prebuilt->table);
+    ufield = uvect->fields + n_changed;
+    vec_update_aux_id(prebuilt->table, ufield, &trx->vec_next_label);
+    ++n_changed;
   }
 
   uvect->n_fields = n_changed;
@@ -14371,6 +14431,15 @@ void create_table_info_t::detach() {
     fts_detach_aux_tables(m_table, true);
   }
 
+  /* Mirror the FTS detach above for vector aux tables - they are
+  created pinned (can_be_evicted=false) by row_create_table_for_mysql
+  and would otherwise stay in dict_sys forever on repeated
+  CREATE-with-vector / DROP cycles. vec_aux_detach_tables is the
+  fts_detach_aux_tables analog; see vec0aux.h. */
+  if (DICT_TF2_FLAG_IS_SET(m_table, DICT_TF2_HAS_VEC_AUX_COL)) {
+    vec_aux_detach_tables(m_table, true);
+  }
+
   dict_sys_mutex_exit();
 }
 
@@ -14846,6 +14915,16 @@ int create_table_info_t::create_table(const dd::Table *dd_table,
     }
   }
 
+  /* Create one auxiliary table per vector index. Must run after the index
+  creation loop so DICT_VECTOR is set on every vector
+  index attached to m_table. See PS-11299. */
+  if (DICT_TF2_FLAG_IS_SET(m_table, DICT_TF2_HAS_VEC_AUX_COL)) {
+    dberr_t verr = vec_aux_create_all_tables(m_trx, m_table);
+    if (verr != DB_SUCCESS) {
+      return convert_error_code_to_mysql(verr, m_flags, nullptr);
+    }
+  }
+
   initialize_autoinc();
 
   /* Cache all the FTS indexes on this table in the FTS specific
@@ -15054,6 +15133,16 @@ int create_table_info_t::create_table_update_global_dd(Table *dd_table) {
     ut_d(bool ret =) fts_create_common_dd_tables(m_table);
     ut_ad(ret);
     fts_create_index_dd_tables(m_table);
+  }
+
+  /* Register the per-vector-index aux table in the DD too, mirroring
+  fts_create_index_dd_tables above - same flag-style gate. The table was
+  just created, so its vector index is the one to register. */
+  if (DICT_TF2_FLAG_IS_SET(m_table, DICT_TF2_HAS_VEC_AUX_COL)) {
+    dict_index_t *vec_index = vec_index_of(m_table);
+    if (vec_index != nullptr && !vec_aux_create_dd_table(m_table, vec_index)) {
+      return HA_ERR_GENERIC;
+    }
   }
 
   ut_ad(dd_table_match(m_table, dd_table));
