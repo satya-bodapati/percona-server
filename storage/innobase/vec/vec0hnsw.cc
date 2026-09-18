@@ -34,6 +34,7 @@ The HNSW runtime and the persistence callbacks behind it.
 #include "btr0pcur.h"
 #include "dict0dd.h"
 #include "dict0dict.h"
+#include "ha_prototypes.h"
 #include "lock0lock.h"
 #include "mach0data.h"
 #include "my_dbug.h"
@@ -134,6 +135,15 @@ dberr_t vec_persist_update_neighbors(Vec_ctx *ctx, uint64_t id,
   if (err == DB_RECORD_NOT_FOUND) return DB_SUCCESS;
   if (err == DB_SUCCESS) vec_ctx_step_commit(ctx);
   return err;
+}
+
+void vec_report_missing_node(THD *thd, uint64_t id) {
+  if (thd == nullptr) return;
+  ib_errf(thd, IB_LOG_LEVEL_ERROR, ER_INNODB_INDEX_CORRUPT,
+          "the vector index's graph names node " UINT64PF
+          ", which its auxiliary table does not have. DROP and re-create"
+          " the index to rebuild it from the base rows.",
+          id);
 }
 
 dberr_t vec_persist_entry_point(Vec_ctx *ctx, uint64_t id) {

@@ -102,6 +102,16 @@ dberr_t vec_persist_update_neighbors(Vec_ctx *ctx, uint64_t id,
 
 dberr_t vec_persist_entry_point(Vec_ctx *ctx, uint64_t id);
 
+/** Report a node the graph names but the aux table does not have.
+
+Reported here rather than left to the generic "Index corrupt" the error
+code maps to, because that message cannot say which of the two halves
+disagreed or which node it was. Sets the statement's error, so the
+DB_INDEX_CORRUPT returned alongside it does not replace this text.
+@param[in]  thd  session to report to; nothing is reported without one
+@param[in]  id   the node the neighbour list named */
+void vec_report_missing_node(THD *thd, uint64_t id);
+
 /** Fill an unloaded node from its aux row.
 
 A template only because LoadNodeHandle is nested in the instantiation,
@@ -126,11 +136,15 @@ dberr_t vec_persist_load_node(Vec_ctx *ctx, Hnsw &hnsw,
   dberr_t err = vec_aux_read_node(ctx->aux, id, heap, &node);
   if (err != DB_SUCCESS) {
     mem_heap_free(heap);
+    if (err != DB_RECORD_NOT_FOUND) return err;
     /* A miss here is never benign: this id came off a neighbour list, so
-    the graph says the node must exist. DB_RECORD_NOT_FOUND would reach
-    the client as HA_ERR_NO_ACTIVE_RECORD, indistinguishable from an
-    ordinary missing row. Report it as what it is. */
-    return err == DB_RECORD_NOT_FOUND ? DB_ANN_NODE_NOT_FOUND : err;
+    the graph says the node must exist, and it does not. The graph and
+    the aux disagree, which is what DB_INDEX_CORRUPT means. Index-scoped
+    rather than DB_CORRUPTION, which would report the base table as
+    crashed; DB_RECORD_NOT_FOUND would reach the client as
+    HA_ERR_NO_ACTIVE_RECORD, indistinguishable from a missing row. */
+    vec_report_missing_node(ctx->thd, id);
+    return DB_INDEX_CORRUPT;
   }
 
   if (node.vec_len != ctx->vec_bytes) {

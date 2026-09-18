@@ -2513,8 +2513,6 @@ int convert_error_code_to_mysql(dberr_t error, uint32_t flags, THD *thd) {
       return (HA_ERR_INTERNAL_ERROR);
     case DB_FTS_TOO_MANY_NESTED_EXP:
       return (HA_ERR_FTS_TOO_MANY_NESTED_EXP);
-    case DB_ANN_NODE_NOT_FOUND:
-      return (HA_ERR_ANN_FAILED);
     case DB_IO_NO_PUNCH_HOLE:
     case DB_IO_NO_PUNCH_HOLE_FS:
     case DB_IO_NO_PUNCH_HOLE_TABLESPACE:
