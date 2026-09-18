@@ -405,6 +405,26 @@ static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
     return DB_INDEX_CORRUPT;
   }
 
+  /* The entry-point row has to be there before the graph is handed the
+  id. init_from_entry_point() asserts that its one load succeeded and
+  has no path for it failing, so a record 0 naming a row that is gone
+  takes a debug build down on that assert - and in a release build
+  leaves a NODE_DUMMY standing in as the entry point, which is worse.
+  Checked here instead, one read per cold load of an index. */
+  {
+    mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
+    vec_aux_read_t probe;
+    const dberr_t perr = vec_aux_read_node(aux, entry_point, heap, &probe);
+    mem_heap_free(heap);
+    if (perr != DB_SUCCESS) {
+      ut::delete_(vec->hnsw);
+      vec->hnsw = nullptr;
+      if (perr != DB_RECORD_NOT_FOUND) return perr;
+      vec_report_missing_node(thd, entry_point);
+      return DB_INDEX_CORRUPT;
+    }
+  }
+
   Vec_ctx ctx;
   ctx.aux = aux;
   ctx.thd = thd;

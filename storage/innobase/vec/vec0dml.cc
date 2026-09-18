@@ -31,6 +31,8 @@ internal SQL parser is not used. */
 
 #include "vec0dml.h"
 
+#include "my_dbug.h"
+
 #include <algorithm>
 #include <limits>
 
@@ -572,6 +574,13 @@ dberr_t vec_aux_read_node(dict_table_t *aux, uint64_t id, mem_heap_t *heap,
                           vec_aux_read_t *out) {
   ut_ad(aux != nullptr);
   ut_ad(out != nullptr);
+
+  /* Make a node the graph names look absent, which is what a neighbour
+  list pointing at a row that is no longer there does. Record 0 is left
+  alone: it carries the entry point rather than a node, and a miss on it
+  means the index is empty, which is a different path entirely. */
+  DBUG_EXECUTE_IF(
+      "vec_aux_node_missing", if (id != 0) { return DB_RECORD_NOT_FOUND; });
 
   dict_index_t *clust = aux->first_index();
 
