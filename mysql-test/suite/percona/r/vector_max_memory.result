@@ -29,7 +29,7 @@ nodes=1 distinct_ids=1 distinct_base_pks=1 dup_ids=0 dup_base_pks=0 labels_conti
 # refused rather than half-applied.
 SET GLOBAL innodb_hnsw_max_memory = 1;
 INSERT INTO t1 VALUES (2, STRING_TO_VECTOR('[0,1,0,0]'));
-ERROR HY000: Out of memory; check if mysqld or some other process uses all available memory; if not, you may have to use 'ulimit' to allow mysqld to use more memory or you can add more swap space
+ERROR HY000: Memory capacity of 1 bytes for 'innodb_hnsw_max_memory' exceeded. The vector index graph was left unchanged. Raise innodb_hnsw_max_memory and retry.
 # The refused row is not in the table and left no node behind.
 SELECT id FROM t1 FORCE INDEX (PRIMARY) ORDER BY id;
 id
@@ -100,7 +100,7 @@ id
 # With the budget spent, t3's graph is not allowed to start loading.
 SET GLOBAL innodb_hnsw_max_memory = 4096;
 SELECT id FROM t3 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 3;
-ERROR HY000: Out of memory; check if mysqld or some other process uses all available memory; if not, you may have to use 'ulimit' to allow mysqld to use more memory or you can add more swap space
+ERROR HY000: Memory capacity of 4096 bytes for 'innodb_hnsw_max_memory' exceeded. The vector index graph was left unchanged. Raise innodb_hnsw_max_memory and retry.
 # t2, already loaded, keeps answering correctly - the refusal is
 # about starting a load, and does not damage a graph that is up.
 SELECT id FROM t2 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 3;
@@ -129,7 +129,7 @@ VECTOR KEY (v) TYPE hnsw (M = 4));
 INSERT INTO t4 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]'));
 SET GLOBAL innodb_hnsw_max_memory = 1;
 INSERT INTO t4 VALUES (2, STRING_TO_VECTOR('[2,0,0,0]'));
-ERROR HY000: Out of memory; check if mysqld or some other process uses all available memory; if not, you may have to use 'ulimit' to allow mysqld to use more memory or you can add more swap space
+ERROR HY000: Memory capacity of 1 bytes for 'innodb_hnsw_max_memory' exceeded. The vector index graph was left unchanged. Raise innodb_hnsw_max_memory and retry.
 # Raise it: the same INSERT succeeds and the index answers with both
 # rows, so the refusal left the graph intact.
 SET GLOBAL innodb_hnsw_max_memory = 67108864;

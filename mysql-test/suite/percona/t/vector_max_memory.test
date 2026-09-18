@@ -31,7 +31,7 @@ SELECT @@session.innodb_interpreter_output;
 --echo # Drop the bound to 1 byte: already spent, so the next insert is
 --echo # refused rather than half-applied.
 SET GLOBAL innodb_hnsw_max_memory = 1;
---error ER_OUT_OF_RESOURCES
+--error ER_CAPACITY_EXCEEDED
 INSERT INTO t1 VALUES (2, STRING_TO_VECTOR('[0,1,0,0]'));
 
 --echo # The refused row is not in the table and left no node behind.
@@ -105,7 +105,7 @@ SELECT id FROM t2 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN
 
 --echo # With the budget spent, t3's graph is not allowed to start loading.
 SET GLOBAL innodb_hnsw_max_memory = 4096;
---error ER_OUT_OF_RESOURCES
+--error ER_CAPACITY_EXCEEDED
 SELECT id FROM t3 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 3;
 
 --echo # t2, already loaded, keeps answering correctly - the refusal is
@@ -131,7 +131,7 @@ CREATE TABLE t4 (id BIGINT UNSIGNED PRIMARY KEY,
 INSERT INTO t4 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]'));
 
 SET GLOBAL innodb_hnsw_max_memory = 1;
---error ER_OUT_OF_RESOURCES
+--error ER_CAPACITY_EXCEEDED
 INSERT INTO t4 VALUES (2, STRING_TO_VECTOR('[2,0,0,0]'));
 
 --echo # Raise it: the same INSERT succeeds and the index answers with both

@@ -112,6 +112,16 @@ DB_INDEX_CORRUPT returned alongside it does not replace this text.
 @param[in]  id   the node the neighbour list named */
 void vec_report_missing_node(THD *thd, uint64_t id);
 
+/** Report that innodb_hnsw_max_memory is spent.
+
+Reported here rather than left to what DB_VEC_OUT_OF_MEMORY maps to,
+because HA_ERR_OUT_OF_MEM reads "check ulimit, add swap space" - which
+sends whoever hit a configurable ceiling looking for a system problem
+that is not there. Names the variable and says the graph is intact, so
+the remedy is the obvious one.
+@param[in]  thd  session to report to; nothing is reported without one */
+void vec_report_memory_ceiling(THD *thd);
+
 /** Fill an unloaded node from its aux row.
 
 A template only because LoadNodeHandle is nested in the instantiation,
