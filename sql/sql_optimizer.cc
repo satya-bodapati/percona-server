@@ -11073,7 +11073,7 @@ bool JOIN::optimize_vector_query() {
   // Only used by the old optimizer.
   assert(!thd->lex->using_hypergraph_optimizer());
 
-  /* Only the canonical approximate-kNN shape activates the index:
+  /* Only the canonical approximate-ANN shape activates the index:
   a single-table block whose single ascending ORDER BY expression is a
   distance call over the indexed column with a constant query vector,
   under a finite LIMIT. Any other placement of a distance call (WHERE,

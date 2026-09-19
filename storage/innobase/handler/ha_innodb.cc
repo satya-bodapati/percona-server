@@ -1203,7 +1203,7 @@ static MYSQL_THDVAR_STR(tmpdir,
 --container_aware startup option */
 static MYSQL_THDVAR_ULONG(
     hnsw_ef_search, PLUGIN_VAR_RQCMDARG,
-    "Minimum candidate-list width for HNSW vector index searches (kNN"
+    "Minimum candidate-list width for HNSW vector index searches (ANN"
     " recall/latency knob; the effective width is max(ef, LIMIT))",
     nullptr, nullptr, 40, 1, 100000, 0);
 
@@ -7104,7 +7104,7 @@ ulong ha_innobase::index_flags(uint key, uint, bool) const {
   index on the table - which is how find_shortest_key picked it for
   SELECT COUNT(*) and returned 0 from a tree that is not there.
 
-  Reads go exclusively through the JT_VECTOR kNN path
+  Reads go exclusively through the JT_VECTOR ANN path
   (vec_init / vec_read_first / vec_read_next), because "the k nearest to
   q" cannot be expressed through the index_* family. */
   if (table_share->key_info[key].algorithm == HA_KEY_ALG_FULLTEXT ||
@@ -8483,7 +8483,7 @@ uint ha_innobase::max_supported_key_part_length(
 int ha_innobase::close() {
   DBUG_TRACE;
 
-  vec_knn_close(m_vec_search);
+  vec_ann_close(m_vec_search);
   m_vec_search = nullptr;
 
   if (m_prebuilt->m_temp_read_shared) {
@@ -10973,7 +10973,7 @@ int ha_innobase::index_end(void) {
   the LIMIT being satisfied, where vec_read_next is simply never called
   again. The scan holds the aux table open and its MDL ticket, so leaking
   it would keep a concurrent ALTER waiting. */
-  vec_knn_close(m_vec_search);
+  vec_ann_close(m_vec_search);
   m_vec_search = nullptr;
 
   if (m_prebuilt->index->last_sel_cur) {
@@ -12179,7 +12179,7 @@ next_record:
 int ha_innobase::vec_init() {
   DBUG_TRACE;
 
-  /* The kNN candidates are fetched from the base table by PRIMARY KEY
+  /* The ANN candidates are fetched from the base table by PRIMARY KEY
   (row_ref is the PK image); rnd_init sets up the clustered-index
   positioning the per-candidate row_search_for_mysql below relies on. */
   return rnd_init(false);
@@ -12226,12 +12226,12 @@ int ha_innobase::vec_read_first(Item *item, uchar *buf, ha_rows limit) {
   m_vec_query.assign(vec->ptr(), vec->length());
 
   /* A re-executed statement can reach here with a scan still open. */
-  vec_knn_close(m_vec_search);
+  vec_ann_close(m_vec_search);
   m_vec_search = nullptr;
 
   /* LIMIT sizes the batch, not the scan: a filter above the iterator may
   consume any number of candidates, and the scan simply continues. */
-  const dberr_t err = vec_knn_open(
+  const dberr_t err = vec_ann_open(
       vindex, reinterpret_cast<const float *>(m_vec_query.data()),
       std::max<size_t>(limit, 1), THDVAR(m_user_thd, hnsw_ef_search),
       m_user_thd, &m_vec_search);
@@ -12265,11 +12265,11 @@ int ha_innobase::vec_read_next(uchar *buf) {
     }
 
     vec_hit_t hit;
-    if (!vec_knn_next(m_vec_search, &hit)) {
+    if (!vec_ann_next(m_vec_search, &hit)) {
       /* Either the graph is exhausted or a lazy node load failed; only
       the second is an error, and it is reported separately because
-      vec_knn_next answers just "is there another candidate". */
-      const dberr_t serr = vec_knn_error(m_vec_search);
+      vec_ann_next answers just "is there another candidate". */
+      const dberr_t serr = vec_ann_error(m_vec_search);
       if (serr != DB_SUCCESS) {
         return convert_error_code_to_mysql(serr, table->flags, m_user_thd);
       }
@@ -19830,7 +19830,7 @@ int ha_innobase::end_stmt() {
   ha_index_or_rnd_end() - a no-op once ha_reset() has cleared `inited`,
   which happens first. The scan pins the aux table, so leaking it here
   makes the next DROP of that table fail its reference-count assertion. */
-  vec_knn_close(m_vec_search);
+  vec_ann_close(m_vec_search);
   m_vec_search = nullptr;
 
   if (m_prebuilt->blob_heap) {

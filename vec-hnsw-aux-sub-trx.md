@@ -521,7 +521,7 @@ SELECT id FROM t ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN'
 
 ```
 id  select_type  table  type         key  Extra
-1   SIMPLE       t      vector_knn   vk   NULL      <- index used, no filesort
+1   SIMPLE       t      vector_ann   vk   NULL      <- index used, no filesort
 ```
 
 Two things have to be true for that plan: the query has to be one the index can honestly answer,
@@ -541,10 +541,10 @@ explicitly accepted approximation, and that shape is `ORDER BY <distance> LIMIT 
 
 | query | plan | why |
 |---|---|---|
-| `ORDER BY DISTANCE(v, <const>, 'EUCLIDEAN') LIMIT 3` | **`vector_knn`** | the canonical shape |
-| `... 'EUCLIDEAN_SQUARED' LIMIT 3` | **`vector_knn`** | monotonic transform of the graph's own metric — same ordering |
-| `ORDER BY DISTANCE(<const>, v, ...) LIMIT 3` | **`vector_knn`** | argument order does not matter |
-| `WHERE k = 1 ORDER BY DISTANCE(...) LIMIT 3` | **`vector_knn`** | the filter sits *above* the scan, which simply continues |
+| `ORDER BY DISTANCE(v, <const>, 'EUCLIDEAN') LIMIT 3` | **`vector_ann`** | the canonical shape |
+| `... 'EUCLIDEAN_SQUARED' LIMIT 3` | **`vector_ann`** | monotonic transform of the graph's own metric — same ordering |
+| `ORDER BY DISTANCE(<const>, v, ...) LIMIT 3` | **`vector_ann`** | argument order does not matter |
+| `WHERE k = 1 ORDER BY DISTANCE(...) LIMIT 3` | **`vector_ann`** | the filter sits *above* the scan, which simply continues |
 | `ORDER BY DISTANCE(...)` — no `LIMIT` | `ALL` + filesort | asks for a total ordering; an approximate index cannot give one |
 | `... LIMIT 3` but `DESC` | `ALL` + filesort | farthest-first is not a question HNSW answers |
 | `... 'MANHATTAN' LIMIT 3` | `ALL` + filesort | the graph was built under L2; another metric would rank by a distance it does not hold |
@@ -1009,7 +1009,7 @@ path filtering them by base-row lookup. Nothing is owed, so nothing is missed.
 re-points the row's current node — one `vec_aux_update_row` writing the new `base_pk` at the
 row's current label. A cascade bypasses that write, so the aux row keeps the old key. The consequence is a *false
 negative*, never a false positive: the node resolves to a key that is gone, so the row silently
-drops out of kNN results — and if some later row takes over that key, check ① rejects it,
+drops out of ANN results — and if some later row takes over that key, check ① rejects it,
 because its label is different. Missing, never wrong.
 
 Narrower still: §18 restricts us to a single-column `BIGINT UNSIGNED` primary key, so a cascade
@@ -1364,7 +1364,7 @@ with the `dict_sys` mutex released across the call because the MDL layer can wai
 
 ## 23. Concurrency
 
-**We take no latch on either hot path.** Neither INSERT nor kNN search locks anything of ours.
+**We take no latch on either hot path.** Neither INSERT nor ANN search locks anything of ours.
 The only synchronisation the runtime owns is `vec_t::load_mutex`, a plain `std::mutex` held on
 the cold path alone, and it is not touched again once the graph is built.
 
@@ -1850,9 +1850,9 @@ The read path once widened by re-running a bounded search with a larger `k` and 
 node ids it had already returned. It now uses the class's streaming search:
 
 ```c
-vec_knn_open(index, q, batch_size, ef_search, thd, &scan);   // nn_search_start
-while (vec_knn_next(scan, &hit)) { ... }                     // nn_search_next
-vec_knn_close(scan);
+vec_ann_open(index, q, batch_size, ef_search, thd, &scan);   // nn_search_start
+while (vec_ann_next(scan, &hit)) { ... }                     // nn_search_next
+vec_ann_close(scan);
 ```
 
 One descent instead of one per widening, no exclude set, no guessed bound to stop at — the scan
@@ -1894,7 +1894,7 @@ the descent path, which node becomes the entry point, and — through `select_ne
 the neighbour lists of nodes inserted earlier.
 
 So no test may record per-node `level` or `nb`, the entry point (record 0's `base_pk`), or the
-order of equidistant kNN hits. Three tests mask those fields. The property they stood in for —
+order of equidistant ANN hits. Three tests mask those fields. The property they stood in for —
 that neighbour lists round-trip through the aux unchanged — is asserted deterministically by
 `vector_aux_dml_debug`, which passes explicit levels and never invokes the graph.
 

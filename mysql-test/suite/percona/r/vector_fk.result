@@ -7,7 +7,7 @@
 # index. ON DELETE CASCADE is in fact harmless here — DELETE writes
 # nothing to the aux table by design — but ON UPDATE CASCADE on a
 # column that is part of the child PK leaves the aux row pointing at
-# the old key, and the row drops out of kNN results. Both are refused
+# the old key, and the row drops out of ANN results. Both are refused
 # for now; see the comment in mysql_prepare_create_table.
 #
 CREATE TABLE parent (id BIGINT UNSIGNED PRIMARY KEY);

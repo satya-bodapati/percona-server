@@ -43,7 +43,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "trx0trx.h"
 #include "vec0aux.h"
 
-/** One open streaming kNN scan; defined in vec0hnsw.cc. Held here by
+/** One open streaming ANN scan; defined in vec0hnsw.cc. Held here by
 pointer only, so this header does not pull in the graph. */
 struct vec_search_t;
 

@@ -97,11 +97,11 @@ id=4 level=# base_pk=8 nb=#
 # says yes to both, because row 7 is live. Only check ①
 # (row.percona_vec_aux_id == node_id) separates them, and that needs
 # a node id that k_nn_search does not return today. Until it does, a
-# kNN query that walks into node 1 will rank row 7 by its OLD
+# ANN query that walks into node 1 will rank row 7 by its OLD
 # vector.
 #
 # This cannot be written as a failing SELECT yet: the branch has no
-# kNN read path to issue one against (P4). What the dump above
+# ANN read path to issue one against (P4). What the dump above
 # records IS the defect — two live nodes naming one row — and the
 # day check ① lands, the read path must return exactly one of them.
 #

@@ -353,7 +353,9 @@ has ever been inserted. */
 static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
   ut_ad(vec->hnsw == nullptr);
 
-  /* innodb_hnsw_max_memory, at the entry to the load. Same charge check
+  /* innodb_hnsw_max_memory, at the entry to the load: refuse to START
+  building a graph on a budget that is already gone. How far this load
+  then gets is bounded per faulted node in load_node_cb. Same charge check
   as vec_add_node: is the budget already spent, not would this fit. What
   this call allocates directly is the graph object and the entry-point
   node; the rest of the graph arrives node by node through
@@ -647,7 +649,7 @@ struct vec_search_t {
   Vec_hnsw::NNSearchContext nn;
 };
 
-dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
+dberr_t vec_ann_open(dict_index_t *index, const float *q, size_t batch_size,
                      size_t ef_search, THD *thd, vec_search_t **out) {
   ut_ad(index != nullptr && index->is_vector());
   ut_ad(q != nullptr && out != nullptr);
@@ -697,7 +699,7 @@ dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
   }
   if (s->ctx.err != DB_SUCCESS) {
     const dberr_t err = s->ctx.err;
-    vec_knn_close(s);
+    vec_ann_close(s);
     return err;
   }
 
@@ -705,7 +707,7 @@ dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
   return DB_SUCCESS;
 }
 
-bool vec_knn_next(vec_search_t *s, vec_hit_t *hit) {
+bool vec_ann_next(vec_search_t *s, vec_hit_t *hit) {
   ut_ad(s != nullptr && hit != nullptr);
   if (s->ctx.err != DB_SUCCESS) return false;
 
@@ -725,11 +727,11 @@ bool vec_knn_next(vec_search_t *s, vec_hit_t *hit) {
   return true;
 }
 
-dberr_t vec_knn_error(const vec_search_t *s) {
+dberr_t vec_ann_error(const vec_search_t *s) {
   return s == nullptr ? DB_SUCCESS : s->ctx.err;
 }
 
-void vec_knn_close(vec_search_t *s) {
+void vec_ann_close(vec_search_t *s) {
   if (s == nullptr) return;
   s->nn.reset();
   if (s->aux != nullptr) {

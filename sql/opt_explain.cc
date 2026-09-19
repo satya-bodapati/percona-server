@@ -118,7 +118,7 @@ static bool mysql_explain_query_expression(THD *explain_thd,
 const char *join_type_str[] = {"UNKNOWN",     "system",      "const",
                                "eq_ref",      "ref",         "ALL",
                                "range",       "index",       "fulltext",
-                               "ref_or_null", "index_merge", "vector_knn"};
+                               "ref_or_null", "index_merge", "vector_ann"};
 
 static const enum_query_type cond_print_flags =
     enum_query_type(QT_ORDINARY | QT_SHOW_SELECT_NUMBER);

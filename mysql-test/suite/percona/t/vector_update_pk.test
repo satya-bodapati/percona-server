@@ -32,7 +32,7 @@ INSERT INTO t1 VALUES (7, 100, STRING_TO_VECTOR('[1,0,0,0]'));
 INSERT INTO t1 VALUES (8, 200, STRING_TO_VECTOR('[0,1,0,0]'));
 INSERT INTO t1 VALUES (9, 300, STRING_TO_VECTOR('[0,0,2,0]'));
 
---echo # Baseline: node for row 7 carries base_pk=7, and the kNN query for
+--echo # Baseline: node for row 7 carries base_pk=7, and the ANN query for
 --echo # row 7's own vector finds it -- both via the index and via the
 --echo # exact (IGNORE INDEX) path.
 SET SESSION innodb_interpreter = 'vec_aux_dump test/t1';

@@ -1,7 +1,7 @@
 #
 # PS-11300: a vector scan must not outlive its statement.
 #
-# A streaming kNN scan pins the aux table for its whole life —
+# A streaming ANN scan pins the aux table for its whole life —
 # nn_search_next faults nodes in through load_node_cb, which reads
 # the aux — so the scan holds a dictionary reference and an MDL
 # ticket. Releasing that in index_end() alone is not enough: by the

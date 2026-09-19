@@ -234,7 +234,7 @@ adding the hidden column to the MySQL row template.
 uint64_t vec_get_aux_id_from_rec(const dict_table_t *table, const rec_t *rec,
                                  const dict_index_t *index);
 
-/** One kNN candidate: the graph node that matched, and the base row it
+/** One ANN candidate: the graph node that matched, and the base row it
 names.
 
 The node id is what MVCC check (1) compares against the visible row

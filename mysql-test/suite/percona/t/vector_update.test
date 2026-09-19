@@ -69,11 +69,11 @@ SELECT @@session.innodb_interpreter_output;
 --echo # says yes to both, because row 7 is live. Only check ①
 --echo # (row.percona_vec_aux_id == node_id) separates them, and that needs
 --echo # a node id that k_nn_search does not return today. Until it does, a
---echo # kNN query that walks into node 1 will rank row 7 by its OLD
+--echo # ANN query that walks into node 1 will rank row 7 by its OLD
 --echo # vector.
 --echo #
 --echo # This cannot be written as a failing SELECT yet: the branch has no
---echo # kNN read path to issue one against (P4). What the dump above
+--echo # ANN read path to issue one against (P4). What the dump above
 --echo # records IS the defect — two live nodes naming one row — and the
 --echo # day check ① lands, the read path must return exactly one of them.
 --echo #

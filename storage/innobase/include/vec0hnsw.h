@@ -257,12 +257,27 @@ struct Vec_persistor {
                           typename Hnsw::LoadNodeHandle handle) {
     if (ctx->err != DB_SUCCESS) return HNSW_ERROR_CB;
 
-    /* The budget is still checked at the entry to a load or an insert
-    (vec_runtime_load, vec_add_node) rather than here, so one statement
-    may overshoot by whatever it faults. Metering each fault is now
-    expressible - a refusal would return HNSW_ERROR_CB and leave the stub
-    retryable rather than lost - but it is a change in where the bound
-    bites, not a correction, so it is left for its own change. */
+    /* Every byte a cold graph grows passes through here, so this is
+    where the bound has to be enforced if it is to hold at all. The
+    checks at the entry to a load or an insert decide whether a graph
+    may START growing; they cannot bound what one statement faults in
+    once it has, and a wide search on a cold index faults a node per
+    step.
+
+    Refusing here is only correct because the result can say which kind
+    of failure this is. HNSW_ERROR_CB leaves the stub NODE_DUMMY, so the
+    node is faulted again on the next attempt once the budget allows.
+    Returning the "gone" answer instead would mark it NODE_LOST, which
+    is never retried - the graph would be permanently short of a node it
+    could have read, and would answer later queries with fewer rows and
+    no error at all. That is what kept this check out of here until the
+    callback could tell the two apart. */
+    if (srv_hnsw_max_memory != 0 &&
+        Vec_arena::global_bytes() >= srv_hnsw_max_memory) {
+      vec_report_memory_ceiling(ctx->thd);
+      ctx->err = DB_VEC_OUT_OF_MEMORY;
+      return HNSW_ERROR_CB;
+    }
 
     const dberr_t err = vec_persist_load_node(ctx, hnsw, handle);
     if (err == DB_SUCCESS) return HNSW_SUCCESS;
@@ -477,16 +492,16 @@ at read time by looking base_pk up under the reader's view.
 dberr_t vec_insert_row(trx_t *trx, dict_table_t *table, const dtuple_t *row,
                        THD *thd);
 
-/** One open streaming kNN scan.
+/** One open streaming ANN scan.
 
 Opaque by design: it owns the class's `NNSearchContext`, which is neither
 copyable nor movable, plus the aux table and the MDL ticket that have to
 stay alive for the whole scan - `nn_search_next` faults nodes in through
-`load_node_cb`, which reads the aux. Allocated by vec_knn_open and
-released by vec_knn_close; the handler holds only the pointer. */
+`load_node_cb`, which reads the aux. Allocated by vec_ann_open and
+released by vec_ann_close; the handler holds only the pointer. */
 struct vec_search_t;
 
-/** Begin a streaming kNN scan.
+/** Begin a streaming ANN scan.
 
 Descends the graph and returns candidates a batch at a time. Where a
 one-shot search would descend,
@@ -501,9 +516,9 @@ is not known when the scan starts.
 @param[in]   batch_size  candidates fetched per internal batch; must be > 0
 @param[in]   ef_search   search width, clamped to at least batch_size
 @param[in]   thd         session, for opening the aux
-@param[out]  out         the scan, on success; caller must vec_knn_close it
+@param[out]  out         the scan, on success; caller must vec_ann_close it
 @return DB_SUCCESS or a storage error */
-dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
+dberr_t vec_ann_open(dict_index_t *index, const float *q, size_t batch_size,
                      size_t ef_search, THD *thd, vec_search_t **out);
 
 /** Take the next candidate from a scan.
@@ -516,15 +531,15 @@ closer than one already yielded rather than emitting it out of order.
 @param[in,out]  s    an open scan
 @param[out]     hit  the candidate, when true is returned
 @return false when the graph is exhausted */
-bool vec_knn_next(vec_search_t *s, vec_hit_t *hit);
+bool vec_ann_next(vec_search_t *s, vec_hit_t *hit);
 
 /** The first storage error a scan hit, or DB_SUCCESS. A lazy node load
-failing during vec_knn_next reports here, since that call returns only
+failing during vec_ann_next reports here, since that call returns only
 "is there another candidate". */
-dberr_t vec_knn_error(const vec_search_t *s);
+dberr_t vec_ann_error(const vec_search_t *s);
 
 /** End a scan and release the aux table and its MDL. Safe on nullptr. */
-void vec_knn_close(vec_search_t *s);
+void vec_ann_close(vec_search_t *s);
 
 /** The vector index on @p table, or nullptr. At most one exists. */
 dict_index_t *vec_index_of(dict_table_t *table);

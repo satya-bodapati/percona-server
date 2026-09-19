@@ -74,7 +74,7 @@ class RefIterator final : public TableRowIterator {
   rows that match NULL, i.e., WHERE column=\<ref\> OR column IS NULL.
  */
 /**
-  Approximate kNN over a vector index: DoRead() returns base rows in
+  Approximate ANN over a vector index: DoRead() returns base rows in
   ascending distance from a constant query vector, via the handler's
   vec_read_first/vec_read_next.
 */

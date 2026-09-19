@@ -877,7 +877,7 @@ class JOIN {
   bool optimize_fts_query();
 
   /**
-    Activate JT_VECTOR access for the canonical approximate-kNN shape:
+    Activate JT_VECTOR access for the canonical approximate-ANN shape:
     single table, ORDER BY <distance-func>(vector_col, const) with a
     finite LIMIT, L2-servable metric.
   */

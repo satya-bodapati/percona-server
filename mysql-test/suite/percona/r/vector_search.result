@@ -1,5 +1,5 @@
 #
-# PS-11300 S3: SQL kNN — ORDER BY DISTANCE(...) LIMIT k is served by
+# PS-11300 S3: SQL ANN — ORDER BY DISTANCE(...) LIMIT k is served by
 # the HNSW vector index (JT_VECTOR access, sort elided, rows in
 # ascending distance). Everything else stays on the exact path.
 #
@@ -13,11 +13,11 @@ INSERT INTO t1 VALUES (100, 0, STRING_TO_VECTOR('[0,0]')),
 (103, 1, STRING_TO_VECTOR('[3,0]')),
 (104, 0, STRING_TO_VECTOR('[0,4]')),
 (105, 1, STRING_TO_VECTOR('[5,0]'));
-# The canonical shape uses the index: access type vector_knn, key vk,
+# The canonical shape uses the index: access type vector_ann, key vk,
 # and no filesort in the plan.
 EXPLAIN SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t1	NULL	vector_knn	NULL	vk	1	NULL	#	#	NULL
+1	SIMPLE	t1	NULL	vector_ann	NULL	vk	1	NULL	#	#	NULL
 Warnings:
 Note	1003	/* select#1 */ select `test`.`t1`.`id` AS `id` from `test`.`t1` order by distance(`test`.`t1`.`v`,to_vector('[0,0]'),'EUCLIDEAN') limit 3
 SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3;
@@ -28,7 +28,7 @@ id
 # EUCLIDEAN_SQUARED orders identically — also served.
 EXPLAIN SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN_SQUARED') LIMIT 3;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t1	NULL	vector_knn	NULL	vk	1	NULL	#	#	NULL
+1	SIMPLE	t1	NULL	vector_ann	NULL	vk	1	NULL	#	#	NULL
 Warnings:
 Note	1003	/* select#1 */ select `test`.`t1`.`id` AS `id` from `test`.`t1` order by distance(`test`.`t1`.`v`,to_vector('[0,0]'),'EUCLIDEAN_SQUARED') limit 3
 SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN_SQUARED') LIMIT 3;
@@ -102,7 +102,7 @@ Note	1003	/* select#1 */ select `test`.`t1`.`id` AS `id` from `test`.`t1` order 
 #
 EXPLAIN SELECT id FROM t1 WHERE k = 1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3;
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t1	NULL	vector_knn	NULL	vk	1	NULL	#	#	Using where
+1	SIMPLE	t1	NULL	vector_ann	NULL	vk	1	NULL	#	#	Using where
 Warnings:
 Note	1003	/* select#1 */ select `test`.`t1`.`id` AS `id` from `test`.`t1` where (`test`.`t1`.`k` = 1) order by distance(`test`.`t1`.`v`,to_vector('[0,0]'),'EUCLIDEAN') limit 3
 SELECT id FROM t1 WHERE k = 1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3;

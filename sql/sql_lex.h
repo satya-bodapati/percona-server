@@ -1974,7 +1974,7 @@ class Query_block : public Query_term {
 
   /**
     A pointer to vector_func_list_alloc: DISTANCE() calls registered at
-    itemization for the kNN index pickup.
+    itemization for the ANN index pickup.
   */
   List<Item_func_vector_distance> *vector_func_list;
   List<Item_func_vector_distance> vector_func_list_alloc{};

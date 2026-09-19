@@ -4281,7 +4281,7 @@ bool Item_func_vector_distance::do_itemize(Parse_context *pc, Item **res) {
   pc->thd->lex->set_stmt_unsafe(LEX::BINLOG_STMT_UNSAFE_SYSTEM_FUNCTION);
 
   /* Register with the query block so the optimizer can consider the
-  vector index for the canonical kNN shape (ORDER BY ... LIMIT). WHERE
+  vector index for the canonical ANN shape (ORDER BY ... LIMIT). WHERE
   placement is registered too, but only the ORDER BY shape activates
   the index - an approximate index inside a filter would silently drop
   qualifying rows. */

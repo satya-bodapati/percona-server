@@ -1,7 +1,7 @@
 --source include/have_debug.inc
 
 --echo #
---echo # PS-11300 S3: SQL kNN — ORDER BY DISTANCE(...) LIMIT k is served by
+--echo # PS-11300 S3: SQL ANN — ORDER BY DISTANCE(...) LIMIT k is served by
 --echo # the HNSW vector index (JT_VECTOR access, sort elided, rows in
 --echo # ascending distance). Everything else stays on the exact path.
 --echo #
@@ -18,7 +18,7 @@ INSERT INTO t1 VALUES (100, 0, STRING_TO_VECTOR('[0,0]')),
                       (104, 0, STRING_TO_VECTOR('[0,4]')),
                       (105, 1, STRING_TO_VECTOR('[5,0]'));
 
---echo # The canonical shape uses the index: access type vector_knn, key vk,
+--echo # The canonical shape uses the index: access type vector_ann, key vk,
 --echo # and no filesort in the plan.
 --replace_column 10 # 11 #
 EXPLAIN SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0]'), 'EUCLIDEAN') LIMIT 3;

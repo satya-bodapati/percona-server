@@ -8804,7 +8804,7 @@ bool mysql_prepare_create_table(
     same state as an ordinary one. ON UPDATE CASCADE is not: when the
     cascaded column is part of the child's primary key, the aux row's
     base_pk still points at the old key and the row silently drops out
-    of kNN results. It cannot return a WRONG row - the label check
+    of ANN results. It cannot return a WRONG row - the label check
     rejects any row that took over the old key - but it does go missing.
 
     Refusing both is broader than the defect. Narrowing it to

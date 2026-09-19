@@ -229,7 +229,7 @@ enum join_type {
   */
   JT_INDEX_MERGE,
   /**
-    Approximate kNN over an HNSW vector index: rows are produced in
+    Approximate ANN over an HNSW vector index: rows are produced in
     ascending distance order from a constant query vector.
   */
   JT_VECTOR
@@ -478,7 +478,7 @@ class QEP_shared {
 
   /** JT_VECTOR: the constant query-vector expression */
   Item *m_vec;
-  /** JT_VECTOR: kNN batch size (the query's LIMIT) */
+  /** JT_VECTOR: ANN batch size (the query's LIMIT) */
   ha_rows m_vec_limit;
 
   /**

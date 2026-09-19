@@ -34,7 +34,7 @@ SELECT COUNT(*) FROM t1;
 DROP TABLE t1;
 
 --echo #
---echo # Same corruption, reached through the real SQL kNN path rather than
+--echo # Same corruption, reached through the real SQL ANN path rather than
 --echo # the debug hook: ORDER BY DISTANCE(...) LIMIT k must surface
 --echo # ER_INDEX_CORRUPT, not a crash and not a false "table is crashed"
 --echo # (which is what DB_CORRUPTION would have mapped to instead).
