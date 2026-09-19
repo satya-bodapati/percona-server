@@ -405,26 +405,6 @@ static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
     return DB_INDEX_CORRUPT;
   }
 
-  /* The entry-point row has to be there before the graph is handed the
-  id. init_from_entry_point() asserts that its one load succeeded and
-  has no path for it failing, so a record 0 naming a row that is gone
-  takes a debug build down on that assert - and in a release build
-  leaves a NODE_DUMMY standing in as the entry point, which is worse.
-  Checked here instead, one read per cold load of an index. */
-  {
-    mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
-    vec_aux_read_t probe;
-    const dberr_t perr = vec_aux_read_node(aux, entry_point, heap, &probe);
-    mem_heap_free(heap);
-    if (perr != DB_SUCCESS) {
-      ut::delete_(vec->hnsw);
-      vec->hnsw = nullptr;
-      if (perr != DB_RECORD_NOT_FOUND) return perr;
-      vec_report_missing_node(thd, entry_point);
-      return DB_INDEX_CORRUPT;
-    }
-  }
-
   Vec_ctx ctx;
   ctx.aux = aux;
   ctx.thd = thd;
@@ -432,11 +412,19 @@ static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
   ctx.vec_bytes = vec->dims * sizeof(float);
   ctx.err = DB_SUCCESS;
 
-  vec->hnsw->init_from_entry_point(entry_point, &ctx);
-  if (ctx.err != DB_SUCCESS) {
+  /* Loads exactly the entry-point node. HNSW_NOT_FOUND means record 0
+  names a row the aux does not have, which is the graph and its table
+  disagreeing; the instance is unusable either way and must go. */
+  const HnswResult irc = vec->hnsw->init_from_entry_point(entry_point, &ctx);
+  if (irc != HNSW_SUCCESS) {
     ut::delete_(vec->hnsw);
     vec->hnsw = nullptr;
-    return ctx.err;
+    if (ctx.err != DB_SUCCESS) return ctx.err;
+    if (irc == HNSW_NOT_FOUND) {
+      vec_report_missing_node(thd, entry_point);
+      return DB_INDEX_CORRUPT;
+    }
+    return DB_OUT_OF_MEMORY;
   }
 
   vec->loaded.store(true, std::memory_order_release);
@@ -599,7 +587,13 @@ static dberr_t vec_add_node(vec_t *vec, dict_index_t *index,
   /* Unlocked: the class is thread-safe for concurrent insert() and search,
   and the only operation it is not thread-safe for - init_from_entry_point -
   cannot be running, because reaching here means `loaded` is already true. */
-  vec->hnsw->insert(label, base_pk, q, &ctx);
+  /* An allocation failure inside the graph leaves no ctx->err behind, so
+  it has to be read off the result rather than inferred from the
+  context. */
+  const HnswResult irc = vec->hnsw->insert(label, base_pk, q, &ctx);
+  if (irc != HNSW_SUCCESS && ctx.err == DB_SUCCESS) {
+    ctx.err = DB_OUT_OF_MEMORY;
+  }
 
   /* Commits whatever the last callback left open - often nothing, since
   each callback commits its own work. */
@@ -695,9 +689,12 @@ dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
   /* Unlocked, like every other graph access: the class is thread-safe for
   concurrent search, and a search mutates only by faulting stubs in, which
   load_node() serialises under its own striped lock. */
-  vec->hnsw->nn_search_start(&s->nn, reinterpret_cast<const char *>(q),
-                             batch_size, std::max(ef_search, batch_size),
-                             &s->ctx);
+  const HnswResult src = vec->hnsw->nn_search_start(
+      &s->nn, reinterpret_cast<const char *>(q), batch_size,
+      std::max(ef_search, batch_size), &s->ctx);
+  if (src != HNSW_SUCCESS && s->ctx.err == DB_SUCCESS) {
+    s->ctx.err = DB_OUT_OF_MEMORY;
+  }
   if (s->ctx.err != DB_SUCCESS) {
     const dberr_t err = s->ctx.err;
     vec_knn_close(s);
@@ -714,7 +711,14 @@ bool vec_knn_next(vec_search_t *s, vec_hit_t *hit) {
 
   const auto next = s->vec->hnsw->nn_search_next(&s->nn);
   if (s->ctx.err != DB_SUCCESS) return false;
-  if (!next.first) return false;
+  /* HNSW_NOT_FOUND is the ordinary end of the scan, not a failure.
+  Anything else with no InnoDB reason behind it is the graph's own
+  allocation giving out. */
+  if (next.first == HNSW_NOT_FOUND) return false;
+  if (next.first != HNSW_SUCCESS) {
+    s->ctx.err = DB_OUT_OF_MEMORY;
+    return false;
+  }
 
   hit->id = next.second.id;
   hit->base_pk = next.second.base_pk;
@@ -873,7 +877,9 @@ dberr_t vec_build_add_row(Vec_build *b, dict_table_t *table,
   const uint64_t base_pk =
       mach_read_from_8(static_cast<const byte *>(dfield_get_data(pk_df)));
 
-  b->graph->insert(id, base_pk, q, &b->null_ctx);
+  if (b->graph->insert(id, base_pk, q, &b->null_ctx) != HNSW_SUCCESS) {
+    return DB_OUT_OF_MEMORY;
+  }
 
   /* innodb_hnsw_max_memory. The whole graph is in memory before any of it
   is durable, so this is the only thing bounding a build. Several scan

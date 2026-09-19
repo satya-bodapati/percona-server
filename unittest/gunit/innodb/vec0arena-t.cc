@@ -141,21 +141,29 @@ TEST(Vec0ArenaTest, SatisfiesHnswArenaContract) {
   for (int i = 1; i <= 400; i++) {
     std::vector<float> v(kDims, static_cast<float>(i));
     points.push_back(v);
-    hnsw.insert(static_cast<uint64_t>(i), static_cast<uint64_t>(i),
-                hnsw_unittest::as_bytes(points.back()),
-                /*persistor_ctx=*/nullptr);
+    ASSERT_EQ(HNSW_SUCCESS,
+              hnsw.insert(static_cast<uint64_t>(i), static_cast<uint64_t>(i),
+                          hnsw_unittest::as_bytes(points.back()),
+                          /*persistor_ctx=*/nullptr));
   }
 
-  /* Nearest neighbour of a point that IS in the graph must be itself. */
+  /* Nearest neighbour of a point that IS in the graph must be itself,
+  asked the way InnoDB asks it: a streaming scan. k_nn_search would do
+  here too, but nothing in the engine calls it - the handler opens a
+  scan and pulls hits one at a time - so testing it would be testing an
+  API no caller uses. */
   std::vector<float> probe(kDims, 42.0f);
-  auto results = hnsw.k_nn_search(hnsw_unittest::as_bytes(probe), /*k=*/1,
-                                  /*ef_search=*/32,
-                                  /*persistor_ctx=*/nullptr);
-  ASSERT_FALSE(results.empty());
-  /* k_nn_search returns SearchHit{id, base_pk}, not a bare base_pk. This
-  insert used the same value for both, so both must read 42. */
-  EXPECT_EQ(42u, results[0].base_pk);
-  EXPECT_EQ(42u, results[0].id);
+  ArenaHnsw::NNSearchContext scan;
+  ASSERT_EQ(HNSW_SUCCESS,
+            hnsw.nn_search_start(&scan, hnsw_unittest::as_bytes(probe),
+                                 /*batch_size=*/1, /*ef_search=*/32,
+                                 /*persistor_ctx=*/nullptr));
+  const auto hit = hnsw.nn_search_next(&scan);
+  ASSERT_EQ(HNSW_SUCCESS, hit.first);
+  /* A hit is SearchHit{id, base_pk}, not a bare base_pk. This insert
+  used the same value for both, so both must read 42. */
+  EXPECT_EQ(42u, hit.second.base_pk);
+  EXPECT_EQ(42u, hit.second.id);
 }
 
 /* Vec_persistor's four callbacks are member templates whose signatures
@@ -170,13 +178,16 @@ default-constructible and held by value, which the class requires. */
 TEST(Vec0ArenaTest, PersistorSatisfiesHnswContract) {
   Vec_hnsw graph(/*dimensions=*/8, &vector_distance_euclidean_squared,
                  /*M=*/8, /*ef_construction=*/32);
-  /* Empty graph: a search must be well-formed and find nothing, without
+  /* Empty graph: a scan must be well-formed and yield nothing, without
   ever reaching a callback (there is no entry point to load from). */
   std::vector<float> probe(8, 1.0f);
   Vec_ctx ctx;
-  auto results = graph.k_nn_search(hnsw_unittest::as_bytes(probe), /*k=*/1,
-                                   /*ef_search=*/8, &ctx);
-  EXPECT_TRUE(results.empty());
+  Vec_hnsw::NNSearchContext scan;
+  EXPECT_EQ(HNSW_SUCCESS,
+            graph.nn_search_start(&scan, hnsw_unittest::as_bytes(probe),
+                                  /*batch_size=*/1, /*ef_search=*/8, &ctx));
+  /* End of scan, not a failure. */
+  EXPECT_EQ(HNSW_NOT_FOUND, graph.nn_search_next(&scan).first);
   EXPECT_EQ(DB_SUCCESS, ctx.err);
 }
 

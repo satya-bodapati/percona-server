@@ -182,9 +182,14 @@ dberr_t vec_persist_load_node(Vec_ctx *ctx, Hnsw &hnsw,
   for (ulint off = 0; off + 8 <= node.neighbors_len; off += 8) {
     ids.push_back(mach_read_from_8(node.neighbors + off));
   }
-  hnsw.load_node_neighbors(handle, ids);
+  /* The only load_* helper that allocates, so the only one that can fail.
+  Its HNSW_OOM_GRAPH leaves the stub NODE_DUMMY and retryable, which is
+  what an out-of-memory deserves - unlike a missing row, which is not
+  coming back. */
+  const HnswResult nrc = hnsw.load_node_neighbors(handle, ids);
 
   mem_heap_free(heap);
+  if (nrc != HNSW_SUCCESS) return DB_OUT_OF_MEMORY;
   return DB_SUCCESS;
 }
 
@@ -215,59 +220,59 @@ struct Vec_persistor {
   using Context = Vec_ctx;
 
   template <typename NeighborIds>
-  void insert_cb(Context *ctx, uint64_t id, uint64_t base_pk, const char *q,
-                 uint8_t layer, NeighborIds nbrs) {
-    if (ctx->err != DB_SUCCESS) return;
+  HnswResult insert_cb(Context *ctx, uint64_t id, uint64_t base_pk,
+                       const char *q, uint8_t layer, NeighborIds nbrs) {
+    if (ctx->err != DB_SUCCESS) return HNSW_ERROR_CB;
     std::vector<byte> blob;
     vec_flatten_neighbors(nbrs, blob);
     ctx->err = vec_persist_insert(ctx, id, base_pk, q, layer, blob);
+    return ctx->err == DB_SUCCESS ? HNSW_SUCCESS : HNSW_ERROR_CB;
   }
 
   template <typename NeighborIds>
-  void update_neighbors_cb(Context *ctx, uint64_t id, NeighborIds nbrs) {
-    if (ctx->err != DB_SUCCESS) return;
+  HnswResult update_neighbors_cb(Context *ctx, uint64_t id, NeighborIds nbrs) {
+    if (ctx->err != DB_SUCCESS) return HNSW_ERROR_CB;
     std::vector<byte> blob;
     vec_flatten_neighbors(nbrs, blob);
     ctx->err = vec_persist_update_neighbors(ctx, id, blob);
+    return ctx->err == DB_SUCCESS ? HNSW_SUCCESS : HNSW_ERROR_CB;
   }
 
-  void update_entry_point_cb(Context *ctx, uint64_t id) {
-    if (ctx->err != DB_SUCCESS) return;
+  HnswResult update_entry_point_cb(Context *ctx, uint64_t id) {
+    if (ctx->err != DB_SUCCESS) return HNSW_ERROR_CB;
     ctx->err = vec_persist_entry_point(ctx, id);
+    return ctx->err == DB_SUCCESS ? HNSW_SUCCESS : HNSW_ERROR_CB;
   }
 
-  /** Returns false on failure, which marks the node NODE_LOST rather than
-  leaving a half-filled COMPLETE one. The first error is kept in ctx->err
-  so the statement fails rather than answering from a partial graph. */
+  /** Fill a stub from its aux row.
+
+  The result says which kind of failure it was, and the class acts on the
+  difference: HNSW_NOT_FOUND marks the stub NODE_LOST, which is never
+  retried, so it is reserved for a row that is genuinely not there.
+  Anything else leaves the stub NODE_DUMMY and retryable. The first error
+  is kept in ctx->err so the statement fails with the InnoDB reason
+  rather than answering from a partial graph. */
   template <typename Hnsw>
-  bool load_node_cb(Context *ctx, Hnsw &hnsw,
-                    typename Hnsw::LoadNodeHandle handle) {
-    if (ctx->err != DB_SUCCESS) return false;
+  HnswResult load_node_cb(Context *ctx, Hnsw &hnsw,
+                          typename Hnsw::LoadNodeHandle handle) {
+    if (ctx->err != DB_SUCCESS) return HNSW_ERROR_CB;
 
-    /* NOT the place for the innodb_hnsw_max_memory check, however much
-    it looks like it: this is where a cold graph grows, but a false
-    return here is indistinguishable from "this node is gone". load_node
-    (hnsw.h) calls set_lost() on it, NODE_LOST is never retried, and
-    every later search skips that node - so refusing one fault for a
-    transient reason leaves the graph permanently short of nodes and
-    answering queries with fewer rows and no error at all. Measured:
-    with the check here, a search after a refused load returned one row
-    where three were correct.
-
-    So the budget is checked at the entry to a load or an insert instead
-    (vec_runtime_load, vec_add_node), which bounds when a graph may
-    start growing but lets one statement overshoot by whatever it
-    faults. Metering each fault needs a load_node_cb that can say
-    "failed, try again later" as opposed to "lost" - the same API gap
-    raised in review of this header, where the callback is to be reworked
-    to report errors properly. This check belongs there. */
+    /* The budget is still checked at the entry to a load or an insert
+    (vec_runtime_load, vec_add_node) rather than here, so one statement
+    may overshoot by whatever it faults. Metering each fault is now
+    expressible - a refusal would return HNSW_ERROR_CB and leave the stub
+    retryable rather than lost - but it is a change in where the bound
+    bites, not a correction, so it is left for its own change. */
 
     const dberr_t err = vec_persist_load_node(ctx, hnsw, handle);
-    if (err != DB_SUCCESS) {
-      ctx->err = err;
-      return false;
-    }
-    return true;
+    if (err == DB_SUCCESS) return HNSW_SUCCESS;
+
+    ctx->err = err;
+    /* DB_INDEX_CORRUPT here means the row the graph named is not in the
+    aux, which is the one condition that will not come back: mark it
+    lost. Everything else - an I/O error, a failed allocation - may
+    succeed on a retry, so the stub stays. */
+    return err == DB_INDEX_CORRUPT ? HNSW_NOT_FOUND : HNSW_ERROR_CB;
   }
 };
 
@@ -288,15 +293,19 @@ struct Vec_null_persistor {
   struct Context {};
 
   template <typename NeighborIds>
-  void insert_cb(Context *, uint64_t, uint64_t, const char *, uint8_t,
-                 NeighborIds) {}
+  HnswResult insert_cb(Context *, uint64_t, uint64_t, const char *, uint8_t,
+                       NeighborIds) {
+    return HNSW_SUCCESS;
+  }
   template <typename NeighborIds>
-  void update_neighbors_cb(Context *, uint64_t, NeighborIds) {}
-  void update_entry_point_cb(Context *, uint64_t) {}
+  HnswResult update_neighbors_cb(Context *, uint64_t, NeighborIds) {
+    return HNSW_SUCCESS;
+  }
+  HnswResult update_entry_point_cb(Context *, uint64_t) { return HNSW_SUCCESS; }
   template <typename Hnsw>
-  bool load_node_cb(Context *, Hnsw &, typename Hnsw::LoadNodeHandle) {
+  HnswResult load_node_cb(Context *, Hnsw &, typename Hnsw::LoadNodeHandle) {
     ut_error;
-    return false;
+    return HNSW_ERROR_CB;
   }
 };
 
@@ -379,7 +388,7 @@ struct vec_t : public Vec_runtime {
   without taking m_global_lock, which insert() does take. This mutex makes
   that unreachable rather than merely unlikely: `loaded` goes false to true
   exactly once, and only after the graph is fully built, so no thread can
-  reach insert() or k_nn_search() until init has finished. There is nobody
+  reach insert() or a search until init has finished. There is nobody
   to exclude, so the hot paths take nothing at all.
 
   Not std::call_once: vec_runtime_load reports failure by *returning*
