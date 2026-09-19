@@ -32,11 +32,15 @@ The HNSW runtime and the persistence callbacks behind it.
 
 #include <variant>
 #include "btr0pcur.h"
+#include "current_thd.h"
 #include "dict0dd.h"
 #include "dict0dict.h"
+#include "ha_prototypes.h"
 #include "lock0lock.h"
 #include "mach0data.h"
 #include "my_dbug.h"
+#include "my_sys.h"
+#include "mysqld_error.h"
 #include "sql/field.h"
 #include "sql/table.h"
 #include "trx0roll.h"
@@ -134,6 +138,24 @@ dberr_t vec_persist_update_neighbors(Vec_ctx *ctx, uint64_t id,
   if (err == DB_RECORD_NOT_FOUND) return DB_SUCCESS;
   if (err == DB_SUCCESS) vec_ctx_step_commit(ctx);
   return err;
+}
+
+void vec_report_memory_ceiling(THD *thd) {
+  if (thd == nullptr) return;
+  my_error(ER_CAPACITY_EXCEEDED, MYF(0),
+           static_cast<ulonglong>(srv_hnsw_max_memory),
+           "innodb_hnsw_max_memory",
+           "The vector index graph was left unchanged. Raise"
+           " innodb_hnsw_max_memory and retry.");
+}
+
+void vec_report_missing_node(THD *thd, uint64_t id) {
+  if (thd == nullptr) return;
+  ib_errf(thd, IB_LOG_LEVEL_ERROR, ER_INNODB_INDEX_CORRUPT,
+          "the vector index's graph names node " UINT64PF
+          ", which its auxiliary table does not have. DROP and re-create"
+          " the index to rebuild it from the base rows.",
+          id);
 }
 
 dberr_t vec_persist_entry_point(Vec_ctx *ctx, uint64_t id) {
@@ -340,6 +362,7 @@ static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
   that is already gone, that one so the load cannot run past it. */
   if (srv_hnsw_max_memory != 0 &&
       Vec_arena::global_bytes() >= srv_hnsw_max_memory) {
+    vec_report_memory_ceiling(thd);
     return DB_VEC_OUT_OF_MEMORY;
   }
 
@@ -380,6 +403,26 @@ static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
     ut::delete_(vec->hnsw);
     vec->hnsw = nullptr;
     return DB_INDEX_CORRUPT;
+  }
+
+  /* The entry-point row has to be there before the graph is handed the
+  id. init_from_entry_point() asserts that its one load succeeded and
+  has no path for it failing, so a record 0 naming a row that is gone
+  takes a debug build down on that assert - and in a release build
+  leaves a NODE_DUMMY standing in as the entry point, which is worse.
+  Checked here instead, one read per cold load of an index. */
+  {
+    mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
+    vec_aux_read_t probe;
+    const dberr_t perr = vec_aux_read_node(aux, entry_point, heap, &probe);
+    mem_heap_free(heap);
+    if (perr != DB_SUCCESS) {
+      ut::delete_(vec->hnsw);
+      vec->hnsw = nullptr;
+      if (perr != DB_RECORD_NOT_FOUND) return perr;
+      vec_report_missing_node(thd, entry_point);
+      return DB_INDEX_CORRUPT;
+    }
   }
 
   Vec_ctx ctx;
@@ -492,6 +535,7 @@ static dberr_t vec_add_node(vec_t *vec, dict_index_t *index,
   overshoot is one insert's allocation per thread already past it. */
   if (srv_hnsw_max_memory != 0 &&
       Vec_arena::global_bytes() >= srv_hnsw_max_memory) {
+    vec_report_memory_ceiling(thd);
     return DB_VEC_OUT_OF_MEMORY;
   }
 
@@ -741,6 +785,7 @@ Vec_build *vec_build_start(dict_index_t *index, const TABLE *altered_table,
   the one branch that is an actual resource shortage. */
   if (srv_hnsw_max_memory != 0 &&
       Vec_arena::global_bytes() >= srv_hnsw_max_memory) {
+    vec_report_memory_ceiling(current_thd);
     *err = DB_VEC_OUT_OF_MEMORY;
     return nullptr;
   }
@@ -836,6 +881,7 @@ dberr_t vec_build_add_row(Vec_build *b, dict_table_t *table,
   bounded by the thread count and cheaper than serialising them. */
   if (srv_hnsw_max_memory != 0 &&
       Vec_arena::global_bytes() >= srv_hnsw_max_memory) {
+    vec_report_memory_ceiling(current_thd);
     return DB_VEC_OUT_OF_MEMORY;
   }
   return DB_SUCCESS;

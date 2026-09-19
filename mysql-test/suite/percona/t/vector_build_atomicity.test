@@ -28,7 +28,7 @@ SHOW CREATE TABLE t1;
 --echo # then the per-row budget check refuses the rest.
 SET @sv = @@GLOBAL.innodb_hnsw_max_memory;
 SET GLOBAL innodb_hnsw_max_memory = 1;
---error ER_OUT_OF_RESOURCES
+--error ER_CAPACITY_EXCEEDED
 ALTER TABLE t1 ADD VECTOR KEY vk2 (v) TYPE hnsw (M = 4), ALGORITHM=INPLACE, LOCK=SHARED;
 SET GLOBAL innodb_hnsw_max_memory = @sv;
 

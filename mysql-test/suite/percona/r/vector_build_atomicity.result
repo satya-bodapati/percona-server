@@ -32,7 +32,7 @@ t1	CREATE TABLE `t1` (
 SET @sv = @@GLOBAL.innodb_hnsw_max_memory;
 SET GLOBAL innodb_hnsw_max_memory = 1;
 ALTER TABLE t1 ADD VECTOR KEY vk2 (v) TYPE hnsw (M = 4), ALGORITHM=INPLACE, LOCK=SHARED;
-ERROR HY000: Out of memory; check if mysqld or some other process uses all available memory; if not, you may have to use 'ulimit' to allow mysqld to use more memory or you can add more swap space
+ERROR HY000: Memory capacity of 1 bytes for 'innodb_hnsw_max_memory' exceeded. The vector index graph was left unchanged. Raise innodb_hnsw_max_memory and retry.
 SET GLOBAL innodb_hnsw_max_memory = @sv;
 # The failed ALTER must have left nothing behind: no index in the
 # table definition, no orphaned aux tablespace, and the rows still
