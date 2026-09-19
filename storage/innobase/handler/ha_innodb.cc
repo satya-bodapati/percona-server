@@ -2487,6 +2487,7 @@ int convert_error_code_to_mysql(dberr_t error, uint32_t flags, THD *thd) {
     case DB_UNDO_RECORD_TOO_BIG:
       return (HA_ERR_UNDO_REC_TOO_BIG);
     case DB_OUT_OF_MEMORY:
+    case DB_VEC_OUT_OF_MEMORY:
       return (HA_ERR_OUT_OF_MEM);
     case DB_TABLESPACE_EXISTS:
       return (HA_ERR_TABLESPACE_EXISTS);
@@ -12205,8 +12206,16 @@ int ha_innobase::vec_read_first(Item *item, uchar *buf, ha_rows limit) {
   DBUG_TRACE;
 
   dict_index_t *vindex = vec_index_of(m_prebuilt->table);
-  if (vindex == nullptr || vec_runtime_get(vindex) == nullptr) {
-    return HA_ERR_END_OF_FILE;
+  if (vindex == nullptr) return HA_ERR_END_OF_FILE;
+
+  /* No runtime means the open that should have built one failed, and
+  ha_innobase::open() carried on so the table stays readable. Answering
+  with no rows would make that look like a table with nothing near the
+  query vector; the reason the open recorded is what the client should
+  see. */
+  if (vec_runtime_get(vindex) == nullptr) {
+    return convert_error_code_to_mysql(vec_runtime_unavailable(vindex), 0,
+                                       ha_thd());
   }
 
   String buff_vec;
