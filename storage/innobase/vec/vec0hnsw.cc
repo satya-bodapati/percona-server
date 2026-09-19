@@ -628,6 +628,12 @@ dict_index_t *vec_index_of(dict_table_t *table) {
   return nullptr;
 }
 
+uint32_t vec_index_dims(const dict_index_t *index) {
+  if (index == nullptr) return 0;
+  const vec_t *vec = vec_runtime_get(index);
+  return vec == nullptr ? 0 : vec->dims;
+}
+
 /* An open streaming scan. Held by the handler for the life of one
 vector scan, which is why the aux table and its MDL live here rather than
 being re-taken per batch: nn_search_next faults nodes in through
@@ -640,6 +646,97 @@ struct vec_search_t {
   Vec_ctx ctx;
   Vec_hnsw::NNSearchContext nn;
 };
+
+dberr_t vec_knn_open(dict_index_t *index, const float *q, size_t batch_size,
+                     size_t ef_search, THD *thd, vec_search_t **out) {
+  ut_ad(index != nullptr && index->is_vector());
+  ut_ad(q != nullptr && out != nullptr);
+  ut_ad(batch_size > 0);
+  *out = nullptr;
+
+  auto *vec = vec_runtime_get(index);
+  if (vec == nullptr) return DB_TABLE_NOT_FOUND;
+
+  MDL_ticket *mdl = nullptr;
+  dict_table_t *aux =
+      vec_aux_open_for_dml(vec->table, vec->index_id, thd, &mdl);
+  if (aux == nullptr) return DB_TABLE_NOT_FOUND;
+
+  {
+    const dberr_t lerr = vec_runtime_load_once(vec, index, aux, thd);
+    if (lerr != DB_SUCCESS) {
+      vec_aux_close_for_dml(aux, thd, &mdl);
+      return lerr;
+    }
+  }
+
+  auto *s = ut::new_withkey<vec_search_t>(UT_NEW_THIS_FILE_PSI_KEY);
+  if (s == nullptr) {
+    vec_aux_close_for_dml(aux, thd, &mdl);
+    return DB_OUT_OF_MEMORY;
+  }
+  s->vec = vec;
+  s->aux = aux;
+  s->mdl = mdl;
+  s->thd = thd;
+  s->ctx.trx = nullptr;
+  s->ctx.aux = aux;
+  s->ctx.thd = thd;
+  s->ctx.m = vec->m;
+  s->ctx.vec_bytes = vec->dims * sizeof(float);
+  s->ctx.err = DB_SUCCESS;
+
+  /* Unlocked, like every other graph access: the class is thread-safe for
+  concurrent search, and a search mutates only by faulting stubs in, which
+  load_node() serialises under its own striped lock. */
+  const HnswResult src = vec->hnsw->nn_search_start(
+      &s->nn, reinterpret_cast<const char *>(q), batch_size,
+      std::max(ef_search, batch_size), &s->ctx);
+  if (src != HNSW_SUCCESS && s->ctx.err == DB_SUCCESS) {
+    s->ctx.err = DB_OUT_OF_MEMORY;
+  }
+  if (s->ctx.err != DB_SUCCESS) {
+    const dberr_t err = s->ctx.err;
+    vec_knn_close(s);
+    return err;
+  }
+
+  *out = s;
+  return DB_SUCCESS;
+}
+
+bool vec_knn_next(vec_search_t *s, vec_hit_t *hit) {
+  ut_ad(s != nullptr && hit != nullptr);
+  if (s->ctx.err != DB_SUCCESS) return false;
+
+  const auto next = s->vec->hnsw->nn_search_next(&s->nn);
+  if (s->ctx.err != DB_SUCCESS) return false;
+  /* HNSW_NOT_FOUND is the ordinary end of the scan, not a failure.
+  Anything else with no InnoDB reason behind it is the graph's own
+  allocation giving out. */
+  if (next.first == HNSW_NOT_FOUND) return false;
+  if (next.first != HNSW_SUCCESS) {
+    s->ctx.err = DB_OUT_OF_MEMORY;
+    return false;
+  }
+
+  hit->id = next.second.id;
+  hit->base_pk = next.second.base_pk;
+  return true;
+}
+
+dberr_t vec_knn_error(const vec_search_t *s) {
+  return s == nullptr ? DB_SUCCESS : s->ctx.err;
+}
+
+void vec_knn_close(vec_search_t *s) {
+  if (s == nullptr) return;
+  s->nn.reset();
+  if (s->aux != nullptr) {
+    vec_aux_close_for_dml(s->aux, s->thd, &s->mdl);
+  }
+  ut::delete_(s);
+}
 
 struct Vec_build {
   Vec_build(uint32_t dims_, uint32_t m_, uint32_t ef_construction_,
