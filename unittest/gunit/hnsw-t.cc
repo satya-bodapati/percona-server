@@ -1470,4 +1470,80 @@ TEST(HnswDeathTest, MTooSmallAsserts) {
 }
 #endif  // NDEBUG
 
+// Not gated by NDEBUG: neighbors_begin()/neighbors_end() must not underflow
+// in release builds either.
+TEST(HnswCorruptionTest, MalformedUpperLayerEdgeDoesNotCrash) {
+  /* A node's neighbour slice for a layer is found by arithmetic on
+  (m_layer - layer), both uint8_t. An edge naming a node at a layer that
+  node's own record does not reach wraps that subtraction, and the multiply
+  turns the wrap into a wild pointer that search_layer_ef_1() then reads
+  Node* values through. A corrupt aux row crashed the process.
+
+  The store is built by hand rather than by inserting and hoping: the shape
+  this needs - an edge at layer 1 into a node whose own record says layer 0 -
+  depends on how the layer draw falls, so any seed that produces it today is
+  a hostage to the next change in that draw. Built explicitly, the test
+  states the corruption instead of hunting for it.
+
+  Slot layout for a node whose top layer is L: (L + 2) * M slots, with layer
+  l >= 1 at offset (L - l) * M width M, and layer 0 at offset L * M width
+  2 * M. */
+  constexpr size_t kDimsLocal = 2;
+  constexpr size_t kMLocal = 4;
+  constexpr size_t kEfConstructionLocal = 16;
+
+  RoundTripFixture fixture;
+  fixture.store.dims = kDimsLocal;
+
+  auto slots = [](uint8_t layer) {
+    return std::vector<uint64_t>((static_cast<size_t>(layer) + 2) * kMLocal, 0);
+  };
+
+  /* Node 1: the entry point, one layer up. Its layer-1 slice names node 2. */
+  StoredNode ep;
+  ep.base_pk = 1001;
+  ep.layer = 1;
+  ep.vec = make_vec({0.0f, 0.0f});
+  ep.neighbor_ids = slots(1);
+  ep.neighbor_ids[0] = 2;                // layer 1, slot 0 - the malformed edge
+  ep.neighbor_ids[1 * kMLocal + 0] = 2;  // layer 0
+  ep.neighbor_ids[1 * kMLocal + 1] = 3;
+  fixture.store.nodes[1] = ep;
+
+  /* Node 2: the target. Its own record reaches layer 0 only, so the edge
+  above points at a layer it does not have. Self-consistent on its own - a
+  blob-length check against its own layer accepts it - which is the point:
+  only the edge is wrong, and nothing validates edges against their target. */
+  StoredNode victim;
+  victim.base_pk = 1002;
+  victim.layer = 0;
+  victim.vec = make_vec({1.0f, 0.0f});
+  victim.neighbor_ids = slots(0);
+  victim.neighbor_ids[0] = 1;
+  victim.neighbor_ids[1] = 3;
+  fixture.store.nodes[2] = victim;
+
+  StoredNode third;
+  third.base_pk = 1003;
+  third.layer = 0;
+  third.vec = make_vec({0.0f, 1.0f});
+  third.neighbor_ids = slots(0);
+  third.neighbor_ids[0] = 1;
+  third.neighbor_ids[1] = 2;
+  fixture.store.nodes[3] = third;
+
+  fixture.store.entry_point = 1;
+
+  LoadTestHnsw cold(kDimsLocal, euclidean, kMLocal, kEfConstructionLocal);
+  ASSERT_EQ(HNSW_SUCCESS, cold.init_from_entry_point(1, &fixture.store));
+
+  /* Query == node 2's vector, so the descent from the entry point at layer 1
+  follows the malformed edge on the first search_layer_ef_1() call - exactly
+  where this used to crash. Reaching the assertion at all is the test. */
+  const auto [rc, hits] = cold.k_nn_search(as_bytes(victim.vec), /*k=*/1,
+                                           /*ef_search=*/16, &fixture.store);
+  EXPECT_EQ(HNSW_SUCCESS, rc);
+  EXPECT_EQ(1U, hits.size());
+}
+
 }  // namespace hnsw_unittest
