@@ -353,7 +353,9 @@ has ever been inserted. */
 static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
   ut_ad(vec->hnsw == nullptr);
 
-  /* innodb_hnsw_max_memory, at the entry to the load. Same charge check
+  /* innodb_hnsw_max_memory, at the entry to the load: refuse to START
+  building a graph on a budget that is already gone. How far this load
+  then gets is bounded per faulted node in load_node_cb. Same charge check
   as vec_add_node: is the budget already spent, not would this fit. What
   this call allocates directly is the graph object and the entry-point
   node; the rest of the graph arrives node by node through

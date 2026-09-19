@@ -257,12 +257,27 @@ struct Vec_persistor {
                           typename Hnsw::LoadNodeHandle handle) {
     if (ctx->err != DB_SUCCESS) return HNSW_ERROR_CB;
 
-    /* The budget is still checked at the entry to a load or an insert
-    (vec_runtime_load, vec_add_node) rather than here, so one statement
-    may overshoot by whatever it faults. Metering each fault is now
-    expressible - a refusal would return HNSW_ERROR_CB and leave the stub
-    retryable rather than lost - but it is a change in where the bound
-    bites, not a correction, so it is left for its own change. */
+    /* Every byte a cold graph grows passes through here, so this is
+    where the bound has to be enforced if it is to hold at all. The
+    checks at the entry to a load or an insert decide whether a graph
+    may START growing; they cannot bound what one statement faults in
+    once it has, and a wide search on a cold index faults a node per
+    step.
+
+    Refusing here is only correct because the result can say which kind
+    of failure this is. HNSW_ERROR_CB leaves the stub NODE_DUMMY, so the
+    node is faulted again on the next attempt once the budget allows.
+    Returning the "gone" answer instead would mark it NODE_LOST, which
+    is never retried - the graph would be permanently short of a node it
+    could have read, and would answer later queries with fewer rows and
+    no error at all. That is what kept this check out of here until the
+    callback could tell the two apart. */
+    if (srv_hnsw_max_memory != 0 &&
+        Vec_arena::global_bytes() >= srv_hnsw_max_memory) {
+      vec_report_memory_ceiling(ctx->thd);
+      ctx->err = DB_VEC_OUT_OF_MEMORY;
+      return HNSW_ERROR_CB;
+    }
 
     const dberr_t err = vec_persist_load_node(ctx, hnsw, handle);
     if (err == DB_SUCCESS) return HNSW_SUCCESS;
