@@ -477,29 +477,9 @@ class HNSW {
             select_neighbors(q, nearest, Mmax, new_node_neighbors);
         assert(n == std::min(Mmax, nearest.size()));
 
-        // write_it packs the list down over any candidate rejected below,
-        // giving the same "selected prefix, nullptr tail" shape
-        // select_neighbors() itself produces - so a rejected candidate is
-        // dropped from the new node's own list too, not merely left
-        // unreciprocated, which would leave an edge to a node that cannot be
-        // traversed onward at this layer.
-        Node **write_it = new_node_neighbors;
-        for (Node **it = new_node_neighbors;
+        for (Node *const *it = new_node_neighbors;
              it != new_node->neighbors_end(*this, l) && *it != nullptr; ++it) {
           Node *neighbor = *it;
-          // A corrupted edge elsewhere in the graph can still let
-          // select_neighbors() choose a node that does not itself reach layer
-          // l - some other node's persisted list names it there while its own
-          // record disagrees. neighbors_begin() now reports an empty range for
-          // that, which is safe to read but is not a valid write destination
-          // for the back-link below.
-          if (neighbor->layer() < l) {
-            continue;
-          }
-          if (write_it != it) {
-            *write_it = neighbor;
-          }
-          ++write_it;
           // search_layer() + select_neighbors() post condition:
           // all neighbors of the newly inserted node are complete.
           assert(neighbor->state() == NODE_COMPLETE);
@@ -534,10 +514,7 @@ class HNSW {
               candidate_neighbors.reserve(Mmax + 1);
               for (size_t i = 0; i < Mmax; ++i) {
                 Node *nb = scratch_buffer[i];
-                // A malformed layer on `neighbor` makes the copy above copy
-                // nothing, leaving scratch_buffer holding whatever the last
-                // iteration wrote - null included.
-                if (nb == nullptr) continue;
+                assert(nb != nullptr);
                 NodeState nb_state = nb->state();
 
                 // Nodes in the NODE_NEW state are not yet part of the graph.
@@ -604,12 +581,6 @@ class HNSW {
           updated_neighbors.insert(neighbor);
           updated_neighbors_max_size = std::max(
               updated_neighbors_max_size, neighbor->all_neighbors_size(*this));
-        }
-
-        // Null-fill past the packed prefix, so a dropped candidate does not
-        // linger in the tail (write_it == the old end when none were dropped).
-        for (Node **t = write_it; t != new_node->neighbors_end(*this, l); ++t) {
-          *t = nullptr;
         }
       }
 
@@ -1289,15 +1260,9 @@ class HNSW {
     if (!node->alloc_neighbors(m_allocator, *this)) return HNSW_OOM_GRAPH;
 
     Node **neighbor_out = node->all_neighbors_begin(*this);
-    Node **const neighbor_end = node->all_neighbors_end(*this);
+    Node **const neighbor_end [[maybe_unused]] = node->all_neighbors_end(*this);
     for (uint64_t id : ids) {
-      // The layer and the neighbor-id blob are independent pieces of
-      // persisted state, so a corrupted layer can disagree with the blob. The
-      // buffer is sized from the layer: ids past it are dropped rather than
-      // written beyond it, and a short range leaves the tail as
-      // alloc_neighbors() zeroed it. This was an assert only, which a release
-      // build drops - turning a corrupt row into a heap overflow.
-      if (neighbor_out == neighbor_end) break;
+      assert(neighbor_out < neighbor_end);
       if (id == 0) {
         *neighbor_out++ = nullptr;
         continue;
@@ -1612,22 +1577,10 @@ class HNSW {
 
     // Neighbor slot range for a layer: [neighbors_begin, neighbors_end).
     // Layout and per-layer width: see Node class comment / get_Mmax().
-    // A well-formed graph always has m_layer >= layer here: a node is not
-    // listed as someone's neighbor at a layer it does not itself reach. A
-    // corrupted persisted layer can still produce layer > m_layer, and the
-    // subtraction is unsigned - it wraps, and the multiply turns that into a
-    // wild pointer the caller then dereferences. Report "no neighbors on this
-    // layer" instead.
     Node **neighbors_begin(const HNSW &hnsw, uint8_t layer) const {
-      if (layer > m_layer) {
-        return all_neighbors_end(hnsw);
-      }
       return all_neighbors_begin(hnsw) + (m_layer - layer) * hnsw.m_M;
     }
     Node **neighbors_end(const HNSW &hnsw, uint8_t layer) const {
-      if (layer > m_layer) {
-        return all_neighbors_end(hnsw);
-      }
       return neighbors_begin(hnsw, layer) + hnsw.get_Mmax(layer);
     }
 
