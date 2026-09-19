@@ -1470,4 +1470,123 @@ TEST(HnswDeathTest, MTooSmallAsserts) {
 }
 #endif  // NDEBUG
 
+// Not gated by NDEBUG: neighbors_begin()/neighbors_end() must not underflow
+// in release builds either.
+TEST(HnswCorruptionTest, MalformedUpperLayerEdgeDoesNotCrash) {
+  // neighbors_begin()/neighbors_end() (vector-common/hnsw.h) used to compute
+  // (m_layer - layer) * M with no check that layer <= m_layer. If a node was
+  // referenced as a neighbor at some layer L but its own persisted layer was
+  // < L (a malformed/corrupted edge), the subtraction went negative and
+  // converted to a huge size_t on the multiply: neighbors_begin() returned a
+  // wild Node** pointer, and the garbage "Node*" values std::copy() read
+  // through it got dereferenced (state(), dist()) a few lines later,
+  // crashing the process. Both accessors now treat layer > m_layer as "no
+  // neighbors on this layer" instead. This is a regression test: search must
+  // complete normally (no crash) even when the persisted graph has this kind
+  // of malformed edge.
+  constexpr size_t kDimsLocal = 2;
+  constexpr size_t kMLocal = 4;
+  constexpr size_t kEfConstructionLocal = 16;
+  constexpr size_t kNumPoints = 300;
+
+  /* The shape this needs - an entry point above layer 0 that actually has a
+  top-layer neighbour - depends on how the layer draw falls, so a fixed seed
+  is a hostage to any change in that. Search for one instead: the first seed
+  that produces it is deterministic, and the test keeps working when the
+  layer logic moves. */
+  RoundTripFixture fixture;
+  uint64_t ep_id = 0;
+  uint64_t seed = 0;
+  uint8_t edge_layer = 0;
+  for (seed = 1; seed <= 200 && ep_id == 0; ++seed) {
+    fixture = make_random_round_trip_fixture(kDimsLocal, kNumPoints, seed);
+    LoadTestHnsw probe(kDimsLocal, euclidean, kMLocal, kEfConstructionLocal);
+    populate_round_trip_index(probe, &fixture);
+    const uint64_t id = fixture.store.entry_point;
+    if (id == 0) continue;
+    const StoredNode &row = fixture.store.nodes.at(id);
+    /* Any layer above 0 will do. Not the entry point's own top layer: that
+    layer usually holds one node - the entry point - so it has no neighbours
+    there at all. The slice for layer l starts at (row.layer - l) * M. */
+    for (int l = row.layer; l >= 1 && ep_id == 0; --l) {
+      const size_t off = static_cast<size_t>(row.layer - l) * kMLocal;
+      for (size_t i = off; i < off + kMLocal && i < row.neighbor_ids.size();
+           ++i) {
+        if (row.neighbor_ids[i] != 0) {
+          ep_id = id;
+          edge_layer = static_cast<uint8_t>(l);
+          break;
+        }
+      }
+    }
+  }
+  ASSERT_NE(0U, ep_id) << "no seed in 1..200 produced an entry point with a "
+                          "neighbour above layer 0";
+
+  LoadTestHnsw built(kDimsLocal, euclidean, kMLocal, kEfConstructionLocal);
+  populate_round_trip_index(built, &fixture);
+  const StoredNode &ep_row = fixture.store.nodes.at(ep_id);
+  // Need an entry point with at least one layer above 0, i.e. a call to
+  // search_layer_ef_1() happens at all (k_nn_search only descends layers
+  // max_layer .. 1 that way).
+  ASSERT_GE(ep_row.layer, 1) << "entry point should be above layer 0";
+
+  // The slice for edge_layer - the layer the search above found a neighbour
+  // at - starts at (m_layer - layer) * M.
+  const size_t edge_off =
+      (static_cast<size_t>(ep_row.layer) - edge_layer) * kMLocal;
+  uint64_t victim_id = 0;
+  for (size_t i = edge_off;
+       i < edge_off + kMLocal && i < ep_row.neighbor_ids.size(); ++i) {
+    if (ep_row.neighbor_ids[i] != 0) {
+      victim_id = ep_row.neighbor_ids[i];
+      break;
+    }
+  }
+  ASSERT_NE(0U, victim_id) << "entry point should have a neighbour at layer "
+                           << static_cast<int>(edge_layer);
+
+  StoredNode &victim_row = fixture.store.nodes.at(victim_id);
+  // A correctly-built graph always has victim_row.layer >= edge_layer here
+  // (the entry point cannot list a neighbor at a layer above the neighbor's
+  // own top layer).
+  ASSERT_GE(victim_row.layer, edge_layer);
+
+  // Simulate a malformed *edge* only: the entry point's own record is
+  // untouched (it still lists victim at its top layer), but victim's own
+  // record is rewritten to a self-consistent, genuinely-lower-layer node -
+  // its neighbor_ids is truncated to just victim's real layer-0 slice, the
+  // same shape a production loader's blob-length-vs-layer check (which
+  // rejects a layer/blob mismatch as corruption before this library ever
+  // sees the node) would accept. So this - some other node's edge naming a
+  // target that does not reach that layer - is exactly the corruption a
+  // blob-length check cannot catch: it only validates a node against its
+  // own record, never the edges pointing at it.
+  const size_t victim_l0_begin = stored_layer0_begin(victim_row.layer, kMLocal);
+  const size_t victim_l0_end = stored_layer0_end(victim_row.layer, kMLocal);
+  ASSERT_LE(victim_l0_end, victim_row.neighbor_ids.size());
+  victim_row.neighbor_ids.assign(
+      victim_row.neighbor_ids.begin() + victim_l0_begin,
+      victim_row.neighbor_ids.begin() + victim_l0_end);
+  victim_row.layer = 0;
+  const std::vector<float> victim_vec = victim_row.vec;
+
+  fixture.store.load_counts.clear();
+  LoadTestHnsw cold(kDimsLocal, euclidean, kMLocal, kEfConstructionLocal);
+  cold.init_from_entry_point(ep_id, &fixture.store);
+
+  // Query == victim's own vector: distance 0 guarantees the entry point's
+  // greedy descent moves into the corrupted victim node at the entry
+  // point's (too-high) layer on the very first search_layer_ef_1() call -
+  // exactly where this used to crash.
+  const auto [rc, hits] = cold.k_nn_search(as_bytes(victim_vec), /*k=*/1,
+                                           /*ef_search=*/16, &fixture.store);
+  EXPECT_EQ(HNSW_SUCCESS, rc);
+  // The corrupted node's own neighbor list (layer 0, untouched above) is
+  // intact, so it - or something equally close - is still found via the
+  // ordinary layer-0 search; the point of this test is that we got here at
+  // all without crashing.
+  EXPECT_EQ(1U, hits.size());
+}
+
 }  // namespace hnsw_unittest
