@@ -1470,4 +1470,255 @@ TEST(HnswDeathTest, MTooSmallAsserts) {
 }
 #endif  // NDEBUG
 
+// Not gated by NDEBUG: neighbors_begin()/neighbors_end() must not underflow
+// in release builds either.
+TEST(HnswCorruptionTest, MalformedUpperLayerEdgeDoesNotCrash) {
+  // neighbors_begin()/neighbors_end() (vector-common/hnsw.h) used to compute
+  // (m_layer - layer) * M with no check that layer <= m_layer. If a node was
+  // referenced as a neighbor at some layer L but its own persisted layer was
+  // < L (a malformed/corrupted edge), the subtraction went negative and
+  // converted to a huge size_t on the multiply: neighbors_begin() returned a
+  // wild Node** pointer, and the garbage "Node*" values std::copy() read
+  // through it got dereferenced (state(), dist()) a few lines later,
+  // crashing the process. Both accessors now treat layer > m_layer as "no
+  // neighbors on this layer" instead. This is a regression test: search must
+  // complete normally (no crash) even when the persisted graph has this kind
+  // of malformed edge.
+  constexpr size_t kDimsLocal = 2;
+  constexpr size_t kMLocal = 4;
+  constexpr size_t kEfConstructionLocal = 16;
+  constexpr size_t kNumPoints = 300;
+
+  /* The shape this needs - an entry point above layer 0 that actually has a
+  top-layer neighbour - depends on how the layer draw falls, so a fixed seed
+  is a hostage to any change in that. Search for one instead: the first seed
+  that produces it is deterministic, and the test keeps working when the
+  layer logic moves. */
+  RoundTripFixture fixture;
+  uint64_t ep_id = 0;
+  uint64_t seed = 0;
+  uint8_t edge_layer = 0;
+  for (seed = 1; seed <= 200 && ep_id == 0; ++seed) {
+    fixture = make_random_round_trip_fixture(kDimsLocal, kNumPoints, seed);
+    LoadTestHnsw probe(kDimsLocal, euclidean, kMLocal, kEfConstructionLocal);
+    populate_round_trip_index(probe, &fixture);
+    const uint64_t id = fixture.store.entry_point;
+    if (id == 0) continue;
+    const StoredNode &row = fixture.store.nodes.at(id);
+    /* Any layer above 0 will do. Not the entry point's own top layer: that
+    layer usually holds one node - the entry point - so it has no neighbours
+    there at all. The slice for layer l starts at (row.layer - l) * M. */
+    for (int l = row.layer; l >= 1 && ep_id == 0; --l) {
+      const size_t off = static_cast<size_t>(row.layer - l) * kMLocal;
+      for (size_t i = off; i < off + kMLocal && i < row.neighbor_ids.size();
+           ++i) {
+        if (row.neighbor_ids[i] != 0) {
+          ep_id = id;
+          edge_layer = static_cast<uint8_t>(l);
+          break;
+        }
+      }
+    }
+  }
+  ASSERT_NE(0U, ep_id) << "no seed in 1..200 produced an entry point with a "
+                          "neighbour above layer 0";
+
+  LoadTestHnsw built(kDimsLocal, euclidean, kMLocal, kEfConstructionLocal);
+  populate_round_trip_index(built, &fixture);
+  const StoredNode &ep_row = fixture.store.nodes.at(ep_id);
+  // Need an entry point with at least one layer above 0, i.e. a call to
+  // search_layer_ef_1() happens at all (k_nn_search only descends layers
+  // max_layer .. 1 that way).
+  ASSERT_GE(ep_row.layer, 1) << "entry point should be above layer 0";
+
+  // The slice for edge_layer - the layer the search above found a neighbour
+  // at - starts at (m_layer - layer) * M.
+  const size_t edge_off =
+      (static_cast<size_t>(ep_row.layer) - edge_layer) * kMLocal;
+  uint64_t victim_id = 0;
+  for (size_t i = edge_off;
+       i < edge_off + kMLocal && i < ep_row.neighbor_ids.size(); ++i) {
+    if (ep_row.neighbor_ids[i] != 0) {
+      victim_id = ep_row.neighbor_ids[i];
+      break;
+    }
+  }
+  ASSERT_NE(0U, victim_id) << "entry point should have a neighbour at layer "
+                           << static_cast<int>(edge_layer);
+
+  StoredNode &victim_row = fixture.store.nodes.at(victim_id);
+  // A correctly-built graph always has victim_row.layer >= edge_layer here
+  // (the entry point cannot list a neighbor at a layer above the neighbor's
+  // own top layer).
+  ASSERT_GE(victim_row.layer, edge_layer);
+
+  // Simulate a malformed *edge* only: the entry point's own record is
+  // untouched (it still lists victim at its top layer), but victim's own
+  // record is rewritten to a self-consistent, genuinely-lower-layer node -
+  // its neighbor_ids is truncated to just victim's real layer-0 slice, the
+  // same shape a production loader's blob-length-vs-layer check (which
+  // rejects a layer/blob mismatch as corruption before this library ever
+  // sees the node) would accept. So this - some other node's edge naming a
+  // target that does not reach that layer - is exactly the corruption a
+  // blob-length check cannot catch: it only validates a node against its
+  // own record, never the edges pointing at it.
+  const size_t victim_l0_begin = stored_layer0_begin(victim_row.layer, kMLocal);
+  const size_t victim_l0_end = stored_layer0_end(victim_row.layer, kMLocal);
+  ASSERT_LE(victim_l0_end, victim_row.neighbor_ids.size());
+  victim_row.neighbor_ids.assign(
+      victim_row.neighbor_ids.begin() + victim_l0_begin,
+      victim_row.neighbor_ids.begin() + victim_l0_end);
+  victim_row.layer = 0;
+  const std::vector<float> victim_vec = victim_row.vec;
+
+  fixture.store.load_counts.clear();
+  LoadTestHnsw cold(kDimsLocal, euclidean, kMLocal, kEfConstructionLocal);
+  cold.init_from_entry_point(ep_id, &fixture.store);
+
+  // Query == victim's own vector: distance 0 guarantees the entry point's
+  // greedy descent moves into the corrupted victim node at the entry
+  // point's (too-high) layer on the very first search_layer_ef_1() call -
+  // exactly where this used to crash.
+  const auto [rc, hits] = cold.k_nn_search(as_bytes(victim_vec), /*k=*/1,
+                                           /*ef_search=*/16, &fixture.store);
+  EXPECT_EQ(HNSW_SUCCESS, rc);
+  // The corrupted node's own neighbor list (layer 0, untouched above) is
+  // intact, so it - or something equally close - is still found via the
+  // ordinary layer-0 search; the point of this test is that we got here at
+  // all without crashing.
+  EXPECT_EQ(1U, hits.size());
+}
+
+// insert() can discover a node reachable only through such a malformed edge
+// too (via the entry point's still-intact, too-high edge to it, which any
+// search at that layer necessarily enumerates), and select_neighbors() may
+// then choose it as one of the new node's reciprocal neighbors at that same
+// layer. Node::neighbors_begin() reports layer > its own layer as an empty
+// range - safe to *read* - but back-linking needs a valid Mmax-sized
+// *write* destination, which an empty range is not. insert() must reject
+// such a candidate before attempting that write-back, and drop it from the
+// new node's own list too (otherwise the new node ends up with the same
+// kind of malformed edge that was just rejected).
+//
+// insert()'s target layer for the new node is drawn from the RNG seeded in
+// the HNSW constructor; kInsertSeed is the first tried that draws a target
+// layer >= the entry point's layer, so the new node's search actually
+// reaches the layer holding the malformed edge - verified by the assert
+// below, not assumed. Once reached, victim is selected as a candidate for
+// certain (query == victim's own vector, i.e. distance 0 - unbeatable by
+// any other candidate), so the only thing left to check is that it did
+// not survive into the persisted result.
+TEST(HnswCorruptionTest, InsertDropsLayerIneligibleNeighborBeforeBacklink) {
+  constexpr size_t kDimsLocal = 2;
+  constexpr size_t kMLocal = 4;
+  constexpr size_t kEfConstructionLocal = 16;
+  constexpr size_t kNumPoints = 300;
+  constexpr uint32_t kInsertSeed = 289;
+
+  /* Same shape requirement, same reason for searching rather than pinning a
+  seed - see MalformedUpperLayerEdgeDoesNotCrash above. */
+  RoundTripFixture fixture;
+  uint64_t ep_id = 0;
+  for (uint64_t seed = 1; seed <= 200; ++seed) {
+    fixture = make_random_round_trip_fixture(kDimsLocal, kNumPoints, seed);
+    LoadTestHnsw probe(kDimsLocal, euclidean, kMLocal, kEfConstructionLocal);
+    populate_round_trip_index(probe, &fixture);
+    const uint64_t id = fixture.store.entry_point;
+    if (id == 0) continue;
+    const StoredNode &row = fixture.store.nodes.at(id);
+    if (row.layer < 1) continue;
+    for (size_t i = 0; i < kMLocal && i < row.neighbor_ids.size(); ++i) {
+      if (row.neighbor_ids[i] != 0) {
+        ep_id = id;
+        break;
+      }
+    }
+    if (ep_id != 0) break;
+  }
+  ASSERT_NE(0U, ep_id) << "no seed in 1..200 produced an entry point with a "
+                          "neighbour above layer 0";
+
+  LoadTestHnsw built(kDimsLocal, euclidean, kMLocal, kEfConstructionLocal);
+  populate_round_trip_index(built, &fixture);
+  const StoredNode &ep_row = fixture.store.nodes.at(ep_id);
+  ASSERT_GE(ep_row.layer, 1) << "entry point should be above layer 0";
+
+  uint64_t victim_id = 0;
+  for (size_t i = 0; i < kMLocal && i < ep_row.neighbor_ids.size(); ++i) {
+    if (ep_row.neighbor_ids[i] != 0) {
+      victim_id = ep_row.neighbor_ids[i];
+      break;
+    }
+  }
+  ASSERT_NE(0U, victim_id) << "entry point should have a top-layer neighbour";
+
+  StoredNode &victim_row = fixture.store.nodes.at(victim_id);
+  ASSERT_GE(victim_row.layer, ep_row.layer);
+  const size_t victim_l0_begin = stored_layer0_begin(victim_row.layer, kMLocal);
+  const size_t victim_l0_end = stored_layer0_end(victim_row.layer, kMLocal);
+  ASSERT_LE(victim_l0_end, victim_row.neighbor_ids.size());
+  victim_row.neighbor_ids.assign(
+      victim_row.neighbor_ids.begin() + victim_l0_begin,
+      victim_row.neighbor_ids.begin() + victim_l0_end);
+  victim_row.layer = 0;
+  const std::vector<float> victim_vec = victim_row.vec;
+
+  LoadTestHnsw cold(kDimsLocal, euclidean, kMLocal, kEfConstructionLocal,
+                    kInsertSeed);
+  cold.init_from_entry_point(ep_id, &fixture.store);
+
+  const uint64_t new_id = kNumPoints + 10;
+  const uint64_t new_pk = 900000;
+  // New node's vector == victim's: distance 0 guarantees victim - found via
+  // the entry point's still-intact edge - outranks every other candidate at
+  // every layer the search reaches, so select_neighbors() picks it whenever
+  // that layer is >= victim's real layer (trivially true: victim's real
+  // layer is 0).
+  EXPECT_EQ(HNSW_SUCCESS,
+            cold.insert(new_id, new_pk, as_bytes(victim_vec), &fixture.store));
+
+  // Confirm this run actually exercised the scenario described above,
+  // rather than passing vacuously because the new node's random target
+  // layer stayed below the entry point's.
+  const StoredNode &new_row = fixture.store.nodes.at(new_id);
+  ASSERT_GE(new_row.layer, ep_row.layer)
+      << "kInsertSeed=" << kInsertSeed
+      << " did not draw a target layer reaching the malformed edge";
+
+  // victim_id must be absent from new_row's slots at layer ep_row.layer
+  // specifically - not anywhere in new_row.neighbor_ids: victim's real
+  // layer is 0 (this test's corruption only misrepresents the *edge* into
+  // it, not victim itself - see above), so it is a perfectly legitimate
+  // candidate at layer 0, and insert()'s descent to layer 0 may well pick
+  // it there too. Only the layer-ep_row.layer appearance - found solely
+  // through the malformed edge - must have been rejected and dropped
+  // rather than end up as one of new_node's own edges.
+  //
+  // insert()'s backlink loop runs layers min(max_layer, target_layer) down
+  // to 0, and max_layer == ep_row.layer (the entry point is always the
+  // graph's highest node) - so given the ASSERT_GE above, l = ep_row.layer
+  // is the first (highest) layer it processes, exactly where the malformed
+  // edge lives. Within new_row's own array (top layer == new_row.layer,
+  // which may be higher than l), layer l's slots start at offset
+  // (new_row.layer - l) * M - NOT offset 0 unless new_row.layer == l
+  // exactly, and NOT stored_layer0_begin(new_row.layer, M) either (that
+  // computes new_row's *layer-0* offset, a different slice).
+  const size_t edge_layer = ep_row.layer;
+  const size_t edge_layer_begin =
+      (static_cast<size_t>(new_row.layer) - edge_layer) * kMLocal;
+  const bool victim_survived_at_edge_layer =
+      std::find(new_row.neighbor_ids.begin() + edge_layer_begin,
+                new_row.neighbor_ids.begin() + edge_layer_begin + kMLocal,
+                victim_id) !=
+      new_row.neighbor_ids.begin() + edge_layer_begin + kMLocal;
+  EXPECT_FALSE(victim_survived_at_edge_layer)
+      << "victim_id=" << victim_id << " is layer-ineligible at layer "
+      << edge_layer << " (its real layer is 0) and should have been "
+      << "dropped from the new node's own neighbor list there, not just "
+      << "left unreciprocated";
+  // The point of this test: insert() got here - selecting a
+  // layer-ineligible node and running the back-link write-back path -
+  // without crashing.
+}
+
 }  // namespace hnsw_unittest
