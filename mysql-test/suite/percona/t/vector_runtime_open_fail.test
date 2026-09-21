@@ -62,6 +62,12 @@ SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
 SELECT @@session.innodb_interpreter_output;
 
 --echo #
+--echo # Does CHECK TABLE see it? It scans base -> aux: every base row's
+--echo # label must name a node the aux has.
+--echo #
+CHECK TABLE t1;
+
+--echo #
 --echo # And it is permanent. With a working runtime again, the row that
 --echo # INSERT skipped and the row that UPDATE relabelled are both
 --echo # invisible to the index - no error, just missing rows.
