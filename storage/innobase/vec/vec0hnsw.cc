@@ -140,6 +140,57 @@ dberr_t vec_persist_update_neighbors(Vec_ctx *ctx, uint64_t id,
   return err;
 }
 
+/** The InnoDB error for a graph result that is not HNSW_SUCCESS.
+
+One mapping in one place, rather than every call site deciding. Only the
+two OOM results are the graph's own failure; the other two mean something
+about the caller:
+
+  HNSW_OOM_GRAPH    the arena or the node map could not grow. The graph
+                    may now be missing a node it needed, so the runtime is
+                    no longer trustworthy and the caller rebuilds it from
+                    the aux, which is still the truth.
+  HNSW_OOM_CONTEXT  a per-operation scratch allocation failed. Nothing
+                    durable changed; the statement fails and the next one
+                    may well succeed.
+  HNSW_ERROR_CB     one of our own callbacks failed and put the reason in
+                    ctx->err, so that reason is what the client should
+                    see - this result carries no information we do not
+                    already have.
+  HNSW_NOT_FOUND    means different things to different callers (end of a
+                    scan, a row the graph named and the aux lacks), so it
+                    is theirs to interpret and never reaches here.
+
+DB_VEC_OUT_OF_MEMORY rather than DB_OUT_OF_MEMORY for the OOM pair:
+row_mysql_handle_errors does not list DB_OUT_OF_MEMORY and so reaches its
+ib::fatal arm, which would turn a failed allocation on the INSERT path
+into a dead server.
+@param[in]  rc   the graph's result
+@param[in]  ctx  the context the callbacks reported through
+@return the error to fail the statement with */
+static dberr_t vec_hnsw_dberr(HnswResult rc, const Vec_ctx *ctx) {
+  switch (rc) {
+    case HNSW_SUCCESS:
+      return DB_SUCCESS;
+    case HNSW_OOM_GRAPH:
+    case HNSW_OOM_CONTEXT:
+      return DB_VEC_OUT_OF_MEMORY;
+    case HNSW_ERROR_CB:
+      /* Every callback sets ctx->err before returning this, and the early
+      exit each one takes is itself conditional on ctx->err already being
+      set - so an unset error here means a callback grew a path that
+      forgot to. */
+      ut_ad(ctx->err != DB_SUCCESS);
+      return ctx->err != DB_SUCCESS ? ctx->err : DB_ERROR;
+    case HNSW_NOT_FOUND:
+      /* The caller decides what a missing node means where it is. */
+      ut_d(ut_error);
+      ut_o(return DB_INDEX_CORRUPT);
+  }
+  ut_d(ut_error);
+  ut_o(return DB_ERROR);
+}
+
 void vec_report_memory_ceiling(THD *thd) {
   if (thd == nullptr) return;
   my_error(ER_CAPACITY_EXCEEDED, MYF(0),
@@ -371,7 +422,17 @@ static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
   vec->hnsw =
       ut::new_withkey<Vec_hnsw>(UT_NEW_THIS_FILE_PSI_KEY, vec->dims, vec->dist,
                                 vec->m, vec->ef_construction);
-  if (vec->hnsw == nullptr) return DB_OUT_OF_MEMORY;
+  /* An allocation failure is the one branch here that no test can reach
+  by ordinary means, and it is also the one that used to be fatal, so it
+  gets a hook. */
+  DBUG_EXECUTE_IF("vec_graph_alloc_fail", {
+    ut::delete_(vec->hnsw);
+    vec->hnsw = nullptr;
+  });
+
+  /* Same reason as the mapping above: this runs on the INSERT path too,
+  where DB_OUT_OF_MEMORY reaches row_mysql_handle_errors' ib::fatal arm. */
+  if (vec->hnsw == nullptr) return DB_VEC_OUT_OF_MEMORY;
 
   mem_heap_t *heap = mem_heap_create(256, UT_LOCATION_HERE);
   vec_aux_read_t meta;
@@ -421,12 +482,16 @@ static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
   if (irc != HNSW_SUCCESS) {
     ut::delete_(vec->hnsw);
     vec->hnsw = nullptr;
-    if (ctx.err != DB_SUCCESS) return ctx.err;
+    /* HNSW_NOT_FOUND here is specific: record 0 names a row the aux does
+    not have, so the graph and its table disagree. Our load_node_cb has
+    already reported it if it ran; report it here for the case where the
+    class decided without reaching the callback. */
     if (irc == HNSW_NOT_FOUND) {
+      if (ctx.err != DB_SUCCESS) return ctx.err;
       vec_report_missing_node(thd, entry_point);
       return DB_INDEX_CORRUPT;
     }
-    return DB_OUT_OF_MEMORY;
+    return vec_hnsw_dberr(irc, &ctx);
   }
 
   vec->loaded.store(true, std::memory_order_release);
@@ -589,12 +654,21 @@ static dberr_t vec_add_node(vec_t *vec, dict_index_t *index,
   /* Unlocked: the class is thread-safe for concurrent insert() and search,
   and the only operation it is not thread-safe for - init_from_entry_point -
   cannot be running, because reaching here means `loaded` is already true. */
-  /* An allocation failure inside the graph leaves no ctx->err behind, so
-  it has to be read off the result rather than inferred from the
-  context. */
   const HnswResult irc = vec->hnsw->insert(label, base_pk, q, &ctx);
-  if (irc != HNSW_SUCCESS && ctx.err == DB_SUCCESS) {
-    ctx.err = DB_OUT_OF_MEMORY;
+  if (irc != HNSW_SUCCESS) {
+    /* HNSW_NOT_FOUND on this path means a node the insert had to fault in
+    is not in the aux - the graph naming a row that is gone, same as on a
+    cold load. Anything else the mapping decides. */
+    if (irc == HNSW_NOT_FOUND && ctx.err == DB_SUCCESS) {
+      ctx.err = DB_INDEX_CORRUPT;
+    } else if (irc != HNSW_NOT_FOUND) {
+      ctx.err = vec_hnsw_dberr(irc, &ctx);
+    }
+    /* A graph that could not grow may be short a node it needed, and
+    nothing retries a node HNSW marked lost - so the runtime is no longer
+    trustworthy and is rebuilt from the aux, which still is. A scratch
+    allocation failing changed nothing durable, so it is left alone. */
+    if (irc == HNSW_OOM_GRAPH) vec_runtime_set_corrupted(vec);
   }
 
   /* Commits whatever the last callback left open - often nothing, since
@@ -695,7 +769,7 @@ dberr_t vec_ann_open(dict_index_t *index, const float *q, size_t batch_size,
       &s->nn, reinterpret_cast<const char *>(q), batch_size,
       std::max(ef_search, batch_size), &s->ctx);
   if (src != HNSW_SUCCESS && s->ctx.err == DB_SUCCESS) {
-    s->ctx.err = DB_OUT_OF_MEMORY;
+    s->ctx.err = vec_hnsw_dberr(src, &s->ctx);
   }
   if (s->ctx.err != DB_SUCCESS) {
     const dberr_t err = s->ctx.err;
@@ -713,12 +787,11 @@ bool vec_ann_next(vec_search_t *s, vec_hit_t *hit) {
 
   const auto next = s->vec->hnsw->nn_search_next(&s->nn);
   if (s->ctx.err != DB_SUCCESS) return false;
-  /* HNSW_NOT_FOUND is the ordinary end of the scan, not a failure.
-  Anything else with no InnoDB reason behind it is the graph's own
-  allocation giving out. */
+  /* HNSW_NOT_FOUND is the ordinary end of the scan here, not a failure -
+  the one caller for which that result is not an error at all. */
   if (next.first == HNSW_NOT_FOUND) return false;
   if (next.first != HNSW_SUCCESS) {
-    s->ctx.err = DB_OUT_OF_MEMORY;
+    s->ctx.err = vec_hnsw_dberr(next.first, &s->ctx);
     return false;
   }
 
