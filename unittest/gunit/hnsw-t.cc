@@ -39,10 +39,11 @@ class HnswTest : public ::testing::Test {
 };
 
 /* The walk a build uses to persist a finished graph: every complete node
-exactly once, with the same shapes insert_cb() is handed. Building with a
-persistor that does nothing and writing at the end is what keeps a node's
-row from being rewritten every time a later insert rewires it. */
-TEST_F(HnswTest, ForEachNodeVisitsEveryNodeOnce) {
+exactly once, in id order, with the same shapes insert_cb() is handed.
+Building with a persistor that does nothing and writing at the end is what
+keeps a node's row from being rewritten every time a later insert rewires
+it. */
+TEST_F(HnswTest, ForEachNodeSortedVisitsEveryNodeOnce) {
   TestHnsw index(kDims, euclidean, kM, kEfConstruction);
 
   constexpr size_t kRows = 40;
@@ -60,15 +61,27 @@ TEST_F(HnswTest, ForEachNodeVisitsEveryNodeOnce) {
   std::map<uint64_t, uint64_t> seen;
   std::vector<uint64_t> neighbour_ids;
   size_t visits = 0;
+  uint64_t previous_id = 0;
 
-  index.for_each_node([&](uint64_t id, uint64_t base_pk, const char *vec,
-                          uint8_t layer, TestHnsw::NeighborIdRange nbrs) {
+  index.for_each_node_sorted([&](uint64_t id, uint64_t base_pk, const char *vec,
+                                 uint8_t layer,
+                                 TestHnsw::NeighborIdRange nbrs) {
     ++visits;
     EXPECT_EQ(0U, seen.count(id)) << "node " << id << " visited twice";
     seen[id] = base_pk;
 
-    /* The vector is the one that was inserted. */
-    ASSERT_NE(nullptr, vec);
+    /* Ascending, so writing each node as it arrives is an append. */
+    EXPECT_LT(previous_id, id)
+        << "node " << id << " came after " << previous_id;
+    previous_id = id;
+
+    /* The vector is the one that was inserted. ADD_FAILURE rather than
+    ASSERT_NE: the latter expands to a bare `return`, which a visitor that
+    reports whether to continue cannot use. */
+    if (vec == nullptr) {
+      ADD_FAILURE() << "node " << id << " visited with no vector";
+      return false;
+    }
     float first = 0.0f;
     memcpy(&first, vec, sizeof(first));
     EXPECT_FLOAT_EQ(static_cast<float>(id - 1), first);
@@ -78,6 +91,7 @@ TEST_F(HnswTest, ForEachNodeVisitsEveryNodeOnce) {
     for (uint64_t nid : nbrs) {
       if (nid != 0) neighbour_ids.push_back(nid);
     }
+    return true;
   });
 
   EXPECT_EQ(kRows, visits);
@@ -96,11 +110,14 @@ TEST_F(HnswTest, ForEachNodeVisitsEveryNodeOnce) {
   EXPECT_EQ(1U, expected.count(ep));
 }
 
-TEST_F(HnswTest, ForEachNodeOnEmptyGraph) {
+TEST_F(HnswTest, ForEachNodeSortedOnEmptyGraph) {
   TestHnsw index(kDims, euclidean, kM, kEfConstruction);
   size_t visits = 0;
-  index.for_each_node([&](uint64_t, uint64_t, const char *, uint8_t,
-                          TestHnsw::NeighborIdRange) { ++visits; });
+  index.for_each_node_sorted([&](uint64_t, uint64_t, const char *, uint8_t,
+                                 TestHnsw::NeighborIdRange) {
+    ++visits;
+    return true;
+  });
   EXPECT_EQ(0U, visits);
   EXPECT_EQ(0U, index.size());
   EXPECT_EQ(0U, index.entry_point_id());

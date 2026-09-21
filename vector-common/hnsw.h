@@ -1676,8 +1676,8 @@ class HNSW {
   };
 
   /**
-    Visit every complete node exactly once, handing the visitor everything a
-    persisted node consists of:
+    Visit every complete node exactly once, in ascending id order, handing
+    the visitor everything a persisted node consists of:
 
         visit(uint64_t id, uint64_t base_pk, const char *vec, uint8_t layer,
               NeighborIdRange neighbors)
@@ -1690,6 +1690,12 @@ class HNSW {
     each node with its final neighbor list. Persisting during the build
     instead rewrites a node's row every time a later insert rewires it.
 
+    Ascending id order because m_nodes is a hash map and hands nodes out in
+    whatever order it happens to hold them. A caller writing them to a store
+    keyed by id wants them sorted: that turns scattered inserts into
+    appends. Only the ids are sorted, which is a few bytes a node next to
+    the graph itself.
+
     Nodes that are not NODE_COMPLETE are skipped: a lazily loaded stub has
     no vector or neighbors to write, and a lost one has nothing to say.
 
@@ -1697,25 +1703,10 @@ class HNSW {
     validate(): the graph must be quiescent, which it is at the end of a
     build.
 
-    @param visit  called once per complete node
+    @param visit  called once per complete node; returns false to end the
+                  walk, which a caller writing these nodes out does once a
+                  write has failed - a graph can hold millions of them
   */
-  template <typename Visitor>
-  void for_each_node(Visitor &&visit) const {
-    for (const auto &entry : m_nodes) {
-      const Node *node = entry.second;
-      if (node->state() != NODE_COMPLETE) continue;
-      visit(node->id(), node->base_pk(), node->vec(), node->layer(),
-            neighbor_ids(node));
-    }
-  }
-
-  /// Same as for_each_node, but in ascending id order.
-  ///
-  /// m_nodes is a hash map, so for_each_node hands nodes out in whatever
-  /// order it happens to hold them. A caller writing them to a store keyed
-  /// by id wants them sorted: that turns scattered inserts into appends.
-  /// Only the ids are sorted, which is a few bytes a node next to the graph
-  /// itself.
   template <typename Visitor>
   void for_each_node_sorted(Visitor &&visit) const {
     std::vector<uint64_t> ids;
@@ -1729,8 +1720,10 @@ class HNSW {
 
     for (const uint64_t id : ids) {
       const Node *node = m_nodes.find(id)->second;
-      visit(node->id(), node->base_pk(), node->vec(), node->layer(),
-            neighbor_ids(node));
+      if (!visit(node->id(), node->base_pk(), node->vec(), node->layer(),
+                 neighbor_ids(node))) {
+        return;
+      }
     }
   }
 
