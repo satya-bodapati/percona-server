@@ -430,9 +430,7 @@ static dberr_t vec_runtime_load(vec_t *vec, dict_table_t *aux, THD *thd) {
     vec->hnsw = nullptr;
   });
 
-  /* Same reason as the mapping above: this runs on the INSERT path too,
-  where DB_OUT_OF_MEMORY reaches row_mysql_handle_errors' ib::fatal arm. */
-  if (vec->hnsw == nullptr) return DB_VEC_OUT_OF_MEMORY;
+  if (vec->hnsw == nullptr) return DB_OUT_OF_MEMORY;
 
   mem_heap_t *heap = mem_heap_create(256, UT_LOCATION_HERE);
   vec_aux_read_t meta;
