@@ -283,6 +283,10 @@ vec_t *vec_runtime_open(dict_index_t *index, const KEY *key, const TABLE *form,
     return existing;
   }
 
+  /* Stands in for any of the failures below, which all log and return
+  nullptr: the option parse, the column check, the allocation. */
+  DBUG_EXECUTE_IF("vec_runtime_open_fail", return nullptr;);
+
   /* The values the user wrote in WITH(...), round-tripped through the
   DD and parsed by the open-time overload added for exactly this. */
   storage::innobase::vec::VectorIndexParam vip;

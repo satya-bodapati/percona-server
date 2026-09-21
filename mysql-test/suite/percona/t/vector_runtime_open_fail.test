@@ -1,0 +1,77 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # What a failed vector runtime open does today. ha_innobase::open()
+--echo # deliberately does not fail the table open when vec_runtime_open()
+--echo # returns nullptr - and the runtime anchor lives on dict_index_t, so
+--echo # the index stays runtime-less for every session until the table is
+--echo # reopened. The real failure paths log to the error log; what none of
+--echo # them do is fail the statement.
+--echo #
+--echo # This test records the behaviour, it does not assert it is right.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(4) NOT NULL,
+                 VECTOR KEY vk (v) TYPE hnsw (M = 4));
+INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]')),
+                      (2, STRING_TO_VECTOR('[0,1,0,0]'));
+
+--echo # The index works, and the aux holds one node per row.
+SELECT id FROM t1
+ ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 1;
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo # Drop the runtime, then refuse to open it again. The next statement
+--echo # is the one that opens the table.
+--source include/restart_mysqld.inc
+SET DEBUG = '+d,vec_runtime_open_fail';
+
+--echo #
+--echo # 1. INSERT. The base row is written, with a hidden label, and the
+--echo #    graph never hears about it.
+--echo #
+INSERT INTO t1 VALUES (3, STRING_TO_VECTOR('[0,0,1,0]'));
+
+--echo #
+--echo # 2. A vector search. No runtime, so vec_read_first returns
+--echo #    HA_ERR_END_OF_FILE - an empty result, not an error.
+--echo #
+SELECT id FROM t1
+ ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,1,0]'), 'euclidean') LIMIT 3;
+
+--echo #
+--echo # 3. UPDATE of the vector column. calc_row_difference has already
+--echo #    given the row a fresh label; the node for it is never written.
+--echo #
+UPDATE t1 SET v = STRING_TO_VECTOR('[0,0,0,1]') WHERE id = 2;
+
+SET DEBUG = '-d,vec_runtime_open_fail';
+
+--echo #
+--echo # The rows are all in the table.
+--echo #
+SELECT id FROM t1 FORCE INDEX (PRIMARY) ORDER BY id;
+
+--echo #
+--echo # The aux is short of them: three base rows, and the nodes do not
+--echo # match.
+--echo #
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo #
+--echo # And it is permanent. With a working runtime again, the row that
+--echo # INSERT skipped and the row that UPDATE relabelled are both
+--echo # invisible to the index - no error, just missing rows.
+--echo #
+--source include/restart_mysqld.inc
+--echo # id=3 was inserted at [0,0,1,0] and is its own nearest neighbour:
+SELECT id FROM t1
+ ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,1,0]'), 'euclidean') LIMIT 3;
+--echo # id=2 was updated to [0,0,0,1] and is its own nearest neighbour:
+SELECT id FROM t1
+ ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,0,1]'), 'euclidean') LIMIT 3;
+
+DROP TABLE t1;

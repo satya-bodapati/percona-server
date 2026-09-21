@@ -1,0 +1,79 @@
+#
+# What a failed vector runtime open does today. ha_innobase::open()
+# deliberately does not fail the table open when vec_runtime_open()
+# returns nullptr - and the runtime anchor lives on dict_index_t, so
+# the index stays runtime-less for every session until the table is
+# reopened. The real failure paths log to the error log; what none of
+# them do is fail the statement.
+#
+# This test records the behaviour, it does not assert it is right.
+#
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(4) NOT NULL,
+VECTOR KEY vk (v) TYPE hnsw (M = 4));
+INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]')),
+(2, STRING_TO_VECTOR('[0,1,0,0]'));
+# The index works, and the aux holds one node per row.
+SELECT id FROM t1
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 1;
+id
+1
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+nodes=2 distinct_ids=2 distinct_base_pks=2 dup_ids=0 dup_base_pks=0 labels_contiguous_from_1=1
+# Drop the runtime, then refuse to open it again. The next statement
+# is the one that opens the table.
+# restart
+SET DEBUG = '+d,vec_runtime_open_fail';
+#
+# 1. INSERT. The base row is written, with a hidden label, and the
+#    graph never hears about it.
+#
+INSERT INTO t1 VALUES (3, STRING_TO_VECTOR('[0,0,1,0]'));
+#
+# 2. A vector search. No runtime, so vec_read_first returns
+#    HA_ERR_END_OF_FILE - an empty result, not an error.
+#
+SELECT id FROM t1
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,1,0]'), 'euclidean') LIMIT 3;
+id
+#
+# 3. UPDATE of the vector column. calc_row_difference has already
+#    given the row a fresh label; the node for it is never written.
+#
+UPDATE t1 SET v = STRING_TO_VECTOR('[0,0,0,1]') WHERE id = 2;
+SET DEBUG = '-d,vec_runtime_open_fail';
+#
+# The rows are all in the table.
+#
+SELECT id FROM t1 FORCE INDEX (PRIMARY) ORDER BY id;
+id
+1
+2
+3
+#
+# The aux is short of them: three base rows, and the nodes do not
+# match.
+#
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+nodes=2 distinct_ids=2 distinct_base_pks=2 dup_ids=0 dup_base_pks=0 labels_contiguous_from_1=1
+#
+# And it is permanent. With a working runtime again, the row that
+# INSERT skipped and the row that UPDATE relabelled are both
+# invisible to the index - no error, just missing rows.
+#
+# restart
+# id=3 was inserted at [0,0,1,0] and is its own nearest neighbour:
+SELECT id FROM t1
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,1,0]'), 'euclidean') LIMIT 3;
+id
+1
+# id=2 was updated to [0,0,0,1] and is its own nearest neighbour:
+SELECT id FROM t1
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,0,1]'), 'euclidean') LIMIT 3;
+id
+1
+DROP TABLE t1;
