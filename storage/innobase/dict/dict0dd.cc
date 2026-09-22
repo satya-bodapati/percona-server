@@ -2836,6 +2836,27 @@ void dd_write_tablespace(dd::Tablespace *dd_space, space_id_t space_id,
   p.set(dd_space_key_strings[DD_SPACE_STATE], dd_space_state_values[state]);
 }
 
+/** Re-add the hidden percona_vec_aux_id column to a new dd::Table that lost
+it. The new definition is built from the server's TABLE_SHARE, which carries
+no SE-hidden columns, so a table that owns this one has to have it put back
+before the column counts of the two definitions are compared.
+@param[in,out]  new_table       New dd table
+@param[in]      old_table       Old dd table */
+void dd_add_vec_aux_id_column(dd::Table &new_table,
+                              const dd::Table &old_table) {
+  if (dd_find_column(&old_table, VEC_AUX_ID_COL_NAME) == nullptr) {
+    return;
+  }
+  if (dd_find_column(&new_table, VEC_AUX_ID_COL_NAME) != nullptr) {
+    return;
+  }
+
+  /* No companion index, unlike FTS_DOC_ID: the base row is linked to the
+  aux by percona_vec_aux_id = aux.id through each table's own PK. */
+  dd_add_hidden_column(&new_table, VEC_AUX_ID_COL_NAME, sizeof(uint64_t),
+                       dd::enum_column_types::LONGLONG);
+}
+
 /** Add fts doc id column and index to new table
 when old table has hidden fts doc id without fulltext index
 @param[in,out]  new_table       New dd table
@@ -4013,10 +4034,10 @@ static inline dict_table_t *dd_fill_dict_table(const Table *dd_tab,
   truth because DD se_private_data does not currently round-trip flags2's
   AUX bit. Reconstruct DICT_TF2_VEC_AUX and the parent_id from the
   "<db>/percona_vec_<type>_<parent_id>_<index_id>" name pattern. */
-  if (table_id_t parent_id = 0;
-      vec_aux_parse_table_name(norm_name, &parent_id, nullptr)) {
+  table_id_t vec_parent_id = 0;
+  if (vec_aux_parse_table_name(norm_name, &vec_parent_id, nullptr)) {
     DICT_TF2_FLAG_SET(m_table, DICT_TF2_VEC_AUX);
-    m_table->parent_id = parent_id;
+    m_table->parent_id = vec_parent_id;
   }
 
   if (is_discard) {

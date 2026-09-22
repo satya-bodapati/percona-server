@@ -50,6 +50,14 @@ vector index keeps in memory.
 class THD;
 class Flush_observer;
 
+/** @return whether innodb_hnsw_max_memory is set and already spent. A
+charge check, not a prediction: it asks whether the budget is gone, not
+whether the next allocation fits. */
+inline bool vec_memory_limit_reached() {
+  return srv_hnsw_max_memory != 0 &&
+         Vec_arena::global_bytes() >= srv_hnsw_max_memory;
+}
+
 /** Everything a callback needs that is NOT a property of the index.
 
 The class requires the persistor itself to be stateless - "no mutable
@@ -73,20 +81,6 @@ struct Vec_ctx {
   report: each one short-circuits when it is already set, and the caller
   inspects it once insert() returns. */
   dberr_t err{DB_SUCCESS};
-  /** Whether a callback may commit trx and start it again.
-
-  True for DML, where trx is a background sub-transaction and committing
-  per callback is what stops concurrent inserts deadlocking on each
-  other's neighbour rows.
-
-  False for an index build, where trx is the ALTER's own transaction.
-  Committing there would commit the DDL itself a node at a time: it ends
-  the transaction the dictionary changes are being made in, clears
-  trx->dict_operation, drops the locks the ALTER holds, and marks a user
-  transaction internal so its GTID is no longer persisted. Nothing is
-  gained either, because an index under construction is invisible, so
-  there is no second writer to deadlock against. */
-  bool commit_aux_trx{true};
 };
 
 /* The persistor's shims forward here. Ordinary functions, so their
@@ -112,6 +106,18 @@ DB_INDEX_CORRUPT returned alongside it does not replace this text.
 @param[in]  id   the node the neighbour list named */
 void vec_report_missing_node(THD *thd, uint64_t id);
 
+/** The InnoDB error for a graph result that is not HNSW_SUCCESS.
+
+Declared rather than kept file-local so the mapping can be enumerated by
+a unit test: it is the one place that decides what each of the class's
+results means to InnoDB, and getting one of them wrong has already cost a
+fatal error once.
+@param[in]  rc   the graph's result
+@param[in]  ctx  the context the callbacks reported through, or nullptr
+                 where there is none
+@return the error to fail the statement with */
+dberr_t vec_hnsw_dberr(HnswResult rc, const Vec_ctx *ctx);
+
 /** Report that innodb_hnsw_max_memory is spent.
 
 Reported here rather than left to what DB_VEC_OUT_OF_MEMORY maps to,
@@ -135,31 +141,37 @@ dberr_t vec_persist_load_node(Vec_ctx *ctx, Hnsw &hnsw,
                               typename Hnsw::LoadNodeHandle handle) {
   const uint64_t id = hnsw.load_node_id(handle);
 
-  /* Record 0 is the metadata record, never a node. The id comes off a
-  neighbour list read from the aux table, so a 0 here means the aux is
-  corrupt - report it rather than fault in the metadata as a node. */
+  /* Record 0 is the metadata record, never a node. No stub is ever made
+  for it: the entry point is refused as 0 by vec_runtime_load, and a 0 on
+  a neighbour list is an empty slot, which load_node_neighbors skips. Should
+  one get here anyway, refuse it rather than read the metadata as a node. */
   ut_ad(id != 0);
-  if (id == 0) return DB_CORRUPTION;
+  if (id == 0) return DB_INDEX_CORRUPT;
 
   mem_heap_t *heap = mem_heap_create(1024, UT_LOCATION_HERE);
   vec_aux_read_t node;
   dberr_t err = vec_aux_read_node(ctx->aux, id, heap, &node);
   if (err != DB_SUCCESS) {
     mem_heap_free(heap);
-    if (err != DB_RECORD_NOT_FOUND) return err;
     /* A miss here is never benign: this id came off a neighbour list, so
     the graph says the node must exist, and it does not. The graph and
-    the aux disagree, which is what DB_INDEX_CORRUPT means. Index-scoped
-    rather than DB_CORRUPTION, which would report the base table as
-    crashed; DB_RECORD_NOT_FOUND would reach the client as
-    HA_ERR_NO_ACTIVE_RECORD, indistinguishable from a missing row. */
-    vec_report_missing_node(ctx->thd, id);
-    return DB_INDEX_CORRUPT;
+    the aux disagree, which is what DB_INDEX_CORRUPT means, as it is for a
+    malformed row. DB_RECORD_NOT_FOUND would reach the client as
+    HA_ERR_NO_ACTIVE_RECORD, indistinguishable from a missing row.
+
+    Anything else is passed back as it is. vec_aux_read_node takes no locks
+    and returns nothing else today, but a transient error (a lock wait, an
+    interrupt) must stay retryable, not become corruption that sticks. */
+    if (err == DB_RECORD_NOT_FOUND) {
+      vec_report_missing_node(ctx->thd, id);
+      return DB_INDEX_CORRUPT;
+    }
+    return err;
   }
 
   if (node.vec_len != ctx->vec_bytes) {
     mem_heap_free(heap);
-    return DB_CORRUPTION;
+    return DB_INDEX_CORRUPT;
   }
 
   /* The neighbour blob must cover exactly the node's slots. Checking it
@@ -168,7 +180,7 @@ dberr_t vec_persist_load_node(Vec_ctx *ctx, Hnsw &hnsw,
   shape of the graph, and load_node_neighbors would read past the blob. */
   if (node.neighbors_len != vec_aux_neighbors_blob_len(node.level, ctx->m)) {
     mem_heap_free(heap);
-    return DB_CORRUPTION;
+    return DB_INDEX_CORRUPT;
   }
 
   /* Order matters: load_node_neighbors sizes its allocation from the
@@ -189,7 +201,10 @@ dberr_t vec_persist_load_node(Vec_ctx *ctx, Hnsw &hnsw,
   const HnswResult nrc = hnsw.load_node_neighbors(handle, ids);
 
   mem_heap_free(heap);
-  if (nrc != HNSW_SUCCESS) return DB_OUT_OF_MEMORY;
+  /* DB_VEC_OUT_OF_MEMORY, not DB_OUT_OF_MEMORY: this runs on the INSERT
+  path, where row_mysql_handle_errors does not list the latter and so
+  reaches its ib::fatal arm. */
+  if (nrc != HNSW_SUCCESS) return DB_VEC_OUT_OF_MEMORY;
   return DB_SUCCESS;
 }
 
@@ -272,8 +287,7 @@ struct Vec_persistor {
     could have read, and would answer later queries with fewer rows and
     no error at all. That is what kept this check out of here until the
     callback could tell the two apart. */
-    if (srv_hnsw_max_memory != 0 &&
-        Vec_arena::global_bytes() >= srv_hnsw_max_memory) {
+    if (vec_memory_limit_reached()) {
       vec_report_memory_ceiling(ctx->thd);
       ctx->err = DB_VEC_OUT_OF_MEMORY;
       return HNSW_ERROR_CB;
@@ -298,7 +312,7 @@ and persisting during that build is wasted work: each insert rewires its
 neighbours, so a node's row would be rewritten every time a later insert
 touches it - O(N x M x log N) row updates to arrive at a state that is
 only correct once the last row is in. Building against this persistor and
-then walking the finished graph (HNSW::for_each_node) writes each node
+then walking the finished graph (HNSW::for_each_node_sorted) writes each node
 once, with its final neighbour list.
 
 Context is an empty tag: there is no error to carry, because none of
@@ -494,13 +508,11 @@ its aux rows roll back would leave the two permanently disagreeing. So
 the aux commits independently, and the invariant is one-directional -
 the aux is a superset of the committed base rows. Orphans are filtered
 at read time by looking base_pk up under the reader's view.
-@param[in,out]  trx    the user's transaction (for the base row, not the aux)
 @param[in,out]  table  the base table
 @param[in]      row    the inserted row, label already written
 @param[in]      thd    session
 @return DB_SUCCESS, or an error */
-dberr_t vec_insert_row(trx_t *trx, dict_table_t *table, const dtuple_t *row,
-                       THD *thd);
+dberr_t vec_insert_row(dict_table_t *table, const dtuple_t *row, THD *thd);
 
 /** One open streaming ANN scan.
 
@@ -521,7 +533,7 @@ the traversal instead of restarting it. That is what the read path needs:
 a filter above the iterator consumes candidates, so how many are required
 is not known when the scan starts.
 
-@param[in]   index       the vector index
+@param[in]   index       the vector index, which has a runtime
 @param[in]   q           query vector, dims floats (copied into the scan)
 @param[in]   batch_size  candidates fetched per internal batch; must be > 0
 @param[in]   ef_search   search width, clamped to at least batch_size
@@ -551,9 +563,6 @@ dberr_t vec_ann_error(const vec_search_t *s);
 /** End a scan and release the aux table and its MDL. Safe on nullptr. */
 void vec_ann_close(vec_search_t *s);
 
-/** The vector index on @p table, or nullptr. At most one exists. */
-dict_index_t *vec_index_of(dict_table_t *table);
-
 /** Dimensions the index was built with; 0 if it has no runtime yet. */
 uint32_t vec_index_dims(const dict_index_t *index);
 
@@ -562,6 +571,57 @@ building that index. Opaque so the DDL layer needs none of the graph's
 headers. */
 struct Vec_build;
 
+/** Start building `index`. The HNSW parameters come from the index's own
+definition in `altered_table`, which is the only place they exist during
+an ALTER - nothing in the dictionary carries M or ef_construction.
+@param[in]   index          the vector index being built
+@param[in]   altered_table  the MySQL table definition the ALTER produces
+@param[out]  err            DB_SUCCESS on success; on failure,
+                            DB_VEC_MEMORY_LIMIT when innodb_hnsw_max_memory
+                            is already spent, DB_ERROR for anything else (the
+                            index's own KEY could not be found or parsed) -
+                            they are not interchangeable to the caller, which
+                            reports err to the user
+@return the build state, or nullptr if it could not be created */
+[[nodiscard]] Vec_build *vec_build_start(dict_index_t *index,
+                                         const TABLE *altered_table,
+                                         dberr_t *err);
+
+/** Add one base row to the graph. Called from the DDL scan's per-row
+callback, concurrently from every scan thread: HNSW::insert serialises
+allocation on its own lock and guards neighbour lists with striped
+per-node locks. Writes nothing - the build persistor is
+Vec_null_persistor - so this takes no latches and calls no row API.
+Reports nothing: a scan thread has no session, so the error goes back
+through the DDL's first-error slot and the ALTER reports it.
+@param[in,out]  b        build state
+@param[in]      table    base table the row belongs to
+@param[in]      lob_index clustered index the scan read, which owns the
+                         row's off-page values
+@param[in]      row      the base row, as the scan built it
+@return DB_SUCCESS, DB_VEC_WRONG_DIMENSIONS, DB_VEC_MEMORY_LIMIT or
+DB_VEC_OUT_OF_MEMORY */
+[[nodiscard]] dberr_t vec_build_add_row(Vec_build *b, dict_table_t *table,
+                                        const dict_index_t *lob_index,
+                                        const dtuple_t *row);
+
+/** Walk the finished graph and write the aux table bottom-up: record 0
+naming the entry point, then one row per node, in id order, with the
+neighbours it ended up with. No undo and no redo; the aux is new to this
+ALTER and is dropped if the ALTER fails.
+@param[in,out]  b      build state
+@param[in]      trx    the ALTER's transaction
+@param[in]      table  base table being altered
+@param[in]      thd    connection, for the aux MDL
+@param[in]      observer  flushes the aux pages before the ALTER commits
+@return DB_SUCCESS or an error */
+[[nodiscard]] dberr_t vec_build_write_aux(Vec_build *b, trx_t *trx,
+                                          dict_table_t *table, THD *thd,
+                                          Flush_observer *observer);
+
+/** Release the build state and the graph it holds. Safe on nullptr. */
+void vec_build_free(Vec_build *b);
+
 /** Add the new node for a vector-column UPDATE.
 
 A node is immutable, so a changed vector is an INSERT of a new node
@@ -569,14 +629,13 @@ under the label calc_row_difference already put into the update vector.
 The superseded node is left exactly as it is - it is still the right
 answer for read views that predate this statement, and removing it would
 break their isolation rather than tidy up.
-@param[in,out]  trx    the user's transaction
 @param[in,out]  table  the base table
 @param[in]      label  the fresh label, from trx->vec_next_label
 @param[in]      q      the new vector, dims * sizeof(float) bytes
 @param[in]      base_pk  the row's primary key, unchanged by this update
 @param[in]      thd    session
 @return DB_SUCCESS, or an error */
-dberr_t vec_update_row(trx_t *trx, dict_table_t *table, uint64_t label,
-                       const char *q, ulint q_len, uint64_t base_pk, THD *thd);
+dberr_t vec_update_row(dict_table_t *table, uint64_t label, const char *q,
+                       ulint q_len, uint64_t base_pk, THD *thd);
 
 #endif /* vec0hnsw_h */

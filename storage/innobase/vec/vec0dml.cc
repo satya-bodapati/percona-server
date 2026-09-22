@@ -47,6 +47,7 @@ internal SQL parser is not used. */
 #include "read0types.h"
 #include "row0ins.h"
 #include "row0mysql.h"
+#include "row0row.h"
 #include "row0upd.h"
 #include "row0vers.h"
 #include "scope_guard.h"
@@ -131,6 +132,87 @@ struct Vec_aux_bulk {
   uint64_t n_rows{};
 };
 
+Vec_aux_bulk *vec_aux_bulk_start(trx_t *trx, dict_table_t *aux,
+                                 Flush_observer *observer) {
+  ut_ad(trx != nullptr && aux != nullptr);
+  /* Btree_load requires one, and the caller's is the statement's. */
+  if (observer == nullptr) return nullptr;
+  return ut::new_withkey<Vec_aux_bulk>(UT_NEW_THIS_FILE_PSI_KEY, trx, aux,
+                                       observer);
+}
+
+dberr_t vec_aux_bulk_insert(Vec_aux_bulk *b, const vec_aux_row_t &row) {
+  ut_ad(b != nullptr);
+  ut_ad(row.vec != nullptr || (row.id == 0 && row.dims == 0));
+  ut_ad(row.neighbors != nullptr || row.neighbors_len == 0);
+
+  if (row.level < 0 || row.level > 127) return DB_CORRUPTION;
+
+  /* An index entry, not a row: clustered field order, system columns
+  included. rec_convert_dtuple_to_rec expects exactly that. */
+  dict_index_t *clust = b->clust;
+  const ulint n_fields = dict_index_get_n_fields(clust);
+
+  dtuple_t *entry = dtuple_create(b->heap, n_fields);
+  dict_index_copy_types(entry, clust, n_fields);
+  dtuple_set_n_fields_cmp(entry, dict_index_get_n_unique(clust));
+
+  const auto set = [&](ulint col, const void *data, ulint len) {
+    vec_aux_set_dfield(
+        dtuple_get_nth_field(
+            entry, dict_col_get_clust_pos(b->aux->get_col(col), clust)),
+        data, len, b->heap);
+  };
+
+  byte id_buf[8];
+  mach_write_to_8(id_buf, row.id);
+  set(VEC_AUX_COL_ID, id_buf, sizeof(id_buf));
+  set(VEC_AUX_COL_VEC, row.vec, row.dims * sizeof(float));
+
+  byte base_pk_buf[8];
+  mach_write_to_8(base_pk_buf, row.base_pk);
+  set(VEC_AUX_COL_BASE_PK, base_pk_buf, sizeof(base_pk_buf));
+
+  const byte level_buf = static_cast<byte>(row.level);
+  set(VEC_AUX_COL_LEVEL, &level_buf, 1);
+  set(VEC_AUX_COL_NEIGHBORS, row.neighbors, row.neighbors_len);
+
+  dfield_set_data(
+      dtuple_get_nth_field(entry, clust->get_sys_col_pos(DATA_TRX_ID)),
+      b->trx_id_buf, DATA_TRX_ID_LEN);
+  dfield_set_data(
+      dtuple_get_nth_field(entry, clust->get_sys_col_pos(DATA_ROLL_PTR)),
+      b->roll_ptr_buf, DATA_ROLL_PTR_LEN);
+
+  /* Level 0: leaf. Btree_load owns everything above it - allocating pages,
+  carrying separators up, committing them - which is all build() does with
+  the rows a merge cursor hands it. */
+  const dberr_t err = b->load->insert(entry, 0);
+
+  mem_heap_empty(b->heap);
+
+  /* Same cadence build() uses, so a killed ALTER stops here rather than
+  finishing the tree first. */
+  if (err == DB_SUCCESS && !(++b->n_rows % 4096) &&
+      b->observer->check_interrupted()) {
+    return DB_INTERRUPTED;
+  }
+  return err;
+}
+
+dberr_t vec_aux_bulk_finish(Vec_aux_bulk *b, dberr_t err) {
+  ut_ad(b != nullptr);
+
+  err = b->load->finish(err);
+
+  /* On failure the statement's observer is told, so the pages it owns are
+  discarded rather than written when the DDL flushes it. */
+  if (err != DB_SUCCESS) b->observer->interrupted();
+
+  ut::delete_(b);
+  return err;
+}
+
 /** Fill one user dfield of the aux row tuple with a heap-duplicated
 value (the run loop may retry after lock waits; values must be stable). */
 static void vec_aux_set_dfield(dfield_t *df, const void *data, ulint len,
@@ -160,6 +242,13 @@ dberr_t vec_aux_insert(trx_t *trx, dict_table_t *aux,
                        const vec_aux_row_t &row) {
   ut_ad(trx != nullptr);
   ut_ad(aux != nullptr);
+
+  /* A transient write failure - the kind a lock wait or a full tablespace
+  produces. Injected because the distinction it proves (a failure the
+  graph recovers from, against one that leaves it inconsistent) has no
+  other way in from SQL. */
+  DBUG_EXECUTE_IF("vec_aux_insert_transient_fail",
+                  return DB_OUT_OF_FILE_SPACE;);
   /* Record 0 is index metadata, not a node: it names the graph's entry
   point and legitimately carries no vector and no neighbours. Every real
   node has both - id 0 is reserved as the empty-slot sentinel, so a node
@@ -496,6 +585,12 @@ dberr_t vec_aux_read_node(dict_table_t *aux, uint64_t id, mem_heap_t *heap,
   means the index is empty, which is a different path entirely. */
   DBUG_EXECUTE_IF(
       "vec_aux_node_missing", if (id != 0) { return DB_RECORD_NOT_FOUND; });
+  /* The same, but past the first node read: the entry point loads, and the
+  miss is found by the search that faults its neighbours in. */
+  DBUG_EXECUTE_IF("vec_aux_node_missing_after_entry", {
+    static thread_local int reads = 0;
+    if (id != 0 && reads++ > 0) return DB_RECORD_NOT_FOUND;
+  });
 
   dict_index_t *clust = aux->first_index();
 
@@ -508,16 +603,12 @@ dberr_t vec_aux_read_node(dict_table_t *aux, uint64_t id, mem_heap_t *heap,
   mtr_t mtr;
   mtr_start(&mtr);
   btr_pcur_t pcur;
-  pcur.open_no_init(clust, ref, PAGE_CUR_LE, BTR_SEARCH_LEAF, 0, &mtr,
-                    UT_LOCATION_HERE);
-
-  const rec_t *rec = pcur.get_rec();
-  if (!page_rec_is_user_rec(rec) ||
-      pcur.get_low_match() < dict_index_get_n_unique(clust)) {
+  if (!row_search_on_row_ref(&pcur, BTR_SEARCH_LEAF, aux, ref, &mtr)) {
     pcur.close();
     mtr_commit(&mtr);
     return DB_RECORD_NOT_FOUND;
   }
+  const rec_t *rec = pcur.get_rec();
 
   mem_heap_t *offs_heap = nullptr;
   ulint *offsets = rec_get_offsets(rec, clust, nullptr, ULINT_UNDEFINED,
@@ -541,7 +632,7 @@ dberr_t vec_aux_read_node(dict_table_t *aux, uint64_t id, mem_heap_t *heap,
 
   p = rec_get_nth_field(clust, rec, offsets, p_base_pk, &len);
   if (len != 8) {
-    err = DB_CORRUPTION;
+    err = DB_INDEX_CORRUPT;
     goto done;
   }
   out->base_pk = mach_read_from_8(p);
@@ -557,7 +648,7 @@ dberr_t vec_aux_read_node(dict_table_t *aux, uint64_t id, mem_heap_t *heap,
     length that happens to match would be accepted and a node quietly
     misplaced. The base_pk field above already refuses a bad length;
     this one now does too. */
-    err = DB_CORRUPTION;
+    err = DB_INDEX_CORRUPT;
     goto done;
   }
   out->level = p[0];
@@ -566,7 +657,7 @@ dberr_t vec_aux_read_node(dict_table_t *aux, uint64_t id, mem_heap_t *heap,
                           &out->vec_len) ||
       !vec_aux_copy_field(clust, rec, offsets, p_nb, heap, &out->neighbors,
                           &out->neighbors_len)) {
-    err = DB_CORRUPTION;
+    err = DB_INDEX_CORRUPT;
   }
 
 done:

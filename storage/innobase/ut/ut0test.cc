@@ -578,7 +578,8 @@ Ret_t Tester::vec_runtime_info(std::vector<std::string> &tokens) noexcept {
   }
 
   XLOG("dims=" << vec->dims << " M=" << vec->m << " ef_construction="
-               << vec->ef_construction << " loaded=" << (vec->loaded ? 1 : 0));
+               << vec->ef_construction << " loaded=" << (vec->loaded ? 1 : 0)
+               << " corrupted=" << (vec->corrupted_hnsw ? 1 : 0));
   set_output(sout);
   return RET_PASS;
 }
@@ -601,7 +602,7 @@ Ret_t Tester::vec_next_id(std::vector<std::string> &tokens) noexcept {
   }
   auto guard = create_scope_guard([&]() { vec_test_close_aux(tt); });
 
-  const uint64_t id = Vec_label_counter::assign(tt.base);
+  const uint64_t id = Vec_label_counter::assign(tt.base, true);
   XLOG("id=" << id);
   set_output(sout);
   return RET_PASS;

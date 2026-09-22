@@ -2600,9 +2600,10 @@ static inline bool row_upd_clust_rec_by_insert_inherit(
   rolled-back insert consumes one, and only the label that reaches the
   inserted record gets a node. The first pass cannot have built one: it
   only gets that far on DB_SUCCESS. */
+  /* The column exists exactly while the table has a vector index. */
   const bool vec_new_node =
-      DICT_TF2_FLAG_IS_SET(table, DICT_TF2_HAS_VEC_AUX_COL) &&
-      vec_indexed_col_no(table) != ULINT_UNDEFINED;
+      DICT_TF2_FLAG_IS_SET(table, DICT_TF2_HAS_VEC_AUX_COL);
+  ut_ad(!vec_new_node || vec_indexed_col_no(table) != ULINT_UNDEFINED);
 
   if (vec_new_node && vec_label_from_row(table, node->upd_row) ==
                           vec_label_from_row(table, node->row)) {
@@ -2702,7 +2703,7 @@ static inline bool row_upd_clust_rec_by_insert_inherit(
     the insert, the same window row_insert_for_mysql builds its node in.
     A failure that leaves us here without an insert (a lock wait, a
     duplicate key) keeps the label in upd_row for the retry. */
-    err = vec_insert_row(trx, node->table, node->upd_row, trx->mysql_thd);
+    err = vec_insert_row(node->table, node->upd_row, trx->mysql_thd);
 
     /* The label is consumed: row_update_for_mysql must not build a
     second node for the same statement. */

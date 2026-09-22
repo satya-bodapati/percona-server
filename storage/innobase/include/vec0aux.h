@@ -189,8 +189,13 @@ Safe on aux tables that aren't currently cached (skips silently).
 @param[in]  dict_locked     true iff caller already holds dict_sys mutex */
 void vec_aux_detach_tables(const dict_table_t *parent, bool dict_locked);
 
-/** True iff `table` has at least one vector index attached. */
-[[nodiscard]] bool vec_aux_table_has_vector_index(const dict_table_t *table);
+/** The vector index on @p table, or nullptr. At most one exists. */
+[[nodiscard]] const dict_index_t *vec_index_of(const dict_table_t *table);
+
+[[nodiscard]] inline dict_index_t *vec_index_of(dict_table_t *table) {
+  return const_cast<dict_index_t *>(
+      vec_index_of(static_cast<const dict_table_t *>(table)));
+}
 
 /** Rename every vector aux table belonging to `parent` after the parent itself
 has been renamed to `new_parent_name`. Only the db-prefix portion of the aux
@@ -256,7 +261,8 @@ ulint vec_indexed_col_no(const dict_table_t *table);
 @param[in]   table  the base table
 @param[in]   update the update vector
 @param[out]  len    its length in bytes
-@return the bytes, or nullptr if this update does not change the vector */
+@return the bytes, or nullptr if this update does not change the vector.
+An empty new value is returned with *len 0, not as nullptr. */
 const char *vec_upd_new_vector(const dict_table_t *table, const upd_t *update,
                                ulint *len);
 
