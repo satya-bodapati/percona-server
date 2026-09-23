@@ -1,0 +1,94 @@
+#
+# PS-11580: a query vector the column cannot be compared with must be
+# an error on the vector index path too.
+#
+# DISTANCE() refuses a vector of the wrong dimension, or bytes that are
+# not a vector at all, when it is evaluated row by row. The vector index
+# path never evaluates it per row, and used to answer the same query
+# with no rows, so a malformed query looked like one nothing was near.
+# Each query below runs on both paths and must fail the same way, with
+# one error and nothing else under it.
+#
+CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4) NOT NULL,
+VECTOR KEY vk (v) TYPE hnsw (M = 8));
+INSERT INTO t VALUES (1, STRING_TO_VECTOR('[1,0,0,0]')),
+(2, STRING_TO_VECTOR('[2,0,0,0]')),
+(3, STRING_TO_VECTOR('[3,0,0,0]'));
+# This is the shape that uses the index.
+EXPLAIN SELECT id FROM t
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3]'), 'EUCLIDEAN') LIMIT 2;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t	NULL	vector_ann	NULL	vk	1	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t`.`id` AS `id` from `test`.`t` order by distance(`test`.`t`.`v`,to_vector('[1,2,3]'),'EUCLIDEAN') limit 2
+# Too few dimensions.
+SELECT id FROM t
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3]'), 'EUCLIDEAN') LIMIT 2;
+ERROR HY000: Incorrect arguments to distance
+SHOW WARNINGS;
+Level	Code	Message
+Error	1210	Incorrect arguments to distance
+SELECT id FROM t IGNORE INDEX (vk)
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3]'), 'EUCLIDEAN') LIMIT 2;
+ERROR HY000: Incorrect arguments to distance
+# Too many.
+SELECT id FROM t
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3,4,5]'), 'EUCLIDEAN') LIMIT 2;
+ERROR HY000: Incorrect arguments to distance
+SELECT id FROM t IGNORE INDEX (vk)
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3,4,5]'), 'EUCLIDEAN') LIMIT 2;
+ERROR HY000: Incorrect arguments to distance
+# With a filter alongside.
+SELECT id FROM t WHERE id > 1
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3]'), 'EUCLIDEAN') LIMIT 2;
+ERROR HY000: Incorrect arguments to distance
+SELECT id FROM t IGNORE INDEX (vk) WHERE id > 1
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3]'), 'EUCLIDEAN') LIMIT 2;
+ERROR HY000: Incorrect arguments to distance
+# Bytes whose length is not a whole number of floats.
+SELECT id FROM t ORDER BY DISTANCE(v, X'0102030405', 'EUCLIDEAN') LIMIT 2;
+ERROR HY000: Data cannot be converted to a valid vector: ''
+SHOW WARNINGS;
+Level	Code	Message
+Error	6138	Data cannot be converted to a valid vector: ''
+SELECT id FROM t IGNORE INDEX (vk)
+ORDER BY DISTANCE(v, X'0102030405', 'EUCLIDEAN') LIMIT 2;
+ERROR HY000: Data cannot be converted to a valid vector: ''
+# The query vector known only at execution: a user variable, and a
+# prepared statement parameter.
+SET @q = STRING_TO_VECTOR('[1,2,3]');
+EXPLAIN SELECT id FROM t ORDER BY DISTANCE(v, @q, 'EUCLIDEAN') LIMIT 2;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t	NULL	vector_ann	NULL	vk	1	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t`.`id` AS `id` from `test`.`t` order by distance(`test`.`t`.`v`,(@`q`),'EUCLIDEAN') limit 2
+SELECT id FROM t ORDER BY DISTANCE(v, @q, 'EUCLIDEAN') LIMIT 2;
+ERROR HY000: Incorrect arguments to distance
+PREPARE e FROM
+'EXPLAIN SELECT id FROM t ORDER BY DISTANCE(v, ?, ''EUCLIDEAN'') LIMIT 2';
+# (The bound parameter prints as raw float bytes.)
+EXECUTE e USING @q;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t	NULL	vector_ann	NULL	vk	1	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t`.`id` AS `id` from `test`.`t` order by distance(`test`.`t`.`v`,<param>,'EUCLIDEAN') limit 2
+DEALLOCATE PREPARE e;
+PREPARE s FROM
+'SELECT id FROM t ORDER BY DISTANCE(v, ?, ''EUCLIDEAN'') LIMIT 2';
+EXECUTE s USING @q;
+ERROR HY000: Incorrect arguments to distance
+# The same statement with a vector that fits still works. (Not
+# [2,0,0,0]: rows 1 and 3 would tie for second.)
+SET @q = STRING_TO_VECTOR('[2.2,0,0,0]');
+EXECUTE s USING @q;
+id
+2
+3
+DEALLOCATE PREPARE s;
+# A well-formed query vector is unaffected.
+SELECT id FROM t
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+id
+3
+2
+DROP TABLE t;

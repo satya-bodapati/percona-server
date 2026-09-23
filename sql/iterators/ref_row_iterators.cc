@@ -720,6 +720,10 @@ int VectorSearchIterator::DoRead() {
     int error =
         table()->file->vec_read_first(m_item, table()->record[0], m_limit);
     if (error) {
+      /* A query vector the column cannot be compared with is reported by
+      vec_read_first() itself, with the error DISTANCE() would raise; the
+      handler's generic one would only add noise under it. */
+      if (thd()->is_error()) return 1;
       return HandleError(error);
     }
     m_first = false;

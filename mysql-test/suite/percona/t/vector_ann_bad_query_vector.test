@@ -1,0 +1,85 @@
+--echo #
+--echo # PS-11580: a query vector the column cannot be compared with must be
+--echo # an error on the vector index path too.
+--echo #
+--echo # DISTANCE() refuses a vector of the wrong dimension, or bytes that are
+--echo # not a vector at all, when it is evaluated row by row. The vector index
+--echo # path never evaluates it per row, and used to answer the same query
+--echo # with no rows, so a malformed query looked like one nothing was near.
+--echo # Each query below runs on both paths and must fail the same way, with
+--echo # one error and nothing else under it.
+--echo #
+
+CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4) NOT NULL,
+                VECTOR KEY vk (v) TYPE hnsw (M = 8));
+INSERT INTO t VALUES (1, STRING_TO_VECTOR('[1,0,0,0]')),
+                     (2, STRING_TO_VECTOR('[2,0,0,0]')),
+                     (3, STRING_TO_VECTOR('[3,0,0,0]'));
+
+--echo # This is the shape that uses the index.
+--replace_column 10 # 11 #
+EXPLAIN SELECT id FROM t
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3]'), 'EUCLIDEAN') LIMIT 2;
+
+--echo # Too few dimensions.
+--error ER_WRONG_ARGUMENTS
+SELECT id FROM t
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3]'), 'EUCLIDEAN') LIMIT 2;
+SHOW WARNINGS;
+--error ER_WRONG_ARGUMENTS
+SELECT id FROM t IGNORE INDEX (vk)
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3]'), 'EUCLIDEAN') LIMIT 2;
+
+--echo # Too many.
+--error ER_WRONG_ARGUMENTS
+SELECT id FROM t
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3,4,5]'), 'EUCLIDEAN') LIMIT 2;
+--error ER_WRONG_ARGUMENTS
+SELECT id FROM t IGNORE INDEX (vk)
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3,4,5]'), 'EUCLIDEAN') LIMIT 2;
+
+--echo # With a filter alongside.
+--error ER_WRONG_ARGUMENTS
+SELECT id FROM t WHERE id > 1
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3]'), 'EUCLIDEAN') LIMIT 2;
+--error ER_WRONG_ARGUMENTS
+SELECT id FROM t IGNORE INDEX (vk) WHERE id > 1
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3]'), 'EUCLIDEAN') LIMIT 2;
+
+--echo # Bytes whose length is not a whole number of floats.
+--error ER_TO_VECTOR_CONVERSION
+SELECT id FROM t ORDER BY DISTANCE(v, X'0102030405', 'EUCLIDEAN') LIMIT 2;
+SHOW WARNINGS;
+--error ER_TO_VECTOR_CONVERSION
+SELECT id FROM t IGNORE INDEX (vk)
+  ORDER BY DISTANCE(v, X'0102030405', 'EUCLIDEAN') LIMIT 2;
+
+--echo # The query vector known only at execution: a user variable, and a
+--echo # prepared statement parameter.
+SET @q = STRING_TO_VECTOR('[1,2,3]');
+--replace_column 10 # 11 #
+EXPLAIN SELECT id FROM t ORDER BY DISTANCE(v, @q, 'EUCLIDEAN') LIMIT 2;
+--error ER_WRONG_ARGUMENTS
+SELECT id FROM t ORDER BY DISTANCE(v, @q, 'EUCLIDEAN') LIMIT 2;
+PREPARE e FROM
+  'EXPLAIN SELECT id FROM t ORDER BY DISTANCE(v, ?, ''EUCLIDEAN'') LIMIT 2';
+--echo # (The bound parameter prints as raw float bytes.)
+--replace_column 10 # 11 #
+--replace_regex /distance\(`test`.`t`.`v`,.*,'EUCLIDEAN'\)/distance(`test`.`t`.`v`,<param>,'EUCLIDEAN')/
+EXECUTE e USING @q;
+DEALLOCATE PREPARE e;
+PREPARE s FROM
+  'SELECT id FROM t ORDER BY DISTANCE(v, ?, ''EUCLIDEAN'') LIMIT 2';
+--error ER_WRONG_ARGUMENTS
+EXECUTE s USING @q;
+--echo # The same statement with a vector that fits still works. (Not
+--echo # [2,0,0,0]: rows 1 and 3 would tie for second.)
+SET @q = STRING_TO_VECTOR('[2.2,0,0,0]');
+EXECUTE s USING @q;
+DEALLOCATE PREPARE s;
+
+--echo # A well-formed query vector is unaffected.
+SELECT id FROM t
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+
+DROP TABLE t;

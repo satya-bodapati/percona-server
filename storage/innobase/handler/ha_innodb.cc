@@ -12225,10 +12225,18 @@ int ha_innobase::vec_read_first(Item *item, uchar *buf, ha_rows limit) {
     return HA_ERR_END_OF_FILE;
   }
 
+  /* A query vector the column cannot be compared with is an error, the
+  one DISTANCE() raises when it is evaluated row by row. Answering with
+  no rows would make a malformed query look like one nothing is near. */
   const uint32 vec_dims =
       get_dimensions(vec->length(), Field_vector::precision);
-  if (vec_dims == UINT32_MAX || vec_dims != vec_index_dims(vindex)) {
-    return HA_ERR_END_OF_FILE;
+  if (vec_dims == UINT32_MAX) {
+    my_error(ER_TO_VECTOR_CONVERSION, MYF(0), vec->length(), vec->ptr());
+    return HA_ERR_GENERIC;
+  }
+  if (vec_dims != vec_index_dims(vindex)) {
+    my_error(ER_WRONG_ARGUMENTS, MYF(0), "distance");
+    return HA_ERR_GENERIC;
   }
 
   m_vec_query.assign(vec->ptr(), vec->length());
