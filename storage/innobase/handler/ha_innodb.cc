@@ -12224,25 +12224,29 @@ int ha_innobase::vec_read_first(Item *item, uchar *buf, ha_rows limit) {
   String buff_vec;
   String *vec = item->val_str(&buff_vec);
   if (vec == nullptr || vec->ptr() == nullptr) {
-    /* NULL query vector: no rows are "near" it. */
-    return HA_ERR_END_OF_FILE;
-  }
+    /* NULL query vector: every row's distance is NULL, so the ORDER BY
+    imposes no order and LIMIT n asks for any n rows - which is what the
+    scan without the index returns. Searching from the origin gives some
+    rows in some order, and keeps going for a filter above, as a search
+    from any vector would. */
+    m_vec_query.assign(vec_index_dims(vindex) * sizeof(float), '\0');
+  } else {
+    /* A query vector the column cannot be compared with is an error, the
+    one DISTANCE() raises when it is evaluated row by row. Answering with
+    no rows would make a malformed query look like one nothing is near. */
+    const uint32 vec_dims =
+        get_dimensions(vec->length(), Field_vector::precision);
+    if (vec_dims == UINT32_MAX) {
+      my_error(ER_TO_VECTOR_CONVERSION, MYF(0), vec->length(), vec->ptr());
+      return HA_ERR_GENERIC;
+    }
+    if (vec_dims != vec_index_dims(vindex)) {
+      my_error(ER_WRONG_ARGUMENTS, MYF(0), "distance");
+      return HA_ERR_GENERIC;
+    }
 
-  /* A query vector the column cannot be compared with is an error, the
-  one DISTANCE() raises when it is evaluated row by row. Answering with
-  no rows would make a malformed query look like one nothing is near. */
-  const uint32 vec_dims =
-      get_dimensions(vec->length(), Field_vector::precision);
-  if (vec_dims == UINT32_MAX) {
-    my_error(ER_TO_VECTOR_CONVERSION, MYF(0), vec->length(), vec->ptr());
-    return HA_ERR_GENERIC;
+    m_vec_query.assign(vec->ptr(), vec->length());
   }
-  if (vec_dims != vec_index_dims(vindex)) {
-    my_error(ER_WRONG_ARGUMENTS, MYF(0), "distance");
-    return HA_ERR_GENERIC;
-  }
-
-  m_vec_query.assign(vec->ptr(), vec->length());
 
   /* A re-executed statement can reach here with a scan still open. */
   vec_ann_close(m_vec_search);
