@@ -132,7 +132,7 @@ DROP TABLE tc1;
 #
 # === Section D: ADD INDEX after INSTANT ADD COLUMN
 #
-# Until PS-11299's rebuild-forcing fix, this crashed at dict0dd.cc:2682
+# Until PS-11299's rebuild-forcing fix, this crashed in dd_write_table()
 # because percona_vec_aux_id was missing from the rebuilt dict_table_t while
 # the dd::Table carried it. ADD INDEX now forces a rebuild that
 # materializes percona_vec_aux_id on a fresh dict_table_t (current_row_version=0),
@@ -185,7 +185,8 @@ DROP TABLE te1;
 # vector index in the current implementation. Consequently INSTANT
 # ADD is still blocked here (the retained hidden col would sit
 # between user cols and the INSTANT-added tail column, tripping
-# the row0sel.ic:199 mismatch on subsequent SELECT). Once
+# the mysql_col_len == len mismatch in
+# row_sel_field_store_in_mysql_format_func on subsequent SELECT). Once
 # PS-11300 either clears percona_vec_aux_id on last-DROP-INDEX or fixes
 # the SELECT column mapping, this section can flip to expect
 # success.
