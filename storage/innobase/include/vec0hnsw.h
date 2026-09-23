@@ -563,9 +563,6 @@ dberr_t vec_ann_error(const vec_search_t *s);
 /** End a scan and release the aux table and its MDL. Safe on nullptr. */
 void vec_ann_close(vec_search_t *s);
 
-/** Dimensions the index was built with; 0 if it has no runtime yet. */
-uint32_t vec_index_dims(const dict_index_t *index);
-
 /** State of one vector index build, owned by the ddl::Builder that is
 building that index. Opaque so the DDL layer needs none of the graph's
 headers. */
