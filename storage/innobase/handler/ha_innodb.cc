@@ -18083,11 +18083,11 @@ ha_rows ha_innobase::records_in_range(
     goto func_exit;
   }
 
-  /* Vector keys are still considered by the optimizer, which lacks an
-  HA_VECTOR exclusion in its cost paths. Without this guard a range
-  estimate would walk the vec index's nonexistent B-tree
-  (page == FIL_NULL). Return "no estimate" instead. tracks
-  teaching the optimizer to skip vector indexes for regular scans. */
+  /* A vector index has no B-tree to estimate from (page == FIL_NULL).
+  The optimizer keeps vector keys out of ref and range access
+  (add_key_part, setup_range_optimizer_param), so this should not be
+  reached; if some other path asks, return "no estimate" rather than
+  walk a tree that is not there. */
   if (index->is_vector()) {
     n_rows = HA_POS_ERROR;
     goto func_exit;

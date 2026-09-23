@@ -7947,7 +7947,7 @@ static bool add_key_part(Key_use_array *keyuse_array, Key_field *key_field) {
 
     for (uint key = 0; key < table->s->keys; key++) {
       if (!(table->keys_in_use_for_query.is_set(key))) continue;
-      if (table->key_info[key].flags & (HA_FULLTEXT | HA_SPATIAL))
+      if (table->key_info[key].flags & (HA_FULLTEXT | HA_SPATIAL | HA_VECTOR))
         continue;  // ToDo: ft-keys in non-ft queries.   SerG
 
       const uint key_parts = actual_key_parts(&table->key_info[key]);

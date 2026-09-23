@@ -1,0 +1,73 @@
+--echo #
+--echo # PS-11581: an equality predicate on a vector column must find the row.
+--echo #
+--echo # A vector index is a graph for nearest-neighbour search, not a B-tree
+--echo # over the values, so it cannot answer "which row holds exactly this
+--echo # vector". The optimizer used to offer it for ref and eq_ref lookups
+--echo # anyway - it excluded FULLTEXT and SPATIAL keys from those, but not
+--echo # vector ones - and the lookup found nothing, so WHERE v = <value>
+--echo # returned no rows with no error. The range optimizer had the same gap,
+--echo # reached through FORCE INDEX. The predicate has to be answered by a
+--echo # scan instead.
+--echo #
+
+CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4) NOT NULL,
+                VECTOR KEY vk (v) TYPE hnsw (M = 8));
+INSERT INTO t VALUES (1, STRING_TO_VECTOR('[1,0,0,0]')),
+                     (2, STRING_TO_VECTOR('[2,0,0,0]')),
+                     (3, STRING_TO_VECTOR('[3,0,0,0]'));
+
+--echo # = is not planned as a lookup on the vector index...
+--replace_column 10 # 11 #
+EXPLAIN SELECT id FROM t WHERE v = STRING_TO_VECTOR('[2,0,0,0]');
+--echo # ...and finds the row.
+SELECT id FROM t WHERE v = STRING_TO_VECTOR('[2,0,0,0]');
+
+--echo # The null-safe form, the same.
+--replace_column 10 # 11 #
+EXPLAIN SELECT id FROM t WHERE v <=> STRING_TO_VECTOR('[2,0,0,0]');
+SELECT id FROM t WHERE v <=> STRING_TO_VECTOR('[2,0,0,0]');
+
+--echo # A join on the vector column is the eq_ref shape of the same thing.
+CREATE TABLE p (pid INT PRIMARY KEY, pv VECTOR(4) NOT NULL);
+INSERT INTO p VALUES (1, STRING_TO_VECTOR('[3,0,0,0]'));
+--replace_column 10 # 11 #
+EXPLAIN SELECT t.id FROM p JOIN t ON t.v = p.pv;
+SELECT t.id FROM p JOIN t ON t.v = p.pv;
+
+--echo # An IN list is the range shape of the same predicate. (BETWEEN and
+--echo # < / > are refused on VECTOR operands before planning.)
+--replace_column 10 # 11 #
+EXPLAIN SELECT id FROM t WHERE v IN (STRING_TO_VECTOR('[1,0,0,0]'),
+                                     STRING_TO_VECTOR('[3,0,0,0]'));
+SELECT id FROM t WHERE v IN (STRING_TO_VECTOR('[1,0,0,0]'),
+                             STRING_TO_VECTOR('[3,0,0,0]')) ORDER BY id;
+
+--echo # FORCE INDEX used to push the same predicates onto a range scan of
+--echo # the vector index instead of a ref lookup.
+--replace_column 10 # 11 #
+EXPLAIN SELECT id FROM t FORCE INDEX (vk)
+  WHERE v = STRING_TO_VECTOR('[2,0,0,0]');
+SELECT id FROM t FORCE INDEX (vk) WHERE v = STRING_TO_VECTOR('[2,0,0,0]');
+--replace_column 10 # 11 #
+EXPLAIN SELECT id FROM t FORCE INDEX (vk)
+  WHERE v IN (STRING_TO_VECTOR('[1,0,0,0]'), STRING_TO_VECTOR('[3,0,0,0]'));
+SELECT id FROM t FORCE INDEX (vk)
+  WHERE v IN (STRING_TO_VECTOR('[1,0,0,0]'), STRING_TO_VECTOR('[3,0,0,0]'))
+  ORDER BY id;
+--replace_column 10 # 11 #
+EXPLAIN SELECT t.id FROM p STRAIGHT_JOIN t FORCE INDEX (vk) ON t.v = p.pv;
+SELECT t.id FROM p STRAIGHT_JOIN t FORCE INDEX (vk) ON t.v = p.pv;
+
+--echo # A value that is not there still finds nothing, so the fix is not
+--echo # simply matching everything.
+SELECT id FROM t WHERE v = STRING_TO_VECTOR('[9,9,9,9]');
+
+--echo # And the approximate search the index exists for is untouched.
+--replace_column 10 # 11 #
+EXPLAIN SELECT id FROM t
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[2,0,0,0]'), 'EUCLIDEAN') LIMIT 1;
+SELECT id FROM t
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[2,0,0,0]'), 'EUCLIDEAN') LIMIT 1;
+
+DROP TABLE p, t;
