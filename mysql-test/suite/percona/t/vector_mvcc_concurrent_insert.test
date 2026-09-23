@@ -1,0 +1,19 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # PS-11299: repeating an ANN query inside one REPEATABLE READ snapshot,
+--echo # while another session INSERTs enough rows to restructure the graph.
+--echo #
+--echo # An INSERT links each new node in and prunes the neighbour lists of the
+--echo # nodes around it. 2000 of them rewrite the shape of the graph a later
+--echo # search walks.
+--echo #
+--echo # This test pins current behaviour: the two reads DIFFER. That is not a
+--echo # visibility fault - every row returned is one the snapshot may see, and
+--echo # the checks below prove it - it is the search reaching different rows
+--echo # because the graph moved under it. If someone makes ANN reads repeatable
+--echo # this test will fail, and that is the point of it.
+--echo #
+--let $label = INSERT
+--let $mutation = INSERT INTO t (id, v) WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM s WHERE n < 2000), d(k) AS (SELECT 1 UNION ALL SELECT k+1 FROM d WHERE k < 64) SELECT 1000000+n, STRING_TO_VECTOR(CONCAT('[', (SELECT GROUP_CONCAT(ROUND(RAND(n*64+k+555)*100,3)) FROM d), ']')) FROM s
+--source ../include/vector_mvcc_body.inc

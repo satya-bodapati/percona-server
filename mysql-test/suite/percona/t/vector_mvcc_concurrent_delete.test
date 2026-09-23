@@ -1,0 +1,18 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # PS-11299: repeating an ANN query inside one REPEATABLE READ snapshot,
+--echo # while another session DELETEs half the rows.
+--echo #
+--echo # This is the one that does not move, and the node count below says why:
+--echo # a DELETE tombstones the base row and leaves its node in the graph. The
+--echo # walk still reaches it, and the read view resolves it to a row this
+--echo # snapshot can still see. Nothing about the graph's shape changed, so
+--echo # the second read walks the same path to the same answer.
+--echo #
+--echo # The two reads AGREE - and unlike the insert and update cases, that is
+--echo # a property worth keeping rather than current behaviour worth pinning.
+--echo #
+--let $label = DELETE
+--let $mutation = DELETE FROM t WHERE id % 2 = 0
+--source ../include/vector_mvcc_body.inc

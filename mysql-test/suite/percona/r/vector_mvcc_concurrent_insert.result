@@ -1,0 +1,60 @@
+#
+# PS-11299: repeating an ANN query inside one REPEATABLE READ snapshot,
+# while another session INSERTs enough rows to restructure the graph.
+#
+# An INSERT links each new node in and prunes the neighbour lists of the
+# nodes around it. 2000 of them rewrite the shape of the graph a later
+# search walks.
+#
+# This test pins current behaviour: the two reads DIFFER. That is not a
+# visibility fault - every row returned is one the snapshot may see, and
+# the checks below prove it - it is the search reaching different rows
+# because the graph moved under it. If someone makes ANN reads repeatable
+# this test will fail, and that is the point of it.
+#
+SET SESSION cte_max_recursion_depth = 100000;
+# Nodes in the graph before the writer:
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+nodes=2000 distinct_ids=2000 distinct_base_pks=2000 dup_ids=0 dup_base_pks=0 labels_contiguous_from_1=1
+# The reads below are on the ANN path - without that this tests nothing.
+EXPLAIN SELECT id FROM t
+ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[', TRIM(TRAILING ',' FROM REPEAT('10,',64)), ']')), 'EUCLIDEAN') LIMIT 1;
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t	NULL	vector_ann	NULL	vk	1	NULL	#	#	NULL
+Warnings:
+Note	1003	/* select#1 */ select `test`.`t`.`id` AS `id` from `test`.`t` order by distance(`test`.`t`.`v`,to_vector(concat('[',trim(trailing ',' from repeat('10,',64)),']')),'EUCLIDEAN') limit 1
+SET SESSION innodb_hnsw_ef_search = 1;
+SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+START TRANSACTION;
+SELECT COUNT(*) AS rows_in_snapshot FROM t;
+rows_in_snapshot
+2000
+SELECT COUNT(*) AS rows_the_writer_left FROM t;
+rows_the_writer_left
+4000
+# Nodes in the graph after the writer:
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+nodes=4000 distinct_ids=4000 distinct_base_pks=4000 dup_ids=0 dup_base_pks=0 labels_contiguous_from_1=1
+# The snapshot still counts exactly what it opened on:
+SELECT COUNT(*) AS rows_in_snapshot FROM t;
+rows_in_snapshot
+2000
+# ...and nothing the writer created is reachable from inside it:
+SELECT COUNT(*) AS leaked_new_rows FROM
+(SELECT id FROM t
+ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[', TRIM(TRAILING ',' FROM REPEAT('50,',64)), ']')), 'EUCLIDEAN')
+LIMIT 50) x
+WHERE id > 1000000;
+leaked_new_rows
+0
+#
+# Ten query vectors, read before the writer and again after it, in one
+# REPEATABLE READ transaction. Do the two reads agree?
+#
+INSERT: the two reads DIFFER
+COMMIT;
+DROP TABLE t;

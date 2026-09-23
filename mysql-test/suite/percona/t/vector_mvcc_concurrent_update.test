@@ -1,0 +1,19 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # PS-11299: repeating an ANN query inside one REPEATABLE READ snapshot,
+--echo # while another session UPDATEs every vector in the table.
+--echo #
+--echo # This disturbs the graph more than anything else can. Changing a vector
+--echo # gives the row a fresh label and inserts a NEW node, leaving the old one
+--echo # behind, so the graph both doubles and relocates: afterwards it
+--echo # describes where the rows are now, while this snapshot still sees where
+--echo # they were.
+--echo #
+--echo # This test pins current behaviour: the two reads DIFFER. Every row
+--echo # returned is still one the snapshot may see - the checks below prove
+--echo # it - so this is the search moving, not the isolation breaking.
+--echo #
+--let $label = UPDATE
+--let $mutation = UPDATE t SET v = STRING_TO_VECTOR(CONCAT('[', TRIM(TRAILING ',' FROM CONCAT(REPEAT(CONCAT(ROUND(RAND(id)*100,3),','),16), REPEAT(CONCAT(ROUND(RAND(id+7)*100,3),','),16), REPEAT(CONCAT(ROUND(RAND(id+13)*100,3),','),16), REPEAT(CONCAT(ROUND(RAND(id+29)*100,3),','),16))), ']'))
+--source ../include/vector_mvcc_body.inc
