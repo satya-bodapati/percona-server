@@ -24,7 +24,7 @@ VECTOR KEY (v) TYPE hnsw (M = 6)
 # in ha_innobase::build_template to skip HT_HIDDEN_SE cols when
 # computing the InnoDB→MySQL column map. Deferred to PS-11300.
 ALTER TABLE ta1 ADD COLUMN c1 INT, ALGORITHM=INSTANT;
-Got one of the listed errors
+ERROR 0A000: ALGORITHM=INSTANT is not supported. Reason: InnoDB does not support ALGORITHM=INSTANT on a table carrying vector index metadata. Try ALGORITHM=COPY/INPLACE.
 # Fallback: server-picked algorithm succeeds (INPLACE or COPY).
 ALTER TABLE ta1 ADD COLUMN c1 INT;
 SHOW CREATE TABLE ta1;
@@ -91,7 +91,7 @@ VECTOR KEY (v) TYPE hnsw (M = 6)
 );
 # B.1 DROP COLUMN ... ALGORITHM=INSTANT — blocked (see A.1 note)
 ALTER TABLE tb1 DROP COLUMN c1, ALGORITHM=INSTANT;
-Got one of the listed errors
+ERROR 0A000: ALGORITHM=INSTANT is not supported. Reason: InnoDB does not support ALGORITHM=INSTANT on a table carrying vector index metadata. Try ALGORITHM=COPY/INPLACE.
 # Fallback: server-picked algorithm succeeds.
 ALTER TABLE tb1 DROP COLUMN c1;
 # B.2 DROP COLUMN ... ALGORITHM=COPY
@@ -197,7 +197,7 @@ VECTOR KEY (v) TYPE hnsw (M = 6)
 );
 ALTER TABLE tf1 DROP KEY v;
 ALTER TABLE tf1 ADD COLUMN c1 INT, ALGORITHM=INSTANT;
-Got one of the listed errors
+ERROR 0A000: ALGORITHM=INSTANT is not supported. Reason: InnoDB does not support ALGORITHM=INSTANT on a table carrying vector index metadata. Try ALGORITHM=COPY/INPLACE.
 # Server-picked algorithm succeeds (rebuild).
 ALTER TABLE tf1 ADD COLUMN c1 INT;
 SHOW CREATE TABLE tf1;

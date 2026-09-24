@@ -28,7 +28,7 @@ CREATE TABLE ta1 (
 --echo # (parallel to FTS's ER_INNODB_FT_LIMIT). Enabling this needs a fix
 --echo # in ha_innobase::build_template to skip HT_HIDDEN_SE cols when
 --echo # computing the InnoDB→MySQL column map. Deferred to PS-11300.
---error ER_ALTER_OPERATION_NOT_SUPPORTED,ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
+--error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
 ALTER TABLE ta1 ADD COLUMN c1 INT, ALGORITHM=INSTANT;
 --echo # Fallback: server-picked algorithm succeeds (INPLACE or COPY).
 ALTER TABLE ta1 ADD COLUMN c1 INT;
@@ -65,7 +65,7 @@ CREATE TABLE tb1 (
 );
 
 --echo # B.1 DROP COLUMN ... ALGORITHM=INSTANT — blocked (see A.1 note)
---error ER_ALTER_OPERATION_NOT_SUPPORTED,ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
+--error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
 ALTER TABLE tb1 DROP COLUMN c1, ALGORITHM=INSTANT;
 --echo # Fallback: server-picked algorithm succeeds.
 ALTER TABLE tb1 DROP COLUMN c1;
@@ -157,7 +157,7 @@ CREATE TABLE tf1 (
   VECTOR KEY (v) TYPE hnsw (M = 6)
 );
 ALTER TABLE tf1 DROP KEY v;
---error ER_ALTER_OPERATION_NOT_SUPPORTED,ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
+--error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
 ALTER TABLE tf1 ADD COLUMN c1 INT, ALGORITHM=INSTANT;
 --echo # Server-picked algorithm succeeds (rebuild).
 ALTER TABLE tf1 ADD COLUMN c1 INT;
