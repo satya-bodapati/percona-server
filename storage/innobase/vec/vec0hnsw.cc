@@ -720,6 +720,7 @@ static dberr_t vec_add_node(vec_t *vec, dict_index_t *index,
     const dberr_t lerr = vec_runtime_load_once(vec, index, aux, thd);
     if (lerr != DB_SUCCESS) {
       trx_rollback_to_savepoint(aux_trx, nullptr);
+      aux_trx->flush_log_later = false;
       trx_free_for_background(aux_trx);
       vec_aux_close_for_dml(aux, thd, &mdl);
       return lerr;
@@ -763,6 +764,9 @@ static dberr_t vec_add_node(vec_t *vec, dict_index_t *index,
     that keeps the aux tracking memory rather than diverging from it. */
     trx_rollback_to_savepoint(aux_trx, nullptr);
   }
+  /* Neither trx_free() nor the pool clears it, and the next background
+  transaction given this trx_t would commit without flushing the log. */
+  aux_trx->flush_log_later = false;
   trx_free_for_background(aux_trx);
   vec_aux_close_for_dml(aux, thd, &mdl);
 

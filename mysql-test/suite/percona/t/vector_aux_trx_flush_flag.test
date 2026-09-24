@@ -1,0 +1,36 @@
+--source include/have_debug.inc
+--echo #
+--echo # The vector index's aux sub-transaction must not hand its deferred-
+--echo # flush flag to whoever gets its trx_t next.
+--echo #
+--echo # Each aux write commits on a background transaction with
+--echo # flush_log_later set, so the per-callback commits skip the fsync. The
+--echo # trx_t went back to the pool with the flag still set, and nothing on
+--echo # the way out of or back into the pool clears it. The next background
+--echo # transaction given that slot - dict stats, an internal DDL commit -
+--echo # then committed without flushing the redo log. The debug hook fails
+--echo # on reuse of a slot that still carries the flag.
+--echo #
+
+CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4) NOT NULL,
+                VECTOR KEY vk (v) TYPE hnsw (M = 8));
+
+SET @old_debug = @@global.debug;
+SET GLOBAL debug = '+d,trx_reuse_check_flush_log_later';
+
+--echo # Each INSERT takes an aux transaction from the pool and returns it,
+--echo # so the second one is handed the first one's slot.
+INSERT INTO t VALUES (1, STRING_TO_VECTOR('[1,0,0,0]'));
+INSERT INTO t VALUES (2, STRING_TO_VECTOR('[2,0,0,0]'));
+INSERT INTO t VALUES (3, STRING_TO_VECTOR('[3,0,0,0]'));
+UPDATE t SET v = STRING_TO_VECTOR('[4,0,0,0]') WHERE id = 3;
+--echo # Other background transactions from the same pool.
+ANALYZE TABLE t;
+CREATE TABLE u (a INT PRIMARY KEY);
+DROP TABLE u;
+
+SET GLOBAL debug = @old_debug;
+
+SELECT id FROM t
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[4,0,0,0]'), 'EUCLIDEAN') LIMIT 1;
+DROP TABLE t;

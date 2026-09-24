@@ -457,6 +457,11 @@ static trx_t *trx_create_low() {
 
   assert_trx_is_free(trx);
 
+  /* A slot handed back with flush_log_later still set would commit its
+  next background transaction without flushing the redo log. */
+  DBUG_EXECUTE_IF("trx_reuse_check_flush_log_later",
+                  ut_a(!trx->flush_log_later););
+
   mem_heap_t *heap;
   ib_alloc_t *alloc;
 
