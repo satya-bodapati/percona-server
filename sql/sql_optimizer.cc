@@ -11089,6 +11089,13 @@ bool JOIN::optimize_vector_query() {
   both filter shapes. */
   if (primary_tables != 1 || const_tables != 0) return false;
   if (m_select_limit == HA_POS_ERROR) return false;
+  /* A grouped or DISTINCT block's ORDER BY sorts groups, and a window
+  function must see every row before it applies; a scan in approximate
+  distance order answers none of them. */
+  if (grouped || implicit_grouping || select_distinct ||
+      m_windows.elements > 0) {
+    return false;
+  }
   if (order.order == nullptr || order.order->next != nullptr ||
       order.order->direction == ORDER_DESC) {
     return false;
