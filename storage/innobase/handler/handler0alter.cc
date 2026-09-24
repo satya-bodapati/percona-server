@@ -386,8 +386,12 @@ static UNIV_COLD void my_error_innodb(
     case DB_INTERRUPTED:
       my_error(ER_QUERY_INTERRUPTED, MYF(0));
       break;
-    case DB_OUT_OF_MEMORY:
     case DB_VEC_OUT_OF_MEMORY:
+      /* innodb_hnsw_max_memory, already reported as the ceiling. A real
+      allocation failure reports nothing first. */
+      if (current_thd->is_error()) break;
+      [[fallthrough]];
+    case DB_OUT_OF_MEMORY:
       my_error(ER_OUT_OF_RESOURCES, MYF(0));
       break;
     case DB_VEC_WRONG_DIMENSIONS:

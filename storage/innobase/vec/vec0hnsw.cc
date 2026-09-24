@@ -1020,8 +1020,8 @@ static uint64_t vec_row_base_pk(const dict_table_t *table,
 
 dberr_t vec_build_add_row(Vec_build *b, dict_table_t *table,
                           const dict_index_t *lob_index, const dtuple_t *row,
-                          uint64_t *bad_pk, uint32_t *bad_dims,
-                          uint32_t *need) {
+                          uint64_t *bad_pk, uint32_t *bad_dims, uint32_t *need,
+                          bool *ceiling) {
   ut_ad(b != nullptr && b->graph != nullptr);
 
   /* The graph copies the vector, so an off-page value only has to live
@@ -1065,10 +1065,13 @@ dberr_t vec_build_add_row(Vec_build *b, dict_table_t *table,
   /* innodb_hnsw_max_memory. The whole graph is in memory before any of it
   is durable, so this is the only thing bounding a build. Several scan
   threads can pass this together and overshoot by a node each, which is
-  bounded by the thread count and cheaper than serialising them. */
+  bounded by the thread count and cheaper than serialising them.
+
+  Not reported here: a scan thread has no session of its own, and several
+  of them can reach this at once. */
   if (srv_hnsw_max_memory != 0 &&
       Vec_arena::global_bytes() >= srv_hnsw_max_memory) {
-    vec_report_memory_ceiling(current_thd);
+    *ceiling = true;
     return DB_VEC_OUT_OF_MEMORY;
   }
   return DB_SUCCESS;

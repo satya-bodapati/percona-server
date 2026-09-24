@@ -539,6 +539,8 @@ dberr_t Context::build() noexcept {
     ut_ad(m_vec_bad_index != nullptr);
     vec_report_wrong_dimensions(thd(), m_vec_bad_index, m_vec_bad_pk,
                                 m_vec_bad_dims, m_vec_bad_need);
+  } else if (err == DB_VEC_OUT_OF_MEMORY && m_vec_ceiling) {
+    vec_report_memory_ceiling(thd());
   }
 
   err = cleanup(err);

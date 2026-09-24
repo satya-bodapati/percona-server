@@ -1714,9 +1714,13 @@ dberr_t Builder::add_row(Cursor &cursor, Row &row, size_t thread_id,
       uint64_t bad_pk{};
       uint32_t bad_dims{};
       uint32_t need{};
+      bool ceiling{};
       err = vec_build_add_row(m_vec, m_ctx.m_new_table,
                               m_ctx.m_old_table->first_index(), row.m_ptr,
-                              &bad_pk, &bad_dims, &need);
+                              &bad_pk, &bad_dims, &need, &ceiling);
+      if (err == DB_VEC_OUT_OF_MEMORY && ceiling && set_error(err)) {
+        m_ctx.m_vec_ceiling = true;
+      }
       if (err == DB_VEC_WRONG_DIMENSIONS && set_error(err)) {
         /* Only the thread whose error the DDL keeps records its row. */
         m_ctx.m_vec_bad_index = m_index;

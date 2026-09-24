@@ -625,6 +625,10 @@ struct Context {
   uint32_t m_vec_bad_dims{};
   uint32_t m_vec_bad_need{};
 
+  /** On DB_VEC_OUT_OF_MEMORY, whether a vector index build reached
+  innodb_hnsw_max_memory. Recorded and reported the same way. */
+  bool m_vec_ceiling{};
+
   /** Transaction covering the index build. */
   trx_t *m_trx{};
 

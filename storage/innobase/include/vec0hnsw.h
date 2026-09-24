@@ -624,12 +624,15 @@ of dimensions is handed back for the ALTER's own thread to report.
 @param[out]     bad_pk   on DB_VEC_WRONG_DIMENSIONS, the row's PRIMARY KEY
 @param[out]     bad_dims on DB_VEC_WRONG_DIMENSIONS, its vector's dimensions
 @param[out]     need     on DB_VEC_WRONG_DIMENSIONS, the index's dimensions
-@return DB_SUCCESS, DB_VEC_WRONG_DIMENSIONS, or DB_OUT_OF_MEMORY once
-innodb_hnsw_max_memory is reached */
+@param[out]     ceiling  set on DB_VEC_OUT_OF_MEMORY when the cause is
+                         innodb_hnsw_max_memory, for the ALTER's own thread
+                         to report
+@return DB_SUCCESS, DB_VEC_WRONG_DIMENSIONS, or DB_VEC_OUT_OF_MEMORY */
 [[nodiscard]] dberr_t vec_build_add_row(Vec_build *b, dict_table_t *table,
                                         const dict_index_t *lob_index,
                                         const dtuple_t *row, uint64_t *bad_pk,
-                                        uint32_t *bad_dims, uint32_t *need);
+                                        uint32_t *bad_dims, uint32_t *need,
+                                        bool *ceiling);
 
 /** Walk the finished graph and write the aux table: one row per node with
 the neighbours it ended up with, then record 0 naming the entry point. On
