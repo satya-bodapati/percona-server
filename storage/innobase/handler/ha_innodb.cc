@@ -12245,6 +12245,19 @@ int ha_innobase::vec_read_first(Item *item, uchar *buf, ha_rows limit) {
       return HA_ERR_GENERIC;
     }
 
+    /* A column cannot store NaN or infinity, but a query vector given as
+    bytes can hold them. DISTANCE() refuses one as out of range. The graph
+    search must never see it: every comparison with NaN is false, so its
+    heaps lose their order. */
+    for (uint32 i = 0; i < vec_dims; ++i) {
+      float f;
+      memcpy(&f, vec->ptr() + i * sizeof(float), sizeof(float));
+      if (!std::isfinite(f)) {
+        my_error(ER_DATA_OUT_OF_RANGE, MYF(0), "DOUBLE", "distance");
+        return HA_ERR_GENERIC;
+      }
+    }
+
     m_vec_query.assign(vec->ptr(), vec->length());
   }
 
