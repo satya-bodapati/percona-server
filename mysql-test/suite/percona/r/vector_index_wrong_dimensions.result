@@ -25,6 +25,26 @@ Error	7040	Column 'v' of the row with primary key 2 has 3 dimensions, but its ve
 # duplicate key.
 INSERT IGNORE INTO t VALUES (2, STRING_TO_VECTOR('[1,2,3]'));
 ERROR HY000: Column 'v' of the row with primary key 2 has 3 dimensions, but its vector index needs 4.
+# Under IGNORE a duplicate key is still skipped, but a row the vector
+# index refuses fails the whole statement: nothing below is inserted,
+# not even the good row.
+INSERT IGNORE INTO t VALUES (1, STRING_TO_VECTOR('[9,0,0,0]')),
+(20, STRING_TO_VECTOR('[2,0,0,0]')),
+(21, STRING_TO_VECTOR('[1,2]'));
+ERROR HY000: Column 'v' of the row with primary key 21 has 2 dimensions, but its vector index needs 4.
+SELECT id, VECTOR_TO_STRING(v) FROM t ORDER BY id;
+id	VECTOR_TO_STRING(v)
+1	[1.00000e+00,0.00000e+00,0.00000e+00,0.00000e+00]
+# Without the short row, IGNORE behaves as usual.
+INSERT IGNORE INTO t VALUES (1, STRING_TO_VECTOR('[9,0,0,0]')),
+(20, STRING_TO_VECTOR('[2,0,0,0]'));
+Warnings:
+Warning	1062	Duplicate entry '1' for key 't.PRIMARY'
+SELECT id FROM t ORDER BY id;
+id
+1
+20
+DELETE FROM t WHERE id = 20;
 # A multi-row INSERT fails as a whole.
 INSERT INTO t VALUES (3, STRING_TO_VECTOR('[3,0,0,0]')),
 (4, STRING_TO_VECTOR('[4,0]'));
