@@ -1144,8 +1144,9 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
   requirement - INSTANT runs its prepare phase under
   MDL_SHARED_UPGRADABLE, so concurrent DML is live throughout, and these
   are the DD paths we have exercised least. */
-  if (instant_type != Instant_Type::INSTANT_IMPOSSIBLE &&
-      DICT_TF2_FLAG_IS_SET(m_prebuilt->table, DICT_TF2_HAS_VEC_AUX_COL)) {
+  const bool vec_refuses_instant =
+      DICT_TF2_FLAG_IS_SET(m_prebuilt->table, DICT_TF2_HAS_VEC_AUX_COL);
+  if (instant_type != Instant_Type::INSTANT_IMPOSSIBLE && vec_refuses_instant) {
     instant_type = Instant_Type::INSTANT_IMPOSSIBLE;
     ha_alter_info->unsupported_reason = innobase_get_err_msg(
         ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_INSTANT);
@@ -1552,6 +1553,15 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
           ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_NOLOCK);
     }
     online = false;
+  }
+
+  /* The rebuild and ADD INDEX branches above set the LOCK=NONE reason
+  whatever was requested. For ALGORITHM=INSTANT the refusal above is the
+  one the statement hit. */
+  if (vec_refuses_instant && ha_alter_info->alter_info->requested_algorithm ==
+                                 Alter_info::ALTER_TABLE_ALGORITHM_INSTANT) {
+    ha_alter_info->unsupported_reason = innobase_get_err_msg(
+        ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_INSTANT);
   }
 
   return online ? HA_ALTER_INPLACE_NO_LOCK_AFTER_PREPARE
