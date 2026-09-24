@@ -836,8 +836,10 @@ bool JOIN::optimize(bool finalize_access_paths) {
   /* Perform FULLTEXT search before all regular searches */
   if (query_block->has_ft_funcs() && optimize_fts_query()) return true;
 
-  if (!thd->lex->using_hypergraph_optimizer() &&
-      query_block->has_vector_funcs() && optimize_vector_query())
+  /* Not gated on has_vector_funcs(): a select-list DISTANCE() the ORDER BY
+  names by alias or position is not on that list, and
+  optimize_vector_query() works everything out from the ORDER BY. */
+  if (!thd->lex->using_hypergraph_optimizer() && optimize_vector_query())
     return true;
 
   /*
