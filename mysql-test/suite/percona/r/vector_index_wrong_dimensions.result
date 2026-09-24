@@ -48,7 +48,8 @@ Error	7040	Column 'v' of the row with primary key 1 has 2 dimensions, but its ve
 INSERT INTO t (id, v) VALUES (1, STRING_TO_VECTOR('[1,2]'))
 ON DUPLICATE KEY UPDATE v = VALUES(v);
 ERROR HY000: Column 'v' of the row with primary key 1 has 2 dimensions, but its vector index needs 4.
-# REPLACE deletes and re-inserts, so it takes the INSERT path.
+# REPLACE on a primary-key conflict is an update of the row;
+# vector_replace covers its delete-and-insert path.
 REPLACE INTO t VALUES (1, STRING_TO_VECTOR('[1,2]'));
 ERROR HY000: Column 'v' of the row with primary key 1 has 2 dimensions, but its vector index needs 4.
 SELECT id, VECTOR_TO_STRING(v) FROM t ORDER BY id;

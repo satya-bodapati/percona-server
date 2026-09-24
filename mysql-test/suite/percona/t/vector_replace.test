@@ -1,0 +1,33 @@
+--echo #
+--echo # REPLACE on a vector-indexed table, on both of its paths.
+--echo #
+--echo # On a primary-key conflict the server turns REPLACE into an update of
+--echo # the row. On a conflict with another unique key it deletes the
+--echo # conflicting row and inserts the new one. The index must follow both.
+--echo #
+
+CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4) NOT NULL, u INT,
+                UNIQUE KEY ku (u), VECTOR KEY vk (v) TYPE hnsw (M = 8));
+INSERT INTO t VALUES (1, STRING_TO_VECTOR('[1,0,0,0]'), 10),
+                     (2, STRING_TO_VECTOR('[2,0,0,0]'), 20);
+
+--echo # Primary-key conflict: an update of row 1.
+REPLACE INTO t VALUES (1, STRING_TO_VECTOR('[5,0,0,0]'), 10);
+--echo # Unique-key conflict: row 2 is deleted, row 3 inserted.
+REPLACE INTO t VALUES (3, STRING_TO_VECTOR('[7,0,0,0]'), 20);
+SELECT id, u FROM t ORDER BY id;
+
+SELECT id FROM t
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[7,0,0,0]'), 'EUCLIDEAN') LIMIT 3;
+SELECT id FROM t IGNORE INDEX (vk)
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[7,0,0,0]'), 'EUCLIDEAN') LIMIT 3;
+SELECT id FROM t
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[2,0,0,0]'), 'EUCLIDEAN') LIMIT 1;
+
+--echo # A short vector is refused on the delete-and-insert path too, and the
+--echo # row it would have replaced survives.
+--error ER_VECTOR_INDEX_WRONG_DIMENSIONS
+REPLACE INTO t VALUES (4, STRING_TO_VECTOR('[9,9]'), 20);
+SELECT id, u FROM t ORDER BY id;
+
+DROP TABLE t;
