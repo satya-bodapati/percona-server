@@ -1,0 +1,45 @@
+#
+# A vector index built after a transaction's snapshot must not answer
+# for that transaction.
+#
+# The graph holds the rows the build saw, so a snapshot older than the
+# build can still see rows the graph never had. A B-tree index in the
+# same position is refused with ER_TABLE_DEF_CHANGED; the vector index
+# answered anyway and silently left those rows out.
+#
+CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4) NOT NULL, g INT);
+# The first ADD adds the hidden label column; the one below is INPLACE.
+ALTER TABLE t ADD VECTOR KEY vk (v) TYPE hnsw (M = 8);
+ALTER TABLE t DROP KEY vk;
+INSERT INTO t VALUES (1, STRING_TO_VECTOR('[1,0,0,0]'), 1),
+(2, STRING_TO_VECTOR('[2,0,0,0]'), 2);
+# The snapshot is taken without touching t, so the ALTERs below do
+# not wait for its metadata lock.
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+DELETE FROM t WHERE id = 1;
+ALTER TABLE t ADD VECTOR KEY vk (v) TYPE hnsw (M = 8), ALGORITHM=INPLACE;
+ALTER TABLE t ADD KEY kg (g), ALGORITHM=INPLACE;
+# The snapshot still sees row 1.
+SELECT id FROM t IGNORE INDEX (vk) ORDER BY id;
+id
+1
+2
+# Both indexes are newer than it, and both are refused.
+SELECT id FROM t FORCE INDEX (kg) WHERE g > 0 ORDER BY id;
+ERROR HY000: Table definition has changed, please retry transaction
+SELECT id FROM t
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+ERROR HY000: Table definition has changed, please retry transaction
+# Without the index the snapshot's answer is complete.
+SELECT id FROM t IGNORE INDEX (vk)
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+id
+1
+2
+COMMIT;
+# A new snapshot sees the index, and the row is gone.
+SELECT id FROM t
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+id
+2
+DROP TABLE t;

@@ -1,0 +1,47 @@
+--echo #
+--echo # A vector index built after a transaction's snapshot must not answer
+--echo # for that transaction.
+--echo #
+--echo # The graph holds the rows the build saw, so a snapshot older than the
+--echo # build can still see rows the graph never had. A B-tree index in the
+--echo # same position is refused with ER_TABLE_DEF_CHANGED; the vector index
+--echo # answered anyway and silently left those rows out.
+--echo #
+
+CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4) NOT NULL, g INT);
+--echo # The first ADD adds the hidden label column; the one below is INPLACE.
+ALTER TABLE t ADD VECTOR KEY vk (v) TYPE hnsw (M = 8);
+ALTER TABLE t DROP KEY vk;
+INSERT INTO t VALUES (1, STRING_TO_VECTOR('[1,0,0,0]'), 1),
+                     (2, STRING_TO_VECTOR('[2,0,0,0]'), 2);
+
+--connect (con1, localhost, root,,)
+--echo # The snapshot is taken without touching t, so the ALTERs below do
+--echo # not wait for its metadata lock.
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+
+--connection default
+DELETE FROM t WHERE id = 1;
+ALTER TABLE t ADD VECTOR KEY vk (v) TYPE hnsw (M = 8), ALGORITHM=INPLACE;
+ALTER TABLE t ADD KEY kg (g), ALGORITHM=INPLACE;
+
+--connection con1
+--echo # The snapshot still sees row 1.
+SELECT id FROM t IGNORE INDEX (vk) ORDER BY id;
+--echo # Both indexes are newer than it, and both are refused.
+--error ER_TABLE_DEF_CHANGED
+SELECT id FROM t FORCE INDEX (kg) WHERE g > 0 ORDER BY id;
+--error ER_TABLE_DEF_CHANGED
+SELECT id FROM t
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+--echo # Without the index the snapshot's answer is complete.
+SELECT id FROM t IGNORE INDEX (vk)
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+COMMIT;
+
+--echo # A new snapshot sees the index, and the row is gone.
+SELECT id FROM t
+  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 2;
+--disconnect con1
+--connection default
+DROP TABLE t;

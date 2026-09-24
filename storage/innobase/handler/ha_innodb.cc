@@ -12211,6 +12211,15 @@ int ha_innobase::vec_read_first(Item *item, uchar *buf, ha_rows limit) {
   dict_index_t *vindex = vec_index_of(m_prebuilt->table);
   if (vindex == nullptr) return HA_ERR_END_OF_FILE;
 
+  /* The visibility check change_active_index() makes for every other
+  index. The graph holds what its build saw, so a snapshot older than the
+  build can see rows the graph never had; answering would leave them out.
+  A corrupt vector index is reported by the runtime checks below, not
+  here. */
+  if (!vindex->is_corrupted() && !vindex->is_usable(m_prebuilt->trx)) {
+    return HA_ERR_TABLE_DEF_CHANGED;
+  }
+
   /* No runtime means the open that should have built one failed, and
   ha_innobase::open() carried on so the table stays readable. Answering
   with no rows would make that look like a table with nothing near the
