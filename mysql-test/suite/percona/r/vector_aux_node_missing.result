@@ -84,15 +84,16 @@ SET DEBUG = '-d,vec_aux_node_missing_after_entry';
 SELECT id FROM t2
 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 6;
 ERROR HY000: Index vk is corrupted
-# Rebuilding the index is the remedy.
+# Rebuilding the index is the remedy. A query vector at a distinct
+# distance from every row, so the answer has one order.
 ALTER TABLE t2 DROP KEY vk, ADD VECTOR KEY vk2 (v) TYPE hnsw (M = 4);
 SELECT id FROM t2
-ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 6;
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[4,3,2,1]'), 'euclidean') LIMIT 6;
 id
-1
 5
-4
-3
-2
 6
+1
+2
+3
+4
 DROP TABLE t2;
