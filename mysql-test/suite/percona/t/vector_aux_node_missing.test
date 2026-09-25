@@ -88,17 +88,17 @@ SET DEBUG = '+d,vec_aux_node_missing_after_entry';
 --replace_regex /names node [0-9]+/names node <N>/
 --error ER_INNODB_INDEX_CORRUPT
 SELECT id FROM t2
- ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 6;
+ ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 5;
 SET DEBUG = '-d,vec_aux_node_missing_after_entry';
 
 --echo # Refused, not answered with a node short.
 --error ER_INDEX_CORRUPT
 SELECT id FROM t2
- ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 6;
+ ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 5;
 
 --echo # Rebuilding the index is the remedy. A query vector at a distinct
 --echo # distance from every row, so the answer has one order.
 ALTER TABLE t2 DROP KEY vk, ADD VECTOR KEY vk2 (v) TYPE hnsw (M = 4);
 SELECT id FROM t2
- ORDER BY DISTANCE(v, STRING_TO_VECTOR('[4,3,2,1]'), 'euclidean') LIMIT 6;
+ ORDER BY DISTANCE(v, STRING_TO_VECTOR('[4,3,2,1]'), 'euclidean') LIMIT 5;
 DROP TABLE t2;

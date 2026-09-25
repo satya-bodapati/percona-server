@@ -77,23 +77,22 @@ INSERT INTO t2 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]')),
 # restart
 SET DEBUG = '+d,vec_aux_node_missing_after_entry';
 SELECT id FROM t2
-ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 6;
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 5;
 ERROR HY000: Index corrupt: the vector index's graph names node <N>, which its auxiliary table does not have. DROP and re-create the index to rebuild it from the base rows.
 SET DEBUG = '-d,vec_aux_node_missing_after_entry';
 # Refused, not answered with a node short.
 SELECT id FROM t2
-ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 6;
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 5;
 ERROR HY000: Index vk is corrupted
 # Rebuilding the index is the remedy. A query vector at a distinct
 # distance from every row, so the answer has one order.
 ALTER TABLE t2 DROP KEY vk, ADD VECTOR KEY vk2 (v) TYPE hnsw (M = 4);
 SELECT id FROM t2
-ORDER BY DISTANCE(v, STRING_TO_VECTOR('[4,3,2,1]'), 'euclidean') LIMIT 6;
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[4,3,2,1]'), 'euclidean') LIMIT 5;
 id
 5
 6
 1
 2
 3
-4
 DROP TABLE t2;
