@@ -441,60 +441,27 @@ struct vec_t : public Vec_runtime {
   release/acquire ordering: it publishes the `hnsw` pointer to every thread
   that sees it true, which is what lets the hot paths run unlocked. */
   std::atomic<bool> loaded{false};
-
-  /** Set when a node failed to load during a search or an insert. HNSW has
-  marked that node lost and never retries it, so this graph would answer
-  later queries with fewer rows and no error. Once set, every statement on
-  this index fails instead. Cleared only by building the runtime again -
-  a reopen after eviction, DROP and re-ADD, or a restart.
-
-  A flag rather than freeing and reloading the graph: readers do not take
-  load_mutex once `loaded` is true, so freeing `hnsw` here would run
-  concurrently with searches already walking it. */
-  std::atomic<bool> corrupted_hnsw{false};
 };
 
-/** The runtime attached to `index`, or nullptr if it has none yet.
+/** The runtime attached to `index`: nullptr only when its definition could
+not be read as the index was loaded (vec_runtime_create()).
 
-dict_index_t::vec is written by whichever session opens the table first
-and read by every session after it, with no latch between them, so the
-access is atomic: a release store publishes the object and an acquire
-load here guarantees that a reader seeing the pointer also sees the
-fields written before it. std::atomic_ref rather than making the member
+dict_index_t::vec is written once, by whoever builds the index, and read
+by every session after it with no latch between them, so the access is
+atomic: the release store in vec_runtime_create() publishes the object and
+an acquire load here guarantees that a reader seeing the pointer also sees
+the fields written before it. std::atomic_ref rather than making the member
 std::atomic because dict_index_t is never constructed - it is zeroed and
 dict_mem_fill_index_struct() stands in for a constructor - so a member
 with a real constructor would not have one called.
 @param[in]  index  vector index
 @return the runtime, or nullptr */
-/** Why a vector index has no runtime, for a statement that needs one.
-
-vec_runtime_open() records its reason on the index, because
-ha_innobase::open() must not fail the table open for a vector index it
-cannot build - the table has to stay readable and droppable. A statement
-that has to maintain or read the graph fails with the reason instead.
-@param[in]  index  the vector index, whose runtime is absent
-@return the reason, never DB_SUCCESS */
-[[nodiscard]] dberr_t vec_runtime_unavailable(const dict_index_t *index);
-
 [[nodiscard]] inline vec_t *vec_runtime_get(const dict_index_t *index) {
   /* const_cast: atomic_ref needs a non-const lvalue, and the read itself
   does not modify the index. */
   std::atomic_ref<Vec_runtime *> slot(const_cast<dict_index_t *>(index)->vec);
   return static_cast<vec_t *>(slot.load(std::memory_order_acquire));
 }
-
-/** Open (lazily create) the runtime for a vector index.
-
-Takes the open TABLE because that is where the parameters are: M, metric
-and ef_construction come back from the DD on the index's KEY, and the
-dimension from its VECTOR column; the row-level code that needs the graph
-has only dict objects. When the definition cannot be read, the reason is
-logged and recorded for vec_runtime_unavailable().
-@param[in,out]  index  the vector index
-@param[in]      form   the open TABLE
-@param[in]      thd    session, for error reporting
-@return the runtime, or nullptr if the parameters could not be read */
-vec_t *vec_runtime_open(dict_index_t *index, const TABLE *form, THD *thd);
 
 /** Add one row's vector to every vector index on the table.
 

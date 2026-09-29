@@ -1261,9 +1261,12 @@ struct dict_index_t {
   /** tracking all R-Tree search cursors */
   rtr_info_track_t *rtr_track;
 
-  /** In-memory state for an open vector index: the HNSW graph, its arena,
-  the persistor, and the parameters read back from the DD. nullptr until
-  something first opens the index, and nullptr for every non-vector index.
+  /** In-memory state for a vector index: the HNSW graph, its arena, the
+  persistor, and the parameters read back from the DD. Set by
+  vec_runtime_create() as the index is built, so every vector index has
+  one unless its definition could not be read - a statement that needs
+  the index then fails, and the next load tries again. nullptr for every
+  non-vector index.
 
   Raw pointer on purpose. This struct is never constructed or destructed -
   the memory is zeroed and dict_mem_fill_index_struct() stands in for a
@@ -1271,15 +1274,6 @@ struct dict_index_t {
   dict_mem_index_free() releases it by hand, as it already does for
   fields_array. */
   Vec_runtime *vec;
-
-  /** Why `vec` above is not there, when it is not. vec_runtime_open()
-  records its reason here, because opening the table must not fail for a
-  vector index that cannot be built - and a statement that needs the
-  index has to fail with something better than silence.
-
-  DB_ERROR_UNSET while no open has failed: it is 0, so the zeroing gives
-  that for free too. */
-  dberr_t vec_open_err;
 
   /** id of the transaction that created this index, or 0 if the index existed
   when InnoDB was started up */

@@ -579,7 +579,7 @@ Ret_t Tester::vec_runtime_info(std::vector<std::string> &tokens) noexcept {
 
   XLOG("dims=" << vec->dims << " M=" << vec->m << " ef_construction="
                << vec->ef_construction << " loaded=" << (vec->loaded ? 1 : 0)
-               << " corrupted=" << (vec->corrupted_hnsw ? 1 : 0));
+               << " corrupted=" << (tt.vindex->is_corrupted() ? 1 : 0));
   set_output(sout);
   return RET_PASS;
 }

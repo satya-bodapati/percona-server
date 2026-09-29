@@ -26,7 +26,10 @@ is open, hanging off dict_index_t::vec.
 #ifndef vec0index_h
 #define vec0index_h
 
+#include "db0err.h"
+
 struct dict_index_t;
+struct TABLE_SHARE;
 
 /** In-memory state belonging to one open vector index - the graph, the arena
 its nodes live in, the persistor, and the parameters read back from the DD.
@@ -52,5 +55,25 @@ so dict_index_t::vec is a raw pointer that starts null for free and has to
 be released by hand here, the way destroy_fields_array() already is.
 @param[in,out]  index  index whose runtime is to be freed */
 void vec_index_runtime_free(dict_index_t *index);
+
+/** Give a vector index its runtime, as the index is built: loaded from the
+DD, created by CREATE TABLE or TRUNCATE, or added by an ALTER. Every path
+that makes a vector dict_index_t has the definition the parameters live in
+- the dimension on the VECTOR column, M and the metric on the KEY - so no
+index is ever without a runtime, and nothing has to race to build one.
+
+Cheap: only the parameters are stored. The graph is read from the aux on
+the first statement that needs it (vec_runtime_load_once), not here, so a
+table loaded for purge or statistics pays nothing for it.
+
+When the definition cannot be read, the index is left without a runtime,
+which is the whole of the state: every statement that needs the index
+fails with ER_INDEX_CORRUPT, the table itself stays readable and
+droppable, and the next load of the table tries again. The index is not
+marked DICT_CORRUPT, which InnoDB would persist.
+@param[in,out]  index  the vector index, already in the dictionary cache
+@param[in]      share  the definition the index was built from
+@return DB_SUCCESS, or DB_INDEX_CORRUPT */
+dberr_t vec_runtime_create(dict_index_t *index, const TABLE_SHARE *share);
 
 #endif /* vec0index_h */

@@ -5270,6 +5270,11 @@ template <typename Table>
       ut_ad(!vec_index);
       vec_index = ctx->add_index[a];
       ut_ad(dict_index_get_online_status(vec_index) == ONLINE_INDEX_COMPLETE);
+
+      /* Its runtime, from the definition this ALTER is producing. DDL
+      validated it, so it can be read. */
+      error = vec_runtime_create(vec_index, altered_table->s);
+      if (error != DB_SUCCESS) goto error_handling;
     }
 
     /* If only online ALTER TABLE operations have been

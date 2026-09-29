@@ -267,30 +267,6 @@ dberr_t vec_persist_entry_point(Vec_ctx *ctx, uint64_t id) {
   return err;
 }
 
-/** Record why no runtime could be built, for the statements that will need
-one. Every failure below also logs, for the operator; this is what the
-client gets to see.
-@param[in,out]  index  the vector index
-@param[in]      err    the reason
-@return nullptr, so a failing path can return this directly */
-static vec_t *vec_runtime_open_failed(dict_index_t *index, dberr_t err) {
-  ut_ad(err != DB_SUCCESS);
-  std::atomic_ref<dberr_t> slot(index->vec_open_err);
-  slot.store(err, std::memory_order_release);
-  return nullptr;
-}
-
-dberr_t vec_runtime_unavailable(const dict_index_t *index) {
-  std::atomic_ref<dberr_t> slot(
-      const_cast<dict_index_t *>(index)->vec_open_err);
-  const dberr_t err = slot.load(std::memory_order_acquire);
-  /* Nothing but ha_innobase::open() builds a runtime, and it records why
-  when it cannot - so an unset reason means no open has run for this
-  index, which a statement that got this far must have done. */
-  ut_ad(err != DB_ERROR_UNSET);
-  return err == DB_ERROR_UNSET ? DB_INDEX_CORRUPT : err;
-}
-
 /** A vector index's settings, as its KEY declares them. */
 struct Vec_index_config {
   uint32_t dims;
@@ -303,22 +279,23 @@ struct Vec_index_config {
 dimension from the VECTOR column, M, ef_construction and the metric from
 WITH(...), which come back from the DD on the KEY. The one place both the
 runtime open and the index build read them, so the two cannot drift.
-@param[in]   table  the TABLE the KEY is in: the open table, or the table
-                    an ALTER is producing
+@param[in]   share  the definition the KEY is in: the one the DD load
+                    built, the one CREATE TABLE is writing, or the one an
+                    ALTER is producing
 @param[in]   index  the vector index
 @param[out]  out    the settings, when the definition is usable
 @return nullptr, or why the definition cannot be used */
-static const char *vec_index_config(const TABLE *table,
+static const char *vec_index_config(const TABLE_SHARE *share,
                                     const dict_index_t *index,
                                     Vec_index_config *out) {
   /* Match by name, which is how InnoDB pairs a KEY with a dict_index_t
   everywhere else - dict_table_get_index_on_name() is the same lookup.
   Index names are unique within a table, so this is exact. */
   const KEY *key = nullptr;
-  for (uint k = 0; k < table->s->keys; k++) {
-    if ((table->key_info[k].flags & HA_VECTOR) != 0 &&
-        innobase_strcasecmp(table->key_info[k].name, index->name) == 0) {
-      key = &table->key_info[k];
+  for (uint k = 0; k < share->keys; k++) {
+    if ((share->key_info[k].flags & HA_VECTOR) != 0 &&
+        innobase_strcasecmp(share->key_info[k].name, index->name) == 0) {
+      key = &share->key_info[k];
       break;
     }
   }
@@ -337,7 +314,7 @@ static const char *vec_index_config(const TABLE *table,
   still correct, though, and indexing table->field with it is exactly the
   dance create_index() does to see past a forged prefix field. */
   ut_ad(key->user_defined_key_parts == 1);
-  const Field *f = table->field[key->key_part[0].field->field_index()];
+  const Field *f = share->field[key->key_part[0].field->field_index()];
   if (f == nullptr || f->type() != MYSQL_TYPE_VECTOR) {
     return "the indexed column is not a VECTOR column";
   }
@@ -354,56 +331,41 @@ static const char *vec_index_config(const TABLE *table,
   return nullptr;
 }
 
-vec_t *vec_runtime_open(dict_index_t *index, const TABLE *form, THD *thd) {
+dberr_t vec_runtime_create(dict_index_t *index, const TABLE_SHARE *share) {
   ut_ad(index != nullptr);
   ut_ad(index->is_vector());
-
-  vec_t *existing = vec_runtime_get(index);
-  if (existing != nullptr) return existing;
-
-  /* Test-only: drives the open-error path, where the reason is recorded in
-  vec_open_err for later statements and a later open can still succeed. */
-  DBUG_EXECUTE_IF("vec_runtime_open_fail",
-                  return vec_runtime_open_failed(index, DB_VEC_OUT_OF_MEMORY););
+  ut_ad(index->vec == nullptr);
+  /* The aux table is named by it. */
+  ut_ad(index->id != 0);
 
   Vec_index_config cfg;
-  const char *why = vec_index_config(form, index, &cfg);
+  const char *why = vec_index_config(share, index, &cfg);
+
+  /* Test-only: a definition that cannot be read, which DDL never
+  produces, so the DD-load path's refusal can be seen from SQL. */
+  DBUG_EXECUTE_IF("vec_runtime_create_fail", why = "injected";);
+
   if (why != nullptr) {
     ib::error(ER_IB_MSG_456)
-        << "Failed to open vector runtime for index " << index->name
+        << "Cannot build the vector runtime for index " << index->name
         << " on table " << index->table->name << ": " << why
-        << "; vector search on it will not work until the table is"
-        << " reopened.";
-    return vec_runtime_open_failed(index, DB_INDEX_CORRUPT);
+        << "; statements that need the index fail until it is loaded again.";
+    /* Not DICT_CORRUPT: InnoDB persists that bit with the table's dynamic
+    metadata, and the cause is only that this load could not read the
+    definition. The missing runtime is the state; the next load retries. */
+    return DB_INDEX_CORRUPT;
   }
 
   auto *vec =
       ut::new_withkey<vec_t>(UT_NEW_THIS_FILE_PSI_KEY, index->id, index->table,
                              cfg.dims, cfg.M, cfg.ef_construction, cfg.dist);
 
-  /* Publish, or lose the race and use the winner. Two sessions opening
-  the same table both find dict_index_t::vec null - ha_innobase::open
-  takes no latch that would order them - so both build a runtime and one
-  of them must give way. Before this was a compare-exchange the loser's
-  object was simply overwritten and leaked, and had any caller used the
-  returned pointer there would have been two graphs on one index: two
-  arenas both charging innodb_hnsw_max_memory, inserts landing in one
-  graph and searches reading the other.
-
-  The loser's object is safe to destroy: nothing has been loaded into it
-  yet, so ~vec_t deletes a null graph and no arena bytes are involved. */
-  std::atomic_ref<Vec_runtime *> slot(index->vec);
-  Vec_runtime *expected = nullptr;
-  if (!slot.compare_exchange_strong(expected, vec, std::memory_order_release,
-                                    std::memory_order_acquire)) {
-    ut::delete_(vec);
-    return static_cast<vec_t *>(expected);
-  }
-
-  /* An earlier open may have failed and recorded why; this one did not. */
-  std::atomic_ref<dberr_t> err_slot(index->vec_open_err);
-  err_slot.store(DB_SUCCESS, std::memory_order_release);
-  return vec;
+  /* One writer: whoever is building the index. The release store still
+  matters for ALTER, which adds the index to a table other sessions can
+  already see; vec_runtime_get() pairs with it. */
+  std::atomic_ref<Vec_runtime *>(index->vec)
+      .store(vec, std::memory_order_release);
+  return DB_SUCCESS;
 }
 
 /** Open the aux table for one DML operation.
@@ -615,9 +577,7 @@ static dberr_t vec_runtime_load_once(vec_t *vec, dict_index_t *index,
                                      dict_table_t *aux, THD *thd) {
   /* Index-scoped, not DB_CORRUPTION: only this index's graph is bad, and
   DB_CORRUPTION would report the base table as crashed. */
-  if (vec->corrupted_hnsw.load(std::memory_order_acquire)) {
-    return DB_INDEX_CORRUPT;
-  }
+  if (index->is_corrupted()) return DB_INDEX_CORRUPT;
 
   if (vec->loaded.load(std::memory_order_acquire)) return DB_SUCCESS;
 
@@ -627,15 +587,6 @@ static dberr_t vec_runtime_load_once(vec_t *vec, dict_index_t *index,
   const dberr_t err = vec_runtime_load(vec, aux, thd);
   if (err == DB_INDEX_CORRUPT) dict_set_corrupted(index);
   return err;
-}
-
-/** Record that a node failed to load mid-statement. HNSW has marked it lost
-and will not retry, so the graph can no longer answer correctly. The graph
-is not freed here - searches may be walking it - so a flag stands in until
-the runtime is built again.
-@param[in,out]  vec  the runtime */
-static void vec_runtime_set_corrupted(vec_t *vec) {
-  vec->corrupted_hnsw.store(true, std::memory_order_release);
 }
 
 /** Insert one node into the graph and, through the persistor, the aux.
@@ -742,7 +693,7 @@ static dberr_t vec_add_node(vec_t *vec, dict_index_t *index,
     This marked the runtime corrupt for any failure at all, which was the
     honest reading while a callback could only say "gone": one lock wait
     cost a rebuild. The result codes tell the two apart now. */
-    if (ctx.err == DB_INDEX_CORRUPT) vec_runtime_set_corrupted(vec);
+    if (ctx.err == DB_INDEX_CORRUPT) dict_set_corrupted(index);
 
     /* trx_rollback_to_savepoint, not trx_rollback_for_mysql: the aux
     transaction is a BACKGROUND trx, so it is not in the MySQL trx list that
@@ -789,7 +740,6 @@ later search would otherwise answer without it.
 @param[in,out]  s  the scan whose ctx.err is set */
 static void vec_ann_set_corrupted(vec_search_t *s) {
   if (s->ctx.err != DB_INDEX_CORRUPT) return;
-  vec_runtime_set_corrupted(s->vec);
   dict_set_corrupted(s->base_index);
 }
 
@@ -941,7 +891,7 @@ Vec_build *vec_build_start(dict_index_t *index, const TABLE *altered_table,
   producing - the dictionary carries neither - so they are read from the
   KEY here rather than plumbed down from the handler. */
   Vec_index_config cfg;
-  const char *why = vec_index_config(altered_table, index, &cfg);
+  const char *why = vec_index_config(altered_table->s, index, &cfg);
 
   /* Test-only: let an MTR test force the "KEY not found" failure without
   needing a genuinely corrupt DD round-trip. */
@@ -1127,7 +1077,7 @@ dberr_t vec_update_row(dict_table_t *table, uint64_t label, const char *q,
        index = index->next()) {
     if (!index->is_vector()) continue;
     vec_t *vec = vec_runtime_get(index);
-    if (vec == nullptr) return vec_runtime_unavailable(index);
+    if (vec == nullptr) return DB_INDEX_CORRUPT;
     if (q_len != vec->dims * sizeof(float)) return DB_VEC_WRONG_DIMENSIONS;
     const dberr_t err = vec_add_node(vec, index, table, label, base_pk, q, thd);
     if (err != DB_SUCCESS) return err;
@@ -1140,14 +1090,14 @@ dberr_t vec_insert_row(dict_table_t *table, const dtuple_t *row, THD *thd) {
        index = index->next()) {
     if (!index->is_vector()) continue;
 
-    /* No runtime means the open that should have built one failed, and
-    ha_innobase::open() carried on so the table stays readable and
+    /* No runtime means the definition could not be read when the index
+    was loaded, and the load carried on so the table stays readable and
     droppable. This statement cannot carry on: the row would be written
     with a hidden label that no node is ever created under, the index
     would answer without it for good, and nothing reconciles the two
     afterwards. */
     vec_t *vec = vec_runtime_get(index);
-    if (vec == nullptr) return vec_runtime_unavailable(index);
+    if (vec == nullptr) return DB_INDEX_CORRUPT;
 
     mem_heap_t *heap = nullptr;
     auto heap_guard = create_scope_guard([&heap]() {

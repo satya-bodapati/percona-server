@@ -8412,29 +8412,6 @@ int ha_innobase::open(const char *name, int, uint open_flags,
     dict_table_close(m_prebuilt->table, false, false);
   }
 
-  /* Give every vector index on this table its runtime, if it has none
-  yet. Here rather than deeper down because this is where the index
-  PARAMETERS are reachable: M, ef_construction and the metric come from
-  the DD through KEY, and the row-level code that will need the graph
-  (row0mysql) has only dict objects. The runtime itself is per index and
-  lives on dict_index_t, so it outlives this handler and is shared by
-  every session that opens the table.
-
-  A failure here is not fatal to the open: without a runtime the index
-  simply has no graph, and the DML path reports the problem when it
-  tries to use one. Refusing the open would take the whole table
-  offline for a vector index that may not even be queried. */
-  for (dict_index_t *index = m_prebuilt->table->first_index(); index != nullptr;
-       index = index->next()) {
-    if (!index->is_vector() || vec_runtime_get(index) != nullptr) continue;
-
-    /* A failure has already reported itself on the THD and recorded its
-    reason on the index, and an index with no runtime simply has no graph
-    yet - the next open tries again. Opening the table must not fail for
-    it. */
-    vec_runtime_open(index, table, thd);
-  }
-
   return 0;
 }
 
@@ -12210,15 +12187,12 @@ int ha_innobase::vec_read_first(Item *item, uchar *buf, ha_rows limit) {
   dict_index_t *vindex = vec_index_of(m_prebuilt->table);
   if (vindex == nullptr) return HA_ERR_END_OF_FILE;
 
-  /* No runtime means the open that should have built one failed, and
-  ha_innobase::open() carried on so the table stays readable. Answering
-  with no rows would make that look like a table with nothing near the
-  query vector; the reason the open recorded is what the client should
-  see. */
+  /* No runtime means the definition could not be read when the index was
+  loaded. Answering with no rows would make that look like a table with
+  nothing near the query vector. */
   const vec_t *rt = vec_runtime_get(vindex);
   if (rt == nullptr) {
-    return convert_error_code_to_mysql(vec_runtime_unavailable(vindex), 0,
-                                       ha_thd());
+    return convert_error_code_to_mysql(DB_INDEX_CORRUPT, 0, ha_thd());
   }
 
   String buff_vec;
@@ -15108,6 +15082,17 @@ int create_table_info_t::create_table(const dd::Table *dd_table,
       if (error) {
         return error;
       }
+    }
+  }
+
+  /* The runtime, built here like every other index attribute; see
+  vec_runtime_create(). DDL validated the definition, so it can be read. */
+  for (dict_index_t *index = m_table->first_index(); index != nullptr;
+       index = index->next()) {
+    if (!index->is_vector()) continue;
+    const dberr_t verr = vec_runtime_create(index, m_form->s);
+    if (verr != DB_SUCCESS) {
+      return convert_error_code_to_mysql(verr, m_flags, nullptr);
     }
   }
 
