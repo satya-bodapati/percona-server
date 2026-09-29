@@ -73,6 +73,81 @@ enum HnswResult {
 };
 
 /**
+  Visited set of SEARCH-LAYER (v in the HNSW paper), a set of T pointers.
+
+  Open addressing with linear probing over one flat array of node
+  pointers, kept at most half full. std::unordered_set allocated and freed
+  a hash node for every visited node, which was a fifth of the time of an
+  index build. Only insertion and lookup are needed: a search never
+  removes a node from the set.
+
+  Allocation failure throws std::bad_alloc, as the standard containers do;
+  callers map it to HNSW_OOM_CONTEXT.
+*/
+template <typename T>
+class HnswVisitedSet {
+ public:
+  /** Make room for @p n nodes without growing. */
+  void reserve(size_t n) {
+    size_t capacity = MIN_CAPACITY;
+    while (capacity < 2 * n) capacity *= 2;
+    if (capacity > m_slots.size()) rehash(capacity);
+  }
+
+  /** Insert @p node; return false if it was already present. */
+  bool insert(T *node) {
+    assert(node != nullptr);
+    if (2 * (m_size + 1) > m_slots.size()) {
+      rehash(std::max(MIN_CAPACITY, 2 * m_slots.size()));
+    }
+    for (size_t i = slot(node);; i = (i + 1) & m_mask) {
+      if (m_slots[i] == node) return false;
+      if (m_slots[i] == nullptr) {
+        m_slots[i] = node;
+        ++m_size;
+        return true;
+      }
+    }
+  }
+
+  size_t count(const T *node) const {
+    if (m_size == 0) return 0;
+    for (size_t i = slot(node);; i = (i + 1) & m_mask) {
+      if (m_slots[i] == node) return 1;
+      if (m_slots[i] == nullptr) return 0;
+    }
+  }
+
+  bool empty() const { return m_size == 0; }
+
+ private:
+  static constexpr size_t MIN_CAPACITY = 64;
+
+  /** Fibonacci hash of the pointer; nodes are at least 8-byte aligned. */
+  size_t slot(const T *node) const {
+    const uint64_t key = reinterpret_cast<uintptr_t>(node) >> 3;
+    return (key * 0x9E3779B97F4A7C15ULL) >> m_shift;
+  }
+
+  void rehash(size_t capacity) {
+    std::vector<T *> old(capacity, nullptr);
+    old.swap(m_slots);
+    m_mask = capacity - 1;
+    m_shift = 64;
+    for (size_t c = capacity; c > 1; c >>= 1) --m_shift;
+    m_size = 0;
+    for (T *node : old) {
+      if (node != nullptr) insert(node);
+    }
+  }
+
+  std::vector<T *> m_slots;
+  size_t m_size{0};
+  size_t m_mask{0};
+  unsigned m_shift{64};
+};
+
+/**
   Basic class for in-memory Hierarchical Navigable Small World (HNSW) vector
   index.
 
@@ -790,79 +865,8 @@ class HNSW {
   typedef std::priority_queue<NodeDist, std::vector<NodeDist>, NodeDistMinCmp>
       NodeDistMinQueue;
 
-  /**
-    Visited set of SEARCH-LAYER (v in the HNSW paper).
-
-    Open addressing with linear probing over one flat array of node
-    pointers, kept at most half full. std::unordered_set allocated and freed
-    a hash node for every visited node, which was a fifth of the time of an
-    index build. Only insertion and lookup are needed: a search never
-    removes a node from the set.
-
-    Allocation failure throws std::bad_alloc, as the standard containers do;
-    callers map it to HNSW_OOM_CONTEXT.
-  */
-  class VisitedSet {
-   public:
-    /** Make room for @p n nodes without growing. */
-    void reserve(size_t n) {
-      size_t capacity = MIN_CAPACITY;
-      while (capacity < 2 * n) capacity *= 2;
-      if (capacity > m_slots.size()) rehash(capacity);
-    }
-
-    /** Insert @p node; return false if it was already present. */
-    bool insert(Node *node) {
-      assert(node != nullptr);
-      if (2 * (m_size + 1) > m_slots.size()) {
-        rehash(std::max(MIN_CAPACITY, 2 * m_slots.size()));
-      }
-      for (size_t i = slot(node);; i = (i + 1) & m_mask) {
-        if (m_slots[i] == node) return false;
-        if (m_slots[i] == nullptr) {
-          m_slots[i] = node;
-          ++m_size;
-          return true;
-        }
-      }
-    }
-
-    size_t count(const Node *node) const {
-      if (m_size == 0) return 0;
-      for (size_t i = slot(node);; i = (i + 1) & m_mask) {
-        if (m_slots[i] == node) return 1;
-        if (m_slots[i] == nullptr) return 0;
-      }
-    }
-
-    bool empty() const { return m_size == 0; }
-
-   private:
-    static constexpr size_t MIN_CAPACITY = 64;
-
-    /** Fibonacci hash of the pointer; nodes are at least 8-byte aligned. */
-    size_t slot(const Node *node) const {
-      const uint64_t key = reinterpret_cast<uintptr_t>(node) >> 3;
-      return (key * 0x9E3779B97F4A7C15ULL) >> m_shift;
-    }
-
-    void rehash(size_t capacity) {
-      std::vector<Node *> old(capacity, nullptr);
-      old.swap(m_slots);
-      m_mask = capacity - 1;
-      m_shift = 64;
-      for (size_t c = capacity; c > 1; c >>= 1) --m_shift;
-      m_size = 0;
-      for (Node *node : old) {
-        if (node != nullptr) insert(node);
-      }
-    }
-
-    std::vector<Node *> m_slots;
-    size_t m_size{0};
-    size_t m_mask{0};
-    unsigned m_shift{64};
-  };
+  /** Visited set of SEARCH-LAYER, see HnswVisitedSet. */
+  using VisitedSet = HnswVisitedSet<Node>;
 
  public:
   /**

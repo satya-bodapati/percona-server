@@ -448,6 +448,17 @@ MYSQL_ADD_EXECUTABLE(hnsw_bench-t hnsw_bench-t.cc
   SKIP_INSTALL
 )
 
+# HnswVisitedSet against ankerl::unordered_dense::set and std::unordered_set.
+# Not in the TESTS list, like hnsw_bench-t: its timing test is meant to be
+# run deliberately. See the file header.
+MYSQL_ADD_EXECUTABLE(hnsw_visited_set-t hnsw_visited_set-t.cc
+  COMPILE_DEFINITIONS ${DISABLE_PSI_DEFINITIONS}
+  ENABLE_EXPORTS
+  EXCLUDE_FROM_ALL
+  LINK_LIBRARIES sqlgunitlib gunit_small extra::boost extra::unordered_dense
+  SKIP_INSTALL
+)
+
 # Disable by default, since it dumps a stack trace.
 # We don't want ppl to think there was a segfault or something.
 # See also the mtr test main.print_stacktrace
