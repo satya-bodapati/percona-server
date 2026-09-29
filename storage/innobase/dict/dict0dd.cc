@@ -80,6 +80,7 @@ Data dictionary interface */
 #include "sql_table.h"
 #include "univ.i"  // Using OS_PATH_SEPARATOR
 #include "vec0aux.h"
+#include "vec0index.h"
 #include "vec0label.h"
 #endif /* !UNIV_HOTBACKUP */
 
@@ -5289,6 +5290,12 @@ dict_table_t *dd_open_table_one(dd::cache::Dictionary_client *client,
     index->space = sid;
     index->id = id;
     index->trx_id = trx_id;
+
+    /* The runtime keys its aux table by index id, so only now. Not fatal
+    to the load: an index whose definition cannot be read has no runtime,
+    and the table stays readable and droppable. A concurrent load of the
+    same table that loses below frees its runtime with it. */
+    if (index->is_vector()) std::ignore = vec_runtime_create(index, table->s);
 
     /** Look up the spatial reference system in the
     dictionary. Since this may cause a table open to read the
