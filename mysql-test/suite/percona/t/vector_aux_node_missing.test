@@ -104,3 +104,57 @@ ALTER TABLE t2 DROP KEY vk, ADD VECTOR KEY vk2 (v) TYPE hnsw (M = 4);
 SELECT id FROM t2
  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[4,3,2,1]'), 'euclidean') LIMIT 3;
 DROP TABLE t2;
+
+--echo #
+--echo # The same, found by an INSERT: the entry point loads, and a node the
+--echo # insert faults in while it looks for neighbours is missing. The
+--echo # index is marked corrupt exactly as a search marks it - persistently,
+--echo # so a restart does not bring back a graph that would answer a node
+--echo # short.
+--echo #
+# Each refused INSERT logs the generic index-corrupt message; a refused
+# SELECT does not.
+--disable_query_log
+call mtr.add_suppression("A vector index's auxiliary table does not agree with its graph");
+--enable_query_log
+CREATE TABLE t3 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(4) NOT NULL,
+                 VECTOR KEY vk (v) TYPE hnsw (M = 4));
+INSERT INTO t3 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]')),
+                      (2, STRING_TO_VECTOR('[0,1,0,0]')),
+                      (3, STRING_TO_VECTOR('[0,0,1,0]')),
+                      (4, STRING_TO_VECTOR('[0,0,0,1]')),
+                      (5, STRING_TO_VECTOR('[1,1,0,0]')),
+                      (6, STRING_TO_VECTOR('[0,1,1,0]'));
+--source include/restart_mysqld.inc
+
+SET DEBUG = '+d,vec_aux_node_missing_after_entry';
+--replace_regex /names node [0-9]+/names node <N>/
+--error ER_INNODB_INDEX_CORRUPT
+INSERT INTO t3 VALUES (7, STRING_TO_VECTOR('[1,0,1,0]'));
+SET DEBUG = '-d,vec_aux_node_missing_after_entry';
+
+--echo # The row was not written: the statement failed with it.
+SELECT id FROM t3 FORCE INDEX (PRIMARY) ORDER BY id;
+
+--echo # Refused from here on, for DML and search alike.
+--error ER_INDEX_CORRUPT
+INSERT INTO t3 VALUES (7, STRING_TO_VECTOR('[1,0,1,0]'));
+
+--echo # And still after a restart: the mark is on the index, not only on
+--echo # the graph in memory.
+--source include/restart_mysqld.inc
+--error ER_INDEX_CORRUPT
+INSERT INTO t3 VALUES (7, STRING_TO_VECTOR('[1,0,1,0]'));
+--error ER_INDEX_CORRUPT
+SELECT id FROM t3
+ ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 3;
+
+--echo # Rebuilding the index is the remedy, and the refused row goes in.
+ALTER TABLE t3 DROP KEY vk, ADD VECTOR KEY vk2 (v) TYPE hnsw (M = 4);
+INSERT INTO t3 VALUES (7, STRING_TO_VECTOR('[1,0,1,0]'));
+SELECT id FROM t3
+ ORDER BY DISTANCE(v, STRING_TO_VECTOR('[4,3,2,1]'), 'euclidean') LIMIT 3;
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t3';
+SELECT @@session.innodb_interpreter_output;
+DROP TABLE t3;

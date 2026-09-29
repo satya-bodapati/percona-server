@@ -98,3 +98,58 @@ id
 6
 1
 DROP TABLE t2;
+#
+# The same, found by an INSERT: the entry point loads, and a node the
+# insert faults in while it looks for neighbours is missing. The
+# index is marked corrupt exactly as a search marks it - persistently,
+# so a restart does not bring back a graph that would answer a node
+# short.
+#
+CREATE TABLE t3 (id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(4) NOT NULL,
+VECTOR KEY vk (v) TYPE hnsw (M = 4));
+INSERT INTO t3 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]')),
+(2, STRING_TO_VECTOR('[0,1,0,0]')),
+(3, STRING_TO_VECTOR('[0,0,1,0]')),
+(4, STRING_TO_VECTOR('[0,0,0,1]')),
+(5, STRING_TO_VECTOR('[1,1,0,0]')),
+(6, STRING_TO_VECTOR('[0,1,1,0]'));
+# restart
+SET DEBUG = '+d,vec_aux_node_missing_after_entry';
+INSERT INTO t3 VALUES (7, STRING_TO_VECTOR('[1,0,1,0]'));
+ERROR HY000: Index corrupt: the vector index's graph names node <N>, which its auxiliary table does not have. DROP and re-create the index to rebuild it from the base rows.
+SET DEBUG = '-d,vec_aux_node_missing_after_entry';
+# The row was not written: the statement failed with it.
+SELECT id FROM t3 FORCE INDEX (PRIMARY) ORDER BY id;
+id
+1
+2
+3
+4
+5
+6
+# Refused from here on, for DML and search alike.
+INSERT INTO t3 VALUES (7, STRING_TO_VECTOR('[1,0,1,0]'));
+ERROR HY000: Index t3 is corrupted
+# And still after a restart: the mark is on the index, not only on
+# the graph in memory.
+# restart
+INSERT INTO t3 VALUES (7, STRING_TO_VECTOR('[1,0,1,0]'));
+ERROR HY000: Index t3 is corrupted
+SELECT id FROM t3
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 3;
+ERROR HY000: Index vk is corrupted
+# Rebuilding the index is the remedy, and the refused row goes in.
+ALTER TABLE t3 DROP KEY vk, ADD VECTOR KEY vk2 (v) TYPE hnsw (M = 4);
+INSERT INTO t3 VALUES (7, STRING_TO_VECTOR('[1,0,1,0]'));
+SELECT id FROM t3
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[4,3,2,1]'), 'euclidean') LIMIT 3;
+id
+5
+7
+6
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t3';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+nodes=7 distinct_ids=7 distinct_base_pks=7 dup_ids=0 dup_base_pks=0 labels_contiguous_from_1=0
+DROP TABLE t3;
