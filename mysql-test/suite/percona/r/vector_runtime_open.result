@@ -9,11 +9,8 @@
 CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
 v VECTOR(8) NOT NULL,
 VECTOR KEY (v) TYPE hnsw (M = 6));
-# Touch the table so the handler opens it: the runtime is created
-# in ha_innobase::open, which CREATE TABLE alone does not reach.
-SELECT COUNT(*) FROM t1;
-COUNT(*)
-0
+# No statement has opened the table yet: CREATE TABLE built the
+# runtime along with the index.
 SET SESSION innodb_interpreter = 'vec_runtime_info test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output

@@ -70,8 +70,8 @@ INSERT INTO tk VALUES (10, STRING_TO_VECTOR('[1,0,0,0]')),
                      (30, STRING_TO_VECTOR('[0,0,1,0]')),
                      (40, STRING_TO_VECTOR('[0,0,0,1]'));
 ALTER TABLE tk ADD VECTOR KEY kv (v) TYPE hnsw (M = 4);
---echo # Touch the table so the handler opens it and creates the runtime
---echo # (vec_runtime_open runs in ha_innobase::open).
+--echo # Touch the table through the primary key first: the search below
+--echo # is then the first statement to need the graph.
 SELECT COUNT(*) FROM tk FORCE INDEX (PRIMARY);
 
 --echo # Nearest to [1,0,0,0] is row 10, then the rest.
