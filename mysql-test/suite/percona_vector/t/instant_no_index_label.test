@@ -17,9 +17,9 @@ INSERT INTO t1 (id, pad, v) VALUES (1,10,STRING_TO_VECTOR('[1,0,0,0]')),
                                    (2,20,STRING_TO_VECTOR('[2,0,0,0]')),
                                    (3,30,STRING_TO_VECTOR('[3,0,0,0]'));
 
---echo # INSTANT is refused while the vector index exists.
---error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
+--echo # INSTANT works while the vector index exists.
 ALTER TABLE t1 RENAME COLUMN pad TO pad2, ALGORITHM=INSTANT;
+ALTER TABLE t1 RENAME COLUMN pad2 TO pad, ALGORITHM=INSTANT;
 
 --echo # A no-change ALTER rebuilds the new dd::Table from the TABLE_SHARE,
 --echo # which has no SE-hidden columns. Without re-adding percona_vec_aux_id

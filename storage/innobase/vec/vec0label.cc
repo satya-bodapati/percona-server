@@ -240,8 +240,10 @@ uint64_t vec_label_from_rec(const dict_table_t *table, const rec_t *rec,
   const ulint pos = index->get_col_pos(table->vec_aux_col);
   ut_ad(pos != ULINT_UNDEFINED);
 
+  /* The index, not nullptr: a clustered record may be of an older row
+  version, and only the index maps its physical fields. */
   ulint len;
-  const byte *data = rec_get_nth_field(nullptr, rec, offsets, pos, &len);
+  const byte *data = rec_get_nth_field(index, rec, offsets, pos, &len);
   ut_ad(len == 8);
   const uint64_t label = mach_read_from_8(data);
 
@@ -261,6 +263,9 @@ void vec_label_update(dict_table_t *table, upd_field_t *ufield,
 
   ufield->exp = nullptr;
   ufield->field_no = dict_col_get_clust_pos(col, clust);
+  /* As calc_row_difference sets it for every other column: a debug check
+  of the undo log compares it once the table has row versions. */
+  ut_d(ufield->field_phy_pos = col->get_col_phy_pos());
   col->copy_type(dfield_get_type(&ufield->new_val));
 
   /* Storage byte order, written back over the trx member the label was assigned

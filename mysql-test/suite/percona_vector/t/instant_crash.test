@@ -1,0 +1,76 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # Crash recovery of a vector table with AUTO_INCREMENT through INSTANT
+--echo # ALTERs. Each INSTANT ALTER bumps the dynamic-metadata version (the
+--echo # table has AUTO_INCREMENT) and writes both counters into the new
+--echo # definition; the records after it carry the new version. After every
+--echo # kill -9 neither counter may go back, and the rows, the graph and the
+--echo # aux must agree.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, k INT,
+                 v VECTOR(4) NOT NULL,
+                 VECTOR KEY vk (v) TYPE hnsw (M = 4));
+INSERT INTO t1 (k, v) VALUES
+  (1, STRING_TO_VECTOR('[1,0,0,0]')), (2, STRING_TO_VECTOR('[0,1,0,0]')),
+  (3, STRING_TO_VECTOR('[0,0,1,0]')), (4, STRING_TO_VECTOR('[0,0,0,1]'));
+
+--echo #
+--echo # 1. INSTANT ADD COLUMN, then labels with no AUTO_INCREMENT advance,
+--echo #    and a crash with no checkpoint since the ALTER.
+--echo #
+SET GLOBAL innodb_log_checkpoint_now = ON;
+ALTER TABLE t1 ADD COLUMN e1 INT DEFAULT 11, ALGORITHM = INSTANT;
+DELETE FROM t1 WHERE id <= 2;
+INSERT INTO t1 (id, k, v, e1) VALUES
+  (1, 11, STRING_TO_VECTOR('[2,0,0,0]'), 1), (2, 12, STRING_TO_VECTOR('[0,2,0,0]'), 2);
+--source include/kill_and_restart_mysqld.inc
+--echo # Labels 1..6 used: the next is 7. AUTO_INCREMENT is 5.
+SET SESSION innodb_interpreter = 'vec_next_id test/t1';
+SELECT @@session.innodb_interpreter_output;
+INSERT INTO t1 (k, v) VALUES (13, STRING_TO_VECTOR('[3,0,0,0]'));
+SELECT LAST_INSERT_ID();
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo #
+--echo # 2. AUTO_INCREMENT moves after an INSTANT DROP COLUMN and is
+--echo #    checkpointed; then label-only records, and a crash.
+--echo #
+ALTER TABLE t1 DROP COLUMN e1, ALGORITHM = INSTANT;
+INSERT INTO t1 (k, v) VALUES
+  (14, STRING_TO_VECTOR('[0,3,0,0]')), (15, STRING_TO_VECTOR('[0,0,3,0]'));
+SET GLOBAL innodb_log_checkpoint_now = ON;
+UPDATE t1 SET v = STRING_TO_VECTOR('[4,4,0,0]') WHERE id = 3;
+UPDATE t1 SET v = STRING_TO_VECTOR('[0,4,4,0]') WHERE id = 4;
+--source include/kill_and_restart_mysqld.inc
+--echo # AUTO_INCREMENT continues after 7; labels after 11.
+INSERT INTO t1 (k, v) VALUES (16, STRING_TO_VECTOR('[5,0,0,0]'));
+SELECT LAST_INSERT_ID();
+SET SESSION innodb_interpreter = 'vec_next_id test/t1';
+SELECT @@session.innodb_interpreter_output;
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+
+--echo #
+--echo # 3. Several INSTANT ALTERs in a row, rows between them, and a crash.
+--echo #
+ALTER TABLE t1 ADD COLUMN m1 INT DEFAULT 5 AFTER k, ALGORITHM = INSTANT;
+INSERT INTO t1 (k, m1, v) VALUES (17, 1, STRING_TO_VECTOR('[0,5,0,0]'));
+ALTER TABLE t1 RENAME COLUMN k TO k2, ALGORITHM = INSTANT;
+INSERT INTO t1 (k2, m1, v) VALUES (18, 2, STRING_TO_VECTOR('[0,0,5,0]'));
+ALTER TABLE t1 ALTER COLUMN m1 SET DEFAULT 9, ALGORITHM = INSTANT;
+DELETE FROM t1 WHERE id = 1;
+INSERT INTO t1 (id, k2, v) VALUES (1, 19, STRING_TO_VECTOR('[0,0,0,5]'));
+--source include/kill_and_restart_mysqld.inc
+SELECT id, k2, m1, VECTOR_TO_STRING(v) FROM t1 FORCE INDEX (PRIMARY) ORDER BY id;
+INSERT INTO t1 (k2, v) VALUES (20, STRING_TO_VECTOR('[6,0,0,0]'));
+SELECT LAST_INSERT_ID();
+SET SESSION innodb_interpreter = 'vec_next_id test/t1';
+SELECT @@session.innodb_interpreter_output;
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[6,0,0,0]'), 'euclidean') LIMIT 1;
+
+DROP TABLE t1;
