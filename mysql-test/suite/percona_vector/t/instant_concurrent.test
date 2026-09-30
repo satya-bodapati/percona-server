@@ -90,7 +90,9 @@ SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
 SELECT @@session.innodb_interpreter_output;
 --source suite/percona_vector/include/nearest_is_exact.inc
 INSERT INTO t1 (id, k, v) VALUES (999999, 1, STRING_TO_VECTOR('[9,9,9,9]'));
+SET SESSION innodb_hnsw_ef_search = 400;
 SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[9,9,9,9]'), 'euclidean') LIMIT 1;
+SET SESSION innodb_hnsw_ef_search = DEFAULT;
 
 DROP PROCEDURE dml;
 DROP TABLE t1;

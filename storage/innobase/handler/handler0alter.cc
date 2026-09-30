@@ -490,6 +490,36 @@ static bool innobase_vec_aux_col_changes(const dict_table_t *old_table,
          innobase_vector_exist(altered_table);
 }
 
+/** Whether a vector index makes this ALTER a rebuild. Adding the first one
+or dropping the last one does, because the hidden label column comes or
+goes (innobase_vec_aux_col_changes). So does adding one to a table that
+keeps the column - DROP and ADD in one statement - when LOCK=NONE is asked
+for: built in place, the new graph would have no log for the DML that runs
+meanwhile, while a rebuild reaches it through the table's row log like any
+other online rebuild. Without LOCK=NONE it stays an in-place build under a
+shared lock, which copies nothing, can be combined with virtual column
+changes, and refuses an older snapshot only the new index, not the table.
+@param old_table      the table before the ALTER
+@param altered_table  MySQL table as it will be after the ALTER
+@param ha_alter_info  the ALTER
+@return whether the ALTER rebuilds for a vector index */
+static bool innobase_vec_rebuild(const dict_table_t *old_table,
+                                 const TABLE *altered_table,
+                                 const Alter_inplace_info *ha_alter_info) {
+  if (innobase_vec_aux_col_changes(old_table, altered_table)) return true;
+  if (!DICT_TF2_FLAG_IS_SET(old_table, DICT_TF2_HAS_VEC_AUX_COL)) return false;
+  if (ha_alter_info->alter_info->requested_lock !=
+      Alter_info::ALTER_TABLE_LOCK_NONE) {
+    return false;
+  }
+  for (uint i = 0; i < ha_alter_info->index_add_count; i++) {
+    const KEY &key =
+        ha_alter_info->key_info_buffer[ha_alter_info->index_add_buffer[i]];
+    if (key.flags & HA_VECTOR) return true;
+  }
+  return false;
+}
+
 /** Determine if spatial indexes exist in a given table.
 @param table MySQL table
 @return whether spatial indexes exist on the table */
@@ -1038,13 +1068,15 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
   Dropping the last vector index takes the column away again, by the same
   kind of rebuild without it.
 
-  Either rebuild happens exactly when innobase_vec_aux_col_changes() says so.
+  Either rebuild happens exactly when innobase_vec_aux_col_changes() says so,
+  and so does a third: adding a vector index to a table that keeps the
+  column (innobase_vec_rebuild), so that it can run online.
 
   InnoDB does not rebuild a table with FULLTEXT indexes in place (see the
   ER_INNODB_FT_LIMIT refusal below), so on such a table both go through
   COPY. */
-  const bool vec_aux_col_changes =
-      innobase_vec_aux_col_changes(m_prebuilt->table, altered_table);
+  const bool vec_rebuild =
+      innobase_vec_rebuild(m_prebuilt->table, altered_table, ha_alter_info);
 
   /* We don't support change encryption attribute with inplace algorithm. */
   char *old_encryption = this->table->s->encrypt_type.str;
@@ -1230,7 +1262,7 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
     /* ADD and DROP INDEX are allowed alongside only because neither
     rebuilds. Adding the first vector index or dropping the last one does:
     it adds or removes the hidden label column. */
-    if (flags != 0 || vec_aux_col_changes ||
+    if (flags != 0 || vec_rebuild ||
         (altered_table->s->partition_info_str &&
          altered_table->s->partition_info_str_len) ||
         (!check_v_col_in_order(this->table, altered_table, ha_alter_info))) {
@@ -1399,13 +1431,13 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
     operation is possible. */
   } else if (((ha_alter_info->handler_flags &
                Alter_inplace_info::ADD_PK_INDEX) ||
-              innobase_need_rebuild(ha_alter_info) || vec_aux_col_changes) &&
+              innobase_need_rebuild(ha_alter_info) || vec_rebuild) &&
              (innobase_fulltext_exist(altered_table) ||
               innobase_spatial_exist(altered_table))) {
     /* Refuse to rebuild the table online, if FULLTEXT or SPATIAL indexes
     are to survive the rebuild. The first ADD and the last DROP of a vector
     index are rebuilds too, though the flags do not say so
-    (vec_aux_col_changes). */
+    (vec_rebuild). */
     online = false;
     /* If the table already contains fulltext indexes,
     refuse to rebuild the table natively altogether. */
@@ -1442,8 +1474,8 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
     case we would have to apply the modification log to the full-text
     indexes.
 
-    A vector index requires one for the same reason and one more of its
-    own; see the HA_VECTOR branch below. */
+    A vector index is added here only without LOCK=NONE; with it, the
+    ALTER is a rebuild (innobase_vec_rebuild), handled above. */
 
     for (uint i = 0; i < ha_alter_info->index_add_count; i++) {
       const KEY *key =
@@ -1458,25 +1490,11 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
         break;
       }
       /* A vector index added without a rebuild - DROP and ADD in one
-      statement - does not run with LOCK=NONE, for two reasons:
-
-      1. Rollback (ddl::mark_secondary_indexes) drops an uncommitted vec
-         index and its aux from the cache immediately, which is safe only
-         while no concurrent thread can hold a prebuilt ins_node
-         entry_list referencing the index. A shared lock guarantees that;
-         FTS documents the same reasoning there.
-
-      2. ddl::Builder builds the graph from its clustered scan, and DML on
-         the same table would have to reach a graph the scan is still
-         building. There is no row log for the new index to apply.
-
-      The first ADD is a rebuild, and neither applies: the index belongs to
-      the new table, which only the scan and the row log apply write. It
-      runs online, above. */
-      if ((key->flags & HA_VECTOR) && !vec_aux_col_changes) {
-        /* Without this the server prints "ALGORITHM=INPLACE is not
-        supported. Reason:" and then nothing, because every other branch
-        here sets a reason and this one did not. */
+      statement, without LOCK=NONE - is built in place under a shared lock:
+      DML would have to reach a graph the scan is still building, and no
+      log exists for it. With LOCK=NONE the ALTER rebuilds instead
+      (innobase_vec_rebuild) and never reaches here. */
+      if ((key->flags & HA_VECTOR) && !vec_rebuild) {
         if (!is_instant_requested) {
           ha_alter_info->unsupported_reason = innobase_get_err_msg(
               ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_NOLOCK);
@@ -5288,11 +5306,11 @@ template <typename Table>
 
     No ONLINE-status handling is needed here: indexes are created in
     ONLINE_INDEX_COMPLETE (the default); a vector index added without a
-    rebuild is offline (HA_VECTOR check in check_if_supported_inplace_alter,
-    same as FTS), and one added by a rebuild belongs to the new table,
-    whose DML arrives through the table's row log, not an index log; and
-    the modification-log loop below exempts vector indexes - so a vector
-    index never enters ONLINE_INDEX_CREATION. */
+    rebuild is offline (the HA_VECTOR check in
+    check_if_supported_inplace_alter), and one added by a rebuild belongs to
+    the new table, whose DML arrives through the table's row log; and the
+    modification-log loop below exempts vector indexes - so a vector index
+    never enters ONLINE_INDEX_CREATION. */
     if (ctx->add_index[a]->is_vector()) {
       ut_ad(!vec_index);
       vec_index = ctx->add_index[a];
@@ -5966,7 +5984,7 @@ bool ha_innobase::prepare_inplace_alter_table_impl(
     index or dropping the last one rebuilds, though the flags do not say
     so: it adds or removes the hidden label column. */
     if (innobase_need_rebuild(ha_alter_info) ||
-        innobase_vec_aux_col_changes(indexed_table, altered_table) ||
+        innobase_vec_rebuild(indexed_table, altered_table, ha_alter_info) ||
         (type == Instant_Type::INSTANT_VIRTUAL_ONLY ||
          type == Instant_Type::INSTANT_ADD_DROP_COLUMN)) {
       my_error(ER_TABLESPACE_DISCARDED, MYF(0), indexed_table->name.m_name);
@@ -6414,9 +6432,11 @@ bool ha_innobase::prepare_inplace_alter_table_impl(
   index is the one rebuild whose flags (a plain DROP INDEX) say no data
   changes, so the shortcut must not apply to it. The rebuild drops the
   column by itself - get_extra_columns_and_keys() left it out of the new
-  definition and innobase_build_col_map() maps it nowhere. */
+  definition and innobase_build_col_map() maps it nowhere. A vector index
+  added to a table that keeps the column rebuilds too (innobase_vec_rebuild),
+  so that it runs on the table's row log when it is online. */
   const bool vec_aux_col_changes =
-      innobase_vec_aux_col_changes(m_prebuilt->table, altered_table);
+      innobase_vec_rebuild(m_prebuilt->table, altered_table, ha_alter_info);
 
   if (!vec_aux_col_changes &&
       (!(ha_alter_info->handler_flags & INNOBASE_ALTER_DATA) ||
