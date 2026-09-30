@@ -51,8 +51,8 @@ nodes=1626 distinct_ids=1626 distinct_base_pks=900 dup_ids=0 dup_base_pks=726 la
 EXPLAIN FORMAT=TREE SELECT id FROM t1
 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,1,1,1]'), 'euclidean') LIMIT 1;
 EXPLAIN
--> Limit: 1 row(s)  (cost=74.1 rows=1)
-    -> Vector index search on t1 using vk  (cost=74.1 rows=721)
+-> Limit: 1 row(s)  (cost=# rows=#)
+    -> Vector index search on t1 using vk  (cost=# rows=#)
 
 # ... and its nearest row is as near as the exact scan's.
 query	same_nearest

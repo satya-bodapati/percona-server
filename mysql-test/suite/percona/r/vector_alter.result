@@ -36,13 +36,11 @@ ta1	CREATE TABLE `ta1` (
   PRIMARY KEY (`id`),
   VECTOR KEY `v` (`v`) USING `hnsw` (`M`=6)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
-# A.2 ADD COLUMN ... ALGORITHM=INPLACE works. It rebuilds, and the
-# rebuild recreates the vector index along with everything else, so
-# the graph comes back from the copied rows. Not ONLINE - LOCK=SHARED
-# - because the row log cannot maintain a graph.
+# A.2 ADD COLUMN ... ALGORITHM=INPLACE works, and online. It rebuilds,
+# and the rebuild recreates the vector index along with everything
+# else, so the graph comes back from the copied rows; DML meanwhile
+# reaches it through the row log.
 ALTER TABLE ta1 ADD COLUMN c2 INT, ALGORITHM=INPLACE, LOCK=NONE;
-ERROR 0A000: LOCK=NONE is not supported. Reason: InnoDB does not support LOCK=NONE on a table with a vector index. Try LOCK=SHARED.
-ALTER TABLE ta1 ADD COLUMN c2 INT, ALGORITHM=INPLACE, LOCK=SHARED;
 SHOW CREATE TABLE ta1;
 Table	Create Table
 ta1	CREATE TABLE `ta1` (

@@ -1,0 +1,101 @@
+--source include/have_debug.inc
+--source include/count_sessions.inc
+
+--echo #
+--echo # Online ALTERs (LOCK=NONE rebuilds and index builds) and INSTANT ALTERs
+--echo # on a vector table while three sessions insert, update the vector of,
+--echo # and delete rows. DML during a rebuild reaches the new table through
+--echo # the row log; afterwards the rows, the graph and the aux must agree.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, k INT,
+                 pad INT DEFAULT 0, r INT, v VECTOR(4) NOT NULL,
+                 VECTOR KEY vk (v) TYPE hnsw (M = 8));
+
+DELIMITER |;
+CREATE PROCEDURE dml(p INT, n INT)
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  WHILE i < n DO
+    INSERT INTO t1 (id, k, v) VALUES
+      (p * 100000 + i, i,
+       STRING_TO_VECTOR(CONCAT('[', p, ',', i % 11, ',', i % 7, ',', i % 5, ']')));
+    UPDATE t1 SET v = STRING_TO_VECTOR(CONCAT('[', i % 13, ',', p, ',', i % 3, ',1]'))
+     WHERE id = p * 100000 + FLOOR(i / 2);
+    UPDATE t1 SET pad = i WHERE id = p * 100000 + FLOOR(i / 3);
+    IF i % 5 = 4 THEN
+      DELETE FROM t1 WHERE id = p * 100000 + i - 3;
+    END IF;
+    SET i = i + 1;
+  END WHILE;
+END|
+DELIMITER ;|
+
+--connect (c1, localhost, root,,)
+--send CALL dml(1, 400)
+--connect (c2, localhost, root,,)
+--send CALL dml(2, 400)
+--connect (c3, localhost, root,,)
+--send CALL dml(3, 400)
+
+--connection default
+--disable_query_log
+let $i = 4;
+while ($i)
+{
+  ALTER TABLE t1 FORCE, ALGORITHM = INPLACE, LOCK = NONE;
+  eval ALTER TABLE t1 ADD COLUMN e$i INT DEFAULT $i, ALGORITHM = INPLACE, LOCK = NONE;
+  ALTER TABLE t1 ADD INDEX ik (k), ALGORITHM = INPLACE, LOCK = NONE;
+  ALTER TABLE t1 RENAME COLUMN r TO r2, ALGORITHM = INSTANT;
+  ALTER TABLE t1 ROW_FORMAT = COMPACT, ALGORITHM = INPLACE, LOCK = NONE;
+  ALTER TABLE t1 RENAME COLUMN r2 TO r, ALGORITHM = INSTANT;
+  ALTER TABLE t1 DROP INDEX ik, ALGORITHM = INPLACE, LOCK = NONE;
+  ALTER TABLE t1 ROW_FORMAT = DYNAMIC, ALGORITHM = INPLACE, LOCK = NONE;
+  eval ALTER TABLE t1 DROP COLUMN e$i, ALGORITHM = INSTANT;
+  if ($i > 2)
+  {
+    ALTER TABLE t1 DROP KEY vk, ALGORITHM = INPLACE, LOCK = NONE;
+    ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw (M = 8), ALGORITHM = INPLACE, LOCK = NONE;
+  }
+  dec $i;
+}
+--enable_query_log
+
+--connection c1
+--reap
+--connection c2
+--reap
+--connection c3
+--reap
+--disconnect c1
+--disconnect c2
+--disconnect c3
+--connection default
+
+--echo # 3 x 400 inserted, 3 x 80 deleted.
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+--echo # No label is shared. The node count itself depends on where the
+--echo # rebuilds fell among the DML, so it is not printed.
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output LIKE '% dup_ids=0 %' AS no_shared_label;
+--replace_regex /cost=[0-9.]+/cost=#/ /rows=[0-9]+/rows=#/
+EXPLAIN FORMAT=TREE SELECT id FROM t1
+ ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,1,1,1]'), 'euclidean') LIMIT 1;
+--source suite/percona/include/vector_nearest_is_exact.inc
+
+--echo # Every row is in the index: a search from each row's own vector finds
+--echo # a row at distance 0.
+--source suite/percona/include/vector_every_row_found.inc
+
+--source include/restart_mysqld.inc
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+--echo # No label is shared. The node count itself depends on where the
+--echo # rebuilds fell among the DML, so it is not printed.
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output LIKE '% dup_ids=0 %' AS no_shared_label;
+--source suite/percona/include/vector_nearest_is_exact.inc
+--source suite/percona/include/vector_every_row_found.inc
+
+DROP PROCEDURE dml;
+DROP TABLE t1;
+--source include/wait_until_count_sessions.inc

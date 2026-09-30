@@ -1,0 +1,80 @@
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+--echo #
+--echo # A rebuild that keeps a vector index runs with LOCK=NONE. DML during it
+--echo # reaches the new table through the row log, and each applied row gets
+--echo # its node in the new graph under the label it carries from the old
+--echo # table. The DML runs while the ALTER waits after its scan, so every
+--echo # change below reaches the new table only through the log.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, k INT,
+                 v VECTOR(4) NOT NULL,
+                 VECTOR KEY vk (v) TYPE hnsw (M = 8));
+INSERT INTO t1 (k, v) VALUES
+  (1, STRING_TO_VECTOR('[1,0,0,0]')), (2, STRING_TO_VECTOR('[0,1,0,0]')),
+  (3, STRING_TO_VECTOR('[0,0,1,0]')), (4, STRING_TO_VECTOR('[0,0,0,1]')),
+  (5, STRING_TO_VECTOR('[1,1,0,0]')), (6, STRING_TO_VECTOR('[0,1,1,0]')),
+  (7, STRING_TO_VECTOR('[0,0,1,1]')), (8, STRING_TO_VECTOR('[1,0,0,1]'));
+
+--connect (con1, localhost, root,,)
+
+--let $alter = ALTER TABLE t1 FORCE, ALGORITHM = INPLACE, LOCK = NONE
+--source suite/percona/include/vector_online_dml.inc
+
+--echo #
+--echo # ADD COLUMN, a rebuild too.
+--echo #
+--let $alter = ALTER TABLE t1 ADD COLUMN c1 INT DEFAULT 7, ALGORITHM = INPLACE, LOCK = NONE
+--source suite/percona/include/vector_online_dml.inc
+
+--echo #
+--echo # A new row format: the vectors are read back from records of another
+--echo # format, by the scan and by the log.
+--echo #
+--let $alter = ALTER TABLE t1 ROW_FORMAT = COMPACT, ALGORITHM = INPLACE, LOCK = NONE
+--source suite/percona/include/vector_online_dml.inc
+
+--echo #
+--echo # ADD INDEX without a rebuild: DML maintains the graph as always, and
+--echo # the new B-tree index gets its entries from its own log.
+--echo #
+--let $alter = ALTER TABLE t1 ADD INDEX ik (k), ALGORITHM = INPLACE, LOCK = NONE
+--let $sync = innodb_inplace_alter_table_enter
+--source suite/percona/include/vector_online_dml.inc
+--let $sync =
+ALTER TABLE t1 DROP INDEX ik, ALGORITHM = INPLACE, LOCK = NONE;
+
+--echo #
+--echo # A crash during an online rebuild rolls it back; the DML the old
+--echo # table took during it stays, with its nodes.
+--echo #
+--connect (con2, localhost, root,,)
+SET DEBUG_SYNC = 'row_log_table_apply1_before SIGNAL built WAIT_FOR never';
+--send ALTER TABLE t1 FORCE, ALGORITHM = INPLACE, LOCK = NONE
+--connection con1
+SET DEBUG_SYNC = 'now WAIT_FOR built';
+INSERT INTO t1 (k, v) VALUES (500, STRING_TO_VECTOR('[7,7,0,0]'));
+UPDATE t1 SET v = STRING_TO_VECTOR('[0,7,7,0]') WHERE k = 2;
+--connection default
+--source include/kill_and_restart_mysqld.inc
+--disconnect con1
+--disconnect con2
+--connection default
+SELECT k, VECTOR_TO_STRING(v) FROM t1 FORCE INDEX (PRIMARY) WHERE k IN (2, 500) ORDER BY k;
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[7,7,0,0]'), 'euclidean') LIMIT 1;
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,7,7,0]'), 'euclidean') LIMIT 1;
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+--source suite/percona/include/vector_nearest_is_exact.inc
+--echo # And the next online rebuild works.
+ALTER TABLE t1 FORCE, ALGORITHM = INPLACE, LOCK = NONE;
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+--source suite/percona/include/vector_nearest_is_exact.inc
+
+SET DEBUG_SYNC = 'RESET';
+DROP TABLE t1;
+--source include/wait_until_count_sessions.inc

@@ -36,13 +36,11 @@ CREATE TABLE ta1 (
 ALTER TABLE ta1 ADD COLUMN c1 INT, ALGORITHM=INSTANT;
 SHOW CREATE TABLE ta1;
 
---echo # A.2 ADD COLUMN ... ALGORITHM=INPLACE works. It rebuilds, and the
---echo # rebuild recreates the vector index along with everything else, so
---echo # the graph comes back from the copied rows. Not ONLINE - LOCK=SHARED
---echo # - because the row log cannot maintain a graph.
---error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
+--echo # A.2 ADD COLUMN ... ALGORITHM=INPLACE works, and online. It rebuilds,
+--echo # and the rebuild recreates the vector index along with everything
+--echo # else, so the graph comes back from the copied rows; DML meanwhile
+--echo # reaches it through the row log.
 ALTER TABLE ta1 ADD COLUMN c2 INT, ALGORITHM=INPLACE, LOCK=NONE;
-ALTER TABLE ta1 ADD COLUMN c2 INT, ALGORITHM=INPLACE, LOCK=SHARED;
 SHOW CREATE TABLE ta1;
 
 --echo # A.3 ADD COLUMN ... ALGORITHM=COPY (full rebuild — aux .ibd gets a new id)

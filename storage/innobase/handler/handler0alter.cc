@@ -1383,9 +1383,12 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
   the graph and a new aux are built from the copied rows, with their labels
   intact and base_pk following the new primary key.
 
-  Such a rebuild is not ONLINE - the branch below clears `online` for it,
-  because the row log cannot maintain a graph while DML runs against it.
-  LOCK=SHARED it is.
+  Such a rebuild runs ONLINE: DML during it reaches the new table through
+  the row log, and row_log_table_apply gives each applied row its node
+  (vec_log_apply_row), under the label the row carries from the old table.
+  The first ADD is a rebuild too, and its old rows have no label: the scan
+  assigns them from the new table's counter (ddl::Row::build), and so does
+  the log apply for the rows DML wrote meanwhile (row_log_vec_label).
 
   vector_alter_rebuild.test covers the shapes: FORCE, OPTIMIZE,
   ENGINE=InnoDB, ROW_FORMAT, a primary key swap, ADD and DROP COLUMN, and
@@ -1398,12 +1401,11 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
                Alter_inplace_info::ADD_PK_INDEX) ||
               innobase_need_rebuild(ha_alter_info) || vec_aux_col_changes) &&
              (innobase_fulltext_exist(altered_table) ||
-              innobase_spatial_exist(altered_table) ||
-              innobase_vector_exist(altered_table))) {
-    /* Refuse to rebuild the table online, if
-    FULLTEXT, SPATIAL or VECTOR indexes are to survive the rebuild. The
-    first ADD and the last DROP of a vector index are rebuilds too, though
-    the flags do not say so (vec_aux_col_changes). */
+              innobase_spatial_exist(altered_table))) {
+    /* Refuse to rebuild the table online, if FULLTEXT or SPATIAL indexes
+    are to survive the rebuild. The first ADD and the last DROP of a vector
+    index are rebuilds too, though the flags do not say so
+    (vec_aux_col_changes). */
     online = false;
     /* If the table already contains fulltext indexes,
     refuse to rebuild the table natively altogether. */
@@ -1451,8 +1453,8 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
         online = false;
         break;
       }
-      /* ADD VECTOR INDEX must not run with LOCK=NONE either, for two
-      independent reasons:
+      /* A vector index added without a rebuild - DROP and ADD in one
+      statement - does not run with LOCK=NONE, for two reasons:
 
       1. Rollback (ddl::mark_secondary_indexes) drops an uncommitted vec
          index and its aux from the cache immediately, which is safe only
@@ -1460,16 +1462,14 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
          entry_list referencing the index. A shared lock guarantees that;
          FTS documents the same reasoning there.
 
-      2. ddl::Builder builds the graph from its clustered scan. Under
-         LOCK=NONE a concurrent INSERT would land in the row log and be
-         applied by row_log_apply, which knows nothing about the graph:
-         the row would exist in the table and not in the index.
+      2. ddl::Builder builds the graph from its clustered scan, and DML on
+         the same table would have to reach a graph the scan is still
+         building. There is no row log for the new index to apply.
 
-      Reason 2 is the trade FTS states above and never took, so ADD
-      FULLTEXT needs a lock too. We are at parity deliberately -
-      supporting LOCK=NONE here would be a deviation beyond FTS and would
-      have to be argued as one. */
-      if (key->flags & HA_VECTOR) {
+      The first ADD is a rebuild, and neither applies: the index belongs to
+      the new table, which only the scan and the row log apply write. It
+      runs online, above. */
+      if ((key->flags & HA_VECTOR) && !vec_aux_col_changes) {
         /* Without this the server prints "ALGORITHM=INPLACE is not
         supported. Reason:" and then nothing, because every other branch
         here sets a reason and this one did not. */
@@ -1479,25 +1479,6 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
         break;
       }
     }
-  }
-
-  /* No ALTER that leaves a vector index on the table runs with LOCK=NONE,
-  whatever it changes. A rebuild applies concurrent DML through the row
-  log, and row_log_apply maintains neither the HNSW graph nor the aux
-  table, so a row written during the rebuild would reach the new table and
-  not the index. Same reason ADD VECTOR INDEX is offline above.
-
-  Dropping the last vector index may run online: the new table has no
-  graph to maintain, and the row log drops the hidden column from each
-  row it applies, as it does for any dropped column.
-
-  TODO: lift this after MVP. It needs row_log_table_apply and
-  row_log_apply to insert each applied row into the new graph, and the
-  first ADD's labels to come from the row log as well as the scan. */
-  if (online && innobase_vector_exist(altered_table)) {
-    ha_alter_info->unsupported_reason = innobase_get_err_msg(
-        ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_NOLOCK);
-    online = false;
   }
 
   return online ? HA_ALTER_INPLACE_NO_LOCK_AFTER_PREPARE
@@ -1714,6 +1695,55 @@ bool ha_innobase::inplace_alter_table(TABLE *altered_table,
   return inplace_alter_table_impl<dd::Table>(altered_table, ha_alter_info);
 }
 
+/** Apply the rest of the row log of an online rebuild that keeps a vector
+index, before the commit latches the data dictionary and before it captures
+the label counter.
+
+Each applied row gets its node through the aux table's insert graph, which
+must not run under dict_sys->mutex, and commit_try_rebuild applies the log
+with it held. The first ADD also labels the rows it applies, from the new
+table's counter, which Vec_label_counter::capture_at_alter_commit() then
+has to see. This thread holds MDL_EXCLUSIVE, so no DML can add to the log
+after this point, and the apply in commit_try_rebuild finds nothing left.
+@param[in]  ha_alter_info  the ALTER
+@param[in]  altered_table  the table as it will be
+@param[in]  table          the table as it is, for error messages
+@return true on error, reported */
+static bool vec_apply_row_log_before_commit(Alter_inplace_info *ha_alter_info,
+                                            TABLE *altered_table,
+                                            const TABLE *table) {
+  auto *ctx =
+      static_cast<ha_innobase_inplace_ctx *>(ha_alter_info->handler_ctx);
+  if (ctx == nullptr || !ctx->need_rebuild() || !ctx->online ||
+      vec_index_of(ctx->new_table) == nullptr) {
+    return false;
+  }
+
+  dict_vcol_templ_t *s_templ = nullptr;
+  if (ctx->new_table->n_v_cols > 0) {
+    s_templ = ut::new_withkey<dict_vcol_templ_t>(UT_NEW_THIS_FILE_PSI_KEY);
+    s_templ->vtempl = nullptr;
+    innobase_build_v_templ(altered_table, ctx->new_table, s_templ, nullptr,
+                           true, nullptr);
+    ctx->new_table->vc_templ = s_templ;
+  }
+
+  const dberr_t error = row_log_table_apply(ctx->thr, ctx->old_table,
+                                            altered_table, ctx->m_stage);
+
+  if (s_templ) {
+    dict_free_vc_templ(s_templ);
+    ut::delete_(s_templ);
+    ctx->new_table->vc_templ = nullptr;
+  }
+
+  if (error != DB_SUCCESS) {
+    my_error_innodb(error, table->s->table_name.str, 0);
+    return true;
+  }
+  return false;
+}
+
 /** Commit or rollback the changes made during
 prepare_inplace_alter_table() and inplace_alter_table() inside
 the storage engine. Note that the allowed level of concurrency
@@ -1765,6 +1795,9 @@ bool ha_innobase::commit_inplace_alter_table(TABLE *altered_table,
   /* Only on commit: a rollback returns before the value is used, and may
   already have freed the new table. */
   if (commit) {
+    if (vec_apply_row_log_before_commit(ha_alter_info, altered_table, table)) {
+      return true;
+    }
     /* m_prebuilt->table is still the old table here: it is swapped for the
     rebuilt one in commit_inplace_alter_table_impl() below, and ctx->old_table
     is the same pointer. */
@@ -5248,10 +5281,12 @@ template <typename Table>
     above. At most one vector index per table.
 
     No ONLINE-status handling is needed here: indexes are created in
-    ONLINE_INDEX_COMPLETE (the default), ADD VECTOR INDEX is always
-    offline (HA_VECTOR check in check_if_supported_inplace_alter, same
-    as FTS), and the modification-log loop below exempts vector
-    indexes - so a vector index never enters ONLINE_INDEX_CREATION. */
+    ONLINE_INDEX_COMPLETE (the default); a vector index added without a
+    rebuild is offline (HA_VECTOR check in check_if_supported_inplace_alter,
+    same as FTS), and one added by a rebuild belongs to the new table,
+    whose DML arrives through the table's row log, not an index log; and
+    the modification-log loop below exempts vector indexes - so a vector
+    index never enters ONLINE_INDEX_CREATION. */
     if (ctx->add_index[a]->is_vector()) {
       ut_ad(!vec_index);
       vec_index = ctx->add_index[a];

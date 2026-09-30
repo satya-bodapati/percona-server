@@ -60,9 +60,9 @@ VECTOR KEY vk (v) TYPE hnsw (M = 8));
 INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]')),
 (2, STRING_TO_VECTOR('[2,0,0,0]')),
 (3, STRING_TO_VECTOR('[3,0,0,0]'));
-# While a vector index stays, LOCK=NONE is refused.
+# While a vector index stays, a rebuild runs online too.
 ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=INPLACE, LOCK=NONE;
-ERROR 0A000: LOCK=NONE is not supported. Reason: InnoDB does not support LOCK=NONE on a table with a vector index. Try LOCK=SHARED.
+ALTER TABLE t1 DROP COLUMN c, ALGORITHM=INPLACE, LOCK=NONE;
 # The last DROP rebuilds, so it gets a new table id, and it runs
 # online: DML during the rebuild reaches the new table through the row
 # log, without the column.

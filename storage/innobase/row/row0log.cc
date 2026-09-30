@@ -39,6 +39,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <algorithm>
 #include <map>
 
+#include "current_thd.h"
 #include "data0data.h"
 #include "ddl0ddl.h"
 #include "handler0alter.h"
@@ -58,6 +59,9 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "trx0rec.h"
 #include "ut0new.h"
 #include "ut0stage.h"
+#include "vec0aux.h"
+#include "vec0hnsw.h"
+#include "vec0label.h"
 
 #include "my_dbug.h"
 
@@ -1686,19 +1690,29 @@ It is then unmarked. Otherwise, the entry is just inserted to the index.
   return (err);
 }
 
-/** No vector index reaches the row log: the only ALTER that may run with
-LOCK=NONE is the one dropping the last vector index, and the table it
-rebuilds has none. Applying the log knows B-trees and FTS, not a graph, so a
-vector index here fails the ALTER instead of being skipped or treated as a
-B-tree: debug stops, release logs it and returns an error.
-@param[in]  index  the vector index found in the rebuilt table
-@return DB_INDEX_CORRUPT */
-static dberr_t row_log_refuse_vector_index(const dict_index_t *index) {
-  ut_d(ut_error);
-  ib::error(ER_IB_MSG_456) << "Vector index " << index->name << " of table "
-                           << index->table->name
-                           << " reached the online ALTER log; the ALTER fails.";
-  return DB_INDEX_CORRUPT;
+/** Whether rows applied from this log need a label assigned: the first
+ADD VECTOR INDEX, where only the new table has the label column.
+@param[in]  log  the row log
+@param[in]  dup  its duplicate reporter, whose index is the old table's
+@return true if applied rows arrive without a label */
+static bool row_log_vec_needs_label(const row_log_t *log, const ddl::Dup *dup) {
+  return log->table->vec_aux_col != ULINT_UNDEFINED &&
+         dup->m_index->table->vec_aux_col == ULINT_UNDEFINED;
+}
+
+/** Give an applied row a fresh label from the new table's counter, as
+ddl::Row::build gives the rows the scan copies. Not persisted per label:
+the counter reaches the new definition when the ALTER commits.
+@param[in,out]  row    the row, in the new table's layout
+@param[in]      table  the new table
+@param[in,out]  heap   memory for the value */
+static void row_log_vec_label(dtuple_t *row, dict_table_t *table,
+                              mem_heap_t *heap) {
+  const uint64_t label = Vec_label_counter::assign(table, /*persist=*/false);
+  auto buf = static_cast<byte *>(mem_heap_alloc(heap, sizeof(label)));
+  mach_write_to_8(buf, label);
+  dfield_set_data(dtuple_get_nth_field(row, table->vec_aux_col), buf,
+                  sizeof(label));
 }
 
 /** Replays an insert operation on a table that was rebuilt.
@@ -1730,6 +1744,13 @@ static dberr_t row_log_refuse_vector_index(const dict_index_t *index) {
   static const uint32_t flags = (BTR_CREATE_FLAG | BTR_NO_LOCKING_FLAG |
                                  BTR_NO_UNDO_LOG_FLAG | BTR_KEEP_SYS_FLAG);
 
+  if (row_log_vec_needs_label(log, dup) &&
+      dfield_is_null(dtuple_get_nth_field(row, log->table->vec_aux_col))) {
+    /* The row is this function's own copy, built by
+    row_log_table_apply_convert_mrec. */
+    row_log_vec_label(const_cast<dtuple_t *>(row), log->table, heap);
+  }
+
   entry = row_build_index_entry(row, nullptr, index, heap);
 
   error = row_ins_clust_index_entry_low(flags, BTR_MODIFY_TREE, index,
@@ -1752,9 +1773,9 @@ static dberr_t row_log_refuse_vector_index(const dict_index_t *index) {
       break;
     }
 
+    /* No B-tree entry: vec_log_apply_row() below adds the node. */
     if (index->is_vector()) {
-      error = row_log_refuse_vector_index(index);
-      break;
+      continue;
     }
 
     if (index->type & DICT_FTS) {
@@ -1778,6 +1799,10 @@ static dberr_t row_log_refuse_vector_index(const dict_index_t *index) {
     }
 
   } while (error == DB_SUCCESS);
+
+  if (error == DB_SUCCESS && vec_index_of(log->table) != nullptr) {
+    error = vec_log_apply_row(log->table, row, current_thd, thr_get_trx(thr));
+  }
 
   return (error);
 }
@@ -1956,9 +1981,10 @@ flag_ok:
   }
 
   while ((index = index->next()) != nullptr) {
+    /* A deleted row's node stays: the graph removes nothing, and a search
+    skips a node whose row is gone. */
     if (index->is_vector()) {
-      error = row_log_refuse_vector_index(index);
-      break;
+      continue;
     }
 
     if (index->type & DICT_FTS) {
@@ -2213,6 +2239,9 @@ flag_ok:
   bool non_mv_upd = true;
   uint32_t n_index = 0;
   trx_t *trx = thr_get_trx(thr);
+  /* Set once the record is updated in place; the node for its label is
+  then added after the mini-transaction commits. */
+  bool vec_row_updated = false;
 
   ut_ad(dtuple_get_n_fields_cmp(old_pk) == dict_index_get_n_unique(index));
   ut_ad(dtuple_get_n_fields(old_pk) ==
@@ -2324,6 +2353,10 @@ flag_ok:
   func_exit_committed:
     ut_ad(mtr.has_committed());
 
+    if (error == DB_SUCCESS && vec_row_updated) {
+      error = vec_log_apply_row(log->table, row, current_thd, thr_get_trx(thr));
+    }
+
     if (error != DB_SUCCESS) {
       /* Report the erroneous row using the new
       version of the table. */
@@ -2391,6 +2424,35 @@ flag_ok:
     error =
         row_log_table_apply_delete_low(&pcur, old_pk, cur_offsets, heap, &mtr);
     goto func_exit_committed;
+  }
+
+  if (row_log_vec_needs_label(log, dup)) {
+    /* The logged row has no label. The record keeps the one it has unless
+    the vector changed, which is a new node and so a new label. A record
+    with externally stored columns is replaced below, not updated, and
+    the insert gives it a label then. */
+    dtuple_t *mrow = const_cast<dtuple_t *>(row);
+    const dict_col_t *vcol = vec_index_of(log->table)->get_field(0)->col;
+    const ulint vpos = index->get_col_pos(dict_col_get_no(vcol));
+    const ulint lpos = index->get_col_pos(log->table->vec_aux_col);
+    ulint vlen, llen;
+    const byte *vrec =
+        rec_get_nth_field(index, pcur.get_rec(), cur_offsets, vpos, &vlen);
+    const byte *lrec =
+        rec_get_nth_field(index, pcur.get_rec(), cur_offsets, lpos, &llen);
+    const dfield_t *vnew = dtuple_get_nth_field(mrow, dict_col_get_no(vcol));
+    const bool same_vector = !rec_offs_nth_extern(index, cur_offsets, vpos) &&
+                             vlen == dfield_get_len(vnew) &&
+                             (vlen == UNIV_SQL_NULL ||
+                              memcmp(vrec, dfield_get_data(vnew), vlen) == 0);
+    if (same_vector && llen == 8) {
+      auto buf = static_cast<byte *>(mem_heap_alloc(heap, 8));
+      memcpy(buf, lrec, 8);
+      dfield_set_data(dtuple_get_nth_field(mrow, log->table->vec_aux_col), buf,
+                      8);
+    } else {
+      row_log_vec_label(mrow, log->table, heap);
+    }
   }
 
   /** It allows to create tuple with virtual column information. */
@@ -2485,8 +2547,8 @@ flag_ok:
     }
 
     if (index->is_vector()) {
-      error = row_log_refuse_vector_index(index);
-      break;
+      vec_row_updated = true;
+      continue;
     }
 
     if (index->type & DICT_FTS) {

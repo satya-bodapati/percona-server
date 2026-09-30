@@ -81,6 +81,10 @@ struct Vec_ctx {
   report: each one short-circuits when it is already set, and the caller
   inspects it once insert() returns. */
   dberr_t err{DB_SUCCESS};
+  /** `trx` belongs to the caller - an ALTER applying its row log - and is
+  neither committed per callback nor freed here: its aux rows commit or roll
+  back with the ALTER. */
+  bool outer_trx{false};
 };
 
 /* The persistor's shims forward here. Ordinary functions, so their
@@ -480,6 +484,22 @@ at read time by looking base_pk up under the reader's view.
 @param[in]      thd    session
 @return DB_SUCCESS, or an error */
 dberr_t vec_insert_row(dict_table_t *table, const dtuple_t *row, THD *thd);
+
+/** Give a row applied from the online ALTER log its node in every vector
+index of the rebuilt table. The row keeps the label it was given in the old
+table, and the rebuilt graph was built from the old rows' labels, so a node
+already under that label - the row was copied by the scan, or an earlier
+record of it was applied - is left as it is.
+The aux rows are written on the ALTER's own transaction, as the build wrote
+the rest of the new aux: a background transaction would wait on the build's
+rows, which that still-active transaction holds.
+@param[in]  table  the rebuilt table
+@param[in]  row    the row as written to it
+@param[in]  thd    session
+@param[in]  trx    the ALTER's transaction
+@return DB_SUCCESS or error code */
+dberr_t vec_log_apply_row(dict_table_t *table, const dtuple_t *row, THD *thd,
+                          trx_t *trx);
 
 /** One open streaming ANN scan.
 
