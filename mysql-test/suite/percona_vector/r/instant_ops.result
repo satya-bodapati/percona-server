@@ -78,6 +78,22 @@ SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
 SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 nodes=9 distinct_ids=9 distinct_base_pks=7 dup_ids=0 dup_base_pks=2 labels_contiguous_from_1=1
+# The vector column itself, the table, and virtual columns.
+ALTER TABLE t1 RENAME COLUMN v TO w, ALGORITHM = INSTANT;
+SELECT id FROM t1 ORDER BY DISTANCE(w, STRING_TO_VECTOR('[0,0,0,1]'), 'euclidean') LIMIT 1;
+id
+4
+ALTER TABLE t1 RENAME COLUMN w TO v, ALGORITHM = INSTANT;
+ALTER TABLE t1 RENAME TO t1r, ALGORITHM = INSTANT;
+SELECT id FROM t1r ORDER BY DISTANCE(v, STRING_TO_VECTOR('[3,0,0,0]'), 'euclidean') LIMIT 1;
+id
+7
+ALTER TABLE t1r RENAME TO t1, ALGORITHM = INSTANT;
+ALTER TABLE t1 ADD COLUMN g INT AS (k2 + 1) VIRTUAL, ALGORITHM = INSTANT;
+SELECT id, g FROM t1 FORCE INDEX (PRIMARY) WHERE id = 7;
+id	g
+7	8
+ALTER TABLE t1 DROP COLUMN g, ALGORITHM = INSTANT;
 # A restart reloads the table and its graph from the DD and the aux.
 # restart
 SELECT id, k2, m1, VECTOR_TO_STRING(v), e1 FROM t1 FORCE INDEX (PRIMARY) ORDER BY id;
