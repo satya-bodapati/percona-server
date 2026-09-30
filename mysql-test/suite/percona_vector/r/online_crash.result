@@ -1,0 +1,129 @@
+#
+# A crash inside the commit of an online ALTER of a vector table, after
+# the last of the row log was applied. Atomic DDL recovery finishes or
+# undoes the ALTER; either way the rows, the graph, the aux and the two
+# counters must agree afterwards, and the DML logged during the ALTER
+# must be there.
+#
+CREATE TABLE t1 (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, k INT,
+v VECTOR(4) NOT NULL,
+VECTOR KEY vk (v) TYPE hnsw (M = 8));
+INSERT INTO t1 (k, v) VALUES
+(1, STRING_TO_VECTOR('[1,0,0,0]')), (2, STRING_TO_VECTOR('[0,1,0,0]')),
+(3, STRING_TO_VECTOR('[0,0,1,0]')), (4, STRING_TO_VECTOR('[0,0,0,1]')),
+(5, STRING_TO_VECTOR('[1,1,0,0]')), (6, STRING_TO_VECTOR('[0,1,1,0]'));
+# ALTER TABLE t1 FORCE, ALGORITHM = INPLACE, LOCK = NONE, crashing at ib_commit_inplace_crash_1
+SET DEBUG_SYNC = 'row_log_table_apply1_before SIGNAL built WAIT_FOR go';
+SET SESSION DEBUG = '+d,ib_commit_inplace_crash_1';
+ALTER TABLE t1 FORCE, ALGORITHM = INPLACE, LOCK = NONE;
+SET DEBUG_SYNC = 'now WAIT_FOR built';
+INSERT INTO t1 (k, v) VALUES (@k, STRING_TO_VECTOR(CONCAT('[', @k, ',2,0,0]')));
+INSERT INTO t1 (k, v) VALUES (@k + 1, STRING_TO_VECTOR(CONCAT('[0,', @k, ',2,0]')));
+UPDATE t1 SET v = STRING_TO_VECTOR(CONCAT('[0,0,', @k, ',2]')) WHERE k = 2;
+SET DEBUG_SYNC = 'now SIGNAL go';
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# The DML logged during the ALTER is in the table.
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY) WHERE k >= 7;
+COUNT(*)
+2
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output LIKE '% dup_ids=0 %' AS no_shared_label;
+no_shared_label
+1
+all_rows_searched	rows_not_found
+1	0
+# The next rows take new labels and new AUTO_INCREMENT ids.
+INSERT INTO t1 (k, v) VALUES (100, STRING_TO_VECTOR('[9,9,9,9]')),
+(101, STRING_TO_VECTOR('[9,9,9,8]'));
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output LIKE '% dup_ids=0 %' AS no_shared_label;
+no_shared_label
+1
+all_rows_searched	rows_not_found
+1	0
+SELECT COUNT(DISTINCT id) = COUNT(*) AS ids_unique FROM t1 FORCE INDEX (PRIMARY);
+ids_unique
+1
+DELETE FROM t1 WHERE k IN (100, 101);
+# ALTER TABLE t1 FORCE, ALGORITHM = INPLACE, LOCK = NONE, crashing at ib_commit_inplace_crash_2
+SET DEBUG_SYNC = 'row_log_table_apply1_before SIGNAL built WAIT_FOR go';
+SET SESSION DEBUG = '+d,ib_commit_inplace_crash_2';
+ALTER TABLE t1 FORCE, ALGORITHM = INPLACE, LOCK = NONE;
+SET DEBUG_SYNC = 'now WAIT_FOR built';
+INSERT INTO t1 (k, v) VALUES (@k, STRING_TO_VECTOR(CONCAT('[', @k, ',2,0,0]')));
+INSERT INTO t1 (k, v) VALUES (@k + 1, STRING_TO_VECTOR(CONCAT('[0,', @k, ',2,0]')));
+UPDATE t1 SET v = STRING_TO_VECTOR(CONCAT('[0,0,', @k, ',2]')) WHERE k = 2;
+SET DEBUG_SYNC = 'now SIGNAL go';
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# The DML logged during the ALTER is in the table.
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY) WHERE k >= 7;
+COUNT(*)
+4
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output LIKE '% dup_ids=0 %' AS no_shared_label;
+no_shared_label
+1
+all_rows_searched	rows_not_found
+1	0
+# The next rows take new labels and new AUTO_INCREMENT ids.
+INSERT INTO t1 (k, v) VALUES (100, STRING_TO_VECTOR('[9,9,9,9]')),
+(101, STRING_TO_VECTOR('[9,9,9,8]'));
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output LIKE '% dup_ids=0 %' AS no_shared_label;
+no_shared_label
+1
+all_rows_searched	rows_not_found
+1	0
+SELECT COUNT(DISTINCT id) = COUNT(*) AS ids_unique FROM t1 FORCE INDEX (PRIMARY);
+ids_unique
+1
+DELETE FROM t1 WHERE k IN (100, 101);
+#
+# The first ADD, online, crashing in its commit.
+#
+ALTER TABLE t1 DROP KEY vk, ALGORITHM = INPLACE, LOCK = NONE;
+# ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw (M = 8), ALGORITHM = INPLACE, LOCK = NONE, crashing at ib_commit_inplace_crash_1
+SET DEBUG_SYNC = 'row_log_table_apply1_before SIGNAL built WAIT_FOR go';
+SET SESSION DEBUG = '+d,ib_commit_inplace_crash_1';
+ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw (M = 8), ALGORITHM = INPLACE, LOCK = NONE;
+SET DEBUG_SYNC = 'now WAIT_FOR built';
+INSERT INTO t1 (k, v) VALUES (@k, STRING_TO_VECTOR(CONCAT('[', @k, ',2,0,0]')));
+INSERT INTO t1 (k, v) VALUES (@k + 1, STRING_TO_VECTOR(CONCAT('[0,', @k, ',2,0]')));
+UPDATE t1 SET v = STRING_TO_VECTOR(CONCAT('[0,0,', @k, ',2]')) WHERE k = 2;
+SET DEBUG_SYNC = 'now SIGNAL go';
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+# The DML logged during the ALTER is in the table.
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY) WHERE k >= 7;
+COUNT(*)
+6
+# Recovery undid the first ADD: no label column, no index. It runs
+# again, online, over the rows the logged DML left.
+SELECT COUNT(*) AS label_column FROM INFORMATION_SCHEMA.INNODB_COLUMNS c
+JOIN INFORMATION_SCHEMA.INNODB_TABLES t USING (TABLE_ID)
+WHERE t.NAME = 'test/t1' AND c.NAME = 'percona_vec_aux_id';
+label_column
+0
+ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw (M = 8), ALGORITHM = INPLACE, LOCK = NONE;
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output LIKE '% dup_ids=0 %' AS no_shared_label;
+no_shared_label
+1
+all_rows_searched	rows_not_found
+1	0
+# The next rows take new labels and new AUTO_INCREMENT ids.
+INSERT INTO t1 (k, v) VALUES (100, STRING_TO_VECTOR('[9,9,9,9]')),
+(101, STRING_TO_VECTOR('[9,9,9,8]'));
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output LIKE '% dup_ids=0 %' AS no_shared_label;
+no_shared_label
+1
+all_rows_searched	rows_not_found
+1	0
+SELECT COUNT(DISTINCT id) = COUNT(*) AS ids_unique FROM t1 FORCE INDEX (PRIMARY);
+ids_unique
+1
+DELETE FROM t1 WHERE k IN (100, 101);
+DROP TABLE t1;

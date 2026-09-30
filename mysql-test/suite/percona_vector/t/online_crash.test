@@ -1,0 +1,41 @@
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/not_valgrind.inc
+--source include/count_sessions.inc
+
+--echo #
+--echo # A crash inside the commit of an online ALTER of a vector table, after
+--echo # the last of the row log was applied. Atomic DDL recovery finishes or
+--echo # undoes the ALTER; either way the rows, the graph, the aux and the two
+--echo # counters must agree afterwards, and the DML logged during the ALTER
+--echo # must be there.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, k INT,
+                 v VECTOR(4) NOT NULL,
+                 VECTOR KEY vk (v) TYPE hnsw (M = 8));
+INSERT INTO t1 (k, v) VALUES
+  (1, STRING_TO_VECTOR('[1,0,0,0]')), (2, STRING_TO_VECTOR('[0,1,0,0]')),
+  (3, STRING_TO_VECTOR('[0,0,1,0]')), (4, STRING_TO_VECTOR('[0,0,0,1]')),
+  (5, STRING_TO_VECTOR('[1,1,0,0]')), (6, STRING_TO_VECTOR('[0,1,1,0]'));
+
+--let $alter = ALTER TABLE t1 FORCE, ALGORITHM = INPLACE, LOCK = NONE
+--let $crash = ib_commit_inplace_crash_1
+--source suite/percona_vector/include/online_crash.inc
+
+--let $alter = ALTER TABLE t1 FORCE, ALGORITHM = INPLACE, LOCK = NONE
+--let $crash = ib_commit_inplace_crash_2
+--source suite/percona_vector/include/online_crash.inc
+
+--echo #
+--echo # The first ADD, online, crashing in its commit.
+--echo #
+ALTER TABLE t1 DROP KEY vk, ALGORITHM = INPLACE, LOCK = NONE;
+--let $alter = ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw (M = 8), ALGORITHM = INPLACE, LOCK = NONE
+--let $crash = ib_commit_inplace_crash_1
+--let $first_add = 1
+--source suite/percona_vector/include/online_crash.inc
+--let $first_add = 0
+
+DROP TABLE t1;
+--source include/wait_until_count_sessions.inc
