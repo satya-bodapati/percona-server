@@ -1,0 +1,57 @@
+#
+# CHECK TABLE on a vector (HNSW) index: vec_check_aux_refs
+# (row0mysql.cc row_scan_index_for_mysql -> vec0hnsw.cc) walks every
+# base row's percona_vec_aux_id and flags a dangling reference -- a
+# label whose node does not exist in the aux table. An aux node
+# nobody's row references any more (an orphan, left behind when an
+# UPDATE stamps a fresh label on the same row) is expected and must
+# NOT be flagged.
+#
+CREATE TABLE t1 (
+id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(4) NOT NULL,
+KEY (v) TYPE hnsw WITH (M = 6)
+) ENGINE=InnoDB;
+# === Baseline: ordinary rows, CHECK TABLE must be OK ===
+INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[1,1,1,1]'));
+INSERT INTO t1 VALUES (2, STRING_TO_VECTOR('[2,2,2,2]'));
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# === An orphan aux node (left behind by UPDATE) must NOT be flagged ===
+UPDATE t1 SET v = STRING_TO_VECTOR('[9,9,9,9]') WHERE id = 1;
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# === A dangling reference (row's label has no aux node) must be flagged ===
+SET SESSION debug = '+d,vec_skip_aux_row_insert';
+INSERT INTO t1 VALUES (3, STRING_TO_VECTOR('[3,3,3,3]'));
+SET SESSION debug = '-d,vec_skip_aux_row_insert';
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	Warning	InnoDB: The B-tree of index v is corrupted.
+test.t1	check	error	Corrupt
+DROP TABLE t1;
+#
+# A stamped label of 0 must be flagged too, not treated as a match on
+# the aux table's record 0 (its entry-point metadata record, not a
+# node). label 0 is otherwise unreachable - vec_assign_next_aux_id
+# never hands it out - so the only way to see it is to fabricate it.
+#
+CREATE TABLE t2 (
+id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(4) NOT NULL,
+KEY (v) TYPE hnsw WITH (M = 6)
+) ENGINE=InnoDB;
+INSERT INTO t2 VALUES (1, STRING_TO_VECTOR('[1,1,1,1]'));
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+SET SESSION debug = '+d,vec_stamp_zero_aux_id';
+INSERT INTO t2 VALUES (2, STRING_TO_VECTOR('[2,2,2,2]'));
+SET SESSION debug = '-d,vec_stamp_zero_aux_id';
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	Warning	InnoDB: The B-tree of index v is corrupted.
+test.t2	check	error	Corrupt
+DROP TABLE t2;
