@@ -3,6 +3,10 @@
 # ORDER BY DISTANCE ... LIMIT 1, the shape that uses the vector index.
 # Needs table t1 with VECTOR(4) column v and vector index vk.
 --disable_query_log
+# A wide search, so a row the index does not return is a missing node, not
+# the approximation HNSW is allowed at the default breadth.
+SET @vector_saved_ef = @@session.innodb_hnsw_ef_search;
+SET SESSION innodb_hnsw_ef_search = 400;
 DELIMITER |;
 CREATE PROCEDURE vector_every_row_found()
 BEGIN
@@ -27,4 +31,5 @@ CALL vector_every_row_found();
 DROP PROCEDURE vector_every_row_found;
 SELECT @searched = (SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY)) AS all_rows_searched,
        @missing AS rows_not_found;
+SET SESSION innodb_hnsw_ef_search = @vector_saved_ef;
 --enable_query_log
