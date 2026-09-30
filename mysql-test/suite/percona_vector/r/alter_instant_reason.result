@@ -1,8 +1,7 @@
 #
 # ALGORITHM=INSTANT on a vector-indexed table: column changes are
 # instant, and an ALTER that also adds an index is refused for the
-# index, by the same rule as on any table. LOCK=NONE keeps its own
-# refusal.
+# index, by the same rule as on any table.
 #
 CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4) NOT NULL, g INT,
 VECTOR KEY vk (v) TYPE hnsw (M = 8));
@@ -12,8 +11,6 @@ ALTER TABLE t ADD COLUMN c INT, ALGORITHM=INSTANT;
 ALTER TABLE t DROP COLUMN g, ALGORITHM=INSTANT;
 ALTER TABLE t ADD COLUMN c2 INT, ADD KEY kc (c), ALGORITHM=INSTANT;
 ERROR 0A000: ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE.
-ALTER TABLE t ADD COLUMN c3 INT, ALGORITHM=INPLACE, LOCK=NONE;
-ERROR 0A000: LOCK=NONE is not supported. Reason: InnoDB does not support LOCK=NONE on a table with a vector index. Try LOCK=SHARED.
 INSERT INTO t (id, v, c) VALUES (3, STRING_TO_VECTOR('[0,0,1,0]'), 3);
 SELECT id FROM t ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,1,0]'), 'euclidean') LIMIT 1;
 id

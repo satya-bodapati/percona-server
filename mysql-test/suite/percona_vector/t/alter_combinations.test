@@ -160,12 +160,12 @@ DROP TABLE t_rebuild_after;
 --echo #
 --echo # ---- algorithm lock ----
 --echo #
---echo # Explicit ALGORITHM and LOCK on the INPLACE path. LOCK=NONE must be
---echo # refused; SHARED and INPLACE must work.
+--echo # Explicit ALGORITHM and LOCK on the INPLACE path: the first ADD works
+--echo # with LOCK=NONE and with LOCK=SHARED.
 CREATE TABLE t_algorithm_lock (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4) NOT NULL);
 INSERT INTO t_algorithm_lock VALUES (1,STRING_TO_VECTOR('[1,0,0,0]')),(2,STRING_TO_VECTOR('[2,0,0,0]'));
---error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
-ALTER TABLE t_algorithm_lock ADD VECTOR KEY (v) TYPE hnsw (M = 8), ALGORITHM=INPLACE, LOCK=NONE;
+ALTER TABLE t_algorithm_lock ADD VECTOR KEY v (v) TYPE hnsw (M = 8), ALGORITHM=INPLACE, LOCK=NONE;
+ALTER TABLE t_algorithm_lock DROP KEY v, ALGORITHM=INPLACE, LOCK=NONE;
 ALTER TABLE t_algorithm_lock ADD VECTOR KEY (v) TYPE hnsw (M = 8), ALGORITHM=INPLACE, LOCK=SHARED;
 SELECT id FROM t_algorithm_lock ORDER BY DISTANCE(v, STRING_TO_VECTOR('[2,0,0,0]'), 'euclidean') LIMIT 1;
 CHECK TABLE t_algorithm_lock;

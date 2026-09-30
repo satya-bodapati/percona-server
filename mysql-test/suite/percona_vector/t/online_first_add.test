@@ -1,0 +1,139 @@
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/count_sessions.inc
+
+--echo #
+--echo # The first ADD VECTOR INDEX runs with LOCK=NONE. It rebuilds the table
+--echo # to add the hidden label column: the scan labels the rows it copies,
+--echo # and the log apply labels the rows DML wrote meanwhile, from the same
+--echo # counter. Dropping the last vector index runs online too.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, k INT,
+                 v VECTOR(4) NOT NULL);
+INSERT INTO t1 (k, v) VALUES
+  (1, STRING_TO_VECTOR('[1,0,0,0]')), (2, STRING_TO_VECTOR('[0,1,0,0]')),
+  (3, STRING_TO_VECTOR('[0,0,1,0]')), (4, STRING_TO_VECTOR('[0,0,0,1]')),
+  (5, STRING_TO_VECTOR('[1,1,0,0]')), (6, STRING_TO_VECTOR('[0,1,1,0]')),
+  (7, STRING_TO_VECTOR('[0,0,1,1]')), (8, STRING_TO_VECTOR('[1,0,0,1]'));
+
+--connect (con1, localhost, root,,)
+--connection default
+SET DEBUG_SYNC = 'row_log_table_apply1_before SIGNAL built WAIT_FOR go';
+--send ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw (M = 8), ALGORITHM = INPLACE, LOCK = NONE
+--connection con1
+SET DEBUG_SYNC = 'now WAIT_FOR built';
+INSERT INTO t1 (k, v) VALUES (9, STRING_TO_VECTOR('[9,1,0,0]'));
+INSERT INTO t1 (k, v) VALUES (10, STRING_TO_VECTOR('[0,9,1,0]'));
+UPDATE t1 SET v = STRING_TO_VECTOR('[0,0,9,1]') WHERE k = 3;
+UPDATE t1 SET k = 44 WHERE k = 4;
+UPDATE t1 SET v = STRING_TO_VECTOR('[1,0,0,9]') WHERE k = 10;
+DELETE FROM t1 WHERE k = 5;
+INSERT INTO t1 (id, k, v) VALUES (5, 55, STRING_TO_VECTOR('[9,9,1,1]'));
+SET DEBUG_SYNC = 'now SIGNAL go';
+--connection default
+--reap
+SET DEBUG_SYNC = 'RESET';
+
+--echo # Each changed row is its own nearest neighbour.
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[9,1,0,0]'), 'euclidean') LIMIT 1;
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,9,1]'), 'euclidean') LIMIT 1;
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,9]'), 'euclidean') LIMIT 1;
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[9,9,1,1]'), 'euclidean') LIMIT 1;
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,0,1]'), 'euclidean') LIMIT 1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+--echo # One label per row, none shared.
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+--source suite/percona_vector/include/nearest_is_exact.inc
+--source suite/percona_vector/include/every_row_found.inc
+
+--echo # The counter survives a restart: no label is reused.
+--disconnect con1
+--connection default
+--source include/restart_mysqld.inc
+INSERT INTO t1 (k, v) VALUES (11, STRING_TO_VECTOR('[3,3,3,0]'));
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+--source suite/percona_vector/include/every_row_found.inc
+
+--echo #
+--echo # Dropping the last vector index, online, with DML during it: the
+--echo # column goes, and the rows come through without it.
+--echo #
+--connect (con1, localhost, root,,)
+--connection default
+SET DEBUG_SYNC = 'row_log_table_apply1_before SIGNAL built WAIT_FOR go';
+--send ALTER TABLE t1 DROP KEY vk, ALGORITHM = INPLACE, LOCK = NONE
+--connection con1
+SET DEBUG_SYNC = 'now WAIT_FOR built';
+INSERT INTO t1 (k, v) VALUES (12, STRING_TO_VECTOR('[4,4,4,0]'));
+UPDATE t1 SET v = STRING_TO_VECTOR('[5,5,5,0]') WHERE k = 11;
+SET DEBUG_SYNC = 'now SIGNAL go';
+--connection default
+--reap
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*) AS label_column FROM INFORMATION_SCHEMA.INNODB_COLUMNS c
+  JOIN INFORMATION_SCHEMA.INNODB_TABLES t USING (TABLE_ID)
+ WHERE t.NAME = 'test/t1' AND c.NAME = 'percona_vec_aux_id';
+SELECT COUNT(*) FROM t1;
+
+--echo #
+--echo # A crash during an online first ADD rolls it back: no index, no
+--echo # column, and the rows DML wrote during it stay.
+--echo #
+--connect (con2, localhost, root,,)
+SET DEBUG_SYNC = 'row_log_table_apply1_before SIGNAL built WAIT_FOR never';
+--send ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw (M = 8), ALGORITHM = INPLACE, LOCK = NONE
+--connection con1
+SET DEBUG_SYNC = 'now WAIT_FOR built';
+INSERT INTO t1 (k, v) VALUES (13, STRING_TO_VECTOR('[6,6,6,0]'));
+--connection default
+--source include/kill_and_restart_mysqld.inc
+--disconnect con1
+--disconnect con2
+--connection default
+SELECT COUNT(*) AS label_column FROM INFORMATION_SCHEMA.INNODB_COLUMNS c
+  JOIN INFORMATION_SCHEMA.INNODB_TABLES t USING (TABLE_ID)
+ WHERE t.NAME = 'test/t1' AND c.NAME = 'percona_vec_aux_id';
+SELECT COUNT(*) FROM t1;
+--echo # And the ADD works afterwards, online.
+ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw (M = 8), ALGORITHM = INPLACE, LOCK = NONE;
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[6,6,6,0]'), 'euclidean') LIMIT 1;
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+--source suite/percona_vector/include/every_row_found.inc
+
+--echo #
+--echo # DML after the first log apply reaches the new table in the last one,
+--echo # at commit, which labels those rows too. The counter stored in the
+--echo # new definition has to include them: after a restart it is what the
+--echo # next label comes from.
+--echo #
+ALTER TABLE t1 DROP KEY vk, ALGORITHM = INPLACE, LOCK = NONE;
+--connect (con1, localhost, root,,)
+--connect (con2, localhost, root,,)
+SET DEBUG_SYNC = 'inplace_after_index_build SIGNAL applied WAIT_FOR go';
+--send ALTER TABLE t1 ADD VECTOR KEY vk (v) TYPE hnsw (M = 8), ALGORITHM = INPLACE, LOCK = NONE
+--connection con1
+SET DEBUG_SYNC = 'now WAIT_FOR applied';
+INSERT INTO t1 (k, v) VALUES (14, STRING_TO_VECTOR('[7,0,7,0]')),
+                             (15, STRING_TO_VECTOR('[0,7,0,7]'));
+UPDATE t1 SET v = STRING_TO_VECTOR('[7,7,7,7]') WHERE k = 13;
+SET DEBUG_SYNC = 'now SIGNAL go';
+--connection con2
+--reap
+--disconnect con1
+--disconnect con2
+--connection default
+SET DEBUG_SYNC = 'RESET';
+--source include/restart_mysqld.inc
+INSERT INTO t1 (k, v) VALUES (16, STRING_TO_VECTOR('[8,0,0,0]')),
+                             (17, STRING_TO_VECTOR('[0,8,0,0]')),
+                             (18, STRING_TO_VECTOR('[0,0,8,0]'));
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+--source suite/percona_vector/include/every_row_found.inc
+
+DROP TABLE t1;
+--source include/wait_until_count_sessions.inc

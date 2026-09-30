@@ -89,6 +89,7 @@ time - and it is the better direction to diverge in, because the in-memory
 rewire cannot be undone either. Rolling the whole insert back left memory
 holding a node the aux had discarded. */
 static void vec_ctx_step_commit(Vec_ctx *ctx) {
+  if (ctx->outer_trx) return;
   trx_commit_for_mysql(ctx->trx);
   trx_start_internal(ctx->trx, UT_LOCATION_HERE);
 }
@@ -373,7 +374,11 @@ dberr_t vec_runtime_create(dict_index_t *index, const TABLE_SHARE *share) {
 No MDL on the aux itself: the caller holds MDL on the BASE table, and every
 DDL that can drop an aux takes exclusive base MDL first. Fast path is the
 dict cache; fall back to the DD only when it has been evicted, and then take
-MDL because the fallback can block. */
+MDL because the fallback can block.
+
+An online ALTER applies the last of its row log before its commit latches
+the data dictionary (vec_apply_row_log_before_commit), so this never runs
+under dict_sys->mutex. */
 static dict_table_t *vec_aux_open_for_dml(dict_table_t *base,
                                           space_index_t index_id, THD *thd,
                                           MDL_ticket **mdl) {
@@ -383,6 +388,7 @@ static dict_table_t *vec_aux_open_for_dml(dict_table_t *base,
 
   *mdl = nullptr;
   DBUG_EXECUTE_IF("vec_aux_open_fail", return nullptr;);
+  ut_ad(!dict_sys_mutex_own());
   dict_table_t *aux = dd_table_open_on_name_in_mem(aux_name, false);
   if (aux == nullptr && thd != nullptr) {
     aux =
@@ -596,7 +602,8 @@ they are the same operation: a node is immutable, so a changed vector is
 a new node rather than an edit of the old one. */
 static dberr_t vec_add_node(vec_t *vec, dict_index_t *index,
                             dict_table_t *table, uint64_t label,
-                            uint64_t base_pk, const char *q, THD *thd) {
+                            uint64_t base_pk, const char *q, THD *thd,
+                            trx_t *outer_trx = nullptr) {
   /* innodb_hnsw_max_memory, checked BEFORE insert() starts mutating.
 
   Refused here, at the entry to the operation, rather than in
@@ -637,6 +644,25 @@ static dberr_t vec_add_node(vec_t *vec, dict_index_t *index,
   and starts it again (vec_ctx_step_commit), so the object is allocated once
   per insert while the locks live only as long as the callback that took
   them. */
+  if (outer_trx != nullptr) {
+    /* The row log of an ALTER: its transaction, which the rest of the new
+    aux rides too, commits or rolls back every write below. */
+    Vec_ctx ctx;
+    ctx.trx = outer_trx;
+    ctx.outer_trx = true;
+    ctx.aux = aux;
+    ctx.thd = thd;
+    ctx.m = vec->m;
+    ctx.vec_bytes = vec->dims * sizeof(float);
+    ctx.err = DB_SUCCESS;
+    const HnswResult irc = vec->hnsw->insert(label, base_pk, q, &ctx);
+    if (irc != HNSW_SUCCESS && ctx.err == DB_SUCCESS) {
+      ctx.err = vec_hnsw_dberr(irc, &ctx);
+    }
+    vec_aux_close_for_dml(aux, thd, &mdl);
+    return ctx.err;
+  }
+
   trx_t *aux_trx = trx_allocate_for_background();
 
   /* Never fsync the redo log for the aux sub-transaction.
@@ -1111,7 +1137,41 @@ dberr_t vec_update_row(dict_table_t *table, uint64_t label, const char *q,
   return DB_SUCCESS;
 }
 
-dberr_t vec_insert_row(dict_table_t *table, const dtuple_t *row, THD *thd) {
+/** Whether the aux table already holds a node under this label.
+@param[in]   vec    the index runtime
+@param[in]   table  base table
+@param[in]   label  node id
+@param[in]   thd    session
+@param[out]  err    DB_SUCCESS, or why the aux could not be read
+@return true if the node is there */
+static bool vec_aux_has_node(const vec_t *vec, dict_table_t *table,
+                             uint64_t label, THD *thd, dberr_t *err) {
+  MDL_ticket *mdl = nullptr;
+  dict_table_t *aux = vec_aux_open_for_dml(table, vec->index_id, thd, &mdl);
+  if (aux == nullptr) {
+    *err = DB_INDEX_CORRUPT;
+    return false;
+  }
+  mem_heap_t *heap = mem_heap_create(256, UT_LOCATION_HERE);
+  vec_aux_read_t node;
+  const dberr_t rerr = vec_aux_read_node(aux, label, heap, &node);
+  mem_heap_free(heap);
+  vec_aux_close_for_dml(aux, thd, &mdl);
+  *err =
+      (rerr == DB_SUCCESS || rerr == DB_RECORD_NOT_FOUND) ? DB_SUCCESS : rerr;
+  return rerr == DB_SUCCESS;
+}
+
+/** Add one row's vector to every vector index on the table.
+@param[in]  table     base table
+@param[in]  row       the row, with its label
+@param[in]  thd       session
+@param[in]  log_trx   the ALTER's transaction when the row comes from its
+                      online log, and may already have a node; else nullptr
+@return DB_SUCCESS or error code */
+static dberr_t vec_insert_row_low(dict_table_t *table, const dtuple_t *row,
+                                  THD *thd, trx_t *log_trx) {
+  const bool from_log = log_trx != nullptr;
   for (dict_index_t *index = table->first_index(); index != nullptr;
        index = index->next()) {
     if (!index->is_vector()) continue;
@@ -1155,12 +1215,32 @@ dberr_t vec_insert_row(dict_table_t *table, const dtuple_t *row, THD *thd) {
       return DB_INDEX_CORRUPT;
     }
 
+    /* A logged row may already have its node: the scan built one for the
+    row it copied, or an earlier record of the same row did. A label
+    names one row version, so the node there is this one. */
+    if (from_log) {
+      dberr_t herr;
+      if (vec_aux_has_node(vec, table, label, thd, &herr)) continue;
+      if (herr != DB_SUCCESS) return herr;
+    }
+
     /* base_pk is the base row's PRIMARY KEY, not the label. A search
     returns base_pk so the caller can fetch the row; the label
     identifies the node and is what the read path compares against the
     row's hidden column. */
-    const dberr_t err = vec_add_node(vec, index, table, label, base_pk, q, thd);
+    const dberr_t err =
+        vec_add_node(vec, index, table, label, base_pk, q, thd, log_trx);
     if (err != DB_SUCCESS) return err;
   }
   return DB_SUCCESS;
+}
+
+dberr_t vec_insert_row(dict_table_t *table, const dtuple_t *row, THD *thd) {
+  return vec_insert_row_low(table, row, thd, nullptr);
+}
+
+dberr_t vec_log_apply_row(dict_table_t *table, const dtuple_t *row, THD *thd,
+                          trx_t *trx) {
+  ut_ad(trx != nullptr);
+  return vec_insert_row_low(table, row, thd, trx);
 }

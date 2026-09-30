@@ -186,6 +186,15 @@ uint64_t Vec_label_counter::capture_at_alter_commit(
   uint64_t vec_next_id = 0;
   if (DICT_TF2_FLAG_IS_SET(old_table, DICT_TF2_HAS_VEC_AUX_COL)) {
     vec_next_id = old_table->vec_aux_autoinc_next_id.load();
+    /* A rebuild copies the labels, so the new table's counter has to go on
+    from the old one's - in memory too, not only in the definition: the
+    table can stay in the cache after the ALTER (DML waiting on its MDL opens
+    it at once), and a counter left at zero there reissues label 1. */
+    if (new_table != nullptr &&
+        DICT_TF2_FLAG_IS_SET(new_table, DICT_TF2_HAS_VEC_AUX_COL)) {
+      new_table->vec_aux_autoinc_next_id.store(vec_next_id);
+      new_table->vec_aux_autoinc_persisted.store(vec_next_id);
+    }
   } else if (new_table != nullptr &&
              DICT_TF2_FLAG_IS_SET(new_table, DICT_TF2_HAS_VEC_AUX_COL)) {
     /* The rebuild added the column and labelled every row itself, in

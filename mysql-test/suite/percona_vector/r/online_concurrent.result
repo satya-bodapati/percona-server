@@ -1,0 +1,82 @@
+#
+# Online ALTERs (LOCK=NONE rebuilds and index builds) and INSTANT ALTERs
+# on a vector table while three sessions insert, update the vector of,
+# and delete rows. DML during a rebuild reaches the new table through
+# the row log; afterwards the rows, the graph and the aux must agree.
+#
+CREATE TABLE t1 (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, k INT,
+pad INT DEFAULT 0, r INT, v VECTOR(4) NOT NULL,
+VECTOR KEY vk (v) TYPE hnsw (M = 8));
+CREATE PROCEDURE dml(p INT, n INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+WHILE i < n DO
+INSERT INTO t1 (id, k, v) VALUES
+(p * 100000 + i, i,
+STRING_TO_VECTOR(CONCAT('[', p, ',', i % 11, ',', i % 7, ',', i % 5, ']')));
+UPDATE t1 SET v = STRING_TO_VECTOR(CONCAT('[', i % 13, ',', p, ',', i % 3, ',1]'))
+WHERE id = p * 100000 + FLOOR(i / 2);
+UPDATE t1 SET pad = i WHERE id = p * 100000 + FLOOR(i / 3);
+IF i % 5 = 4 THEN
+DELETE FROM t1 WHERE id = p * 100000 + i - 3;
+END IF;
+SET i = i + 1;
+END WHILE;
+END|
+CALL dml(1, 400);
+CALL dml(2, 400);
+CALL dml(3, 400);
+# 3 x 400 inserted, 3 x 80 deleted.
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)
+960
+# No label is shared. The node count itself depends on where the
+# rebuilds fell among the DML, so it is not printed.
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output LIKE '% dup_ids=0 %' AS no_shared_label;
+no_shared_label
+1
+EXPLAIN FORMAT=TREE SELECT id FROM t1
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,1,1,1]'), 'euclidean') LIMIT 1;
+EXPLAIN
+-> Limit: 1 row(s)  (cost=# rows=#)
+    -> Vector index search on t1 using vk  (cost=# rows=#)
+
+query	same_nearest
+1	1
+query	same_nearest
+2	1
+query	same_nearest
+3	1
+query	same_nearest
+4	1
+query	same_nearest
+5	1
+# Every row is in the index: a search from each row's own vector finds
+# a row at distance 0.
+all_rows_searched	rows_not_found
+1	0
+# restart
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)
+960
+# No label is shared. The node count itself depends on where the
+# rebuilds fell among the DML, so it is not printed.
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output LIKE '% dup_ids=0 %' AS no_shared_label;
+no_shared_label
+1
+query	same_nearest
+1	1
+query	same_nearest
+2	1
+query	same_nearest
+3	1
+query	same_nearest
+4	1
+query	same_nearest
+5	1
+all_rows_searched	rows_not_found
+1	0
+DROP PROCEDURE dml;
+DROP TABLE t1;
