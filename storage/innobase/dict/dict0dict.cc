@@ -5783,15 +5783,35 @@ ulint AutoIncPersister::read(PersistentTableMetadata &metadata,
   return (consumed);
 }
 
+/** Fold one counter record into the metadata recovery builds for a table.
+A newer version replaces the value and takes the version; the same version
+keeps the larger value; an older one is ignored, as
+dict_table_apply_dynamic_metadata() would ignore it. Both counters, autoinc
+and the vector label, follow this rule.
+@param[in,out]  metadata        metadata being built
+@param[in]      new_entry       one record's metadata
+@param[in]      get             the counter's getter
+@param[in]      set             the counter's setter
+@param[in]      set_if_bigger   the counter's max-setter */
+static void aggregate_counter(
+    PersistentTableMetadata &metadata, const PersistentTableMetadata &new_entry,
+    uint64_t (PersistentTableMetadata::*get)() const,
+    void (PersistentTableMetadata::*set)(uint64_t),
+    void (PersistentTableMetadata::*set_if_bigger)(uint64_t)) {
+  if (new_entry.get_version() > metadata.get_version()) {
+    (metadata.*set)((new_entry.*get)());
+    metadata.set_version(new_entry.get_version());
+  } else if (new_entry.get_version() == metadata.get_version()) {
+    (metadata.*set_if_bigger)((new_entry.*get)());
+  }
+}
+
 void AutoIncPersister::aggregate(
     PersistentTableMetadata &metadata,
     const PersistentTableMetadata &new_entry) const {
-  if (new_entry.get_version() > metadata.get_version()) {
-    metadata.set_autoinc(new_entry.get_autoinc());
-    metadata.set_version(new_entry.get_version());
-  } else if (new_entry.get_version() == metadata.get_version()) {
-    metadata.set_autoinc_if_bigger(new_entry.get_autoinc());
-  }
+  aggregate_counter(metadata, new_entry, &PersistentTableMetadata::get_autoinc,
+                    &PersistentTableMetadata::set_autoinc,
+                    &PersistentTableMetadata::set_autoinc_if_bigger);
 }
 
 ulint VecIdxIdPersister::write(const PersistentTableMetadata &metadata,
@@ -5842,15 +5862,16 @@ ulint VecIdxIdPersister::read(PersistentTableMetadata &metadata,
 void VecIdxIdPersister::aggregate(
     PersistentTableMetadata &metadata,
     const PersistentTableMetadata &new_entry) const {
-  /* DEVIATION FROM AutoIncPersister: the vec counter is monotonic for
-  the whole lifetime of a table_id - legitimate resets ride table_id
-  reassignment (TRUNCATE, IMPORT, rebuilds), never a version bump on
-  the same table. A newer-version redo entry written by ANOTHER
-  persister (e.g. autoinc after an INSTANT DDL) carries vec == 0;
-  taking it version-authoritatively would wipe the counter on crash
-  recovery. Always keep the maximum, and leave the shared version
-  field to the persisters whose semantics depend on it. */
-  metadata.set_vec_next_id_if_bigger(new_entry.get_vec_next_id());
+  /* The autoinc rule, version included. Recovery calls a persister only
+  for its own records, so a record of another persister never reaches
+  this. The version is what lets dict_table_apply_dynamic_metadata() use
+  the result: without it, a table whose version a DDL had bumped
+  recovered its label records at version 0, had them discarded, and
+  reissued labels. */
+  aggregate_counter(metadata, new_entry,
+                    &PersistentTableMetadata::get_vec_next_id,
+                    &PersistentTableMetadata::set_vec_next_id,
+                    &PersistentTableMetadata::set_vec_next_id_if_bigger);
 }
 
 /** Destructor */
@@ -5945,6 +5966,13 @@ size_t Persisters::write(PersistentTableMetadata &metadata, byte *buffer) {
   }
 
   return (size);
+}
+
+void Persisters::aggregate(PersistentTableMetadata &metadata,
+                           const PersistentTableMetadata &new_entry) const {
+  for (const auto &entry : m_persisters) {
+    entry.second->aggregate(metadata, new_entry);
+  }
 }
 
 void dict_sdi_close_table(dict_table_t *table) {
