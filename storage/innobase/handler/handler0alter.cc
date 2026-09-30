@@ -1094,18 +1094,6 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
   Instant_Type instant_type = innobase_support_instant(
       ha_alter_info, m_prebuilt->table, this->table, altered_table);
 
-  /* ALGORITHM=INSTANT is refused while the table has a vector index, and
-  so while it has the hidden column. For most INSTANT operations that is
-  conservatism - INSTANT runs its prepare phase under MDL_SHARED_UPGRADABLE,
-  with concurrent DML live throughout, on DD paths exercised least. For
-  INSTANT ADD/DROP COLUMN it is also needed: ha_innobase::build_template()
-  maps user fields to InnoDB positions contiguously and does not skip an
-  HT_HIDDEN_SE column, so a column added after percona_vec_aux_id would be
-  read from the wrong bytes. Once the last vector index is gone the table is
-  an ordinary one again. The reason is set once, at the end. */
-  const bool vec_refuses_instant = vec_index_of(m_prebuilt->table) != nullptr;
-  if (vec_refuses_instant) instant_type = Instant_Type::INSTANT_IMPOSSIBLE;
-
   ha_alter_info->handler_trivial_ctx =
       instant_type_to_int(Instant_Type::INSTANT_IMPOSSIBLE);
 
@@ -1510,14 +1498,6 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
     ha_alter_info->unsupported_reason = innobase_get_err_msg(
         ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_NOLOCK);
     online = false;
-  }
-
-  /* The branches above set the LOCK=NONE reason whatever was requested.
-  For ALGORITHM=INSTANT the refusal above is the one the statement hit. */
-  if (vec_refuses_instant && ha_alter_info->alter_info->requested_algorithm ==
-                                 Alter_info::ALTER_TABLE_ALGORITHM_INSTANT) {
-    ha_alter_info->unsupported_reason = innobase_get_err_msg(
-        ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_INSTANT);
   }
 
   return online ? HA_ALTER_INPLACE_NO_LOCK_AFTER_PREPARE
@@ -5089,9 +5069,15 @@ template <typename Table>
     dict_table_t so the dict layer sees the same column set as the new
     dd::Table, and so dict_table_t::vec_aux_col points at it. The new
     table has no row versions, so phy_pos is auto-assigned by the
-    clust-index builder; mirrors fts_add_doc_id_column above. */
+    clust-index builder; mirrors fts_add_doc_id_column above. The column
+    counts include it, as dd_table_get_column_counters() does when the
+    table is next loaded from the DD: INSTANT ADD COLUMN numbers the new
+    column's physical position from them. */
     if (need_vec_aux_col) {
       vec_add_aux_id_column(ctx->new_table, ctx->heap);
+      ctx->new_table->initial_col_count++;
+      ctx->new_table->current_col_count++;
+      ctx->new_table->total_col_count++;
     }
 
     const char *compression;

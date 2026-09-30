@@ -3756,11 +3756,23 @@ static inline void fill_dict_columns(const Table *dd_table, const TABLE *m_form,
 
   if (add_vec_aux_col) {
     /* Materialize the hidden percona_vec_aux_id column on dict_table_t.
-    Same simple shape as fts_add_doc_id_column above: INSTANT
-    ADD/DROP COLUMN is blocked on vec-indexed tables (see
-    innobase_support_instant), so the table can never have
-    row_versions > 0 and no phy_pos plumbing is needed. */
+    Unlike FTS_DOC_ID, whose table refuses INSTANT ADD/DROP COLUMN, a
+    vector table can have row versions, and then every column's physical
+    position comes from its DD entry: dd_copy_table_columns() stored this
+    column's there when the table got its first row version. */
     vec_add_aux_id_column(dict_table, heap);
+    if (has_row_versions) {
+      const dd::Column *dd_col =
+          dd_find_column(&dd_table->table(), VEC_AUX_ID_COL_NAME);
+      const char *s = dd_column_key_strings[DD_INSTANT_PHYSICAL_POS];
+      uint32_t phy_pos = UINT32_UNDEFINED;
+      ut_ad(dd_col != nullptr && dd_col->se_private_data().exists(s));
+      if (dd_col != nullptr && dd_col->se_private_data().exists(s)) {
+        dd_col->se_private_data().get(s, &phy_pos);
+      }
+      ut_ad(phy_pos != UINT32_UNDEFINED);
+      dict_table->get_col(dict_table->vec_aux_col)->set_phy_pos(phy_pos);
+    }
   }
 
   /* Add system columns to make adding index work */
