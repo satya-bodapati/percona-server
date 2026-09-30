@@ -1,11 +1,9 @@
 #
-# PS-11299: no ALTER that leaves a vector index runs with LOCK=NONE.
+# PS-11299: an online ALTER of a vector table keeps the label counter.
 #
-# DML during an online ALTER goes to the row log, and applying the
-# row log maintains neither the graph nor its aux table, so a row
-# written meanwhile would be in the table and not in the index.
-# LOCK=NONE is refused instead, even for an ALTER such as ADD INDEX
-# that never touches the vector index.
+# ADD INDEX without a rebuild runs with LOCK=NONE: DML during it
+# maintains the graph as always, and only the new B-tree index is built
+# from a log.
 #
 # The label counter is captured at commit, under MDL_EXCLUSIVE, so
 # the labels written before and after the ALTER must never repeat.
@@ -21,11 +19,8 @@ SELECT @@session.innodb_interpreter_output;
 @@session.innodb_interpreter_output
 nodes=2 distinct_ids=2 distinct_base_pks=2 dup_ids=0 dup_base_pks=0 labels_contiguous_from_1=1
 # An ordinary secondary index: not a rebuild, does not touch the vector
-# key. Refused anyway, because the table carries a vector index.
+# key, and online.
 ALTER TABLE t1 ADD INDEX id_idx (id), ALGORITHM=INPLACE, LOCK=NONE;
-ERROR 0A000: LOCK=NONE is not supported. Reason: InnoDB does not support LOCK=NONE on a table with a vector index. Try LOCK=SHARED.
-# The same ALTER without LOCK=NONE is supported.
-ALTER TABLE t1 ADD INDEX id_idx (id), ALGORITHM=INPLACE;
 # Rows inserted after it keep assigning labels from where the build left
 # off: 3,4,5 with no reissue.
 INSERT INTO t1 (id, v) VALUES (3,STRING_TO_VECTOR('[3,0,0,0]')),

@@ -1,0 +1,247 @@
+#
+# A rebuild that keeps a vector index runs with LOCK=NONE. DML during it
+# reaches the new table through the row log, and each applied row gets
+# its node in the new graph under the label it carries from the old
+# table. The DML runs while the ALTER waits after its scan, so every
+# change below reaches the new table only through the log.
+#
+CREATE TABLE t1 (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, k INT,
+v VECTOR(4) NOT NULL,
+VECTOR KEY vk (v) TYPE hnsw (M = 8));
+INSERT INTO t1 (k, v) VALUES
+(1, STRING_TO_VECTOR('[1,0,0,0]')), (2, STRING_TO_VECTOR('[0,1,0,0]')),
+(3, STRING_TO_VECTOR('[0,0,1,0]')), (4, STRING_TO_VECTOR('[0,0,0,1]')),
+(5, STRING_TO_VECTOR('[1,1,0,0]')), (6, STRING_TO_VECTOR('[0,1,1,0]')),
+(7, STRING_TO_VECTOR('[0,0,1,1]')), (8, STRING_TO_VECTOR('[1,0,0,1]'));
+SET DEBUG_SYNC = 'row_log_table_apply1_before SIGNAL built WAIT_FOR go';
+ALTER TABLE t1 FORCE, ALGORITHM = INPLACE, LOCK = NONE;
+SET DEBUG_SYNC = 'now WAIT_FOR built';
+INSERT INTO t1 (k, v) VALUES (@k, STRING_TO_VECTOR(CONCAT('[', @k, ',1,0,0]')));
+INSERT INTO t1 (k, v) VALUES (@k + 1, STRING_TO_VECTOR(CONCAT('[0,', @k, ',1,0]')));
+UPDATE t1 SET v = STRING_TO_VECTOR(CONCAT('[0,0,', @k, ',1]')) WHERE k = 3;
+UPDATE t1 SET k = k WHERE k = 4;
+UPDATE t1 SET v = STRING_TO_VECTOR(CONCAT('[1,0,0,', @k, ']')) WHERE k = @k + 1;
+DELETE FROM t1 WHERE k = 5;
+INSERT INTO t1 (k, v) VALUES (5, STRING_TO_VECTOR(CONCAT('[', @k, ',', @k, ',1,1]')));
+SET DEBUG_SYNC = 'now SIGNAL go';
+SET DEBUG_SYNC = 'RESET';
+# Each changed row is its own nearest neighbour.
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[', @k, ',1,0,0]')), 'euclidean') LIMIT 1;
+k
+9
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[0,0,', @k, ',1]')), 'euclidean') LIMIT 1;
+k
+3
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[1,0,0,', @k, ']')), 'euclidean') LIMIT 1;
+k
+10
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[', @k, ',', @k, ',1,1]')), 'euclidean') LIMIT 1;
+k
+5
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)
+10
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+nodes=13 distinct_ids=13 distinct_base_pks=11 dup_ids=0 dup_base_pks=2 labels_contiguous_from_1=1
+query	same_nearest
+1	1
+query	same_nearest
+2	1
+query	same_nearest
+3	1
+query	same_nearest
+4	1
+query	same_nearest
+5	1
+#
+# ADD COLUMN, a rebuild too.
+#
+SET DEBUG_SYNC = 'row_log_table_apply1_before SIGNAL built WAIT_FOR go';
+ALTER TABLE t1 ADD COLUMN c1 INT DEFAULT 7, ALGORITHM = INPLACE, LOCK = NONE;
+SET DEBUG_SYNC = 'now WAIT_FOR built';
+INSERT INTO t1 (k, v) VALUES (@k, STRING_TO_VECTOR(CONCAT('[', @k, ',1,0,0]')));
+INSERT INTO t1 (k, v) VALUES (@k + 1, STRING_TO_VECTOR(CONCAT('[0,', @k, ',1,0]')));
+UPDATE t1 SET v = STRING_TO_VECTOR(CONCAT('[0,0,', @k, ',1]')) WHERE k = 3;
+UPDATE t1 SET k = k WHERE k = 4;
+UPDATE t1 SET v = STRING_TO_VECTOR(CONCAT('[1,0,0,', @k, ']')) WHERE k = @k + 1;
+DELETE FROM t1 WHERE k = 5;
+INSERT INTO t1 (k, v) VALUES (5, STRING_TO_VECTOR(CONCAT('[', @k, ',', @k, ',1,1]')));
+SET DEBUG_SYNC = 'now SIGNAL go';
+SET DEBUG_SYNC = 'RESET';
+# Each changed row is its own nearest neighbour.
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[', @k, ',1,0,0]')), 'euclidean') LIMIT 1;
+k
+11
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[0,0,', @k, ',1]')), 'euclidean') LIMIT 1;
+k
+3
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[1,0,0,', @k, ']')), 'euclidean') LIMIT 1;
+k
+12
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[', @k, ',', @k, ',1,1]')), 'euclidean') LIMIT 1;
+k
+5
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)
+12
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+nodes=15 distinct_ids=15 distinct_base_pks=13 dup_ids=0 dup_base_pks=2 labels_contiguous_from_1=0
+query	same_nearest
+1	1
+query	same_nearest
+2	1
+query	same_nearest
+3	1
+query	same_nearest
+4	1
+query	same_nearest
+5	1
+#
+# A new row format: the vectors are read back from records of another
+# format, by the scan and by the log.
+#
+SET DEBUG_SYNC = 'row_log_table_apply1_before SIGNAL built WAIT_FOR go';
+ALTER TABLE t1 ROW_FORMAT = COMPACT, ALGORITHM = INPLACE, LOCK = NONE;
+SET DEBUG_SYNC = 'now WAIT_FOR built';
+INSERT INTO t1 (k, v) VALUES (@k, STRING_TO_VECTOR(CONCAT('[', @k, ',1,0,0]')));
+INSERT INTO t1 (k, v) VALUES (@k + 1, STRING_TO_VECTOR(CONCAT('[0,', @k, ',1,0]')));
+UPDATE t1 SET v = STRING_TO_VECTOR(CONCAT('[0,0,', @k, ',1]')) WHERE k = 3;
+UPDATE t1 SET k = k WHERE k = 4;
+UPDATE t1 SET v = STRING_TO_VECTOR(CONCAT('[1,0,0,', @k, ']')) WHERE k = @k + 1;
+DELETE FROM t1 WHERE k = 5;
+INSERT INTO t1 (k, v) VALUES (5, STRING_TO_VECTOR(CONCAT('[', @k, ',', @k, ',1,1]')));
+SET DEBUG_SYNC = 'now SIGNAL go';
+SET DEBUG_SYNC = 'RESET';
+# Each changed row is its own nearest neighbour.
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[', @k, ',1,0,0]')), 'euclidean') LIMIT 1;
+k
+13
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[0,0,', @k, ',1]')), 'euclidean') LIMIT 1;
+k
+3
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[1,0,0,', @k, ']')), 'euclidean') LIMIT 1;
+k
+14
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[', @k, ',', @k, ',1,1]')), 'euclidean') LIMIT 1;
+k
+5
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)
+14
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+nodes=17 distinct_ids=17 distinct_base_pks=15 dup_ids=0 dup_base_pks=2 labels_contiguous_from_1=0
+query	same_nearest
+1	1
+query	same_nearest
+2	1
+query	same_nearest
+3	1
+query	same_nearest
+4	1
+query	same_nearest
+5	1
+#
+# ADD INDEX without a rebuild: DML maintains the graph as always, and
+# the new B-tree index gets its entries from its own log.
+#
+SET DEBUG_SYNC = 'innodb_inplace_alter_table_enter SIGNAL built WAIT_FOR go';
+ALTER TABLE t1 ADD INDEX ik (k), ALGORITHM = INPLACE, LOCK = NONE;
+SET DEBUG_SYNC = 'now WAIT_FOR built';
+INSERT INTO t1 (k, v) VALUES (@k, STRING_TO_VECTOR(CONCAT('[', @k, ',1,0,0]')));
+INSERT INTO t1 (k, v) VALUES (@k + 1, STRING_TO_VECTOR(CONCAT('[0,', @k, ',1,0]')));
+UPDATE t1 SET v = STRING_TO_VECTOR(CONCAT('[0,0,', @k, ',1]')) WHERE k = 3;
+UPDATE t1 SET k = k WHERE k = 4;
+UPDATE t1 SET v = STRING_TO_VECTOR(CONCAT('[1,0,0,', @k, ']')) WHERE k = @k + 1;
+DELETE FROM t1 WHERE k = 5;
+INSERT INTO t1 (k, v) VALUES (5, STRING_TO_VECTOR(CONCAT('[', @k, ',', @k, ',1,1]')));
+SET DEBUG_SYNC = 'now SIGNAL go';
+SET DEBUG_SYNC = 'RESET';
+# Each changed row is its own nearest neighbour.
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[', @k, ',1,0,0]')), 'euclidean') LIMIT 1;
+k
+15
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[0,0,', @k, ',1]')), 'euclidean') LIMIT 1;
+k
+3
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[1,0,0,', @k, ']')), 'euclidean') LIMIT 1;
+k
+16
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[', @k, ',', @k, ',1,1]')), 'euclidean') LIMIT 1;
+k
+5
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)
+16
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+nodes=22 distinct_ids=22 distinct_base_pks=18 dup_ids=0 dup_base_pks=4 labels_contiguous_from_1=0
+query	same_nearest
+1	1
+query	same_nearest
+2	1
+query	same_nearest
+3	1
+query	same_nearest
+4	1
+query	same_nearest
+5	1
+ALTER TABLE t1 DROP INDEX ik, ALGORITHM = INPLACE, LOCK = NONE;
+#
+# A crash during an online rebuild rolls it back; the DML the old
+# table took during it stays, with its nodes.
+#
+SET DEBUG_SYNC = 'row_log_table_apply1_before SIGNAL built WAIT_FOR never';
+ALTER TABLE t1 FORCE, ALGORITHM = INPLACE, LOCK = NONE;
+SET DEBUG_SYNC = 'now WAIT_FOR built';
+INSERT INTO t1 (k, v) VALUES (500, STRING_TO_VECTOR('[7,7,0,0]'));
+UPDATE t1 SET v = STRING_TO_VECTOR('[0,7,7,0]') WHERE k = 2;
+# Kill and restart
+SELECT k, VECTOR_TO_STRING(v) FROM t1 FORCE INDEX (PRIMARY) WHERE k IN (2, 500) ORDER BY k;
+k	VECTOR_TO_STRING(v)
+2	[0.00000e+00,7.00000e+00,7.00000e+00,0.00000e+00]
+500	[7.00000e+00,7.00000e+00,0.00000e+00,0.00000e+00]
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[7,7,0,0]'), 'euclidean') LIMIT 1;
+k
+500
+SELECT k FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,7,7,0]'), 'euclidean') LIMIT 1;
+k
+2
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+nodes=24 distinct_ids=24 distinct_base_pks=19 dup_ids=0 dup_base_pks=5 labels_contiguous_from_1=0
+query	same_nearest
+1	1
+query	same_nearest
+2	1
+query	same_nearest
+3	1
+query	same_nearest
+4	1
+query	same_nearest
+5	1
+# And the next online rebuild works.
+ALTER TABLE t1 FORCE, ALGORITHM = INPLACE, LOCK = NONE;
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+nodes=17 distinct_ids=17 distinct_base_pks=17 dup_ids=0 dup_base_pks=0 labels_contiguous_from_1=0
+query	same_nearest
+1	1
+query	same_nearest
+2	1
+query	same_nearest
+3	1
+query	same_nearest
+4	1
+query	same_nearest
+5	1
+SET DEBUG_SYNC = 'RESET';
+DROP TABLE t1;
