@@ -31,13 +31,9 @@ CREATE TABLE ta1 (
   VECTOR KEY (v) TYPE hnsw (M = 6)
 );
 
---echo # A.1 ADD COLUMN ... ALGORITHM=INSTANT is refused while the table has
---echo # a vector index. That is phase-one conservatism, not a correctness
---echo # requirement.
---error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
+--echo # A.1 ADD COLUMN ... ALGORITHM=INSTANT works on a table with a vector
+--echo # index.
 ALTER TABLE ta1 ADD COLUMN c1 INT, ALGORITHM=INSTANT;
---echo # Without ALGORITHM=INSTANT the server picks INPLACE.
-ALTER TABLE ta1 ADD COLUMN c1 INT;
 SHOW CREATE TABLE ta1;
 
 --echo # A.2 ADD COLUMN ... ALGORITHM=INPLACE works. It rebuilds, and the
@@ -72,11 +68,8 @@ CREATE TABLE tb1 (
   VECTOR KEY (v) TYPE hnsw (M = 6)
 );
 
---echo # B.1 DROP COLUMN ... ALGORITHM=INSTANT is refused, as in A.1.
---error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
+--echo # B.1 DROP COLUMN ... ALGORITHM=INSTANT works, as ADD does in A.1.
 ALTER TABLE tb1 DROP COLUMN c1, ALGORITHM=INSTANT;
---echo # Without ALGORITHM=INSTANT the server picks INPLACE.
-ALTER TABLE tb1 DROP COLUMN c1;
 
 --echo # B.2 DROP COLUMN ... ALGORITHM=COPY
 ALTER TABLE tb1 DROP COLUMN c2, ALGORITHM=COPY;

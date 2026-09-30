@@ -1,0 +1,92 @@
+#
+# INSTANT ALTERs on a vector table while three sessions insert, update
+# the vector of, and delete rows. INSTANT commits under MDL_EXCLUSIVE, so
+# each DML statement runs wholly before or after a given ALTER; what is
+# checked is that the rows, the graph and the aux still agree.
+#
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY, k INT, pad INT DEFAULT 0,
+v VECTOR(4) NOT NULL,
+VECTOR KEY vk (v) TYPE hnsw (M = 8));
+CREATE PROCEDURE dml(p INT, n INT)
+BEGIN
+DECLARE i INT DEFAULT 0;
+WHILE i < n DO
+INSERT INTO t1 (id, k, v) VALUES
+(p * 100000 + i, i,
+STRING_TO_VECTOR(CONCAT('[', p, ',', i % 11, ',', i % 7, ',', i % 5, ']')));
+UPDATE t1 SET v = STRING_TO_VECTOR(CONCAT('[', i % 13, ',', p, ',', i % 3, ',1]'))
+WHERE id = p * 100000 + FLOOR(i / 2);
+IF i % 5 = 4 THEN
+DELETE FROM t1 WHERE id = p * 100000 + i - 3;
+END IF;
+SET i = i + 1;
+END WHILE;
+END|
+CALL dml(1, 300);
+CALL dml(2, 300);
+CALL dml(3, 300);
+# 3 x 300 inserted, 3 x 60 deleted.
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)
+720
+# Columns e4..e1 were dropped again, e8..e5 stay.
+SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA = 'test' AND TABLE_NAME = 't1' ORDER BY ORDINAL_POSITION;
+COLUMN_NAME
+id
+k
+pad
+v
+e8
+e7
+e6
+e5
+# Every row has exactly one current node; old nodes of updated
+# vectors and deleted rows stay behind.
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+nodes=1626 distinct_ids=1626 distinct_base_pks=900 dup_ids=0 dup_base_pks=726 labels_contiguous_from_1=1
+# The search uses the vector index ...
+EXPLAIN FORMAT=TREE SELECT id FROM t1
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,1,1,1]'), 'euclidean') LIMIT 1;
+EXPLAIN
+-> Limit: 1 row(s)  (cost=74.1 rows=1)
+    -> Vector index search on t1 using vk  (cost=74.1 rows=721)
+
+# ... and its nearest row is as near as the exact scan's.
+query	same_nearest
+1	1
+query	same_nearest
+2	1
+query	same_nearest
+3	1
+query	same_nearest
+4	1
+query	same_nearest
+5	1
+# And the same after a restart, from the DD and the aux.
+# restart
+SELECT COUNT(*) FROM t1 FORCE INDEX (PRIMARY);
+COUNT(*)
+720
+SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';
+SELECT @@session.innodb_interpreter_output;
+@@session.innodb_interpreter_output
+nodes=1626 distinct_ids=1626 distinct_base_pks=900 dup_ids=0 dup_base_pks=726 labels_contiguous_from_1=1
+query	same_nearest
+1	1
+query	same_nearest
+2	1
+query	same_nearest
+3	1
+query	same_nearest
+4	1
+query	same_nearest
+5	1
+INSERT INTO t1 (id, k, v) VALUES (999999, 1, STRING_TO_VECTOR('[9,9,9,9]'));
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[9,9,9,9]'), 'euclidean') LIMIT 1;
+id
+999999
+DROP PROCEDURE dml;
+DROP TABLE t1;

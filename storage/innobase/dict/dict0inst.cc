@@ -197,11 +197,6 @@ bool Instant_ddl_impl<dd::Partition>::commit_instant_drop_col() {
 
 template <typename Table>
 bool Instant_ddl_impl<Table>::commit_instant_ddl() {
-  /* MVP: no INSTANT ALTER on a table with a vector index;
-  check_if_supported_inplace_alter() refuses it. Allowing it means handling
-  the hidden label column here and in build_template() (design doc). */
-  ut_ad(!DICT_TF2_FLAG_IS_SET(m_dict_table, DICT_TF2_HAS_VEC_AUX_COL));
-
   Instant_Type type =
       static_cast<Instant_Type>(m_ha_alter_info->handler_trivial_ctx);
 
@@ -444,11 +439,9 @@ void Instant_ddl_impl<Table>::dd_commit_inplace_no_change(bool ignore_fts) {
                          UINT32_UNDEFINED);
   }
 
-  /* No re-add of percona_vec_aux_id, unlike FTS_DOC_ID below: the column
-  exists only while the table has a vector index, and
-  check_if_supported_inplace_alter refuses INSTANT on such a table. So no
-  INSTANT ALTER ever starts from a definition that has the column. */
-  ut_ad(dd_find_column(&m_old_dd_tab->table(), VEC_AUX_ID_COL_NAME) == nullptr);
+  /* No re-add of percona_vec_aux_id, unlike FTS_DOC_ID below: the new
+  definition already has it, from get_extra_columns_and_keys(), whenever
+  the table keeps a vector index. */
 
   if (!ignore_fts) {
     dd_add_fts_doc_id_index(m_new_dd_tab->table(), m_old_dd_tab->table());

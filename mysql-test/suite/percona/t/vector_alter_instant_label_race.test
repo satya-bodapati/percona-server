@@ -1,14 +1,12 @@
 --source include/have_debug.inc
 
 --echo #
---echo # PS-11299: no ALTER of a vector-indexed table runs with
---echo # ALGORITHM=INSTANT.
+--echo # PS-11299: an INSTANT ALTER of a vector-indexed table keeps the label
+--echo # counter.
 --echo #
---echo # This is phase-one conservatism, not a correctness requirement: the
---echo # label counter is carried forward in the commit phase, under
---echo # MDL_EXCLUSIVE, so concurrent DML during an INSTANT ALTER could not
---echo # make a label repeat. The refusal only avoids INSTANT's DD paths.
---echo # Without ALGORITHM=INSTANT the server picks INPLACE.
+--echo # The counter is written into the new definition in the commit phase,
+--echo # under MDL_EXCLUSIVE, so no DML can be assigning a label while it is
+--echo # captured, and none can reuse one afterwards.
 --echo #
 
 CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
@@ -18,12 +16,8 @@ INSERT INTO t1 (id, pad, v) VALUES (1,10,STRING_TO_VECTOR('[1,0,0,0]')),
                                    (2,20,STRING_TO_VECTOR('[2,0,0,0]'));
 ALTER TABLE t1 ADD VECTOR KEY (v) TYPE hnsw (M = 8);
 
---echo # Pure metadata, and still refused: the table carries a vector index.
---error ER_ALTER_OPERATION_NOT_SUPPORTED_REASON
+--echo # Pure metadata, and INSTANT.
 ALTER TABLE t1 RENAME COLUMN pad TO pad2, ALGORITHM=INSTANT;
-
---echo # Without ALGORITHM=INSTANT the server picks a supported algorithm.
-ALTER TABLE t1 RENAME COLUMN pad TO pad2;
 
 INSERT INTO t1 (id, pad2, v) VALUES (3,30,STRING_TO_VECTOR('[3,0,0,0]'));
 SET SESSION innodb_interpreter = 'vec_aux_verify test/t1';

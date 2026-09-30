@@ -12890,13 +12890,16 @@ dberr_t create_table_info_t::enable_encryption(dict_table_t *table) {
     fts_add_doc_id_column(table, heap);
   }
 
-  /* Materialize the hidden percona_vec_aux_id column on dict_table_t, in
-  the same simple shape as fts_add_doc_id_column above: no phy_pos
-  plumbing. That holds because the table cannot reach row_versions > 0
-  - INSTANT ADD/DROP COLUMN is refused for tables owning this column,
-  in check_if_supported_inplace_alter. */
+  /* Materialize the hidden percona_vec_aux_id column on dict_table_t. A
+  new table has no row versions, so no physical position to set; but the
+  column counts must include it, as dd_table_get_column_counters() does
+  when the table is next loaded from the DD. INSTANT ADD COLUMN numbers
+  the new column's physical position from them. */
   if (has_vec_aux_col_in_dd) {
     vec_add_aux_id_column(table, heap);
+    table->initial_col_count++;
+    table->current_col_count++;
+    table->total_col_count++;
   }
 
   if (!keyring_encryption_option_none) {
