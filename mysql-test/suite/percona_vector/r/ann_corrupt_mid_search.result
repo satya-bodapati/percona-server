@@ -1,0 +1,64 @@
+CALL mtr.add_suppression("A vector index's auxiliary table does not agree with its graph");
+#
+# A search that is already past the corruption check keeps walking the
+# graph after another statement has found a node missing.
+#
+# When a node the graph names is not in the aux, HNSW marks it
+# NODE_LOST and never retries it. The statement that found it fails
+# with ER_INNODB_INDEX_CORRUPT and sets corrupted_hnsw, and every
+# statement that STARTS later is refused with ER_INDEX_CORRUPT.
+#
+# corrupted_hnsw is read only once per statement, in
+# vec_runtime_load_once, though. A search that passed that check
+# before the flag was set walks on: it skips the NODE_LOST node as if
+# it had never existed and answers without it, with no error.
+#
+# The graph here has two nodes: the entry point and one neighbour. The
+# statement that loads the graph sees the neighbour as missing, so once
+# it has run only the entry point is left to answer. A search parked
+# before the walk asks for both rows (LIMIT 2), gets one, and no error.
+# Which node is the entry point depends on the unseeded layer draw, so
+# the test counts the rows rather than printing them.
+#
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(4) NOT NULL,
+VECTOR KEY vk (v) TYPE hnsw (M = 4));
+INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]')),
+(2, STRING_TO_VECTOR('[0,1,0,0]'));
+ANALYZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	OK
+# Drop the in-memory graph so the next search has to read the aux.
+# restart
+# con_a loads the entry point, then finds its neighbour missing. It is
+# parked after the corruption check, with only the entry point read.
+SET DEBUG = '+d,vec_aux_node_missing_after_entry';
+SET DEBUG_SYNC = 'vec_ann_open_after_load SIGNAL a_ready WAIT_FOR a_go';
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 1;
+SET DEBUG_SYNC = 'now WAIT_FOR a_ready';
+# A search gets past the corruption check while the index still looks
+# healthy, and parks before walking the graph.
+SET DEBUG_SYNC = 'vec_ann_open_after_load SIGNAL b_ready WAIT_FOR b_go';
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 2;
+SET DEBUG_SYNC = 'now WAIT_FOR b_ready';
+# con_a walks on, faults the neighbour in, and finds it missing: the
+# node is marked NODE_LOST and the index is marked as corrupted.
+SET DEBUG_SYNC = 'now SIGNAL a_go';
+ERROR HY000: Index corrupt: the vector index's graph names node <N>, which its auxiliary table does not have. DROP and re-create the index to rebuild it from the base rows.
+SET DEBUG = '-d,vec_aux_node_missing_after_entry';
+# A search that starts now is refused, as it should be.
+SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 1;
+ERROR HY000: Index vk is corrupted
+# The parked search walks the graph now. It does not fail: it skips
+# the NODE_LOST node and answers from the entry point alone.
+SET DEBUG_SYNC = 'now SIGNAL b_go';
+# Both rows are reachable without the index. The graph returned one,
+# with no error. A correct server would refuse the search with
+# ER_INDEX_CORRUPT, as it refuses the one started after the index was
+# marked as corrupted.
+rows returned without error: 1
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+2
+SET DEBUG_SYNC = 'RESET';
+DROP TABLE t1;
