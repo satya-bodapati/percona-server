@@ -20,11 +20,10 @@ CALL mtr.add_suppression("A vector index's auxiliary table does not agree with i
 --echo #
 --echo # The graph here has two nodes: the entry point and one neighbour. The
 --echo # statement that loads the graph sees the neighbour as missing, so once
---echo # it has run only the entry point is left to answer. Two searches,
---echo # parked before the walk, ask for the nearest row to each of the two
---echo # vectors. Whichever node drew the higher layer is the entry point, so
---echo # exactly one of the two answers is wrong, and both are returned without
---echo # an error.
+--echo # it has run only the entry point is left to answer. A search parked
+--echo # before the walk asks for both rows (LIMIT 2), gets one, and no error.
+--echo # Which node is the entry point depends on the unseeded layer draw, so
+--echo # the test counts the rows rather than printing them.
 --echo #
 
 CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
@@ -47,21 +46,14 @@ SET DEBUG_SYNC = 'vec_ann_open_after_load SIGNAL a_ready WAIT_FOR a_go';
 --connection default
 SET DEBUG_SYNC = 'now WAIT_FOR a_ready';
 
---echo # Two searches get past the corruption check while the index still
---echo # looks healthy, and park before walking the graph.
---connect (con_b1, localhost, root,,)
-SET DEBUG_SYNC = 'vec_ann_open_after_load SIGNAL b1_ready WAIT_FOR b1_go';
---send SELECT id INTO @ann FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 1
+--echo # A search gets past the corruption check while the index still looks
+--echo # healthy, and parks before walking the graph.
+--connect (con_b, localhost, root,,)
+SET DEBUG_SYNC = 'vec_ann_open_after_load SIGNAL b_ready WAIT_FOR b_go';
+--send SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 2
 
 --connection default
-SET DEBUG_SYNC = 'now WAIT_FOR b1_ready';
-
---connect (con_b2, localhost, root,,)
-SET DEBUG_SYNC = 'vec_ann_open_after_load SIGNAL b2_ready WAIT_FOR b2_go';
---send SELECT id INTO @ann FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,1,0,0]'), 'euclidean') LIMIT 1
-
---connection default
-SET DEBUG_SYNC = 'now WAIT_FOR b2_ready';
+SET DEBUG_SYNC = 'now WAIT_FOR b_ready';
 
 --echo # con_a walks on, faults the neighbour in, and finds it missing: the
 --echo # node is marked NODE_LOST and the index is marked as corrupted.
@@ -77,35 +69,27 @@ SET DEBUG = '-d,vec_aux_node_missing_after_entry';
 --error ER_INDEX_CORRUPT
 SELECT id FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 1;
 
---echo # The two parked searches walk the graph now. Neither one fails:
---echo # each skips the NODE_LOST node and answers from the entry point
---echo # alone.
-SET DEBUG_SYNC = 'now SIGNAL b1_go';
---connection con_b1
+--echo # The parked search walks the graph now. It does not fail: it skips
+--echo # the NODE_LOST node and answers from the entry point alone.
+SET DEBUG_SYNC = 'now SIGNAL b_go';
+--connection con_b
+--disable_result_log
 --reap
---let $b1_wrong = `SELECT @ann <> 1`
+--enable_result_log
+--disable_warnings
+--let $rows = `SELECT FOUND_ROWS()`
+--enable_warnings
 
 --connection default
-SET DEBUG_SYNC = 'now SIGNAL b2_go';
---connection con_b2
---reap
---let $b2_wrong = `SELECT @ann <> 2`
-
---connection default
---echo # The exact answers are 1 and 2. The graph returned the entry point to
---echo # both, so one answer is wrong. A correct server would refuse both
---echo # searches with ER_INDEX_CORRUPT, as it refuses the one started after
---echo # the index was marked as corrupted.
---expr $wrong_answers = $b1_wrong + $b2_wrong
---echo wrong answers returned without error: $wrong_answers
-SELECT id FROM t1 IGNORE INDEX (vk)
- ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 1;
-SELECT id FROM t1 IGNORE INDEX (vk)
- ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,1,0,0]'), 'euclidean') LIMIT 1;
+--echo # Both rows are reachable without the index. The graph returned one,
+--echo # with no error. A correct server would refuse the search with
+--echo # ER_INDEX_CORRUPT, as it refuses the one started after the index was
+--echo # marked as corrupted.
+--echo rows returned without error: $rows
+SELECT COUNT(*) FROM t1;
 
 --disconnect con_a
---disconnect con_b1
---disconnect con_b2
+--disconnect con_b
 SET DEBUG_SYNC = 'RESET';
 DROP TABLE t1;
 --source include/wait_until_count_sessions.inc
