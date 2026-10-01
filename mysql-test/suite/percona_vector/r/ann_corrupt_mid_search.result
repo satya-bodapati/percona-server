@@ -46,7 +46,7 @@ SET DEBUG_SYNC = 'vec_ann_open_after_load SIGNAL b2_ready WAIT_FOR b2_go';
 SELECT id INTO @ann FROM t1 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,1,0,0]'), 'euclidean') LIMIT 1;
 SET DEBUG_SYNC = 'now WAIT_FOR b2_ready';
 # con_a walks on, faults the neighbour in, and finds it missing: the
-# node is marked NODE_LOST and the index is latched corrupt.
+# node is marked NODE_LOST and the index is marked as corrupted.
 SET DEBUG_SYNC = 'now SIGNAL a_go';
 ERROR HY000: Index corrupt: the vector index's graph names node <N>, which its auxiliary table does not have. DROP and re-create the index to rebuild it from the base rows.
 SET DEBUG = '-d,vec_aux_node_missing_after_entry';
@@ -61,7 +61,7 @@ SET DEBUG_SYNC = 'now SIGNAL b2_go';
 # The exact answers are 1 and 2. The graph returned the entry point to
 # both, so one answer is wrong. A correct server would refuse both
 # searches with ER_INDEX_CORRUPT, as it refuses the one started after
-# the latch.
+# the index was marked as corrupted.
 wrong answers returned without error: 1
 SELECT id FROM t1 IGNORE INDEX (vk)
 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 1;

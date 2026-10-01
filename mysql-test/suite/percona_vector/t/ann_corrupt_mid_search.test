@@ -64,7 +64,7 @@ SET DEBUG_SYNC = 'vec_ann_open_after_load SIGNAL b2_ready WAIT_FOR b2_go';
 SET DEBUG_SYNC = 'now WAIT_FOR b2_ready';
 
 --echo # con_a walks on, faults the neighbour in, and finds it missing: the
---echo # node is marked NODE_LOST and the index is latched corrupt.
+--echo # node is marked NODE_LOST and the index is marked as corrupted.
 SET DEBUG_SYNC = 'now SIGNAL a_go';
 --connection con_a
 --replace_regex /names node [0-9]+/names node <N>/
@@ -95,7 +95,7 @@ SET DEBUG_SYNC = 'now SIGNAL b2_go';
 --echo # The exact answers are 1 and 2. The graph returned the entry point to
 --echo # both, so one answer is wrong. A correct server would refuse both
 --echo # searches with ER_INDEX_CORRUPT, as it refuses the one started after
---echo # the latch.
+--echo # the index was marked as corrupted.
 --expr $wrong_answers = $b1_wrong + $b2_wrong
 --echo wrong answers returned without error: $wrong_answers
 SELECT id FROM t1 IGNORE INDEX (vk)

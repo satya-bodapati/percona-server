@@ -818,7 +818,7 @@ dberr_t vec_ann_open(dict_index_t *index, const float *q, size_t batch_size,
   }
 
   /* Past the corrupted_hnsw check: a search parked here walks the graph
-  even if another statement latches the index corrupt meanwhile. */
+  even if another statement marks the index as corrupted meanwhile. */
   DEBUG_SYNC(thd, "vec_ann_open_after_load");
 
   auto *s = ut::new_withkey<vec_search_t>(UT_NEW_THIS_FILE_PSI_KEY);
