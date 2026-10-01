@@ -138,7 +138,7 @@ DROP TABLE t;
 
 --echo # None of it was reported as corruption.
 --let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
---let $assert_only_after = CURRENT_TEST: percona.vector_index_wrong_dimensions
+--let $assert_only_after = CURRENT_TEST: percona_vector.index_wrong_dimensions
 --let $assert_select = index corruption
 --let $assert_count = 0
 --let $assert_text = no row with the wrong dimensions was logged as corruption
