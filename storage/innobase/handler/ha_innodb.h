@@ -214,6 +214,11 @@ class ha_innobase : public handler {
   vec_search_t *m_vec_search = nullptr;
   std::string m_vec_query;
 
+  /** The vector index vec_init() resolved from the KEY the optimizer chose,
+  through innobase_get_index() like every other index read. The table's
+  index list can also hold an index an ALTER is still building. */
+  dict_index_t *m_vec_index = nullptr;
+
  public:
   void position(const uchar *record) override;
 
