@@ -43,6 +43,7 @@ The HNSW runtime and the persistence callbacks behind it.
 #include "my_sys.h"
 #include "mysqld_error.h"
 #include "scope_guard.h"
+#include "sql/debug_sync.h"
 #include "sql/field.h"
 #include "sql/table.h"
 #include "trx0roll.h"
@@ -815,6 +816,10 @@ dberr_t vec_ann_open(dict_index_t *index, const float *q, size_t batch_size,
       return lerr;
     }
   }
+
+  /* Past the corrupted_hnsw check: a search parked here walks the graph
+  even if another statement latches the index corrupt meanwhile. */
+  DEBUG_SYNC(thd, "vec_ann_open_after_load");
 
   auto *s = ut::new_withkey<vec_search_t>(UT_NEW_THIS_FILE_PSI_KEY);
   s->vec = vec;
