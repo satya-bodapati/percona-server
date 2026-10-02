@@ -1119,6 +1119,28 @@ void vec_build_free(Vec_build *b) {
   if (b != nullptr) ut::delete_(b);
 }
 
+/** Decide whether a DML statement maintains a vector index's graph.
+
+An index an ALTER is still building is uncommitted. Its rows come from the
+ALTER's own scan, which runs while DML on the table is blocked, so a
+statement leaves it alone. A build that let DML run alongside it would be
+in ONLINE_INDEX_CREATION, and its rows would have to be logged for the
+index, as row_log_online_op() does for a B-tree. Nothing logs them for a
+vector index yet, so such a build is refused here rather than left with a
+graph that misses rows.
+@param[in]   index  a vector index of the table
+@param[out]  err    DB_SUCCESS, or the refusal
+@return true if the statement maintains the index */
+static bool vec_dml_maintains(const dict_index_t *index, dberr_t *err) {
+  *err = DB_SUCCESS;
+  if (index->is_committed()) return true;
+  if (dict_index_get_online_status(index) == ONLINE_INDEX_CREATION) {
+    ut_d(ut_error);
+    ut_o(*err = DB_UNSUPPORTED);
+  }
+  return false;
+}
+
 dberr_t vec_update_row(dict_table_t *table, uint64_t label, const char *q,
                        ulint q_len, uint64_t base_pk, THD *thd) {
   ut_ad(label != 0);
@@ -1126,6 +1148,10 @@ dberr_t vec_update_row(dict_table_t *table, uint64_t label, const char *q,
   for (dict_index_t *index = table->first_index(); index != nullptr;
        index = index->next()) {
     if (!index->is_vector()) continue;
+    if (dberr_t err; !vec_dml_maintains(index, &err)) {
+      if (err != DB_SUCCESS) return err;
+      continue;
+    }
     vec_t *vec = vec_runtime_get(index);
     if (vec == nullptr) return vec_runtime_unavailable(index);
     if (q_len != vec->dims * sizeof(float)) return DB_VEC_WRONG_DIMENSIONS;
@@ -1139,6 +1165,10 @@ dberr_t vec_insert_row(dict_table_t *table, const dtuple_t *row, THD *thd) {
   for (dict_index_t *index = table->first_index(); index != nullptr;
        index = index->next()) {
     if (!index->is_vector()) continue;
+    if (dberr_t err; !vec_dml_maintains(index, &err)) {
+      if (err != DB_SUCCESS) return err;
+      continue;
+    }
 
     /* No runtime means the open that should have built one failed, and
     ha_innobase::open() carried on so the table stays readable and

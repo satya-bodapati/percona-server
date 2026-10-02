@@ -8423,10 +8423,15 @@ int ha_innobase::open(const char *name, int, uint open_flags,
   A failure here is not fatal to the open: without a runtime the index
   simply has no graph, and the DML path reports the problem when it
   tries to use one. Refusing the open would take the whole table
-  offline for a vector index that may not even be queried. */
-  for (dict_index_t *index = m_prebuilt->table->first_index(); index != nullptr;
-       index = index->next()) {
-    if (!index->is_vector() || vec_runtime_get(index) != nullptr) continue;
+  offline for a vector index that may not even be queried.
+
+  Walk the TABLE's vector KEYs and resolve each as every index read does,
+  through innobase_get_index(): the table's index list can also hold an
+  index an ALTER is still building, which this TABLE has no KEY for. */
+  for (uint k = 0; k < table->s->keys; k++) {
+    if (!(table->key_info[k].flags & HA_VECTOR)) continue;
+    dict_index_t *index = innobase_get_index(k);
+    if (index == nullptr || vec_runtime_get(index) != nullptr) continue;
 
     /* A failure has already reported itself on the THD and recorded its
     reason on the index, and an index with no runtime simply has no graph
@@ -12175,9 +12180,11 @@ int ha_innobase::vec_init() {
   ER_TABLE_DEF_CHANGED, as a B-tree is - the graph holds what its build
   saw, so answering would leave out rows the snapshot sees - and a corrupt
   one with ER_INDEX_CORRUPT. FULLTEXT gets the same from ha_index_init(). */
+  m_vec_index = nullptr;
   for (uint k = 0; k < table->s->keys; k++) {
     if (!(table->key_info[k].flags & HA_VECTOR)) continue;
     if (const int err = change_active_index(k); err != 0) return err;
+    m_vec_index = innobase_get_index(k);
     break;
   }
 
@@ -12207,7 +12214,7 @@ static void innobase_vec_build_pk_tuple(dtuple_t *tuple,
 int ha_innobase::vec_read_first(Item *item, uchar *buf, ha_rows limit) {
   DBUG_TRACE;
 
-  dict_index_t *vindex = vec_index_of(m_prebuilt->table);
+  dict_index_t *vindex = m_vec_index;
   if (vindex == nullptr) return HA_ERR_END_OF_FILE;
 
   /* No runtime means the open that should have built one failed, and
