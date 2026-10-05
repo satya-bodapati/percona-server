@@ -1520,3 +1520,28 @@ Refusal reaches the user as `ER_CAPACITY_EXCEEDED`, naming `innodb_hnsw_max_memo
 is checked before an insert or a load starts and again as a cold search faults nodes in. InnoDB
 carries it as `DB_VEC_OUT_OF_MEMORY`, which `row_mysql_handle_errors()` handles beside
 `DB_OUT_OF_FILE_SPACE`, so the statement fails and `DB_OUT_OF_MEMORY` keeps its fatal arm. A resource ceiling is not a corrupt engine.
+
+### Seeing the memory
+
+`INFORMATION_SCHEMA.INNODB_VECTOR_INDEXES` has one row per vector index of a table in the
+dictionary cache: `TABLE_ID`, `INDEX_ID`, `TABLE_NAME`, `INDEX_NAME`, `DIMENSIONS`, `M`, `LOADED`,
+`NODES` and `MEMORY_BYTES`. A user sees only the rows of tables they have table-level `SELECT`
+on; a grant on some columns is not enough.
+`MEMORY_BYTES` is the graph's arena, which is what `innodb_hnsw_max_memory` counts. `NODES`
+includes dead nodes (§18). A column that is not known yet is 0, never `NULL`: an index whose
+graph is not loaded shows `NODES` and `MEMORY_BYTES` 0, and one without a runtime shows
+`DIMENSIONS` and `M` 0 too. A table that is not in the cache has no row.
+
+The global status variable `Innodb_hnsw_memory_used` is the sum the limit is compared with.
+
+Neither number counts:
+
+- the node map (`HNSW::m_nodes`), which uses the normal heap, roughly 30 to 50 bytes per node;
+- search scratch space;
+- per index, an ALTER's build graph. It is in `Innodb_hnsw_memory_used` while it exists, but
+  belongs to no row.
+
+`MEMORY_BYTES` is the arena resident now, not what a rebuild needs. A cold or partly loaded
+graph holds only the nodes read so far. For a graph that holds every node, such as one built
+since the restart, it is a rough estimate of a rebuild, not a bound: the rebuilt graph draws new
+random layers, so its neighbour lists can take more or less room.

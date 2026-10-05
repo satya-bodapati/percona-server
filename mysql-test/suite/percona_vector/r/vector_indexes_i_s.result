@@ -1,0 +1,168 @@
+#
+# INFORMATION_SCHEMA.INNODB_VECTOR_INDEXES: one row per vector index of
+# a table in the dictionary cache, with its graph's node count and
+# arena bytes. Innodb_hnsw_memory_used is the server-wide arena total.
+#
+# MTR lets every user into the test database, so the tables live
+# in their own.
+CREATE DATABASE vdb;
+USE vdb;
+# t2 is created and then made cold by a restart.
+CREATE TABLE t2 (id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(4) NOT NULL,
+VECTOR KEY vk2 (v) TYPE hnsw (M = 4));
+INSERT INTO t2 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]')),
+(2, STRING_TO_VECTOR('[0,1,0,0]')),
+(3, STRING_TO_VECTOR('[0,0,1,0]')),
+(4, STRING_TO_VECTOR('[0,0,0,1]')),
+(5, STRING_TO_VECTOR('[1,1,0,0]'));
+# restart
+USE vdb;
+# A table that is not in the dictionary cache has no row.
+SELECT COUNT(*) FROM information_schema.innodb_vector_indexes;
+COUNT(*)
+0
+# t1 is filled in this server's lifetime, so every row has a node.
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(8) NOT NULL,
+VECTOR KEY vk1 (v) TYPE hnsw (M = 8));
+INSERT INTO t1
+WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 1000)
+SELECT i, STRING_TO_VECTOR(CONCAT('[', i % 7, ',', i % 11, ',', i % 13, ',',
+i % 17, ',', i % 19, ',', i % 23, ',',
+i % 29, ',', i, ']'))
+FROM s;
+SELECT id FROM t1
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,1,1,1,1,1,1,1]'), 'EUCLIDEAN')
+LIMIT 1;
+id
+1
+# Opening t2 creates its runtime, but its graph stays cold.
+SELECT COUNT(*) FROM t2 FORCE INDEX (PRIMARY);
+COUNT(*)
+5
+SELECT table_name, index_name, dimensions, m, loaded, nodes,
+memory_bytes > 0 AS has_memory
+FROM information_schema.innodb_vector_indexes ORDER BY table_name;
+table_name	index_name	dimensions	m	loaded	nodes	has_memory
+vdb/t1	vk1	8	8	1	1000	1
+vdb/t2	vk2	4	4	0	0	0
+# The ids are those of INNODB_TABLES and INNODB_INDEXES.
+SELECT v.table_name, v.index_name
+FROM information_schema.innodb_vector_indexes v
+JOIN information_schema.innodb_tables t
+ON t.table_id = v.table_id AND t.name = v.table_name
+JOIN information_schema.innodb_indexes i
+ON i.index_id = v.index_id AND i.table_id = v.table_id
+AND i.name = v.index_name
+ORDER BY v.table_name;
+table_name	index_name
+vdb/t1	vk1
+vdb/t2	vk2
+# A search loads part of t2's graph: the nodes it reaches.
+SELECT id FROM t2
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 1;
+id
+1
+SELECT loaded, nodes BETWEEN 1 AND 5 AS nodes_ok, memory_bytes > 0 AS has_memory
+FROM information_schema.innodb_vector_indexes WHERE table_name = 'vdb/t2';
+loaded	nodes_ok	has_memory
+1	1	1
+# The larger graph comes first.
+SELECT table_name FROM information_schema.innodb_vector_indexes
+ORDER BY memory_bytes DESC;
+table_name
+vdb/t1
+vdb/t2
+# The status variable covers at least every graph's arena.
+SELECT (SELECT variable_value FROM performance_schema.global_status
+WHERE variable_name = 'Innodb_hnsw_memory_used') >=
+(SELECT SUM(memory_bytes) FROM information_schema.innodb_vector_indexes)
+AS covers_all;
+covers_all
+1
+# An UPDATE of the vector adds a node and keeps the old one.
+SELECT nodes, memory_bytes INTO @nodes, @bytes
+FROM information_schema.innodb_vector_indexes WHERE table_name = 'vdb/t1';
+UPDATE t1 SET v = STRING_TO_VECTOR('[9,9,9,9,9,9,9,9]') WHERE id = 1;
+SELECT nodes - @nodes AS new_nodes, memory_bytes >= @bytes AS not_shrunk
+FROM information_schema.innodb_vector_indexes WHERE table_name = 'vdb/t1';
+new_nodes	not_shrunk
+1	1
+#
+# Each row needs SELECT on its table.
+#
+CREATE USER u_t2@localhost;
+GRANT SELECT ON vdb.t2 TO u_t2@localhost;
+CREATE USER u_none@localhost;
+CREATE USER u_process@localhost;
+GRANT PROCESS ON *.* TO u_process@localhost;
+CREATE USER u_col@localhost;
+GRANT SELECT (id) ON vdb.t2 TO u_col@localhost;
+SELECT table_name FROM information_schema.innodb_vector_indexes;
+table_name
+vdb/t2
+SELECT COUNT(*) FROM information_schema.innodb_vector_indexes;
+COUNT(*)
+0
+SELECT COUNT(*) FROM information_schema.innodb_vector_indexes;
+COUNT(*)
+0
+# SELECT on one column is not SELECT on the table.
+SELECT COUNT(*) FROM information_schema.innodb_vector_indexes;
+COUNT(*)
+0
+DROP USER u_t2@localhost, u_none@localhost, u_process@localhost,
+u_col@localhost;
+#
+# Reading the table while other connections search and insert.
+#
+# The searches use a constant query vector, so they read the graph:
+# the procedure shows its plan first.
+CREATE PROCEDURE search_loop()
+BEGIN
+DECLARE i INT DEFAULT 0;
+EXPLAIN SELECT id FROM t1
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,1,1,1,1,1,1,9]'), 'EUCLIDEAN')
+LIMIT 1;
+WHILE i < 200 DO
+SELECT id INTO @nn FROM t1
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,1,1,1,1,1,1,9]'), 'EUCLIDEAN')
+LIMIT 1;
+SET i = i + 1;
+END WHILE;
+END|
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t1 WITH RECURSIVE s(i) AS (SELECT 1001 UNION ALL SELECT i + 1 FROM s WHERE i < 3000) SELECT i, STRING_TO_VECTOR(CONCAT('[', i % 3, ',', i % 5, ',', i % 7, ',', i % 11, ',', i % 13, ',', i % 17, ',', i % 19, ',', i, ']')) FROM s;
+CALL search_loop();
+SELECT nodes BETWEEN @nodes + 1 AND @nodes + 2001 AS sane
+FROM information_schema.innodb_vector_indexes WHERE table_name = 'vdb/t1';
+sane
+1
+id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t1	NULL	vector_ann	NULL	vk1	1	NULL	#	#	NULL
+# Every row of t1, plus the node the UPDATE left behind.
+SELECT nodes - (SELECT COUNT(*) FROM t1) AS extra_nodes
+FROM information_schema.innodb_vector_indexes WHERE table_name = 'vdb/t1';
+extra_nodes
+1
+#
+# DROP INDEX and DROP TABLE remove the row and free the memory.
+#
+ALTER TABLE t2 DROP INDEX vk2;
+SELECT table_name FROM information_schema.innodb_vector_indexes;
+table_name
+vdb/t1
+SELECT variable_value INTO @used FROM performance_schema.global_status
+WHERE variable_name = 'Innodb_hnsw_memory_used';
+DROP PROCEDURE search_loop;
+DROP TABLE t1;
+SELECT COUNT(*) FROM information_schema.innodb_vector_indexes;
+COUNT(*)
+0
+SELECT variable_value < @used AS freed FROM performance_schema.global_status
+WHERE variable_name = 'Innodb_hnsw_memory_used';
+freed
+1
+DROP TABLE t2;
+DROP DATABASE vdb;
