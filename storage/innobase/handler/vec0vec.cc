@@ -34,6 +34,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <cctype>
 #include <charconv>
 #include <cstdlib>
+#include <iterator>
 #include <string>
 #include <variant>
 
@@ -88,20 +89,52 @@ the TYPE token and the WITH(...) list - so the same parse serves DDL,
 where they arrive on a Key_spec, and table open, where they arrive on a
 KEY. */
 namespace {
-/** Parse an integer WITH(...) value: the whole string, within [min, max].
-@return true on error, reported through my_error() */
-bool parse_int_option(const LEX_CSTRING &value, int min, int max, int *out) {
+/** Parse an integer value: the whole string, within [min, max].
+@return false if it is not one */
+bool parse_int(const LEX_CSTRING &value, int min, int max, int &out) {
   const auto *last = value.str + value.length;
   int val;
-  auto result = std::from_chars(value.str, last, val);
-  if (result.ptr != last || result.ec != errc() || val < min || val > max) {
-    my_error(ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER_VALUE, MYF(0),
-             value.str);
-    return true;
-  }
-  *out = val;
-  return false;
+  const auto result = std::from_chars(value.str, last, val);
+  if (result.ptr != last || result.ec != errc() || val < min || val > max)
+    return false;
+  out = val;
+  return true;
 }
+
+/** Parse a metric name.
+@return false if it is not one */
+bool parse_metric(const LEX_CSTRING &value, vector_constants::Metric &out) {
+  const auto *metric =
+      vector_constants::metric_from_name({value.str, value.length});
+  if (metric == nullptr) return false;
+  out = *metric;
+  return true;
+}
+
+/** An HNSW option: its name, and how its value is parsed, checked and
+stored. */
+struct Hnsw_option {
+  const char *name;
+  bool (*parse)(const LEX_CSTRING &value, HnswParam &param);
+};
+
+/* One entry per option: {"name", function that parses, checks and stores
+its value}. */
+constexpr Hnsw_option hnsw_options[] = {
+    {"M",
+     [](const LEX_CSTRING &value, HnswParam &param) {
+       return parse_int(value, hnsw::min_M, hnsw::max_M, param.M);
+     }},
+    {"ef_construction",
+     [](const LEX_CSTRING &value, HnswParam &param) {
+       return parse_int(value, hnsw::min_ef_construction,
+                        hnsw::max_ef_construction, param.ef_construction);
+     }},
+    {"metric",
+     [](const LEX_CSTRING &value, HnswParam &param) {
+       return parse_metric(value, param.metric);
+     }},
+};
 
 /** Copy a string onto a MEM_ROOT as a LEX_CSTRING.
 @return false on OOM */
@@ -127,27 +160,35 @@ bool parse_options(LEX_CSTRING type, const Vector_index_params_YY &params,
 
   auto &hnsw_param = vip.emplace<HnswParam>();
 
-  for (const auto &[key, value] : params) {
-    if (my_strcasecmp(system_charset_info, key.str, "M") == 0) {
-      if (parse_int_option(value, hnsw::min_M, hnsw::max_M, &hnsw_param.M))
-        return true;
-    } else if (my_strcasecmp(system_charset_info, key.str,
-                             "ef_construction") == 0) {
-      if (parse_int_option(value, hnsw::min_ef_construction,
-                           hnsw::max_ef_construction,
-                           &hnsw_param.ef_construction))
-        return true;
-    } else if (my_strcasecmp(system_charset_info, key.str, "metric") == 0) {
-      std::string_view name(value.str, value.length);
-      const auto *m = vector_constants::metric_from_name(name);
-      if (m == nullptr) {
-        my_error(ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER_VALUE, MYF(0),
-                 value.str);
-        return true;
-      }
-      hnsw_param.metric = *m;
-    } else {
+  for (const auto *param = params.begin(); param != params.end(); ++param) {
+    const auto &[key, value] = *param;
+    /* Unknown name, e.g. (bogus = 1). */
+    const auto *option =
+        std::find_if(std::begin(hnsw_options), std::end(hnsw_options),
+                     [&](const Hnsw_option &candidate) {
+                       return my_strcasecmp(system_charset_info, key.str,
+                                            candidate.name) == 0;
+                     });
+    if (option == std::end(hnsw_options)) {
       my_error(ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER, MYF(0), key.str);
+      return true;
+    }
+
+    /* Name given twice, case-insensitively, e.g. (M = 8, m = 8). */
+    const bool repeated =
+        std::any_of(params.begin(), param, [&](const auto &earlier) {
+          return my_strcasecmp(system_charset_info, earlier.first.str,
+                               key.str) == 0;
+        });
+    if (repeated) {
+      my_error(ER_DUPLICATE_INDEX_CONSTRUCTION_PARAMETER, MYF(0), key.str);
+      return true;
+    }
+
+    /* Bad value, e.g. (M = abc), (M = 500) or (metric = nosuchmetric). */
+    if (!option->parse(value, hnsw_param)) {
+      my_error(ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER_VALUE, MYF(0),
+               value.str);
       return true;
     }
   }
