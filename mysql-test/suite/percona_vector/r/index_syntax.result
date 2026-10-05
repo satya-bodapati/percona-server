@@ -557,6 +557,23 @@ CREATE VECTOR INDEX ix ON t1(v1) TYPE hnsw ( bogus = 1 );
 ERROR HY000: Illegal index construction parameter: bogus.
 CREATE VECTOR INDEX ix ON t1(v1) TYPE hnsw ( metric = nosuchmetric );
 ERROR HY000: Illegal index construction parameter value: nosuchmetric.
+# A parameter given twice is refused, whatever its case.
+CREATE VECTOR INDEX ix ON t1(v1) TYPE hnsw ( M = 8, M = 16 );
+ERROR HY000: Duplicate index construction parameter: M.
+CREATE VECTOR INDEX ix ON t1(v1) TYPE hnsw ( M = 8, m = 8 );
+ERROR HY000: Duplicate index construction parameter: m.
+CREATE VECTOR INDEX ix ON t1(v1) TYPE hnsw ( metric = euclidean, M = 8, METRIC = euclidean );
+ERROR HY000: Duplicate index construction parameter: METRIC.
+CREATE VECTOR INDEX ix ON t1(v1) TYPE hnsw ( bogus = 1, bogus = 2 );
+ERROR HY000: Duplicate index construction parameter: bogus.
+ALTER TABLE t1 ADD VECTOR KEY ix (v1) TYPE hnsw ( M = 8, M = 8 );
+ERROR HY000: Duplicate index construction parameter: M.
+CREATE TABLE t (
+id BIGINT UNSIGNED PRIMARY KEY,
+v1 VECTOR ( 4 ) NOT NULL,
+VECTOR KEY ( v1 ) TYPE hnsw ( M = 8, M = 16 )
+);
+ERROR HY000: Duplicate index construction parameter: M.
 CREATE VECTOR INDEX ix ON t1(v1) TYPE hnsw ( M = abc );
 ERROR HY000: Illegal index construction parameter value: abc.
 CREATE VECTOR INDEX ix ON t1(v1) TYPE hnsw ( M = `M = 1` );

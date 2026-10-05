@@ -2162,11 +2162,18 @@ bool PT_vector_index_type::do_contextualize(Table_ddl_parse_context *pc) {
   pc->key_create_info->vector_index_type = m_type_name;
   if (m_params.size() > 0) {
     pc->key_create_info->vector_index_params.init(pc->mem_root);
+    auto &params = pc->key_create_info->vector_index_params;
     for (const auto *param : m_params) {
       if (param == nullptr) return true;
-      if (pc->key_create_info->vector_index_params.push_back(
-              {to_lex_cstring(param->key()), to_lex_cstring(param->value())}))
-        return true;
+      const LEX_CSTRING key = to_lex_cstring(param->key());
+      /* Names are case-insensitive, so M and m are the same parameter. */
+      for (const auto &[seen, value] : params) {
+        if (my_strcasecmp(system_charset_info, seen.str, key.str) == 0) {
+          my_error(ER_DUPLICATE_INDEX_CONSTRUCTION_PARAMETER, MYF(0), key.str);
+          return true;
+        }
+      }
+      if (params.push_back({key, to_lex_cstring(param->value())})) return true;
     }
   }
   return false;
