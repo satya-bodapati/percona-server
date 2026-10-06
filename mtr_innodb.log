@@ -1,0 +1,800 @@
+Logging: /home/satya/WORK/vector/vec-memory-i-s/mysql-test/mysql-test-run.pl  --mysqld=--log-error-suppression-list=MY-011873,MY-011879,MY-011875 --suite=innodb --parallel=32 --force --max-test-fail=0 --retry=0
+MySQL Version 9.7.1
+Checking supported features
+ - Binaries are debug compiled
+Using suite(s): innodb
+Collecting tests
+Removing old var directory
+Creating var directory '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var'
+Installing system database
+Using parallel: 32
+ports_per_thread:30
+
+==============================================================================
+                  TEST NAME                   WORKER RESULT  TIME (ms) COMMENT
+------------------------------------------------------------------------------
+[  0%] innodb.alter_table_temp_files_io          [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] innodb.analyze_table                      [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] innodb.atomic_rename_debug_database       [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] innodb.checkpoint_too_soon                [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] innodb.ddl_crash_alter_partition          [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] innodb.ddl_crash_alter_table              [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] innodb.ddl_crash_alter_table_partition    [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] innodb.ddl_crash_alter_table_tablespace   [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] innodb.ddl_crash_basic                    [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] innodb.ddl_kill                           [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] innodb.discarded_partition_create         [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] innodb.doublewrite_multiple_pools         [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] innodb.end_range_check                    [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] innodb.histogram                          [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] innodb.ibuf_sys_tablespace_extend         [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] innodb.import_compress_encrypt            [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] innodb.innodb-status-output               [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] innodb.innodb_autoextend_dml_1            [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] innodb.innodb_autoextend_dml_2            [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] innodb.innodb_autoextend_table_ddl        [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] innodb.innodb_autoextend_tbsp_ddl         [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] innodb.innodb_buffer_pool_chunk_size_rounding  [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] innodb.innodb_buffer_pool_resize          [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] innodb.innodb_buffer_pool_resize_with_chunks  [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] innodb.innodb_bug11766634                 [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] innodb.innodb_bug14704286                 [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] innodb.innodb_bug30423                    [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] innodb.innodb_bug52663                    [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] innodb.innodb_bug53290                    [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] innodb.innodb_bug56143                    [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] innodb.innodb_bulk_create_index           [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  4%] innodb.innodb_bulk_create_index_debug     [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  4%] innodb.innodb_file_limit_check            [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  4%] innodb.innodb_mysql                       [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  4%] innodb.innodb_read_only-1                 [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  4%] innodb.innodb_row_log_read                [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  4%] innodb.innodb_stats_del_mark              [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  4%] innodb.instant_add_column_basic           [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  5%] innodb.instant_add_column_recovery        [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  5%] innodb.instant_ddl_import_max_row_version  [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  5%] innodb.instant_ddl_limitations            [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  5%] innodb.large_partitions_ddl               [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  5%] innodb.lock_contention_big                [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  5%] innodb.log_encrypt_4                      [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  5%] innodb.log_encrypt_kill                   [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  5%] innodb.log_file_invalid_lsn_ranges        [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  6%] innodb.log_file_missing                   [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  6%] innodb.mysql_ts_alter_encrypt_2           [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  6%] innodb.mysqld_core_dump_without_buffer_pool  [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  6%] innodb.mysqld_core_dump_without_buffer_pool_dynamic  [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  6%] innodb.nonmonotone_trx_ids                [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  6%] innodb.open_file_lru                      [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  6%] innodb.recovery_ibuf_redo_overflow        [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  6%] innodb.sp_temp_table                      [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  7%] innodb.table_encrypt_4                    [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  7%] innodb.table_encrypt_kill                 [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  7%] innodb.tablespace_encrypt_10              [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  7%] innodb.tablespace_encrypt_11              [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  7%] innodb.tablespace_encrypt_2               [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  7%] innodb.tablespace_encrypt_5               [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  7%] innodb.tablespace_encrypt_7               [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  7%] innodb.tablespace_encrypt_9               [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  8%] innodb.tinytext-groupby                   [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  8%] innodb.transportable_tbsp-debug           [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  8%] innodb.zlob_ddl_big                       [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  8%] innodb.zlob_ddl_big_slow_io               [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  8%] innodb.zlob_fragments                     [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  8%] innodb.zlob_ibd_size                      [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  8%] innodb.zlob_ibd_size_replace              [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  9%] innodb.zlob_update_purge                  [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  9%] innodb.alter_tablespace_partition         [ disabled ]   WL#12034 Enable again once shared tablespaces are allowed in partitioned table.
+[  9%] innodb.create_tablespace_partition        [ disabled ]   WL#12034 Enable again once shared tablespaces are allowed in partitioned table.
+[  9%] innodb.ddl_crash_alter_table_partition_tablespace  [ disabled ]   WL#12034 Enable again once shared tablespaces are allowed in partitioned table.
+[  9%] innodb.fts_exec_interrupt                 [ disabled ]   Bug#28534199 The test is unstable and should be rewritten
+[  9%] innodb.innodb_bug14676111                 [ disabled ]   BUG#18200831 The test has never worked correctly
+[  9%] innodb.innodb_upd_stats_if_needed_not_inited  [ disabled ]   WL#11249 SQL Engine foreign key replaces InnoDB FK handling.
+[  9%] innodb.instant_ddl_recovery_old           [ disabled ]   WL#12527 Redo format has changed - crashed_datadir.zip needs to be recreated.
+[ 10%] innodb.log_logical_size                   [ disabled ]   Bug#35543413 Test is shaky - needs to be fixed.
+[ 10%] innodb.mysql_ts_alter_encrypt_1           [ disabled ]   BUG#29531106 - ATTACHABLE_TRX(): ASSERTION `!M_THD->TRANSACTION_ROLLBACK_REQUEST' FAILED
+[ 10%] innodb.portability_tablespace_linux       [ disabled ]   Bug#36312666 Several InnoDB testcases fail after the change to 9.0
+[ 10%] innodb.portability_tablespace_windows     [ disabled ]   Bug#36312666 Several InnoDB testcases fail after the change to 9.0
+[ 10%] innodb.set_concurrency_in_readonly        [ disabled ]   Bug#35573783 innodb.set_concurrency_in_readonly is failing in trunk
+[ 10%] innodb.slow_shutdown                      [ disabled ]   Bug#31763837 mtr hits this debug assert post test run cleanup
+[ 10%] innodb.subpartition                       [ disabled ]   WL#12034 Enable again once shared tablespaces are allowed in partitioned table.
+[ 10%] innodb.truncate                           [ disabled ]   WL#12034 Enable again once shared tablespaces are allowed in partitioned table.
+[ 11%] innodb.innodb_bug53674                   w24 [ pass ]     97
+[ 11%] innodb.bug32554667                       w14 [ pass ]    145
+[ 11%] innodb.flush_drop_gtid_deadlock          w2  [ pass ]    521
+[ 11%] innodb.innodb_ctype_ldml                 w26 [ pass ]   1341
+[ 11%] innodb.innodb-2byte-collation            w30 [ pass ]   1575
+[ 11%] innodb.lob_rollback_crash_4              w21 [ pass ]   2204
+[ 11%] innodb.lob_rollback_crash_3              w23 [ pass ]   2229
+[ 11%] innodb.zlob_rollback_crash_4             w16 [ pass ]   2349
+[ 12%] innodb.lob_rollback_crash_5              w32 [ pass ]   2347
+[ 12%] innodb.zlob_rollback_crash_5             w17 [ pass ]   2467
+[ 12%] innodb.innodb-autoinc-44030              w31 [ pass ]   4112
+[ 12%] innodb.innodb_timeout_rollback           w25 [ pass ]   6206
+[ 12%] innodb.innodb-autoinc                    w15 [ pass ]   7758
+[ 12%] innodb.innodb_misc1                      w22 [ pass ]   9029
+[ 12%] innodb.cats-autoinc                      w25 [ pass ]    262
+[ 13%] innodb.gtid_shutdown                     w4  [ pass ]  12205
+[ 13%] innodb.innodb_autoinc_lock_mode_zero     w25 [ pass ]    121
+[ 13%] innodb.innodb_i_s_multi_file_tablespace  w5  [ pass ]      9
+[ 13%] innodb.innodb_deadlock_with_autoinc      w25 [ pass ]    197
+[ 13%] innodb.lock_sys_resize                   w15 [ pass ]    198
+[ 13%] innodb.innodb_32k                        w6  [ pass ]    611
+[ 13%] innodb.known_directory                   w7  [ pass ]   1864
+[ 13%] innodb.known_dir_unique_undo             w28 [ pass ]   1790
+[ 14%] innodb.innodb_64k                        w1  [ pass ]    905
+[ 14%] innodb.mysqld_core_dump_without_buffer_pool_with_resizing w19 [ pass ]  14048
+[ 14%] innodb.innodb                            w29 [ pass ]  19392
+[ 14%] innodb.lob_big_purge                     w28 [ pass ]    847
+[ 14%] innodb.tablespace_portability_windows    w21 [ skipped ]  Need windows
+[ 14%] innodb.innodb_bug60196                   w32 [ skipped ]  Test requires 'lower_case_table_names = 2'
+[ 14%] innodb.buffer_pool_lazy_latch_init       w22 [ pass ]   6551
+[ 14%] innodb.innodb_read_only-2                w10 [ pass ]  20946
+[ 15%] innodb.autoinc_persist_deadlock          w30 [ pass ]   2226
+[ 15%] innodb.innodb_bug-13628249               w8  [ pass ]  21771
+[ 15%] innodb.instant_add_column_long           w26 [ pass ]   3156
+[ 15%] innodb.lob_big_rollback                  w28 [ pass ]   1874
+[ 15%] innodb.create_tablespace_32k             w18 [ pass ]   9581
+[ 15%] innodb.index_merge_threshold             w13 [ pass ]  10672
+[ 15%] innodb.zlob_big_purge                    w28 [ pass ]   1420
+[ 15%] innodb.innodb-index-online               w15 [ pass ]   6109
+[ 16%] innodb.events-merge-tmp-path             w21 [ pass ]    930
+[ 16%] innodb.zlob_big_rollback                 w28 [ pass ]    652
+[ 16%] innodb.cmp_per_index                     w10 [ pass ]    655
+[ 16%] innodb.blob-crash-4k                     w23 [ pass ]   4727
+[ 16%] innodb.create_drop_temp_table_perf_1     w22 [ pass ]    617
+[ 16%] innodb.blob-crash-16k                    w30 [ pass ]   4582
+[ 16%] innodb.create_tablespace_64k             w24 [ pass ]   8607
+[ 17%] innodb.dblwr_encrypt                     w5  [ pass ]   7401
+[ 17%] innodb.create_tablespace_16k             w12 [ pass ]  14294
+[ 17%] innodb.tablespace_remove                 w7  [ pass ]   8209
+[ 17%] innodb.partition_autoinc                 w20 [ pass ]  27455
+[ 17%] innodb.create_tablespace_4k              w11 [ pass ]  13432
+[ 17%] innodb.log_file_name_1                   w27 [ pass ]  14553
+[ 17%] innodb.innodb_buffer_pool_resize_debug   w4  [ pass ]  10896
+[ 17%] innodb.dblwr_page_size_mismatch_warning  w2  [ pass ]  10317
+[ 18%] innodb.import_export_4k                  w23 [ pass ]   2293
+[ 18%] innodb.import_tablespace_schema_missmatch w18 [ pass ]   2004
+[ 18%] innodb.disable_ahi_other_blocks          w3  [ pass ]  15869
+[ 18%] innodb.optimizer_temporary_table         w9  [ pass ]  18042
+[ 18%] innodb.innodb_max_recordsize             w23 [ pass ]    282
+[ 18%] innodb.pct_cached_evict                  w25 [ pass ]  12213
+[ 18%] innodb.innodb-table-online               w29 [ pass ]   6865
+[ 18%] innodb.innodb_bug39438                   w28 [ pass ]     59
+[ 19%] innodb.innodb_open_file_hang             w17 [ pass ]  11102
+[ 19%] innodb.log_memory_pfs                    w10 [ pass ]    465
+[ 19%] innodb.tablespace_per_table              w18 [ pass ]   1365
+[ 19%] innodb.metadata_table_reference_count    w24 [ pass ]      5
+[ 19%] innodb.blob_page_reserve                 w30 [ pass ]   4522
+[ 19%] innodb.choose_tbsp_location-alter        w8  [ pass ]   5610
+[ 19%] innodb.create_tablespace_8k              w14 [ pass ]  14624
+[ 19%] innodb.innodb_bug12400341                w20 [ pass ]    168
+[ 20%] innodb.innodb-import-lctn_1              w31 [ pass ]   9247
+[ 20%] innodb.partition_import                  w26 [ pass ]   5439
+[ 20%] innodb.instant_ddl_max_row_size          w23 [ pass ]   1840
+[ 20%] innodb.choose_tbsp_location-debug        w8  [ pass ]    107
+[ 20%] innodb.innodb_buffer_pool_load_now       w1  [ pass ]  14531
+[ 20%] innodb.innodb-autoinc-56228              w3  [ pass ]     41
+[ 20%] innodb.dirty_invalid_page                w13 [ pass ]   6044
+[ 21%] innodb.innodb_bug42101-nonzero           w24 [ pass ]      6
+[ 21%] innodb.innodb_buffer_pool_resize_with_instances w29 [ pass ]    214
+[ 21%] innodb.extern_relative_path              w20 [ pass ]     21
+[ 21%] innodb.innodb_doublewrite_dir_01         w13 [ pass ]     73
+[ 21%] innodb.innodb_doublewrite_dir_02         w1  [ pass ]     67
+[ 21%] innodb.buf_pool_resize_oom               w28 [ pass ]    561
+[ 21%] innodb.log_file_consumer                 w7  [ pass ]   8322
+[ 21%] innodb.innodb_bug30919                   w3  [ pass ]   4936
+[ 22%] innodb.blob_redo                         w12 [ pass ]   8287
+[ 22%] innodb.innodb_stats_flag_global_on       w2  [ pass ]   7570
+[ 22%] innodb.innodb_stats_flag_global_off      w4  [ pass ]   8435
+[ 22%] innodb.dblwr_encrypt_recover             w5  [ pass ]  10109
+[ 22%] innodb.innodb-index-debug                w27 [ pass ]  11494
+[ 22%] innodb.innodb-consistent                 w3  [ pass ]    121
+[ 22%] innodb.update_time                       w25 [ pass ]  14000
+[ 22%] innodb.dblwr_disable                     w26 [ pass ]   6836
+[ 23%] innodb.dblwr_recover_general_tablespace  w15 [ pass ]  14116
+[ 23%] innodb.create_index_with_disable_sort_file_cache w31 [ pass ]   9709
+[ 23%] innodb.zlob_ddl                          w18 [ pass ]   9369
+[ 23%] innodb.innodb_mysql_rbk                  w1  [ pass ]   2070
+[ 23%] innodb.log_file_producer                 w7  [ pass ]   6162
+[ 23%] innodb.innodb_bug19164038                w27 [ pass ]   2680
+[ 23%] innodb.resurrection_logs                 w12 [ pass ]   2258
+[ 23%] innodb.check_ibd_filesize_16k            w30 [ pass ]  15702
+[ 24%] innodb.redo_log_archive_04               w26 [ pass ]     66
+[ 24%] innodb.crc32_endianness                  w30 [ pass ]    189
+[ 24%] innodb.innodb_bug14147491                w29 [ pass ]   6355
+[ 24%] innodb.log_writer_extra_margin           w22 [ pass ]  17643
+[ 24%] innodb.innodb-copy-alter-debug           w6  [ pass ]  32511
+[ 24%] innodb.innodb_bug34750489                w25 [ pass ]    470
+[ 24%] innodb.innodb-change-buffer-recovery     w32 [ pass ]  28161
+[ 25%] innodb.blob_partial_update               w18 [ pass ]   1203
+[ 25%] innodb.create_tablespace                 w14 [ pass ]  16384
+[ 25%] innodb.innodb_lock_wait_timeout_1        w28 [ pass ]   9390
+[ 25%] innodb.alter_table_stage_progress        w27 [ pass ]    115
+[ 25%] innodb.innodb-index                      w11 [ pass ]  21986
+[ 25%] innodb.innodb-read-view                  w29 [ pass ]    209
+[ 25%] innodb.blob_partial_update_2             w18 [ pass ]   1588
+[ 25%] innodb.alter_kill                        w21 [ pass ]  24132
+[ 26%] innodb.dblwr_recover_zeroes              w13 [ pass ]   9726
+[ 26%] innodb.innodb_bug30594501                w6  [ pass ]     89
+[ 26%] innodb.recovery_small_bp_read_deadlock   w16 [ pass ]  35424
+[ 26%] innodb.dblwr_zlib_encrypt                w24 [ pass ]  11766
+[ 26%] innodb.innodb_replace                    w6  [ pass ]    195
+[ 26%] innodb.redo_log_archive_01               w15 [ pass ]   7166
+[ 26%] innodb.check_sector_size                 w20 [ pass ]  11947
+[ 26%] innodb.accessing_table_during_fulltext_creation w25 [ pass ]    889
+[ 27%] innodb.check_table_debug                 w28 [ pass ]    163
+[ 27%] innodb.tablespace_truncate_stress        w9  [ pass ]  23033
+[ 27%] innodb.innodb-index-online-delete        w13 [ pass ]    130
+[ 27%] innodb.innodb_dirty_pages_at_shutdown    w26 [ pass ]   4220
+[ 27%] innodb.disable_log_encryption            w4  [ pass ]  11081
+[ 27%] innodb.add_foreign_key                   w25 [ pass ]   1544
+[ 27%] innodb.innodb_bug51920                   w20 [ pass ]     69
+[ 27%] innodb.innodb-alter-autoinc              w21 [ pass ]    915
+[ 28%] innodb.high_prio_trx_4                   w29 [ pass ]     92
+[ 28%] innodb.alter-compressed                  w25 [ pass ]    209
+[ 28%] innodb.implicit_to_explicit_conversion   w18 [ pass ]    354
+[ 28%] innodb.innodb_bug52199                   w20 [ pass ]    101
+[ 28%] innodb.default_row_format_16k            w30 [ pass ]  11413
+[ 28%] innodb.innodb-alter-debug                w21 [ pass ]    379
+[ 28%] innodb.innodb_bug44032                   w6  [ pass ]     80
+[ 28%] innodb.alter_add_pk_pq_crash             w25 [ pass ]    290
+[ 29%] innodb.innodb_bug53046                   w20 [ pass ]    199
+[ 29%] innodb.high_prio_trx_5                   w29 [ pass ]   1097
+[ 29%] innodb.innodb_bug44369                   w6  [ pass ]     11
+[ 29%] innodb.innodb-alter-nullable             w21 [ pass ]    436
+[ 29%] innodb.default_row_format_compatibility  w30 [ pass ]    900
+[ 29%] innodb.innodb_bug44571                   w6  [ pass ]    214
+[ 29%] innodb.checksum                          w28 [ pass ]   4023
+[ 30%] innodb.innodb-index-online-fk            w13 [ pass ]   4177
+[ 30%] innodb.innodb_bug53592                   w20 [ pass ]    873
+[ 30%] innodb.innodb_bug45357                   w6  [ pass ]     68
+[ 30%] innodb.high_prio_trx_6                   w29 [ pass ]   1104
+[ 30%] innodb.innodb_bug54044                   w20 [ pass ]     52
+[ 30%] innodb.innochecksum_1                    w17 [ pass ]  27172
+[ 30%] innodb.innodb_bug46000                   w6  [ pass ]    132
+[ 30%] innodb.innodb-index-online-purge         w13 [ pass ]    562
+[ 31%] innodb.innodb_bug56716                   w20 [ pass ]     53
+[ 31%] innodb.log_file_size_1                   w7  [ pass ]  12312
+[ 31%] innodb.constraint_check_locks_in_read_committed w28 [ pass ]   1511
+[ 31%] innodb.innodb_bug46676                   w6  [ pass ]    207
+[ 31%] innodb.innodb-index_ucs2                 w13 [ pass ]    261
+[ 31%] innodb.innodb_buffer_pool_load           w19 [ pass ]  44576
+[ 31%] innodb.innodb_bug56947                   w20 [ pass ]     67
+[ 31%] innodb.create-index                      w28 [ pass ]     84
+[ 32%] innodb.innodb_bug29692250                w12 [ pass ]  12107
+[ 32%] innodb.innodb_bug57252                   w20 [ pass ]     74
+[ 32%] innodb.innodb-large-prefix               w13 [ pass ]    169
+[ 32%] innodb.innodb_bug47621                   w6  [ pass ]    487
+[ 32%] innodb.merge-subtrees                    w2  [ pass ]  21617
+[ 32%] innodb.choose_tbsp_location-discard      w8  [ pass ]  33455
+[ 32%] innodb.innodb_bug47622                   w6  [ pass ]    521
+[ 32%] innodb.innodb_bug57255                   w20 [ pass ]    873
+[ 33%] innodb.undo-order                        w1  [ pass ]  15814
+[ 33%] innodb.dblwr_encrypt_rowcomp             w5  [ pass ]  21695
+[ 33%] innodb.innodb_bug47777                   w6  [ pass ]     75
+[ 33%] innodb.innodb_bug57904                   w20 [ pass ]    256
+[ 33%] innodb.xdes_fseg_frag                    w23 [ pass ]  35527
+[ 33%] innodb.create_drop_temp_table_perf_debug w28 [ pass ]   2239
+[ 33%] innodb.redo_log_archive_02               w15 [ pass ]  12579
+[ 34%] innodb.innodb_bug53756                   w12 [ pass ]   2327
+[ 34%] innodb.innodb-semi-consistent            w3  [ pass ]  24262
+[ 34%] innodb.ibuf_not_empty                    w10 [ pass ]  32998
+[ 34%] innodb.innodb_bug48024                   w6  [ pass ]    412
+[ 34%] innodb.innodb_bug59307                   w20 [ pass ]    107
+[ 34%] innodb.innodb-alter-varchar-debug        w21 [ pass ]   7060
+[ 34%] innodb.redo_log_archive_03               w15 [ pass ]    230
+[ 34%] innodb.redo_log_archive_05               w15 [ skipped ]  Run with env $IRLA_SMALL_DIR set to dir with max 100MB space
+[ 35%] innodb.innodb_bug49164                   w6  [ pass ]     85
+[ 35%] innodb.innodb_bug59410                   w20 [ pass ]    117
+[ 35%] innodb.import                            w18 [ pass ]   9631
+[ 35%] innodb.high_prio_trx_7                   w29 [ pass ]   6662
+[ 35%] innodb.innodb-alter-varchar              w21 [ pass ]    603
+[ 35%] innodb.lob_double_purge                  w20 [ pass ]     70
+[ 35%] innodb.innodb_corrupt_readonly           w4  [ pass ]   8963
+[ 35%] innodb.file_format_upgrade_16k           w30 [ pass ]   8188
+[ 36%] innodb.innodb_bug59641                   w26 [ pass ]   8136
+[ 36%] innodb.high_prio_trx_8                   w29 [ pass ]     63
+[ 36%] innodb.innodb-lock-inherit-read_commited w13 [ pass ]   4793
+[ 36%] innodb.innodb_bug51378                   w6  [ pass ]    682
+[ 36%] innodb.ibd2sdi                           w30 [ pass ]     21
+[ 36%] innodb.innodb_defaults                   w4  [ pass ]    239
+[ 36%] innodb.high_prio_trx_9                   w29 [ pass ]    130
+[ 36%] innodb.innodb_virtual_col_index_corruption w8  [ pass ]     72
+[ 37%] innodb.lob_mvcc_undo                     w6  [ pass ]     85
+[ 37%] innodb.innodb_bug59733                   w26 [ pass ]    678
+[ 37%] innodb.index_tree_operation              w30 [ pass ]    179
+[ 37%] innodb.alter_crash                       w25 [ pass ]  11680
+[ 37%] innodb.lob_no_space                      w6  [ pass ]    267
+[ 37%] innodb.ddl_log_error                     w27 [ pass ]  14202
+[ 37%] innodb.innodb_bug60229                   w26 [ pass ]    241
+[ 38%] innodb.lob_partial_update                w6  [ pass ]    215
+[ 38%] innodb.innodb-lock                       w13 [ pass ]   2331
+[ 38%] innodb.lob_partial_update_concurrent     w6  [ pass ]    132
+[ 38%] innodb.json_small_partial_update_04      w15 [ pass ]    244
+[ 38%] innodb.innodb-new-fk                     w13 [ pass ]    654
+[ 38%] innodb.insert_debug                      w8  [ pass ]   3018
+[ 38%] innodb.lob_print                         w6  [ pass ]     84
+[ 38%] innodb.json_small_partial_update_05      w15 [ pass ]    109
+[ 39%] innodb.innodb-replace-debug              w13 [ pass ]    108
+[ 39%] innodb.lob_purge                         w6  [ pass ]    130
+[ 39%] innodb.instant_rename_column             w3  [ pass ]   2871
+[ 39%] innodb.json_small_partial_update_06      w15 [ pass ]    112
+[ 39%] innodb.import_cfg                        w18 [ pass ]   6827
+[ 39%] innodb.high_prio_trx_commit_crash        w29 [ pass ]   4700
+[ 39%] innodb.fseg_reserve_factor               w31 [ pass ]  29206
+[ 39%] innodb.import_compress_no_punch_hole     w18 [ skipped ]  Test requires 'no Punch hole support'
+[ 40%] innodb.ddl_prepare                       w27 [ pass ]   2307
+[ 40%] innodb.import_empty_instant_default      w18 [ pass ]    173
+[ 40%] innodb.high_prio_trx_debug               w29 [ pass ]   1152
+[ 40%] innodb.innodb-alter                      w21 [ pass ]   8863
+[ 40%] innodb.import_table_with_multibyte_chars w18 [ pass ]    485
+[ 40%] innodb.innodb-blob                       w30 [ pass ]   6953
+[ 40%] innodb.innodb_bug70867                   w26 [ pass ]   6208
+[ 40%] innodb.iodku                             w3  [ pass ]   2870
+[ 41%] innodb.high_prio_trx_fk                  w29 [ pass ]    302
+[ 41%] innodb.innodb-timeout                    w13 [ pass ]   3462
+[ 41%] innodb.innodb_init_rseg_parallel         w17 [ pass ]  12104
+[ 41%] innodb.innodb-analyze                    w21 [ pass ]    229
+[ 41%] innodb.high_prio_trx_predicate           w29 [ pass ]    109
+[ 41%] innodb.innodb_io_pf                      w17 [ pass ]     62
+[ 41%] innodb.innodb_stats_auto_recalc_lots     w19 [ pass ]  11832
+[ 42%] innodb.lob-being-modified-bit            w15 [ pass ]   3708
+[ 42%] innodb.innodb-autoinc-18274              w21 [ pass ]    121
+[ 42%] innodb.instant_ddl_index_log_version     w23 [ pass ]   8490
+[ 42%] innodb.innodb_bug84958                   w26 [ pass ]    753
+[ 42%] innodb.insert_redo_size_instant          w8  [ pass ]   5364
+[ 42%] innodb.innodb_extend_and_initialize_debug w4  [ pass ]   9560
+[ 42%] innodb.innodb_stats_auto_recalc_on_nonexistent w19 [ pass ]    168
+[ 42%] innodb.innodb-autoinc-optimize           w21 [ pass ]    131
+[ 43%] innodb.innodb-truncate                   w13 [ pass ]   1333
+[ 43%] innodb.innodb_extend_and_initialize_windows w4  [ skipped ]  Need windows
+[ 43%] innodb.innodb_buffer_pool_dump_pct       w30 [ pass ]   2165
+[ 43%] innodb.innodb_stats_create_table         w19 [ pass ]    181
+[ 43%] innodb.tablespace_truncate_stress_debug  w9  [ pass ]  26624
+[ 43%] innodb.atomic_truncate_crash             w32 [ pass ]  29229
+[ 43%] innodb.innodb-bug-14068765               w21 [ pass ]   1414
+[ 43%] innodb.histogram-debug                   w29 [ pass ]   2638
+[ 44%] innodb.deadlock_detect                   w27 [ pass ]   5396
+[ 44%] innodb.lob-format                        w15 [ pass ]   2288
+[ 44%] innodb.innodb-ucs2                       w13 [ pass ]   1459
+[ 44%] innodb.attachable_trx                    w32 [ pass ]     85
+[ 44%] innodb.innodb-bug-14084530               w21 [ pass ]    196
+[ 44%] innodb.deadlock_in_subquery              w27 [ pass ]    168
+[ 44%] innodb.lob-read-uncommitted              w15 [ pass ]    286
+[ 44%] innodb.innodb-update-insert              w13 [ pass ]    123
+[ 45%] innodb.import_tablespace_page_corrupt    w18 [ pass ]   5483
+[ 45%] innodb.innodb-bug12552164                w21 [ pass ]    165
+[ 45%] innodb.dblwr_lz4_encrypt                 w5  [ pass ]  13977
+[ 45%] innodb.deadlock_on_lock_upgrade          w27 [ pass ]    157
+[ 45%] innodb.lob-single-zstream                w15 [ pass ]     86
+[ 45%] innodb.lock_rec_unlock                   w13 [ pass ]    188
+[ 45%] innodb.innodb-bug14219515                w21 [ pass ]     80
+[ 46%] innodb.deadlock_stats                    w27 [ pass ]    105
+[ 46%] innodb.import_update_stats               w18 [ pass ]    528
+[ 46%] innodb.lock_s_to_implicit_x_escalation   w13 [ pass ]    110
+[ 46%] innodb.lob_rollback_crash_2              w31 [ pass ]   4529
+[ 46%] innodb.innodb_bulk_create_index_flush    w26 [ pass ]   5469
+[ 46%] innodb.create_index_excess_memory        w28 [ pass ]  19348
+[ 46%] innodb.lob_compact                       w15 [ pass ]    636
+[ 46%] innodb.index-create-dml-rollback         w18 [ pass ]    220
+[ 47%] innodb.lock_trx_release_read_locks_in_x_mode w13 [ pass ]    323
+[ 47%] innodb.log_ddl_must_flush                w15 [ pass ]     31
+[ 47%] innodb.create_table                      w28 [ pass ]    142
+[ 47%] innodb.index-lock-mode                   w18 [ pass ]     80
+[ 47%] innodb.lock_collision_report             w9  [ pass ]    181
+[ 47%] innodb.lob_rollback_deadlock             w31 [ pass ]   1433
+[ 47%] innodb.default_row_format                w27 [ pass ]   1884
+[ 47%] innodb.innodb_bulk_create_index_small    w26 [ pass ]   1655
+[ 48%] innodb.index-online-norebuild            w18 [ pass ]    416
+[ 48%] innodb.innodb_stats_table_flag_auto_recalc w2  [ pass ]  20318
+[ 48%] innodb.lob_rollback_problem_mini         w31 [ pass ]     62
+[ 48%] innodb.create_table_select               w28 [ pass ]   1040
+[ 48%] innodb.create_table_similar_to_fts       w28 [ pass ]    601
+[ 48%] innodb.default_row_format_tablespace     w27 [ pass ]   1684
+[ 48%] innodb.lob_rollback_update               w31 [ pass ]   1203
+[ 48%] innodb.lock_empty_bitmap                 w9  [ pass ]   3028
+[ 49%] innodb.innodb_bulk_inject_errors         w26 [ pass ]   2041
+[ 49%] innodb.hp_deadlock                       w29 [ pass ]   8317
+[ 49%] innodb.instant_add_column_autoinc        w8  [ pass ]  10950
+[ 49%] innodb.lob_update                        w31 [ pass ]     91
+[ 49%] innodb.lob_vjhi                          w31 [ pass ]     75
+[ 49%] innodb.innodb_cats                       w26 [ pass ]    742
+[ 49%] innodb.lock-inherit-existing             w31 [ pass ]    188
+[ 50%] innodb.innodb_autoextend_import_export   w16 [ pass ]  36155
+[ 50%] innodb.log_first_rec_group               w22 [ pass ]  43548
+[ 50%] innodb.disable_flush_restart_mysqld      w27 [ pass ]   3425
+[ 50%] innodb.lock_end_of_range                 w9  [ pass ]   3753
+[ 50%] innodb.log_alter_table                   w13 [ pass ]   8661
+[ 50%] innodb.discard_tablespace                w27 [ pass ]   1300
+[ 50%] innodb.lob_ibd_size                      w20 [ pass ]  28401
+[ 50%] innodb.innodb_bug11754376                w16 [ pass ]     75
+[ 51%] innodb.doublewrite_reduced               w11 [ pass ]  41022
+[ 51%] innodb.innodb_bug11789106                w16 [ pass ]     81
+[ 51%] innodb.innodb_collation_test             w26 [ pass ]   4208
+[ 51%] innodb.discard_tablespace_debug          w27 [ pass ]    549
+[ 51%] innodb.hp_deadlock_shutdown              w29 [ pass ]   6180
+[ 51%] innodb.log_buffer_size                   w13 [ pass ]   1739
+[ 51%] innodb.i_s_files_debug                   w29 [ pass ]    149
+[ 51%] innodb.dblwr_lz4_encrypt_recv            w5  [ pass ]  10191
+[ 52%] innodb.lock_granted_before_waiting       w9  [ pass ]   3289
+[ 52%] innodb.innodb_prefix_index_restart_server w30 [ pass ]  18199
+[ 52%] innodb.log_directory                     w15 [ pass ]  13384
+[ 52%] innodb.instant_add_column_clear          w8  [ pass ]   9499
+[ 52%] innodb.innodb-import-partition           w21 [ pass ]  16421
+[ 52%] innodb.innodb_redo_debug_3               w7  [ pass ]  35973
+[ 52%] innodb.lock_impl_to_expl                 w9  [ pass ]   2545
+[ 52%] innodb.innodb_force_recovery             w4  [ pass ]  21752
+[ 53%] innodb.instant_add_column_debug          w8  [ pass ]    818
+[ 53%] innodb.lock_impl_to_expl_case_sensitivity w9  [ pass ]    129
+[ 53%] innodb.innodb_fts_limit_check            w4  [ pass ]    338
+[ 53%] innodb.innodb_stats_table_flag_sample_pages w2  [ pass ]  15113
+[ 53%] innodb.index-stats-during-analyze        w18 [ pass ]  15518
+[ 53%] innodb.innodb_i_s_cached_indexes         w4  [ pass ]     91
+[ 53%] innodb.lock_partitions                   w9  [ pass ]    991
+[ 53%] innodb.innodb_sys_var_valgrind           w2  [ pass ]    817
+[ 54%] innodb.innodb_i_s_columns                w4  [ pass ]   1438
+[ 54%] innodb.i_s_innodb_tables                 w29 [ pass ]   8383
+[ 54%] innodb.innodb_i_s_innodb_trx             w4  [ pass ]    626
+[ 54%] innodb.innodb_stats_auto_recalc          w30 [ pass ]  10186
+[ 54%] innodb.ibuf_with_validate_tablespace     w10 [ pass ]  44744
+[ 54%] innodb.log_spin_vars                     w29 [ pass ]   1821
+[ 54%] innodb.innodb_stats_fetch                w30 [ pass ]    129
+[ 55%] innodb.innodb_stats_sample_pages         w30 [ pass ]    725
+[ 55%] innodb.alter_datadir_path                w25 [ pass ]  43502
+[ 55%] innodb.dblwr_zlib_encrypt_recv           w5  [ pass ]  10198
+[ 55%] innodb.log_file_checkpoint               w31 [ pass ]  20687
+[ 55%] innodb.lock_contention                   w30 [ pass ]    825
+[ 55%] innodb.log_file_truncate_2               w9  [ pass ]  10186
+[ 55%] innodb.create_table_sys_tablespace_extend w28 [ pass ]  27199
+[ 55%] innodb.log_sys_vars                      w29 [ pass ]   6264
+[ 56%] innodb.instant_ddl_basic                 w8  [ pass ]  15347
+[ 56%] innodb.discarded_partition               w27 [ pass ]  19891
+[ 56%] innodb.innodb_idle_flush_pct             w4  [ pass ]   9912
+[ 56%] innodb.log_writer_threads                w29 [ pass ]     75
+[ 56%] innodb.dml_operations_temp_table         w27 [ pass ]     76
+[ 56%] innodb.log_file_from_future              w31 [ pass ]   4918
+[ 56%] innodb.log_file_resize_1                 w21 [ pass ]  17924
+[ 56%] innodb.dml_operations_temp_table_debug   w27 [ pass ]    288
+[ 57%] innodb.innochecksum_linux                w18 [ pass ]  16305
+[ 57%] innodb.monitor_restart                   w5  [ pass ]   5013
+[ 57%] innodb.innodb-ac-non-locking-select      w18 [ pass ]     88
+[ 57%] innodb.long_deadlock_cycle               w29 [ pass ]   3209
+[ 57%] innodb.instant_ddl_import_charset_drop_enum_dynamic w1  [ pass ]  54558
+[ 57%] innodb.bug33788578                       w14 [ pass ]  70487
+[ 57%] innodb.log_writer_threads_default        w22 [ pass ]  29175
+[ 57%] innodb.create_tablespace_debug           w28 [ pass ]   8318
+[ 58%] innodb.mtr_memo_size                     w5  [ pass ]    310
+[ 58%] innodb.log_encrypt_1                     w15 [ pass ]  24727
+[ 58%] innodb.cross_ddl_partition_tables        w28 [ pass ]    307
+[ 58%] innodb.iodku_debug                       w3  [ pass ]  50275
+[ 58%] innodb.innodb_corrupt_bit                w26 [ pass ]  30129
+[ 58%] innodb.json-read-uncommitted             w3  [ pass ]     65
+[ 58%] innodb.log_corruption                    w13 [ pass ]  30256
+[ 59%] innodb.partition-blob                    w22 [ pass ]    593
+[ 59%] innodb.json_small_partial_update_00      w3  [ pass ]   1411
+[ 59%] innodb.missing_redologs                  w10 [ pass ]  14187
+[ 59%] innodb.json_small_partial_update_01      w3  [ pass ]   1479
+[ 59%] innodb.readahead                         w26 [ pass ]   4074
+[ 59%] innodb.instant_ddl_basic_debug           w8  [ pass ]  15451
+[ 59%] innodb.innodb_redo_debug_4               w7  [ pass ]  31943
+[ 59%] innodb.log_file_invalid_checkpoint       w31 [ pass ]  14844
+[ 60%] innodb.json_small_partial_update_02      w3  [ pass ]   1840
+[ 60%] innodb.partition                         w22 [ pass ]   5237
+[ 60%] innodb.innodb_tablespace                 w2  [ pass ]  29987
+[ 60%] innodb.json_small_partial_update_03      w3  [ pass ]    199
+[ 60%] innodb.log_corruption_1                  w30 [ pass ]  22506
+[ 60%] innodb.instant_ddl_upgrade_metadata      w12 [ pass ]  67789
+[ 60%] innodb.page_reorganize                   w30 [ pass ]     92
+[ 60%] innodb.lob_ibd_size_replace              w20 [ pass ]  42058
+[ 61%] innodb.innodb_bug30899683                w24 [ pass ]  85394
+[ 61%] innodb.auto_increment                    w32 [ pass ]  55680
+[ 61%] innodb.innodb_bug31205266                w24 [ pass ]     85
+[ 61%] innodb.lob_import_export                 w20 [ pass ]    275
+[ 61%] innodb.lob_insert                        w20 [ pass ]     92
+[ 61%] innodb.instant_ddl_import                w8  [ pass ]   5812
+[ 61%] innodb.missing_tablespaces               w10 [ pass ]   6340
+[ 61%] innodb.lob_insert_noindex                w20 [ pass ]    334
+[ 62%] innodb.lob_long_partial_update           w20 [ pass ]    109
+[ 62%] innodb.partition-16k                     w30 [ pass ]   3607
+[ 62%] innodb.innodb_bug33405696                w24 [ pass ]   2324
+[ 62%] innodb.lob_mvcc                          w20 [ pass ]    165
+[ 62%] innodb.autoinc_debug                     w32 [ pass ]   4122
+[ 62%] innodb.dblwr_encrypt_recover1            w28 [ pass ]  14997
+[ 62%] innodb.mixed_case_0                      w10 [ pass ]   3402
+[ 63%] innodb.innodb_lru_threads_kill_recovery  w17 [ pass ]  67555
+[ 63%] innodb.mixed_case_1                      w10 [ skipped ]  Test requires 'lower_case_table_names = 1'
+[ 63%] innodb.innodb_information_schema_buffer  w4  [ pass ]  27512
+[ 63%] innodb.innodb_multi_update               w17 [ pass ]    228
+[ 63%] innodb.mixed_case_2                      w10 [ skipped ]  Test requires 'lower_case_table_names = 2'
+[ 63%] innodb.innodb_bug11933790                w16 [ pass ]  50081
+[ 63%] innodb.sdi_debug                         w4  [ pass ]    126
+[ 63%] innodb.innodb_open_files_priv            w17 [ pass ]     76
+[ 64%] innodb.doublewrite_reduced_odirect       w11 [ pass ]  50784
+[ 64%] innodb.doublewrite                       w27 [ pass ]  26852
+[ 64%] innodb.monitor                           w10 [ pass ]    623
+[ 64%] innodb.partition_debug                   w22 [ pass ]  12495
+[ 64%] innodb.innodb_bug12429573                w16 [ pass ]   1079
+[ 64%] innodb.innodb_bug12661768                w16 [ pass ]    154
+[ 64%] innodb.log_file_invalid_start_lsn        w31 [ pass ]  14761
+[ 64%] innodb.innodb_bug14006907                w16 [ pass ]    171
+[ 65%] innodb.dblwr_unencrypt                   w28 [ pass ]   3090
+[ 65%] innodb.innodb_bug14007109                w16 [ pass ]    601
+[ 65%] innodb.innodb_bug14007649                w16 [ pass ]     93
+[ 65%] innodb.ddl_add_drop_basic                w28 [ pass ]   1446
+[ 65%] innodb.sdi_delete_marked                 w4  [ pass ]   5180
+[ 65%] innodb.innodb_bug14169459                w16 [ pass ]     87
+[ 65%] innodb.max_trx_id                        w29 [ pass ]  31177
+[ 65%] innodb.sdi_fail                          w4  [ pass ]     75
+[ 66%] innodb.secondary_unique_index_range_locking w4  [ pass ]     86
+[ 66%] innodb.innodb_bug21704                   w16 [ pass ]    585
+[ 66%] innodb.log_crash                         w13 [ pass ]  26654
+[ 66%] innodb.readonly                          w26 [ pass ]  21879
+[ 66%] innodb.rec_offsets                       w26 [ pass ]    394
+[ 66%] innodb.innodb_page_size_func             w17 [ pass ]   8768
+[ 66%] innodb.records_in_range                  w26 [ pass ]    240
+[ 67%] innodb.log_encrypt_2                     w15 [ pass ]  26823
+[ 67%] innodb.skip_locked_nowait_isolation      w13 [ pass ]   2253
+[ 67%] innodb.innodb_bug33766482                w24 [ pass ]  16746
+[ 67%] innodb.innodb_temporary_file_path        w2  [ pass ]  23748
+[ 67%] innodb.select_count_perf                 w4  [ pass ]   4369
+[ 67%] innodb.innodb_bug34053                   w24 [ pass ]    358
+[ 67%] innodb.innodb_bug34300                   w24 [ pass ]    431
+[ 67%] innodb.innodb_thread_concurrency_debug   w2  [ pass ]   1352
+[ 68%] innodb.innodb_bug35220                   w24 [ pass ]    112
+[ 68%] innodb.log_file_marked_as_full           w31 [ pass ]  12893
+[ 68%] innodb.innodb_bug38231                   w24 [ pass ]    125
+[ 68%] innodb.innodb_bug40360                   w24 [ pass ]     48
+[ 68%] innodb.portability_basic                 w22 [ pass ]  15755
+[ 68%] innodb.innodb_bug40565                   w24 [ pass ]     85
+[ 68%] innodb.innodb_bug41904                   w24 [ pass ]     83
+[ 68%] innodb.innodb_bug42101                   w24 [ pass ]      5
+[ 69%] innodb.innodb_bug42419                   w24 [ pass ]    300
+[ 69%] innodb.innodb_bug26818787                w16 [ pass ]  12597
+[ 69%] innodb.log_file_name_discover            w31 [ pass ]   4772
+[ 69%] innodb.redo_log_disable                  w3  [ pass ]  33147
+[ 69%] innodb.rename_fk_1                       w3  [ pass ]    390
+[ 69%] innodb.rename_fk_2                       w3  [ pass ]    551
+[ 69%] innodb.multi_value_basic                 w5  [ pass ]  47433
+[ 69%] innodb.instant_ddl_import_charset_drop_enum_redundant w1  [ pass ]  50846
+[ 70%] innodb.session_temp_tablespaces          w10 [ pass ]  25841
+[ 70%] innodb.doublewrite_reduced_to_on         w11 [ pass ]  26727
+[ 70%] innodb.show_engine_status                w10 [ pass ]     89
+[ 70%] innodb.dropdb                            w11 [ pass ]     63
+[ 70%] innodb.strict_checksum                   w4  [ pass ]  16136
+[ 70%] innodb.table_encrypt_fts                 w31 [ pass ]   6787
+[ 70%] innodb.end_range_check_2                 w11 [ pass ]   1954
+[ 71%] innodb.innodb_bug30113362                w16 [ pass ]   9673
+[ 71%] innodb.strict_mode                       w4  [ pass ]    797
+[ 71%] innodb.innodb_redo_debug_5               w7  [ pass ]  44312
+[ 71%] innodb.multi_value_debug                 w5  [ pass ]   4506
+[ 71%] innodb.innodb_stats_drop_locked          w19 [ pass ]  100119
+[ 71%] innodb.skip_tablespace_path_validation   w13 [ pass ]  19969
+[ 71%] innodb.instant_ddl_import_debug          w1  [ pass ]   5555
+[ 71%] innodb.minrecflag                        w29 [ pass ]  25887
+[ 72%] innodb.tablespace_encrypt_1              w30 [ pass ]  36431
+[ 72%] innodb.innodb_stats_external_pages       w19 [ pass ]   1213
+[ 72%] innodb.tablespace_per_table_windows      w29 [ skipped ]  Need windows
+[ 72%] innodb.instant_ddl_import_old            w1  [ pass ]    643
+[ 72%] innodb.stats_post_alter_copy             w13 [ pass ]   1641
+[ 72%] innodb.innodb_stats_fetch_nonexistent    w19 [ pass ]     94
+[ 72%] innodb.instant_ddl_import_old_debug      w1  [ pass ]    635
+[ 72%] innodb.innodb_stats_long_names           w19 [ pass ]    115
+[ 73%] innodb.mysqldump_max_recordsize          w18 [ pass ]  61706
+[ 73%] innodb.alter_datadir_path_on_upgrade     w25 [ pass ]  66076
+[ 73%] innodb.mvcc_cache                        w5  [ pass ]   3066
+[ 73%] innodb.rename_table                      w3  [ pass ]   9742
+[ 73%] innodb.stored_fk                         w13 [ pass ]   1319
+[ 73%] innodb.rename_table_generail_failure     w3  [ pass ]     70
+[ 73%] innodb.log_flush_order                   w9  [ pass ]  68681
+[ 73%] innodb.mysql_tables_deadlocks            w5  [ pass ]    642
+[ 74%] innodb.temporary_table_optimization      w3  [ pass ]    345
+[ 74%] innodb.instant_ddl_import_old_part       w1  [ pass ]   2458
+[ 74%] innodb.shutdown_threads                  w10 [ pass ]  10002
+[ 74%] innodb.temptable_write_row               w3  [ pass ]    221
+[ 74%] innodb.tmpdir                            w5  [ pass ]   1164
+[ 74%] innodb.timestamp                         w3  [ pass ]    117
+[ 74%] innodb.lob_recovery                      w6  [ pass ]  115370
+[ 75%] innodb.fast_shutdown                     w11 [ pass ]   8713
+[ 75%] innodb.page_tracking_corruption          w18 [ pass ]   4347
+[ 75%] innodb.table_encrypt_portable_64         w31 [ pass ]   6100
+[ 75%] innodb.innodb_stats_race_condition       w19 [ pass ]   5183
+[ 75%] innodb.instant_ddl_import_old_part_debug w1  [ pass ]   2701
+[ 75%] innodb.doublewrite_on_to_reduced         w27 [ pass ]  41228
+[ 75%] innodb.log_file_resize_2                 w21 [ pass ]  70040
+[ 75%] innodb.innodb_stats_rename_table         w19 [ pass ]     97
+[ 76%] innodb.parallel_read                     w18 [ pass ]    293
+[ 76%] innodb.table_encrypt_2                   w24 [ pass ]  19353
+[ 76%] innodb.flush-hang                        w11 [ pass ]    663
+[ 76%] innodb.log_encrypt_3                     w15 [ pass ]  27043
+[ 76%] innodb.innodb_stats_rename_table_if_exists w19 [ pass ]    498
+[ 76%] innodb.alter_foreign_crash               w25 [ pass ]   2596
+[ 76%] innodb.skip_locked_nowait                w10 [ pass ]   4334
+[ 76%] innodb.undo                              w19 [ pass ]    166
+[ 77%] innodb.lob_rollback_crash                w6  [ pass ]   2612
+[ 77%] innodb.parallel_read_1                   w18 [ pass ]   1938
+[ 77%] innodb.instant_ddl_import_charset_drop_enum_compact w8  [ pass ]  51988
+[ 77%] innodb.table_options                     w31 [ pass ]    433
+[ 77%] innodb.trx_cleanup_at_startup            w27 [ pass ]   2412
+[ 77%] innodb.table_compress                    w4  [ pass ]  13606
+[ 77%] innodb.trx_id_future                     w27 [ skipped ]  Test requires binaries to be compiled in release mode
+[ 77%] innodb.update-cascade                    w6  [ pass ]    975
+[ 78%] innodb.use_latest_stats                  w8  [ pass ]    617
+[ 78%] innodb.innodb_too_many_columns           w2  [ pass ]  30974
+[ 78%] innodb.update-ext                        w6  [ pass ]    132
+[ 78%] innodb.autoinc_persist                   w32 [ pass ]  50538
+[ 78%] innodb.innodb_trx_weight                 w2  [ pass ]   1439
+[ 78%] innodb.innodb_update_rollback_gen_col    w2  [ pass ]    227
+[ 78%] innodb.bug33788578_ddl                   w14 [ pass ]  74896
+[ 78%] innodb.log_encrypt_7                     w15 [ pass ]   4385
+[ 79%] innodb.innodb_ut_format_name             w2  [ pass ]     55
+[ 79%] innodb.instant_ddl_upgrade_metadata_debug w12 [ pass ]  61029
+[ 79%] innodb.recover_xa_insert_only_trx        w26 [ pass ]  39525
+[ 79%] innodb.bug33788578_incorrect_instant_field w14 [ pass ]    279
+[ 79%] innodb.undo_log_temp_table               w19 [ pass ]   6729
+[ 79%] innodb.undetected_deadlock               w27 [ pass ]   5220
+[ 79%] innodb.log_file_size                     w21 [ pass ]   9258
+[ 80%] innodb.tablespace_encrypt_4              w16 [ pass ]  19169
+[ 80%] innodb.parallel_read_kill                w18 [ pass ]   7503
+[ 80%] innodb.virtual_purge                     w27 [ pass ]   1346
+[ 80%] innodb.virtual_uncommitted               w18 [ pass ]    138
+[ 80%] innodb.ddl_large_record                  w28 [ pass ]  48239
+[ 80%] innodb.instant_ddl_misc                  w23 [ pass ]  124071
+[ 80%] innodb.xa_another                        w18 [ pass ]    176
+[ 80%] innodb.foreign_key                       w11 [ pass ]  12094
+[ 81%] innodb.virtual_stats                     w27 [ pass ]    393
+[ 81%] innodb.xa_prepare_lock_release           w28 [ pass ]     85
+[ 81%] innodb.portability_tablespace            w22 [ pass ]  33835
+[ 81%] innodb.zlob_geom                         w27 [ pass ]    232
+[ 81%] innodb.generate_new_row_id               w11 [ pass ]    388
+[ 81%] innodb.transportable_tbsp                w3  [ pass ]  15921
+[ 81%] innodb.tablespace_recovery_state         w29 [ pass ]  22576
+[ 81%] innodb.tablespace_temp_table_debug       w13 [ pass ]  19825
+[ 82%] innodb.zlob_import_export                w22 [ pass ]    271
+[ 82%] innodb.log_invalid_format                w9  [ pass ]  20275
+[ 82%] innodb.zlob_import_10mb                  w27 [ pass ]   1028
+[ 82%] innodb.xa_recovery_debug                 w18 [ pass ]   2403
+[ 82%] innodb.zlob_long_partial_update          w27 [ pass ]    112
+[ 82%] innodb.instant_ddl_import_partition      w1  [ pass ]  17148
+[ 82%] innodb.temp_table                        w13 [ pass ]   1777
+[ 82%] innodb.too_many_concurrent_trxs          w5  [ pass ]  19720
+[ 83%] innodb.zlob_insert_by_update             w22 [ pass ]   2119
+[ 83%] innodb.zlob                              w18 [ pass ]    441
+[ 83%] innodb.virtual_fk_restart                w26 [ pass ]   9326
+[ 83%] innodb.zlob_no_space                     w27 [ pass ]   1171
+[ 83%] innodb.zlob_partial_update_concurrent    w22 [ pass ]    197
+[ 83%] innodb.zlob_purge                        w18 [ pass ]    159
+[ 83%] innodb.zlob_print                        w22 [ pass ]    122
+[ 84%] innodb.zlob_purge_undo_no                w18 [ pass ]    152
+[ 84%] innodb.zlob_redundant_partial_update     w27 [ pass ]    754
+[ 84%] innodb.log_long_running_rollback         w9  [ pass ]   4548
+[ 84%] innodb.alter_missing_tablespace          w25 [ pass ]  18164
+[ 84%] innodb.innodb_pagesize_max_recordsize    w17 [ pass ]  53614
+[ 84%] innodb.zlob_rollback                     w27 [ pass ]     84
+[ 84%] innodb.tablespace_rename                 w29 [ pass ]   2224
+[ 84%] innodb.innodb_prefix_index_check         w17 [ pass ]    574
+[ 85%] innodb.tablespace_portability            w30 [ pass ]  27349
+[ 85%] innodb.temp_table_savepoint              w13 [ pass ]   4916
+[ 85%] innodb.virtual_index                     w26 [ pass ]   3454
+[ 85%] innodb.row_format                        w20 [ pass ]  70161
+[ 85%] innodb.zlob_rollback_crash_3             w18 [ pass ]   2416
+[ 85%] innodb.virtual_no_storage                w26 [ pass ]    323
+[ 85%] innodb.zlob_rollback_deadlock            w27 [ pass ]   2331
+[ 85%] innodb.virtual_debug                     w2  [ pass ]  15911
+[ 86%] innodb.zlob_rollback_problem_mini        w27 [ pass ]    114
+[ 86%] innodb.log_encrypt_8                     w15 [ pass ]  16678
+[ 86%] innodb.zlob_rollback_crash               w22 [ pass ]   4602
+[ 86%] innodb.log_process_redo_rename           w9  [ skipped ]  Test requires Address Sanitizer
+[ 86%] innodb.alter_multivalue                  w25 [ pass ]   4056
+[ 86%] innodb.undo_with_virtual_no_idx          w10 [ pass ]  24058
+[ 86%] innodb.alter_page_size                   w15 [ pass ]    121
+[ 86%] innodb.zlob_rollback_crash_2             w22 [ pass ]     79
+[ 87%] innodb.xa_recovery                       w28 [ pass ]  12945
+[ 87%] innodb.zlob_rollback_update              w30 [ pass ]   1490
+[ 87%] innodb.alter_rename_files                w22 [ pass ]    139
+[ 87%] innodb.zlob_rollback_crash_6             w18 [ pass ]   2291
+[ 87%] innodb.alter_rename_existing             w25 [ pass ]   1323
+[ 87%] innodb.alter_rename_existing_xtra        w15 [ pass ]    651
+[ 87%] innodb.help_verbose                      w11 [ pass ]  13172
+[ 88%] innodb.alter_table_rebuild_duplicate_record w28 [ pass ]    123
+[ 88%] innodb.alter_table_update_primary_key    w18 [ pass ]    455
+[ 88%] innodb.transportable_tbsp-1              w5  [ pass ]  10600
+[ 88%] innodb.blob-update-debug                 w28 [ pass ]     62
+[ 88%] innodb.log_file_size_checkpoint          w21 [ pass ]  18617
+[ 88%] innodb.alter_table_rebuild_missing_record w30 [ pass ]   1306
+[ 88%] innodb.blob_update_rollback              w18 [ pass ]     68
+[ 88%] innodb.create_tablespace_replication     w26 [ pass ]    823
+[ 89%] innodb.update_time_is                    w6  [ pass ]  24921
+[ 89%] innodb.bug120323_row_size_insert_boundary w18 [ pass ]    414
+[ 89%] innodb.bug33657235                       w18 [ pass ]     86
+[ 89%] innodb.btree_load_root_split             w28 [ pass ]   2131
+[ 89%] innodb.high_prio_trx_rpl                 w26 [ pass ]    578
+[ 89%] innodb.tablespace_encrypt_3              w31 [ pass ]  26558
+[ 89%] innodb.innodb-import-partition-rpl       w27 [ pass ]   1218
+[ 89%] innodb.innodb_read_only                  w17 [ pass ]   8867
+[ 90%] innodb.alter_table_redundant             w22 [ pass ]   4119
+[ 90%] innodb.bug33767814                       w18 [ pass ]    238
+[ 90%] innodb.bug33788578_rec_IV_set            w28 [ pass ]    327
+[ 90%] innodb.bug34323538                       w22 [ skipped ]  Need '--valgrind'
+[ 90%] innodb.bug120323_row_size_too_large_regression w6  [ pass ]   2455
+[ 90%] innodb.bug35006212                       w22 [ pass ]    276
+[ 90%] innodb.innodb_bulk_create_index_replication w27 [ pass ]   1228
+[ 90%] innodb.instant_ddl_import_partition_debug w1  [ pass ]  16914
+[ 91%] innodb.bug37645185                       w6  [ pass ]     71
+[ 91%] innodb.bug34574604                       w18 [ pass ]   1430
+[ 91%] innodb.table_encrypt_1                   w4  [ pass ]  29216
+[ 91%] innodb.instant_ddl_recovery_debug        w23 [ pass ]  21524
+[ 91%] innodb.undo_log_temp_table_debug         w19 [ pass ]  25207
+[ 91%] innodb.case_insensitive_fs               w18 [ skipped ]  Test requires 'case_insensitive_file_system'
+[ 91%] innodb.cascade_lock_wait                 w6  [ pass ]    264
+[ 92%] innodb.tablespace_temp_table_1           w29 [ pass ]  13156
+[ 92%] innodb.high_prio_trx_1                   w19 [ pass ]     89
+[ 92%] innodb.high_prio_trx_2                   w18 [ pass ]     98
+[ 92%] innodb.high_prio_trx_3                   w6  [ pass ]    106
+[ 92%] innodb.instant_ddl_rollback              w23 [ pass ]    715
+[ 92%] innodb.bug34307874                       w31 [ pass ]   1683
+[ 92%] innodb.innodb_rename_index_err           w18 [ pass ]    242
+[ 92%] innodb.bulk_create_index_online          w1  [ pass ]   2353
+[ 93%] innodb.hidden_directory_win              w4  [ skipped ]  Need windows
+[ 93%] innodb.instant_ddl_rollback_debug        w23 [ pass ]    755
+[ 93%] innodb.innodb_stats                      w18 [ pass ]    580
+[ 93%] innodb.virtual_basic                     w8  [ pass ]  34441
+[ 93%] innodb.bug33788578_release               w26 [ skipped ]  Test requires binaries to be compiled in release mode
+[ 93%] innodb.innodb_stats_auto_recalc_ddl      w1  [ pass ]    228
+[ 93%] innodb.unknown_directory                 w10 [ pass ]  11727
+[ 93%] innodb.autoinc_persist_debug             w32 [ pass ]  33568
+[ 94%] innodb.virtual_blob                      w8  [ pass ]    203
+[ 94%] innodb.innodb_set_open_files_limit_concurrent w31 [ pass ]   2499
+[ 94%] innodb.tablespace_encrypt_8              w16 [ pass ]  24573
+[ 94%] innodb.virtual_debug_purge               w2  [ pass ]  14789
+[ 94%] innodb.innodb_set_open_files_limit       w6  [ pass ]   2988
+[ 94%] innodb.trigger_function_lock_compare     w3  [ pass ]  25138
+[ 94%] innodb.instant_ddl_update                w4  [ pass ]   2136
+[ 94%] innodb.innodb_rename_index               w19 [ pass ]   4052
+[ 95%] innodb.innodb_redo_debug_6               w7  [ pass ]  51618
+[ 95%] innodb.truncate_debug                    w3  [ pass ]    369
+[ 95%] innodb.avoid_deadlock_with_blocked       w25 [ pass ]  13340
+[ 95%] innodb.instant_ddl_update_debug          w23 [ pass ]   3752
+[ 95%] innodb.builder_error_case                w22 [ pass ]   7517
+[ 95%] innodb.buf_pool_resize_status_codes      w30 [ pass ]  12249
+[ 95%] innodb.sdi_compressed                    w25 [ pass ]    239
+[ 96%] innodb.hidden_directory_dotfile          w11 [ pass ]  14271
+[ 96%] innodb.tablespace_per_table_not_windows  w30 [ pass ]    332
+[ 96%] innodb.row_size                          w7  [ pass ]   4517
+[ 96%] innodb.innodb_redo_debug_1               w17 [ pass ]  15173
+[ 96%] innodb.virtual_fk                        w2  [ pass ]   7954
+[ 96%] innodb.log_read_only                     w9  [ pass ]  22911
+[ 96%] innodb.row_format_redundant              w20 [ pass ]  25281
+[ 96%] innodb.tablespace_first_page_unrecoverable w16 [ pass ]   6278
+[ 97%] innodb.blob-crash                        w15 [ pass ]  21090
+[ 97%] innodb.update-cascade-innodb-fk          w10 [ pass ]  12668
+[ 97%] innodb.log_file_truncate_1               w19 [ pass ]  16013
+[ 97%] innodb.bug34790366                       w28 [ pass ]  27091
+[ 97%] innodb.builder_insert_direct_freed       w27 [ pass ]  20293
+[ 97%] innodb.table_encrypt_6                   w23 [ pass ]  20150
+[ 97%] innodb.innodb_redo_debug_2               w29 [ pass ]  31892
+[ 97%] innodb.temporary_table                   w13 [ pass ]  46306
+[ 98%] innodb.bootstrap                         w5  [ pass ]  42128
+[ 98%] innodb.table_encrypt_3                   w24 [ pass ]  68548
+[ 98%] innodb.sdi                               w3  [ pass ]  33233
+[ 98%] innodb.table_encrypt_debug               w22 [ pass ]  33484
+[ 98%] innodb.instant_ddl_upgrade_part          w12 [ pass ]  76458
+[ 98%] innodb.bug33788578_online_ddl            w14 [ pass ]  83340
+[ 98%] innodb.instant_max_column_crash          w4  [ pass ]  56293
+[ 98%] innodb.instant_ddl_upgrade               w18 [ pass ]  61505
+[ 99%] innodb.instant_ddl_upgrade_debug         w26 [ pass ]  63210
+[ 99%] innodb.log_file_system                   w21 [ pass ]  75398
+[ 99%] innodb.instant_ddl_upgrade_update        w6  [ pass ]  64753
+[ 99%] innodb.instant_ddl_upgrade_part_metadata w32 [ pass ]  66063
+[ 99%] innodb.instant_ddl_upgrade_part_metadata_debug w8  [ pass ]  67078
+[ 99%] innodb.instant_ddl_upgrade_part_debug    w1  [ pass ]  72485
+[ 99%] innodb.instant_ddl_upgrade_rollback      w31 [ pass ]  71578
+[100%] shutdown_report                          w0  [ pass ]       
+------------------------------------------------------------------------------
+The servers were restarted 144 times
+The servers were reinitialized 23 times
+Spent 7146.251 of 330 seconds executing testcases
+
+Completed: All 677 tests were successful.
+
+84 tests were skipped, 14 by the test itself.
+
