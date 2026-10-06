@@ -1,0 +1,33 @@
+--echo #
+--echo # A vector search re-run within one statement, once per outer row,
+--echo # returns the same rows as the exact scan every time.
+--echo #
+
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4) NOT NULL,
+                VECTOR KEY vk (v) TYPE hnsw (M = 8));
+--disable_query_log
+INSERT INTO t WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 300)
+  SELECT n, STRING_TO_VECTOR(CONCAT('[', n % 17, ',', n % 13, ',', n % 11, ',', n * 3 % 7, ']'))
+  FROM s;
+--enable_query_log
+SET SESSION cte_max_recursion_depth = DEFAULT;
+
+--echo # A dependent subquery: the search runs once per outer row.
+let $dep = SELECT o.id, (SELECT i.id + 0 * o.id FROM t i ORDER BY DISTANCE(i.v, STRING_TO_VECTOR('[5,5,5,5]'), 'euclidean') LIMIT 1) AS nn FROM t o WHERE o.id <= 30;
+--replace_regex /cost=[0-9.e+]+/cost=#/ /rows=[0-9.e+]+/rows=#/
+eval EXPLAIN FORMAT=TREE $dep;
+eval SELECT COUNT(*) AS runs, GROUP_CONCAT(DISTINCT nn) AS answers FROM ($dep) d;
+SELECT id AS exact FROM t IGNORE INDEX (vk)
+ ORDER BY DISTANCE(v, STRING_TO_VECTOR('[5,5,5,5]'), 'euclidean'), id LIMIT 1;
+
+--echo # LATERAL, re-materialised per outer row.
+let $lat = SELECT o.id, l.id AS nn FROM t o, LATERAL (SELECT i.id, o.id AS oid FROM t i FORCE INDEX (vk) ORDER BY DISTANCE(i.v, STRING_TO_VECTOR('[1,2,3,4]'), 'euclidean') LIMIT 2) l WHERE o.id <= 30;
+--replace_regex /cost=[0-9.e+]+/cost=#/ /rows=[0-9.e+]+/rows=#/
+eval EXPLAIN FORMAT=TREE $lat;
+eval SELECT COUNT(*) AS rows_, GROUP_CONCAT(DISTINCT nn ORDER BY nn) AS answers FROM ($lat) d;
+SELECT GROUP_CONCAT(id ORDER BY id) AS exact FROM
+  (SELECT id FROM t IGNORE INDEX (vk)
+    ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3,4]'), 'euclidean'), id LIMIT 2) e;
+
+DROP TABLE t;

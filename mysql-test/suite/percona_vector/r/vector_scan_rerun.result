@@ -1,0 +1,49 @@
+#
+# A vector search re-run within one statement, once per outer row,
+# returns the same rows as the exact scan every time.
+#
+SET SESSION cte_max_recursion_depth = 10000;
+CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4) NOT NULL,
+VECTOR KEY vk (v) TYPE hnsw (M = 8));
+SET SESSION cte_max_recursion_depth = DEFAULT;
+# A dependent subquery: the search runs once per outer row.
+EXPLAIN FORMAT=TREE SELECT o.id, (SELECT i.id + 0 * o.id FROM t i ORDER BY DISTANCE(i.v, STRING_TO_VECTOR('[5,5,5,5]'), 'euclidean') LIMIT 1) AS nn FROM t o WHERE o.id <= 30;
+EXPLAIN
+-> Filter: (o.id <= 30)  (cost=# rows=#)
+    -> Covering index range scan on o using PRIMARY over (id <= 30)  (cost=# rows=#)
+-> Select #2 (subquery in projection; dependent)
+    -> Limit: 1 row(s)  (cost=# rows=#)
+        -> Vector index search on i using vk (v = to_vector('[5,5,5,5]'))  (cost=# rows=#)
+
+Warnings:
+Note	1276	Field or reference 'test.o.id' of SELECT #2 was resolved in SELECT #1
+SELECT COUNT(*) AS runs, GROUP_CONCAT(DISTINCT nn) AS answers FROM (SELECT o.id, (SELECT i.id + 0 * o.id FROM t i ORDER BY DISTANCE(i.v, STRING_TO_VECTOR('[5,5,5,5]'), 'euclidean') LIMIT 1) AS nn FROM t o WHERE o.id <= 30) d;
+runs	answers
+30	226
+SELECT id AS exact FROM t IGNORE INDEX (vk)
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[5,5,5,5]'), 'euclidean'), id LIMIT 1;
+exact
+226
+# LATERAL, re-materialised per outer row.
+EXPLAIN FORMAT=TREE SELECT o.id, l.id AS nn FROM t o, LATERAL (SELECT i.id, o.id AS oid FROM t i FORCE INDEX (vk) ORDER BY DISTANCE(i.v, STRING_TO_VECTOR('[1,2,3,4]'), 'euclidean') LIMIT 2) l WHERE o.id <= 30;
+EXPLAIN
+-> Nested loop inner join  (cost=# rows=#)
+    -> Invalidate materialized tables (row from o)  (cost=# rows=#)
+        -> Filter: (o.id <= 30)  (cost=# rows=#)
+            -> Covering index range scan on o using PRIMARY over (id <= 30)  (cost=# rows=#)
+    -> Table scan on l  (cost=# rows=#)
+        -> Materialize (invalidate on row from o)  (cost=# rows=#)
+            -> Limit: 2 row(s)  (cost=# rows=#)
+                -> Vector index search on i using vk (v = to_vector('[1,2,3,4]'))  (cost=# rows=#)
+
+Warnings:
+Note	1276	Field or reference 'test.o.id' of SELECT #2 was resolved in SELECT #1
+SELECT COUNT(*) AS rows_, GROUP_CONCAT(DISTINCT nn ORDER BY nn) AS answers FROM (SELECT o.id, l.id AS nn FROM t o, LATERAL (SELECT i.id, o.id AS oid FROM t i FORCE INDEX (vk) ORDER BY DISTANCE(i.v, STRING_TO_VECTOR('[1,2,3,4]'), 'euclidean') LIMIT 2) l WHERE o.id <= 30) d;
+rows_	answers
+60	69,223
+SELECT GROUP_CONCAT(id ORDER BY id) AS exact FROM
+(SELECT id FROM t IGNORE INDEX (vk)
+ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3,4]'), 'euclidean'), id LIMIT 2) e;
+exact
+69,223
+DROP TABLE t;
