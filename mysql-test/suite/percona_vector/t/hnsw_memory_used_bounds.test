@@ -1,0 +1,56 @@
+--echo #
+--echo # Innodb_hnsw_memory_used grows by a plausible amount for a graph of a
+--echo # known shape. Node layers are random, so the exact size is not fixed;
+--echo # the check is a range.
+--echo #
+
+--echo # The bytes a freshly built graph of `nodes` nodes may hold. Every node
+--echo # holds its vector (dims x 4 bytes) and a layer-0 neighbour list
+--echo # (2 x M x 8 bytes), so that is the floor. Node headers, the random
+--echo # upper layers and the rounding up to 64 KB slabs stay under the floor
+--echo # again plus two slabs.
+DELIMITER |;
+CREATE PROCEDURE hnsw_bytes_bounds(IN nodes BIGINT, IN dims INT, IN m INT,
+                                   OUT lo BIGINT, OUT hi BIGINT)
+BEGIN
+  SET lo = nodes * (dims * 4 + 2 * m * 8);
+  SET hi = 2 * lo + 2 * 65536;
+END|
+DELIMITER ;|
+
+--echo # A small graph: the first slab decides its size.
+SELECT CAST(variable_value AS UNSIGNED) INTO @before
+  FROM performance_schema.global_status
+ WHERE variable_name = 'Innodb_hnsw_memory_used';
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(8) NOT NULL,
+                 VECTOR KEY vk (v) TYPE hnsw (M = 8));
+INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[1,0,0,0,0,0,0,0]')),
+                      (2, STRING_TO_VECTOR('[0,1,0,0,0,0,0,0]'));
+SELECT CAST(variable_value AS UNSIGNED) - @before INTO @bytes
+  FROM performance_schema.global_status
+ WHERE variable_name = 'Innodb_hnsw_memory_used';
+CALL hnsw_bytes_bounds(2, 8, 8, @lo, @hi);
+SELECT @bytes >= @lo AS above_floor, @bytes <= @hi AS under_ceiling;
+DROP TABLE t1;
+
+--echo # A larger graph, where the nodes decide its size.
+SET SESSION cte_max_recursion_depth = 1000;
+SELECT CAST(variable_value AS UNSIGNED) INTO @before
+  FROM performance_schema.global_status
+ WHERE variable_name = 'Innodb_hnsw_memory_used';
+CREATE TABLE t2 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(64) NOT NULL,
+                 VECTOR KEY vk (v) TYPE hnsw (M = 16));
+INSERT INTO t2
+  WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 1000)
+  SELECT i, STRING_TO_VECTOR(CONCAT('[', REPEAT(CONCAT(i % 97, ','), 63), i, ']'))
+    FROM s;
+SELECT CAST(variable_value AS UNSIGNED) - @before INTO @bytes
+  FROM performance_schema.global_status
+ WHERE variable_name = 'Innodb_hnsw_memory_used';
+CALL hnsw_bytes_bounds(1000, 64, 16, @lo, @hi);
+SELECT @bytes >= @lo AS above_floor, @bytes <= @hi AS under_ceiling;
+DROP TABLE t2;
+
+DROP PROCEDURE hnsw_bytes_bounds;
