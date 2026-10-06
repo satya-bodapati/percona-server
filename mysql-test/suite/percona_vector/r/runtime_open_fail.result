@@ -70,6 +70,11 @@ id	k
 SELECT id FROM t1
 ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 1;
 ERROR HY000: Out of memory; check if mysqld or some other process uses all available memory; if not, you may have to use 'ulimit' to allow mysqld to use more memory or you can add more swap space
+# INNODB_VECTOR_INDEXES lists the index with zeros, never NULL.
+SELECT table_name, index_name, dimensions, m, loaded, nodes, memory_bytes
+FROM information_schema.innodb_vector_indexes;
+table_name	index_name	dimensions	m	loaded	nodes	memory_bytes
+test/t1	vk	0	0	0	0	0
 SET DEBUG = '-d,vec_runtime_open_fail';
 #
 # Nothing was lost. The reason recorded was an allocation failure,

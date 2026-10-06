@@ -74,6 +74,10 @@ SELECT id, k FROM t1 FORCE INDEX (PRIMARY) ORDER BY id;
 SELECT id FROM t1
  ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'euclidean') LIMIT 1;
 
+--echo # INNODB_VECTOR_INDEXES lists the index with zeros, never NULL.
+SELECT table_name, index_name, dimensions, m, loaded, nodes, memory_bytes
+  FROM information_schema.innodb_vector_indexes;
+
 SET DEBUG = '-d,vec_runtime_open_fail';
 
 --echo #

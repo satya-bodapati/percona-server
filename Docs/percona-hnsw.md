@@ -1528,5 +1528,21 @@ bytes held by every graph's arena on the server. It goes up as graphs are loaded
 down by exactly a graph's bytes when that graph is freed (DROP, a rebuild, eviction of its table).
 An ALTER's build graph is counted while it exists.
 
-It does not count the node map (`HNSW::m_nodes`), which uses the normal heap, roughly 30 to 50
-bytes per node, or search scratch space.
+`INFORMATION_SCHEMA.INNODB_VECTOR_INDEXES` has one row per vector index of a table in the
+dictionary cache: `TABLE_ID`, `INDEX_ID`, `TABLE_NAME`, `INDEX_NAME`, `DIMENSIONS`, `M`, `LOADED`,
+`NODES` and `MEMORY_BYTES`. A user sees only the rows of tables they have table-level `SELECT`
+on; a grant on some columns is not enough.
+`MEMORY_BYTES` is the graph's arena, which is what `innodb_hnsw_max_memory` counts. `NODES`
+includes dead nodes (§18). A column that is not known yet is 0, never `NULL`: an index whose
+graph is not loaded shows `NODES` and `MEMORY_BYTES` 0, and one without a runtime shows
+`DIMENSIONS` and `M` 0 too. A table that is not in the cache has no row. An index being built and
+an ALTER's intermediate table have no row; their graphs are counted only in
+`Innodb_hnsw_memory_used`.
+
+Neither number counts the node map (`HNSW::m_nodes`), which uses the normal heap, roughly 30 to
+50 bytes per node, or search scratch space.
+
+`MEMORY_BYTES` is the arena resident now, not what a rebuild needs. A cold or partly loaded
+graph holds only the nodes read so far. For a graph that holds every node, such as one built
+since the restart, it is a rough estimate of a rebuild, not a bound: the rebuilt graph draws new
+random layers, so its neighbour lists can take more or less room.

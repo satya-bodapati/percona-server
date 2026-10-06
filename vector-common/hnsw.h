@@ -1801,6 +1801,16 @@ class HNSW {
   /** Number of nodes the graph holds, complete or not. */
   size_t size() const { return m_nodes.size(); }
 
+  /**
+    Number of nodes and the bytes the allocator holds, read under
+    m_global_lock so another thread can read them while inserts and node
+    loads run. Needs ArenaAllocator::bytes_allocated().
+  */
+  std::pair<size_t, size_t> memory_usage() {
+    std::scoped_lock lock(m_global_lock);
+    return {m_nodes.size(), m_allocator.bytes_allocated()};
+  }
+
  private:
   NeighborIdRange neighbor_ids(const Node *node) const {
     return NeighborIdRange{node->all_neighbors_begin(*this),
