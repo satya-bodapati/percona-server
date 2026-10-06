@@ -6158,8 +6158,9 @@ class handler {
   are produced in ascending distance from the constant query vector.
   `limit` is the initial batch size (the query's LIMIT); readers must
   keep producing past it - the engine widens the search - because
-  filters above the iterator may consume arbitrarily many rows. */
-  virtual int vec_init() { return HA_ERR_WRONG_COMMAND; }
+  filters above the iterator may consume arbitrarily many rows. The scan
+  is started with ha_index_init() on the vector key and ended with
+  ha_index_end(). */
   virtual int vec_read_first(Item *, uchar *, ha_rows) {
     return HA_ERR_WRONG_COMMAND;
   }

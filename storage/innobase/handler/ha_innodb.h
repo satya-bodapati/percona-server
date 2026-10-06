@@ -199,7 +199,8 @@ class ha_innobase : public handler {
 
   int ft_read(uchar *buf) override;
 
-  int vec_init() override;
+  /** Start a vector index scan on key keynr; called by index_init(). */
+  int vec_index_init(uint keynr);
   int vec_read_first(Item *item, uchar *buf, ha_rows limit) override;
   int vec_read_next(uchar *buf) override;
 
