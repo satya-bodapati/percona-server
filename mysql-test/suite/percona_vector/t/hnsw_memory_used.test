@@ -1,0 +1,52 @@
+--echo #
+--echo # Innodb_hnsw_memory_used: the memory of every HNSW graph on the server,
+--echo # the number innodb_hnsw_max_memory is compared with.
+--echo #
+
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(4) NOT NULL,
+                 VECTOR KEY vk (v) TYPE hnsw (M = 4));
+INSERT INTO t1 VALUES (1, STRING_TO_VECTOR('[1,0,0,0]')),
+                      (2, STRING_TO_VECTOR('[0,1,0,0]')),
+                      (3, STRING_TO_VECTOR('[0,0,1,0]'));
+
+--echo # After a restart no graph is loaded.
+--source include/restart_mysqld.inc
+SHOW GLOBAL STATUS LIKE 'Innodb_hnsw_memory_used';
+SET @saved_max = @@global.innodb_hnsw_max_memory;
+
+--echo # A search loads t1's graph.
+SELECT id FROM t1
+ ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 1;
+SELECT CAST(variable_value AS UNSIGNED) INTO @t1_loaded FROM performance_schema.global_status
+ WHERE variable_name = 'Innodb_hnsw_memory_used';
+SELECT @t1_loaded > 0 AS loaded;
+
+--echo # A second graph adds to it.
+CREATE TABLE t2 (id BIGINT UNSIGNED PRIMARY KEY,
+                 v VECTOR(8) NOT NULL,
+                 VECTOR KEY vk (v) TYPE hnsw (M = 8));
+INSERT INTO t2 VALUES (1, STRING_TO_VECTOR('[1,0,0,0,0,0,0,0]')),
+                      (2, STRING_TO_VECTOR('[0,1,0,0,0,0,0,0]'));
+SELECT CAST(variable_value AS UNSIGNED) > @t1_loaded AS grew
+  FROM performance_schema.global_status
+ WHERE variable_name = 'Innodb_hnsw_memory_used';
+
+--echo # Dropping t2 gives back exactly what its graph held.
+DROP TABLE t2;
+SELECT CAST(variable_value AS UNSIGNED) = @t1_loaded AS back_to_t1
+  FROM performance_schema.global_status
+ WHERE variable_name = 'Innodb_hnsw_memory_used';
+
+--echo # The limit is compared with this number: at it, an insert is refused,
+--echo # one byte above it, the insert goes through.
+SET GLOBAL innodb_hnsw_max_memory = @t1_loaded;
+--replace_regex /capacity of [0-9]+ bytes/capacity of N bytes/
+--error ER_CAPACITY_EXCEEDED
+INSERT INTO t1 VALUES (4, STRING_TO_VECTOR('[0,0,0,1]'));
+SET GLOBAL innodb_hnsw_max_memory = @t1_loaded + 1;
+INSERT INTO t1 VALUES (4, STRING_TO_VECTOR('[0,0,0,1]'));
+SET GLOBAL innodb_hnsw_max_memory = @saved_max;
+
+DROP TABLE t1;
+SHOW GLOBAL STATUS LIKE 'Innodb_hnsw_memory_used';
