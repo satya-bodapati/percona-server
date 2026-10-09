@@ -1,0 +1,109 @@
+#
+# PS-11673: a cross-schema RENAME TABLE must hold an exclusive MDL on
+# the vector and FULLTEXT aux tables before it opens them.
+#
+# The aux tables are hidden, so the server took no metadata lock on
+# them when it locked the parent. A cross-schema rename also renames
+# each aux table, and row_rename_table_for_mysql() opens it by name.
+# After a restart the aux table is not in the InnoDB dictionary cache,
+# so it is loaded from the data dictionary, which needs the MDL.
+#
+CREATE DATABASE d1;
+CREATE DATABASE d2;
+CREATE TABLE d1.t_vec (id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(4) NOT NULL,
+VECTOR KEY vk (v) TYPE hnsw);
+CREATE TABLE d1.t_fts (id BIGINT UNSIGNED PRIMARY KEY,
+s VARCHAR(64),
+FULLTEXT KEY fk (s));
+CREATE TABLE d1.t_both (id BIGINT UNSIGNED PRIMARY KEY,
+v VECTOR(4) NOT NULL,
+s VARCHAR(64),
+VECTOR KEY vk (v) TYPE hnsw,
+FULLTEXT KEY fk (s));
+# FULLTEXT index dropped: the hidden FTS_DOC_ID and the common aux
+# tables stay.
+CREATE TABLE d1.t_doc_id (id BIGINT UNSIGNED PRIMARY KEY,
+s VARCHAR(64),
+FULLTEXT KEY fk (s));
+ALTER TABLE d1.t_doc_id DROP INDEX fk;
+CREATE TABLE d1.t_multi_vec LIKE d1.t_vec;
+CREATE TABLE d1.t_multi_fts LIKE d1.t_fts;
+CREATE TABLE d1.t_alter LIKE d1.t_both;
+CREATE TABLE d1.t_locked LIKE d1.t_both;
+INSERT INTO d1.t_vec VALUES (1, STRING_TO_VECTOR('[1,2,3,4]'));
+INSERT INTO d1.t_fts VALUES (1, 'hello world');
+INSERT INTO d1.t_both VALUES (1, STRING_TO_VECTOR('[1,2,3,4]'), 'hello world');
+INSERT INTO d1.t_doc_id VALUES (1, 'hello world');
+INSERT INTO d1.t_multi_vec SELECT * FROM d1.t_vec;
+INSERT INTO d1.t_multi_fts SELECT * FROM d1.t_fts;
+INSERT INTO d1.t_alter SELECT * FROM d1.t_both;
+INSERT INTO d1.t_locked SELECT * FROM d1.t_both;
+# restart
+RENAME TABLE d1.t_vec TO d2.t_vec;
+RENAME TABLE d1.t_fts TO d2.t_fts;
+RENAME TABLE d1.t_both TO d2.t_both;
+RENAME TABLE d1.t_doc_id TO d2.t_doc_id;
+RENAME TABLE d1.t_multi_vec TO d2.t_multi_vec,
+d1.t_multi_fts TO d2.t_multi_fts;
+ALTER TABLE d1.t_alter RENAME TO d2.t_alter;
+LOCK TABLES d1.t_locked WRITE;
+ALTER TABLE d1.t_locked RENAME TO d2.t_locked;
+UNLOCK TABLES;
+# The aux tables moved along with their parents.
+# d1:
+# d2, vector aux tables:
+percona_vec_hnsw_<TID>_<IID>.ibd
+percona_vec_hnsw_<TID>_<IID>.ibd
+percona_vec_hnsw_<TID>_<IID>.ibd
+percona_vec_hnsw_<TID>_<IID>.ibd
+percona_vec_hnsw_<TID>_<IID>.ibd
+# d2, FULLTEXT aux tables:
+SELECT COUNT(*) FROM information_schema.innodb_tables
+WHERE name LIKE 'd2/fts\_%';
+COUNT(*)
+60
+SELECT id, VECTOR_TO_STRING(v) FROM d2.t_vec;
+id	VECTOR_TO_STRING(v)
+1	[1.00000e+00,2.00000e+00,3.00000e+00,4.00000e+00]
+SELECT id FROM d2.t_vec ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3,4]'), 'euclidean')
+LIMIT 1;
+id
+1
+SELECT id FROM d2.t_fts WHERE MATCH(s) AGAINST('hello');
+id
+1
+SELECT id FROM d2.t_both WHERE MATCH(s) AGAINST('hello');
+id
+1
+SELECT id FROM d2.t_both ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3,4]'), 'euclidean')
+LIMIT 1;
+id
+1
+SELECT id, s FROM d2.t_doc_id;
+id	s
+1	hello world
+SELECT id FROM d2.t_multi_vec ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3,4]'), 'euclidean')
+LIMIT 1;
+id
+1
+SELECT id FROM d2.t_multi_fts WHERE MATCH(s) AGAINST('hello');
+id
+1
+SELECT id FROM d2.t_alter WHERE MATCH(s) AGAINST('hello');
+id
+1
+SELECT id FROM d2.t_locked WHERE MATCH(s) AGAINST('hello');
+id
+1
+# Same results after another restart.
+# restart
+SELECT id FROM d2.t_both WHERE MATCH(s) AGAINST('hello');
+id
+1
+SELECT id FROM d2.t_both ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,2,3,4]'), 'euclidean')
+LIMIT 1;
+id
+1
+DROP DATABASE d1;
+DROP DATABASE d2;
