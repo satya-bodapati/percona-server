@@ -1,15 +1,16 @@
-/* Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -105,13 +106,13 @@ extern "C" u_long xdr_sizeof(xdrproc_t, void *);
     name##_array retval = x;                                             \
     u_int i;                                                             \
     retval.name##_array_len = x.name##_array_len;                        \
-    IFDBG(D_XDR, FN; NDBG(retval.name##_array_len, u));                  \
+    XCOM_IFDBG(D_XDR, FN; NDBG(retval.name##_array_len, u));             \
     if (retval.name##_array_len > 0) {                                   \
       retval.name##_array_val =                                          \
           (name *)xcom_calloc((size_t)x.name##_array_len, sizeof(name)); \
       for (i = 0; i < retval.name##_array_len; i++) {                    \
         retval.name##_array_val[i] = x.name##_array_val[i];              \
-        IFDBG(D_XDR, FN; STRLIT("clone_xdr_array"); NDBG(i, u));         \
+        XCOM_IFDBG(D_XDR, FN; STRLIT("clone_xdr_array"); NDBG(i, u));    \
       }                                                                  \
     } else {                                                             \
       retval.name##_array_val = 0;                                       \

@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,6 +25,7 @@
 
 #include "storage/ndb/plugin/ndb_event_data.h"
 
+#include "my_base.h"
 #include "sql/dd_table_share.h"
 #include "sql/field.h"
 #include "sql/sql_base.h"
@@ -141,6 +143,32 @@ void Ndb_event_data::init_stored_columns() {
   }
 }
 
+void Ndb_event_data::init_uk() {
+  KEY *keyinfo;
+  uint key;
+  uint res = MAX_KEY;
+  for (key = 0, keyinfo = shadow_table->key_info;
+       key < shadow_table->s->keys && res == MAX_KEY; key++, keyinfo++) {
+    /*
+      skip keys flagged for:
+       - duplicate records
+       - multi-value
+       - the current pk
+       allow keys with:
+       - null-part (e.g. (int not null, varchar nullable)
+       - hidden
+    */
+    if (!(keyinfo->actual_flags & HA_NOSAME) ||
+        keyinfo->actual_flags & HA_MULTI_VALUED_KEY ||
+        key == shadow_table->s->primary_key) {
+      continue;
+    }
+    res = key;
+    break;
+  }
+  have_uk = res != MAX_KEY;
+}
+
 TABLE *Ndb_event_data::open_shadow_table(THD *thd, const char *db,
                                          const char *table_name,
                                          const char *key,
@@ -249,7 +277,15 @@ const Ndb_event_data *Ndb_event_data::create_event_data(
 
   event_data->shadow_table = shadow_table;
 
-  // Calculate bitmaps after assigning the shadow_table
+  // Continue setup after assigning the shadow_table
+
+  // NOTE: For a parent table in an FK relation, the table_share might
+  // not have the fk_parents != 0, if the table has just been created
+  // because it is not yet committed into mysql's DD. We avoid calling
+  // NDB for that matter, for simplicity.
+  event_data->have_fk = shadow_table->s->foreign_keys != 0 ||
+                        shadow_table->s->is_referenced_by_foreign_key();
+  event_data->init_uk();
   event_data->init_pk_bitmap();
   event_data->init_stored_columns();
 
@@ -264,6 +300,10 @@ void Ndb_event_data::destroy(const Ndb_event_data *event_data) {
 
 uint32 Ndb_event_data::unpack_uint32(unsigned attr_id) const {
   return ndb_value[0][attr_id].rec->u_32_value();
+}
+
+uint64 Ndb_event_data::unpack_uint64(unsigned attr_id) const {
+  return ndb_value[0][attr_id].rec->u_64_value();
 }
 
 const char *Ndb_event_data::unpack_string(unsigned attr_id) const {

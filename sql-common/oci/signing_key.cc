@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -29,8 +30,8 @@
 #include <openssl/crypto.h>
 #include <iostream>
 #include <memory>
+#include "include/base64_encode.h"
 #include "scope_guard.h"
-#include "sql-common/oci/ssl.h"
 
 namespace oci {
 // custom unique_ptr deleter since OPENSSL_free is a macro
@@ -38,17 +39,17 @@ static void SSL_memory_deallocator(void *p) { OPENSSL_free(p); }
 
 void log_error(const std::string &message) { std::cerr << message; }
 
-Data Signing_Key::sign(const std::string &message) {
+Data Signing_Key::sign(const std::string &message) const {
   return sign(message.c_str(), message.length());
 }
 
-Data Signing_Key::sign(const void *message, size_t length) {
+Data Signing_Key::sign(const void *message, size_t length) const {
   if (m_private_key == nullptr) return {};
 
   size_t slen = 0;
 
   /* Create the Message Digest Context */
-  ssl::EVP_MD_CTX_ptr evp_md_ctx{EVP_MD_CTX_create()};
+  ssl::EVP_MD_CTX_ptr const evp_md_ctx{EVP_MD_CTX_create()};
   if (!evp_md_ctx) return {};
 
   /* Initialise the DigestSign operation, using SHA-256 message digest. */
@@ -64,10 +65,10 @@ Data Signing_Key::sign(const void *message, size_t length) {
    * length of the signature. Length is returned in slen */
   if (1 != EVP_DigestSignFinal(evp_md_ctx.get(), nullptr, &slen)) return {};
   /* Allocate memory for the signature based on size in slen */
-  std::unique_ptr<unsigned char, decltype(&SSL_memory_deallocator)> signature(
-      static_cast<unsigned char *>(
-          OPENSSL_malloc(sizeof(unsigned char) * slen)),
-      &SSL_memory_deallocator);
+  std::unique_ptr<unsigned char, decltype(&SSL_memory_deallocator)> const
+      signature(static_cast<unsigned char *>(
+                    OPENSSL_malloc(sizeof(unsigned char) * slen)),
+                &SSL_memory_deallocator);
 
   if (!signature) return {};
 
@@ -97,7 +98,7 @@ Signing_Key::Signing_Key(const std::string &file_name)
     return;
   }
 
-  auto key = m_private_key.release();
+  auto *key = m_private_key.release();
   key = PEM_read_PrivateKey(fp, &key, nullptr, nullptr);
   if (key == nullptr) {
     log_error("Cannot read signing key file " + file_name);
@@ -110,10 +111,10 @@ Signing_Key::Signing_Key(const std::string &file_name)
  * Constructor.
  * Read the key from the memory string.
  */
-Signing_Key::Signing_Key(ssl::Key_Content key_content) {
+Signing_Key::Signing_Key(const ssl::Key_Content &key_content) {
   void *ptr;
   ptr = static_cast<void *>(const_cast<char *>(key_content.c_str()));
-  oci::ssl::BIO_ptr key_bio{BIO_new_mem_buf(ptr, key_content.size())};
+  oci::ssl::BIO_ptr const key_bio{BIO_new_mem_buf(ptr, key_content.size())};
   if (!key_bio) return;
 
   m_private_key = ssl::EVP_PKEY_ptr{
@@ -131,8 +132,8 @@ Signing_Key::Signing_Key(ssl::Key_Content key_content) {
 Signing_Key::Signing_Key() {
   // Generate a new RSA private key to be used for request signing.
 #if OPENSSL_VERSION_NUMBER < 0x30000000L
-  std::unique_ptr<RSA, decltype(&::RSA_free)> rsa(RSA_new(), ::RSA_free);
-  std::unique_ptr<BIGNUM, decltype(&::BN_free)> bn(BN_new(), ::BN_free);
+  std::unique_ptr<RSA, decltype(&::RSA_free)> const rsa(RSA_new(), ::RSA_free);
+  std::unique_ptr<BIGNUM, decltype(&::BN_free)> const bn(BN_new(), ::BN_free);
 
   if (1 == BN_set_word(bn.get(), RSA_F4)) {
     if (1 == RSA_generate_key_ex(rsa.get(), 2048, bn.get(), nullptr)) {
@@ -140,9 +141,9 @@ Signing_Key::Signing_Key() {
       // Convert RSA to PKEY
       if (1 == EVP_PKEY_set1_RSA(m_private_key.get(), rsa.get())) {
         // Extract the public key from the private key.
-        oci::ssl::BIO_ptr bio{BIO_new(BIO_s_mem())};
+        oci::ssl::BIO_ptr const bio{BIO_new(BIO_s_mem())};
         if (PEM_write_bio_RSA_PUBKEY(bio.get(), rsa.get())) {
-          size_t len = BIO_pending(bio.get());
+          size_t const len = BIO_pending(bio.get());
           std::vector<char> read_buffer;
           read_buffer.resize(len + 1, '\0');
           BIO_read(bio.get(), read_buffer.data(), len);

@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2012, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -138,12 +139,10 @@ public class NdbRecordOperationImpl implements Operation {
      * NdbRecord and one buffer, so all operations result in using
      * the same buffer.
      * 
-     * @param clusterConnection the cluster connection
      * @param db the Db
      * @param storeTable the store table
      */
-    public NdbRecordOperationImpl(ClusterConnectionImpl clusterConnection, Db db, Table storeTable) {
-        byteBufferPool = clusterConnection.getByteBufferPool();
+    public NdbRecordOperationImpl(Db db, Table storeTable) {
         this.db = (DbImpl)db;
         this.storeTable = storeTable;
         Column autoIncrementColumn = storeTable.getAutoIncrementColumn();
@@ -154,7 +153,7 @@ public class NdbRecordOperationImpl implements Operation {
         if (logger.isDetailEnabled())
             logger.detail("autoIncrement for " + storeTable.getName() + " is: " + autoIncrement);
         this.tableName = storeTable.getName();
-        this.ndbRecordValues = clusterConnection.getCachedNdbRecordImpl(storeTable);
+        this.ndbRecordValues = this.db.getCachedNdbRecordImpl(storeTable);
         this.ndbRecordKeys = ndbRecordValues;
         this.valueBufferSize = ndbRecordValues.getBufferSize();
         this.keyBufferSize = ndbRecordKeys.getBufferSize();
@@ -164,6 +163,7 @@ public class NdbRecordOperationImpl implements Operation {
         this.numberOfColumns = storeColumns.length;
         this.blobs = new NdbRecordBlobImpl[this.numberOfColumns];
         this.bufferManager = ((DbImpl)db).getBufferManager();
+        this.byteBufferPool = bufferManager.getPool();
         resetMask();
     }
 
@@ -172,10 +172,10 @@ public class NdbRecordOperationImpl implements Operation {
      * @param clusterTransaction the cluster transaction
      */
     public NdbRecordOperationImpl(ClusterTransactionImpl clusterTransaction, Table storeTable) {
-        this.byteBufferPool = clusterTransaction.getClusterConnection().getByteBufferPool();
         this.clusterTransaction = clusterTransaction;
         this.db = clusterTransaction.db;
         this.bufferManager = clusterTransaction.getBufferManager();
+        this.byteBufferPool = bufferManager.getPool();
         this.storeTable = storeTable;
         Column autoIncrementColumn = storeTable.getAutoIncrementColumn();
         if (autoIncrementColumn != null) {
@@ -566,8 +566,10 @@ public class NdbRecordOperationImpl implements Operation {
     }
 
     public void setNull(Column storeColumn) {
-        int columnId = ndbRecordValues.setNull(valueBuffer, storeColumn);
-        columnSet(columnId);
+        if (ndbRecordValues.isNullable(valueBuffer, storeColumn)) {
+            int columnId = ndbRecordValues.setNull(valueBuffer, storeColumn);
+            columnSet(columnId);
+        }
     }
 
     public void setNull(int columnId) {

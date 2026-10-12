@@ -1,18 +1,19 @@
 #ifndef SQL_ARRAY_INCLUDED
 #define SQL_ARRAY_INCLUDED
 
-/* Copyright (c) 2005, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2005, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,6 +26,7 @@
 
 #include <assert.h>
 #include <array>
+#include <span>
 
 #include "my_alloc.h"
 
@@ -178,6 +180,22 @@ class Bounds_checked_array {
 template <typename Element_type>
 Bounds_checked_array<Element_type> make_array(Element_type *p, size_t n) {
   return Bounds_checked_array<Element_type>(p, n);
+}
+
+/**
+   An equivalent to Bounds_checked_array::Alloc(). Allocate an array of 'size'
+   elements on 'mem_root', and return that. Note that the resulting span<T>
+   will have data()==nullptr and size()==0 if either the 'size' parameter
+   is 0, or the allocation fails. So data()==nullptr <=> size()==0 is an
+   invariant.
+*/
+template <class T>
+std::span<T> AllocSpan(MEM_ROOT *mem_root, size_t size) {
+  if (size == 0) {
+    return {};
+  }
+  T *buffer{mem_root->ArrayAlloc<T>(size)};
+  return {buffer, buffer == nullptr ? 0 : size};
 }
 
 #endif /* SQL_ARRAY_INCLUDED */

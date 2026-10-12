@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -59,7 +60,7 @@ static void BM_LookupAllCollations(size_t num_iterations) {
 
   // Look up one collation to initialize the all_charsets array.
   lookup_collation("latin1_swedish_ci");
-  size_t num_charsets = array_elements(all_charsets);
+  size_t const num_charsets = array_elements(all_charsets);
 
   StartBenchmarkTiming();
   for (size_t i = 0; i < num_iterations; i++) {
@@ -101,12 +102,12 @@ void TestRandomCollation() {
   for (int ix = 0; ix < 100000; ix++) {
     memset(coll_name, 0, 65);
     // Generate a random collation name whose length is in range [1, 64].
-    size_t random_coll_name_len = 1 + rand() % 64;
+    size_t const random_coll_name_len = 1 + rand() % 64;
     for (size_t i = 0; i < random_coll_name_len; i++) {
       // Use ASCII latin letters to generate the name.
       coll_name[i] = 'a' + rand() % 26;
     }
-    int rc = get_collation_number(coll_name);
+    int const rc = get_collation_number(coll_name);
     // Random collation that doesn't exist should return 0.
     EXPECT_EQ(0, rc);
   }
@@ -116,7 +117,7 @@ TEST(CollationLoaderTest, RandomCollation) {
   // Look up one collation to initialize the all_charsets array.
   lookup_collation("latin1_swedish_ci");
   std::thread test_thd[4];
-  for (int i = 0; i < 4; i++) test_thd[i] = std::thread(TestRandomCollation);
-  for (int i = 0; i < 4; i++) test_thd[i].join();
+  for (auto &i : test_thd) i = std::thread(TestRandomCollation);
+  for (auto &i : test_thd) i.join();
 }
 }  // namespace collation_loader_unittest

@@ -199,6 +199,7 @@ EOF
 
 ## Setup X Plugin & GR
 --let $dont_reset_global_status_variables=1
+--let $dont_cache_x_root=1
 --source include/xplugin_preamble.inc
 
 --let $rpl_skip_group_replication_start= 1
@@ -212,7 +213,7 @@ while ($i < $ceiling)
   --let $rpl_connection_silent= 1
   --let $rpl_connection_name= server$i
   --echo [Setup XPlugin user on connection '$rpl_connection_name']
-  --source include/rpl_connection.inc
+  --source include/connection.inc
   --let $create_user_disable_binlog=1
   --source include/xplugin_create_user.inc
   --inc $i
@@ -226,7 +227,7 @@ while ($i < $ceiling)
 --echo ##########################################################################
 
 exec $MYSQLXTEST
-  -ux_root --ssl-mode=disabled --file=$xtest
+  -ux_root --file=$xtest
   -v %SERVER_NUMBER%=$rpl_server_count
   -v %GR_NAME%=$group_replication_group_name
   -v %ASSERT_NOTICES%=CHK_assert_notice
@@ -241,7 +242,7 @@ exec $MYSQLXTEST
 --echo ##########################################################################
 
 exec $MYSQLXTEST
-  -ux_root --ssl-mode=disabled --file=$xtest
+  -ux_root --file=$xtest
   -v %SERVER_NUMBER%=$rpl_server_count
   -v %GR_NAME%=$group_replication_group_name
   -v %ASSERT_NOTICES%=CHK_assert_notice_none_ignore_args
@@ -258,7 +259,7 @@ exec $MYSQLXTEST
 --echo ##########################################################################
 
 --let $rpl_connection_name= server1
---source include/rpl_connection.inc
+--source include/connection.inc
 
 ## Assert from xtest (Mysqlx_notice_global_sent 9) + additional one notice per connection (3 conn * 2 tests)
 --let $assert_text= Verify if the number of send global notices matches Mysqlx_notice_global_sent.
@@ -270,7 +271,7 @@ exec $MYSQLXTEST
 --source include/assert.inc
 
 --let $rpl_connection_name= server2
---source include/rpl_connection.inc
+--source include/connection.inc
 
 ## Assert from xtest (Mysqlx_notice_global_sent 6) + additional one notice per connection (2 conn * 2 tests)
 --let $assert_text= Verify if the number of send global notices matches Mysqlx_notice_global_sent.
@@ -291,7 +292,7 @@ while ($i < $ceiling)
 {
   --let $rpl_connection_silent= 1
   --let $rpl_connection_name= server$i
-  --source include/rpl_connection.inc
+  --source include/connection.inc
   --source include/xplugin_drop_user.inc
   --inc $i
 }

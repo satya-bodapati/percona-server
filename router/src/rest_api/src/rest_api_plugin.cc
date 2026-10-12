@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -32,12 +33,14 @@
 
 #include "mysql/harness/config_option.h"
 #include "mysql/harness/config_parser.h"
+#include "mysql/harness/dynamic_config.h"
 #include "mysql/harness/loader.h"
 #include "mysql/harness/logging/logging.h"
 #include "mysql/harness/plugin.h"
 #include "mysql/harness/plugin_config.h"
+#include "mysql/harness/section_config_exposer.h"
 #include "mysql/harness/utility/string.h"  // ::join()
-#include "mysqlrouter/http_server_component.h"
+#include "mysqlrouter/component/http_server_component.h"
 #include "mysqlrouter/rest_api_utils.h"
 
 #include "rest_api.h"
@@ -45,7 +48,9 @@ IMPORT_LOG_FUNCTIONS()
 
 static const char kSectionName[]{"rest_api"};
 
-static constexpr std::array<const char *, 1> supported_options{"require_realm"};
+static constexpr std::array supported_options = {
+    "require_realm",
+};
 
 // one shared setting
 std::string require_realm_api;
@@ -65,11 +70,11 @@ class RestApiPluginConfig : public mysql_harness::BasePluginConfig {
     GET_OPTION_CHECKED(require_realm, section, "require_realm", StringOption{});
   }
 
-  std::string get_default(const std::string & /* option */) const override {
+  std::string get_default(std::string_view /* option */) const override {
     return {};
   }
 
-  bool is_required(const std::string & /* option */) const override {
+  bool is_required(std::string_view /* option */) const override {
     return false;
   }
 };
@@ -196,7 +201,7 @@ void RestApi::remove_path(const std::string &path) {
       rest_api_handlers_.end());
 }
 
-void RestApi::handle_paths(HttpRequest &req) {
+void RestApi::handle_paths(http::base::Request &req) {
   std::string uri_path(req.get_uri().get_path());
 
   // strip prefix from uri path
@@ -247,14 +252,15 @@ static void start(mysql_harness::PluginFuncEnv *env) {
 
     rest_api_srv.init(rest_api);
 
-    http_srv.add_route(rest_api->uri_prefix_regex(),
-                       std::make_unique<RestApiHttpRequestHandler>(rest_api));
+    const auto *route_id = http_srv.add_regex_route(
+        "", rest_api->uri_prefix_regex(),
+        std::make_unique<RestApiHttpRequestHandler>(rest_api));
 
     mysql_harness::on_service_ready(env);
 
     wait_for_stop(env, 0);
 
-    http_srv.remove_route(rest_api->uri_prefix_regex());
+    http_srv.remove_route(route_id);
     rest_api->remove_path("/swagger.json$");
   } catch (const std::runtime_error &exc) {
     set_error(env, mysql_harness::kRuntimeError, "%s", exc.what());
@@ -275,10 +281,48 @@ static void deinit(mysql_harness::PluginFuncEnv * /* env */) {
 #define DLLEXPORT
 #endif
 
-static const std::array<const char *, 2> plugin_requires = {{
+static constexpr std::array plugin_requires{
     "http_server",
     "logger",
-}};
+};
+
+namespace {
+
+class RestApiConfigExposer : public mysql_harness::SectionConfigExposer {
+ public:
+  using DC = mysql_harness::DynamicConfig;
+  RestApiConfigExposer(const bool initial,
+                       const RestApiPluginConfig &plugin_config,
+                       const mysql_harness::ConfigSection &default_section)
+      : mysql_harness::SectionConfigExposer(
+            initial, default_section,
+            DC::SectionId{"rest_configs", kSectionName}),
+        plugin_config_(plugin_config) {}
+
+  void expose() override {
+    expose_option("require_realm", plugin_config_.require_realm, "");
+  }
+
+ private:
+  const RestApiPluginConfig &plugin_config_;
+};
+
+}  // namespace
+
+static void expose_configuration(mysql_harness::PluginFuncEnv *env,
+                                 const char * /*key*/, bool initial) {
+  const mysql_harness::AppInfo *info = get_app_info(env);
+
+  if (!info->config) return;
+
+  for (const mysql_harness::ConfigSection *section : info->config->sections()) {
+    if (section->name == kSectionName) {
+      RestApiPluginConfig config{section};
+      RestApiConfigExposer(initial, config, info->config->get_default_section())
+          .expose();
+    }
+  }
+}
 
 extern "C" {
 mysql_harness::Plugin DLLEXPORT harness_plugin_rest_api = {
@@ -299,5 +343,6 @@ mysql_harness::Plugin DLLEXPORT harness_plugin_rest_api = {
     true,     // declares_readiness
     supported_options.size(),
     supported_options.data(),
+    expose_configuration,
 };
 }

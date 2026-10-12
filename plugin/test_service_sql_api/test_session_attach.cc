@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -31,8 +32,8 @@
 
 #include <fcntl.h>
 #include <mysql/plugin.h>
-#include <stdlib.h>
 #include <sys/types.h>
+#include <cstdlib>
 
 #include "m_string.h"
 #include "my_dbug.h"
@@ -131,7 +132,7 @@ static void test_sql() {
 
     test_context->log_test("\nQuery ", session_id_text, ": ");
 
-    snprintf(&(buffer[0]), buffer.length(),
+    snprintf(buffer.data(), buffer.length(),
              "SET SESSION test_session_attach_var_int = %i;",
              expected_session_variable_value(i));
 
@@ -157,7 +158,7 @@ static void test_sql() {
     }
 
     test_context->log_test_line("Verify Session ", i + 1, " variable");
-    auto session_thd = srv_session_info_get_thd(sessions[session_index]);
+    auto *session_thd = srv_session_info_get_thd(sessions[session_index]);
 
     if (expected_session_variable_value(session_index) !=
         THDVAR(session_thd, var_int)) {
@@ -201,8 +202,7 @@ struct test_thread_context {
 };
 
 static void *test_sql_threaded_wrapper(void *param) {
-  struct test_thread_context *thread_context =
-      (struct test_thread_context *)param;
+  auto *thread_context = (struct test_thread_context *)param;
 
   test_context->separator();
   test_context->log_test_line("init thread");

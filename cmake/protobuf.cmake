@@ -1,15 +1,16 @@
-# Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,7 +30,7 @@
 #  Other values will be ignored, and we fall back to "bundled"
 #
 
-# Bundled version is currently 3.19.4
+# Bundled version is currently 4.24.4
 # Lowest checked system version is 3.5.0 on Oracle Linux 8.
 # Older versions may generate code which breaks the -Werror build.
 SET(MIN_PROTOBUF_VERSION_REQUIRED "3.5.0")
@@ -75,7 +76,10 @@ MACRO(COULD_NOT_FIND_PROTOBUF)
     )
 ENDMACRO()
 
-SET(BUNDLED_PROTO_SRCDIR ${CMAKE_SOURCE_DIR}/extra/protobuf/protobuf-3.19.4/src)
+SET(BUNDLED_GRPC_SRCDIR
+  "${CMAKE_SOURCE_DIR}/internal/extra/grpc/grpc-1.76.0")
+SET(BUNDLED_PROTO_SRCDIR ${CMAKE_SOURCE_DIR}/extra/protobuf/protobuf-24.4/src)
+SET(BUNDLED_ABSEIL_SRCDIR ${CMAKE_SOURCE_DIR}/extra/abseil/abseil-cpp-20250814.1)
 
 MACRO(MYSQL_USE_BUNDLED_PROTOBUF)
   SET(WITH_PROTOBUF "bundled" CACHE STRING
@@ -119,6 +123,13 @@ MACRO(MYSQL_CHECK_PROTOBUF)
   IF(WITH_PROTOBUF STREQUAL "bundled")
     MYSQL_USE_BUNDLED_PROTOBUF()
   ELSE()
+    # In case we want grpc, it must be loaded *before* Protobuf,
+    # otherwise we get
+    # CMake Error at ..../cmake/protobuf/protobuf-targets.cmake:42 (message):
+    #   "some (but not all) targets in this export set were already defined".
+    IF(WITH_INTERNAL)
+      FIND_PACKAGE(gRPC QUIET)
+    ENDIF()
     FIND_PACKAGE(Protobuf)
   ENDIF()
 
@@ -148,24 +159,52 @@ MACRO(MYSQL_CHECK_PROTOBUF)
   ELSE()
     # We cannot use the IMPORTED libraries defined by FIND_PACKAGE above,
     # protobuf::libprotobuf may have INTERFACE properties like -std=gnu++11
-    # and that will break the build since we use -std=c++17
-    ADD_LIBRARY(ext::libprotobuf UNKNOWN IMPORTED)
+    # and that will break the build since we use -std=c++20
+    # <cmake source root>/Modules/FindProtobuf.cmake may do:
+    # set_property(TARGET protobuf::libprotobuf APPEND PROPERTY
+    #              INTERFACE_COMPILE_FEATURES cxx_std_11
+    #             )
+    # INTERFACE_LINK_LIBRARIES will be needed once this is built
+    # with protobuf 22 and above (lots of abseil libs).
+    IF(NOT TARGET ext::libprotobuf)
+      ADD_LIBRARY(ext::libprotobuf UNKNOWN IMPORTED)
+    ENDIF()
     SET_TARGET_PROPERTIES(ext::libprotobuf PROPERTIES
       INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${Protobuf_INCLUDE_DIR}")
     SET_TARGET_PROPERTIES(ext::libprotobuf PROPERTIES
       IMPORTED_LOCATION "${PROTOBUF_LIBRARY}")
+    IF(LINUX)
+      FIND_LIBRARY_DEPENDENCIES("${PROTOBUF_LIBRARY}" protobuf_dependencies)
+      SET_TARGET_PROPERTIES(ext::libprotobuf PROPERTIES
+        INTERFACE_LINK_LIBRARIES "${protobuf_dependencies}")
+    ENDIF()
 
-    ADD_LIBRARY(ext::libprotobuf-lite UNKNOWN IMPORTED)
+    IF(NOT TARGET ext::libprotobuf-lite)
+      ADD_LIBRARY(ext::libprotobuf-lite UNKNOWN IMPORTED)
+    ENDIF()
     SET_TARGET_PROPERTIES(ext::libprotobuf-lite PROPERTIES
       INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${Protobuf_INCLUDE_DIR}")
     SET_TARGET_PROPERTIES(ext::libprotobuf-lite PROPERTIES
       IMPORTED_LOCATION "${PROTOBUF_LITE_LIBRARY}")
+    IF(LINUX)
+      FIND_LIBRARY_DEPENDENCIES("${PROTOBUF_LITE_LIBRARY}" lite_dependencies)
+      SET_TARGET_PROPERTIES(ext::libprotobuf-lite PROPERTIES
+        INTERFACE_LINK_LIBRARIES "${lite_dependencies}")
+    ENDIF()
 
-    ADD_LIBRARY(ext::libprotoc UNKNOWN IMPORTED)
+    IF(NOT TARGET ext::libprotoc)
+      ADD_LIBRARY(ext::libprotoc UNKNOWN IMPORTED)
+    ENDIF()
     SET_TARGET_PROPERTIES(ext::libprotoc PROPERTIES
       INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${Protobuf_INCLUDE_DIR}")
     SET_TARGET_PROPERTIES(ext::libprotoc PROPERTIES
       IMPORTED_LOCATION "${Protobuf_PROTOC_LIBRARY}")
+    IF(LINUX)
+      FIND_LIBRARY_DEPENDENCIES(
+        "${Protobuf_PROTOC_LIBRARY}" protoc_dependencies)
+      SET_TARGET_PROPERTIES(ext::libprotoc PROPERTIES
+        INTERFACE_LINK_LIBRARIES "${protoc_dependencies}")
+    ENDIF()
   ENDIF()
 
   FIND_PROTOBUF_VERSION()

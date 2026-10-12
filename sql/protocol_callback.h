@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -197,12 +198,12 @@ class Protocol_callback final : public Protocol {
   /**
     Sends DATE value
 
-    @param time      value
+    @param date      value
 
     @retval false  success
     @retval true   failure
   */
-  bool store_date(const MYSQL_TIME &time) override;
+  bool store_date(const Date_val date) override;
 
   /**
     Sends TIME value
@@ -213,7 +214,7 @@ class Protocol_callback final : public Protocol {
     @retval false  success
     @retval true   failure
   */
-  bool store_time(const MYSQL_TIME &time, uint precision) override;
+  bool store_time(const Time_val time, uint precision) override;
 
   /**
     Sends Field

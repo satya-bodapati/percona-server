@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -37,8 +38,6 @@ using ::testing::ContainerEq;
 using ::testing::Eq;
 using ::testing::StrEq;
 
-using mysql_harness::TCPAddress;
-
 // the Good
 
 struct GoodTestData {
@@ -50,7 +49,6 @@ struct GoodTestData {
     std::string user;
     std::chrono::milliseconds ttl;
     std::string metadata_cluster;
-    std::vector<TCPAddress> bootstrap_addresses;
   } expected;
 };
 
@@ -58,21 +56,11 @@ class MetadataCachePluginConfigGoodTest
     : public ::testing::Test,
       public ::testing::WithParamInterface<GoodTestData> {};
 
-namespace mysql_harness {
-// operator needs to be defined in the namespace of the printed type
-std::ostream &operator<<(std::ostream &os, const TCPAddress &addr) {
-  return os << addr.str();
-}
-}  // namespace mysql_harness
-
 std::ostream &operator<<(std::ostream &os, const GoodTestData &test_data) {
   return os << "user=" << test_data.expected.user << ", "
             << "ttl="
             << mysqlrouter::ms_to_seconds_string(test_data.expected.ttl) << ", "
-            << "metadata_cluster=" << test_data.expected.metadata_cluster
-            << ", "
-            << "bootstrap_server_addresses="
-            << test_data.expected.bootstrap_addresses;
+            << "metadata_cluster=" << test_data.expected.metadata_cluster;
 }
 
 /**
@@ -94,8 +82,6 @@ TEST_P(MetadataCachePluginConfigGoodTest, GoodConfigs) {
   EXPECT_THAT(plugin_config.ttl, Eq(test_data.expected.ttl));
   EXPECT_THAT(plugin_config.cluster_name,
               StrEq(test_data.expected.metadata_cluster));
-  EXPECT_THAT(plugin_config.metadata_servers_addresses,
-              ContainerEq(test_data.expected.bootstrap_addresses));
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -105,9 +91,8 @@ INSTANTIATE_TEST_SUITE_P(
         {{std::map<std::string, std::string>({
              {"user", "foo"},  // required
          })},
+         {"foo", mysqlrouter::kDefaultMetadataTTLCluster, ""}},
 
-         {"foo", metadata_cache::kDefaultMetadataTTL, "",
-          std::vector<TCPAddress>()}},
         // TTL = 0.5 seconds
         {{std::map<std::string, std::string>({
              {
@@ -119,9 +104,8 @@ INSTANTIATE_TEST_SUITE_P(
                  "0.5",
              },
          })},
+         {"foo", std::chrono::milliseconds(500), ""}},
 
-         {"foo", std::chrono::milliseconds(500), "",
-          std::vector<TCPAddress>()}},
         // TTL = 0 seconds
         {{std::map<std::string, std::string>({
              {
@@ -133,7 +117,8 @@ INSTANTIATE_TEST_SUITE_P(
                  "0",
              },
          })},
-         {"foo", std::chrono::milliseconds(0), "", std::vector<TCPAddress>()}},
+         {"foo", std::chrono::milliseconds(0), ""}},
+
         // TTL = 5 seconds
         {{std::map<std::string, std::string>({
              {
@@ -145,50 +130,8 @@ INSTANTIATE_TEST_SUITE_P(
                  "5",
              },
          })},
-         {"foo", std::chrono::milliseconds(5000), "",
-          std::vector<TCPAddress>()}},
-        // bootstrap_servers, nicely split into pieces
-        {{std::map<std::string, std::string>({
-             {
-                 "user",
-                 "foo",
-             },  // required
-             {
-                 "ttl",
-                 "0.5",
-             },
-             {
-                 "bootstrap_server_addresses",
-                 "mysql://foobar,mysql://fuzzbozz",
-             },
-         })},
-         {"foo", std::chrono::milliseconds(500), "",
-          std::vector<TCPAddress>({
-              {
-                  TCPAddress("foobar", metadata_cache::kDefaultMetadataPort),
-              },
-              {
-                  TCPAddress("fuzzbozz", metadata_cache::kDefaultMetadataPort),
-              },
-          })}},
-        // bootstrap_servers, single value
-        {{std::map<std::string, std::string>({
-             {
-                 "user",
-                 "foo",
-             },  // required
-             {
-                 "bootstrap_server_addresses",
-                 "mysql://foobar",
-             },
-         })},
+         {"foo", std::chrono::milliseconds(5000), ""}},
 
-         {"foo", metadata_cache::kDefaultMetadataTTL, "",
-          std::vector<TCPAddress>({
-              {
-                  TCPAddress("foobar", metadata_cache::kDefaultMetadataPort),
-              },
-          })}},
         // metadata_cluster
         {{std::map<std::string, std::string>({
              {
@@ -200,24 +143,12 @@ INSTANTIATE_TEST_SUITE_P(
                  "0.5",
              },
              {
-                 "bootstrap_server_addresses",
-                 "mysql://foobar,mysql://fuzzbozz",
-             },
-             {
                  "metadata_cluster",
                  "whatisthis",
              },
          })},
 
-         {"foo", std::chrono::milliseconds(500), "whatisthis",
-          std::vector<TCPAddress>({
-              {
-                  TCPAddress("foobar", metadata_cache::kDefaultMetadataPort),
-              },
-              {
-                  TCPAddress("fuzzbozz", metadata_cache::kDefaultMetadataPort),
-              },
-          })}},
+         {"foo", std::chrono::milliseconds(500), "whatisthis"}},
     })));
 
 // the Bad
@@ -263,57 +194,68 @@ TEST_P(MetadataCachePluginConfigBadTest, BadConfigs) {
   }
 }
 
-INSTANTIATE_TEST_SUITE_P(SomethingUseful, MetadataCachePluginConfigBadTest,
-                         ::testing::ValuesIn(std::vector<BadTestData>({
-                             // user option is required
-                             {{
-                                  std::map<std::string, std::string>(),
-                              },
+INSTANTIATE_TEST_SUITE_P(
+    SomethingUseful, MetadataCachePluginConfigBadTest,
+    ::testing::ValuesIn(std::vector<BadTestData>({
+        // user option is required
+        {{
+             std::map<std::string, std::string>(),
+         },
 
-                              {
-                                  typeid(mysql_harness::option_not_present),
-                                  "option user in [metadata_cache] is required",
-                              }},
-                             // ttl is garbage
-                             {{
-                                  std::map<std::string, std::string>({
-                                      {"user", "foo"},  // required
-                                      {"ttl", "garbage"},
-                                  }),
-                              },
-                              {
-                                  typeid(std::invalid_argument),
-                                  "option ttl in [metadata_cache] needs value "
-                                  "between 0 and 3600 inclusive, was 'garbage'",
-                              }},
-                             // ttl is too big
-                             {{
-                                  std::map<std::string, std::string>({
-                                      {"user", "foo"},  // required
-                                      {"ttl", "3600.1"},
-                                  }),
-                              },
+         {
+             typeid(mysql_harness::option_not_present),
+             "option user in [metadata_cache] is required",
+         }},
+        // ttl is garbage
+        {{
+             std::map<std::string, std::string>({
+                 {"user", "foo"},  // required
+                 {"ttl", "garbage"},
+             }),
+         },
+         {
+             typeid(std::invalid_argument),
+             "option ttl in [metadata_cache] needs value "
+             "between 0 and 3600 inclusive, was 'garbage'",
+         }},
+        // ttl is too big
+        {{
+             std::map<std::string, std::string>({
+                 {"user", "foo"},  // required
+                 {"ttl", "3600.1"},
+             }),
+         },
 
-                              {
-                                  typeid(std::invalid_argument),
-                                  "option ttl in [metadata_cache] needs value "
-                                  "between 0 and 3600 inclusive, was '3600.1'",
-                              }},
-                             // ttl is negative
-                             {{
-                                  std::map<std::string, std::string>({
-                                      {"user", "foo"},  // required
-                                      {"ttl", "-0.1"},
-                                  }),
-                              },
-                              {
-                                  typeid(std::invalid_argument),
-                                  "option ttl in [metadata_cache] needs value "
-                                  "between 0 and 3600 inclusive, was '-0.1'",
-                              }},
-                         })));
-
-using mysql_harness::BasePluginConfig;
+         {
+             typeid(std::invalid_argument),
+             "option ttl in [metadata_cache] needs value "
+             "between 0 and 3600 inclusive, was '3600.1'",
+         }},
+        // ttl is negative
+        {{
+             std::map<std::string, std::string>({
+                 {"user", "foo"},  // required
+                 {"ttl", "-0.1"},
+             }),
+         },
+         {
+             typeid(std::invalid_argument),
+             "option ttl in [metadata_cache] needs value "
+             "between 0 and 3600 inclusive, was '-0.1'",
+         }},
+        // close_connection_after_refresh
+        {{
+             std::map<std::string, std::string>({
+                 {"user", "foo"},  // required
+                 {"close_connection_after_refresh", "-0.1"},
+             }),
+         },
+         {
+             typeid(std::invalid_argument),
+             "option close_connection_after_refresh in [metadata_cache] needs "
+             "a value of either 0, 1, false or true, was '-0.1'",
+         }},
+    })));
 
 // Valid millisecond configuration values
 using GetOptionMillisecondsOkTestData =

@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -103,12 +104,11 @@ struct index_entry_t {
   not have older versions.  If older version is there, bring it back to the
   index list from the versions list.  Then remove the current entry from
   the index list.  Move the versions list from current entry to older entry.
-  @param[in]  trxid  The transaction identifier.
   @param[in]  first_page  The first lob page containing index list and free
                           list. */
-  void make_old_version_current(trx_id_t trxid, base_node_page_t &first_page);
+  void make_old_version_current(base_node_page_t &first_page);
 
-  fil_addr_t purge_version(trx_id_t trxid, flst_base_node_t *ver_list,
+  fil_addr_t purge_version(flst_base_node_t *ver_list,
                            flst_base_node_t *free_list);
 
   void add_version(index_entry_t &entry) const {
@@ -279,7 +279,7 @@ struct data_page_t : public page_t {
                                          byte *&data, ulint &len,
                                          buf_block_t *&new_block);
 
-  buf_block_t *remove_middle(trx_id_t trxid, ulint offset, ulint &len);
+  buf_block_t *remove_middle(ulint offset, ulint &len);
 
   ulint max_space_available() const { return (payload()); }
 };
@@ -321,7 +321,7 @@ struct base_node_page_t : public page_t {
                                          byte *&data, ulint &len,
                                          buf_block_t *&new_block);
 
-  buf_block_t *remove_middle(trx_id_t trxid, ulint offset, ulint &len);
+  buf_block_t *remove_middle(ulint offset, ulint &len);
 
   /** Write as much as possible of the given data into the page. */
   ulint write(trx_id_t trxid, byte *&data, ulint &len) {

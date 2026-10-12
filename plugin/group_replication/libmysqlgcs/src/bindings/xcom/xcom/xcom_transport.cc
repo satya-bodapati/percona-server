@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,17 +21,17 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
-#include <assert.h>
-#include <ctype.h>
-#include <errno.h>
-#include <limits.h>
-#include <math.h>
+#include <cassert>
+#include <cctype>
+#include <cerrno>
+#include <climits>
+#include <cmath>
 #ifdef _MSC_VER
 #include <stdint.h>
 #endif
 #include <rpc/rpc.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdlib>
+#include <cstring>
 
 #include "xcom/xcom_profile.h"
 #ifndef XCOM_STANDALONE
@@ -56,6 +57,7 @@
 #include "xcom/xcom_detector.h"
 #include "xcom/xcom_memory.h"
 #include "xcom/xcom_msg_queue.h"
+#include "xcom/xcom_scope_guard.h"
 #include "xcom/xcom_statistics.h"
 #include "xcom/xcom_transport.h"
 #include "xcom/xcom_vp_str.h"
@@ -99,14 +101,17 @@ static int pm(xcom_port port) { return port == xcom_listen_port; }
 /* purecov: end */
 
 int close_open_connection(connection_descriptor *conn) {
+  if (conn == nullptr) return -1;
+
   return Network_provider_manager::getInstance().close_xcom_connection(conn);
 }
 
-connection_descriptor *open_new_connection(const char *server, xcom_port port,
-                                           int connection_timeout) {
+connection_descriptor *open_new_connection(
+    const char *server, xcom_port port, int connection_timeout,
+    network_provider_dynamic_log_level log_level) {
   return Network_provider_manager::getInstance().open_xcom_connection(
       server, port, Network_provider_manager::getInstance().is_xcom_using_ssl(),
-      connection_timeout);
+      connection_timeout, log_level);
 }
 
 /* purecov: begin deadcode */
@@ -129,6 +134,18 @@ connection_descriptor *open_new_local_connection(const char *server,
 }
 /* purecov: end */
 
+bool is_able_to_connect_to_node(const char *server, const xcom_port port) {
+  connection_descriptor *new_conn{nullptr};
+
+  Xcom_scope_guard cleanup_guard([&]() { free(new_conn); });
+
+  if (new_conn = open_new_connection(server, port, 1000); new_conn->fd == -1) {
+    return false;
+  }
+
+  return !static_cast<bool>(close_open_connection(new_conn));
+}
+
 result set_nodelay(int fd) {
   int n = 1;
   result ret = {0, 0};
@@ -138,7 +155,7 @@ result set_nodelay(int fd) {
     ret.val =
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (xcom_buf *)&n, sizeof n);
     ret.funerr = to_errno(GET_OS_ERR);
-    IFDBG(D_NONE, FN; NDBG(from_errno(ret.funerr), d));
+    XCOM_IFDBG(D_NONE, FN; NDBG(from_errno(ret.funerr), d));
   } while (ret.val < 0 && can_retry(ret.funerr));
   return ret;
 }
@@ -210,7 +227,7 @@ int flush_srv_buf(server *s, int64_t *ret) {
   reset_srv_buf(&s->out_buf);
   if (s->con->fd >= 0) {
     if (ep->buflen) {
-      IFDBG(D_TRANSPORT, FN; PTREXP(stack); NDBG(ep->buflen, u));
+      XCOM_IFDBG(D_TRANSPORT, FN; PTREXP(stack); NDBG(ep->buflen, u));
       /* LOCK_FD(s->con.fd, 'w'); */
       TASK_CALL(task_write(s->con, s->out_buf.buf, ep->buflen, &sent));
       /* UNLOCK_FD(s->fd, 'w'); */
@@ -302,11 +319,12 @@ static int _send_msg(server *s, pax_msg *p, node_no to, int64_t *ret) {
   int64_t sent{0};
   TASK_BEGIN
   p->to = to;
-  IFDBG(D_NONE, FN; PTREXP(stack); PTREXP(s); PTREXP(p); NDBG(s->con.fd, d));
-  IFDBG(D_NONE, FN; STREXP(s->srv); NDBG(s->port, d); NDBG(task_now(), f);
-        COPY_AND_FREE_GOUT(dbg_pax_msg(p)););
+  XCOM_IFDBG(D_NONE, FN; PTREXP(stack); PTREXP(s); PTREXP(p);
+             NDBG(s->con->fd, d));
+  XCOM_IFDBG(D_NONE, FN; STREXP(s->srv); NDBG(s->port, d); NDBG(task_now(), f);
+             COPY_AND_FREE_GOUT(dbg_pax_msg(p)););
   if (to == p->from) {
-    IFDBG(D_NONE, FN; COPY_AND_FREE_GOUT(dbg_pax_msg(p)););
+    XCOM_IFDBG(D_NONE, FN; COPY_AND_FREE_GOUT(dbg_pax_msg(p)););
     dispatch_op(find_site_def(p->synode), p, nullptr);
     TASK_RETURN(sizeof(*p));
   } else {
@@ -314,7 +332,7 @@ static int _send_msg(server *s, pax_msg *p, node_no to, int64_t *ret) {
     if (s->con->fd >= 0) {
       /* LOCK_FD(s->con.fd, 'w'); */
       serialize_msg(p, s->con->x_proto, &ep->buflen, &ep->buf);
-      IFDBG(D_TRANSPORT, FN; NDBG(ep->buflen, u));
+      XCOM_IFDBG(D_TRANSPORT, FN; NDBG(ep->buflen, u));
       if (ep->buflen) {
         /* Not enough space? Flush the buffer */
         if (ep->buflen > srv_buf_free_space(&s->out_buf)) {
@@ -324,7 +342,8 @@ static int _send_msg(server *s, pax_msg *p, node_no to, int64_t *ret) {
           }
           /* Still not enough? Message must be huge, send without buffering */
           if (ep->buflen > srv_buf_free_space(&s->out_buf)) {
-            IFDBG(D_TRANSPORT, FN; STRLIT("task_write "); NDBG(ep->buflen, u));
+            XCOM_IFDBG(D_TRANSPORT, FN; STRLIT("task_write ");
+                       NDBG(ep->buflen, u));
             TASK_CALL(task_write(s->con, ep->buf, ep->buflen, &sent));
             if (s->con->fd < 0) {
               TASK_FAIL;
@@ -340,7 +359,8 @@ static int _send_msg(server *s, pax_msg *p, node_no to, int64_t *ret) {
         send_count[p->op]++;
         send_bytes[p->op] += ep->buflen;
         alive(s); /* Note activity */
-        /* IFDBG(D_NONE, STRLIT("sent message "); STRLIT(pax_op_to_str(p->op));
+        /* XCOM_IFDBG(D_NONE, STRLIT("sent message ");
+         * STRLIT(pax_op_to_str(p->op));
          */
         /* NDBG(p->from,d); NDBG(p->to,d); */
         /* SYCEXP(p->synode);  */
@@ -369,8 +389,9 @@ xcom_proto read_protoversion(unsigned char *p) { return (xcom_proto)get_32(p); }
 
 int check_protoversion(xcom_proto x_proto, xcom_proto negotiated) {
   if (x_proto != negotiated) {
-    IFDBG(D_NONE, FN; STRLIT(" found XCOM protocol version "); NDBG(x_proto, d);
-          STRLIT(" need version "); NDBG(negotiated, d););
+    XCOM_IFDBG(D_NONE, FN; STRLIT(" found XCOM protocol version ");
+               NDBG(x_proto, d); STRLIT(" need version ");
+               NDBG(negotiated, d););
 
     return 0;
   }
@@ -417,6 +438,7 @@ int send_proto(connection_descriptor *con, xcom_proto x_proto,
 #define XDRFUNC xdrfunc
 #endif
 
+// This function is annotated with SUPPRESS_UBSAN, see header file declaration.
 int apply_xdr(void *buff, uint32_t bufflen, xdrproc_t xdrfunc, void *xdrdata,
               enum xdr_op op) {
   XDR xdr;
@@ -476,7 +498,8 @@ static int serialize(void *p, xcom_proto x_proto, uint32_t *out_len,
   if (!msg_buflen) return 0;
   assert(msg_buflen);
   tot_buflen = SERIALIZED_BUFLEN(msg_buflen);
-  IFDBG(D_TRANSPORT, FN; PTREXP(p); NDBG64(msg_buflen); NDBG64(tot_buflen));
+  XCOM_IFDBG(D_TRANSPORT, FN; PTREXP(p); NDBG64(msg_buflen);
+             NDBG64(tot_buflen));
   /*
     Paxos message size is limited in UINT32 range. It will return an
     error if the serialized message is bigger than UINT32_MAX bytes.
@@ -506,8 +529,8 @@ static int serialize(void *p, xcom_proto x_proto, uint32_t *out_len,
     *out_len = (uint32_t)tot_buflen;
     *out_buf = (char *)buf;
   }
-  IFDBG(D_TRANSPORT, FN; NDBG(retval, d); NDBG(*out_len, u); PTREXP(*out_buf);
-        dump_header(*out_buf));
+  XCOM_IFDBG(D_TRANSPORT, FN; NDBG(retval, d); NDBG(*out_len, u);
+             PTREXP(*out_buf); dump_header(*out_buf));
   return retval;
 }
 
@@ -582,9 +605,9 @@ static server *mksrv(char *srv, xcom_port port) {
 
   s = (server *)xcom_calloc((size_t)1, sizeof(*s));
 
-  IFDBG(D_NONE, FN; PTREXP(s); STREXP(srv));
+  XCOM_IFDBG(D_NONE, FN; PTREXP(s); STREXP(srv));
   if (s == nullptr) {
-    g_critical("out of memory");
+    G_FATAL("out of memory");
     abort();
   }
   s->garbage = 0;
@@ -602,18 +625,18 @@ static server *mksrv(char *srv, xcom_port port) {
 #endif
 
   channel_init(&s->outgoing, TYPE_HASH("msg_link"));
-  IFDBG(D_NONE, FN; STREXP(srv); NDBG(port, d));
+  XCOM_IFDBG(D_NONE, FN; STREXP(srv); NDBG(port, d));
 
   if (xcom_mynode_match(srv, port)) { /* Short-circuit local messages */
-    IFDBG(D_NONE, FN; STRLIT("creating local sender"); STREXP(srv);
-          NDBG(port, d));
+    XCOM_IFDBG(D_NONE, FN; STRLIT("creating local sender"); STREXP(srv);
+               NDBG(port, d));
     s->sender = task_new(local_sender_task, void_arg(s), "local_sender_task",
                          XCOM_THREAD_DEBUG);
   } else {
     s->sender =
         task_new(sender_task, void_arg(s), "sender_task", XCOM_THREAD_DEBUG);
-    IFDBG(D_NONE, FN; STRLIT("creating sender and reply_handler"); STREXP(srv);
-          NDBG(port, d));
+    XCOM_IFDBG(D_NONE, FN; STRLIT("creating sender and reply_handler");
+               STREXP(srv); NDBG(port, d));
     s->reply_handler = task_new(reply_handler_task, void_arg(s),
                                 "reply_handler_task", XCOM_THREAD_DEBUG);
   }
@@ -632,9 +655,9 @@ static server *addsrv(char *srv, xcom_port port) {
    reply_handler_task begin.
   */
   srv_ref(s);
-  IFDBG(D_NONE, FN; PTREXP(all_servers[maxservers]);
-        STREXP(all_servers[maxservers]->srv);
-        NDBG(all_servers[maxservers]->port, d); NDBG(maxservers, d));
+  XCOM_IFDBG(D_NONE, FN; PTREXP(all_servers[maxservers]);
+             STREXP(all_servers[maxservers]->srv);
+             NDBG(all_servers[maxservers]->port, d); NDBG(maxservers, d));
   maxservers++;
   return s;
 }
@@ -643,8 +666,8 @@ static void rmsrv(int i) {
   assert(all_servers[i]);
   assert(maxservers > 0);
   assert(i < maxservers);
-  IFDBG(D_NONE, FN; PTREXP(all_servers[i]); STREXP(all_servers[i]->srv);
-        NDBG(all_servers[i]->port, d); NDBG(i, d));
+  XCOM_IFDBG(D_NONE, FN; PTREXP(all_servers[i]); STREXP(all_servers[i]->srv);
+             NDBG(all_servers[i]->port, d); NDBG(i, d));
   maxservers--;
 
   /* Allow the server to be freed. This unref pairs with the ref from addsrv. */
@@ -694,7 +717,7 @@ static void sweep() {
     server *s = all_servers[i];
     assert(s);
     if (s->garbage) {
-      IFDBG(D_NONE, FN; STREXP(s->srv));
+      XCOM_IFDBG(D_NONE, FN; STREXP(s->srv));
       shut_srv(s);
       rmsrv(i);
     } else {
@@ -704,11 +727,11 @@ static void sweep() {
 }
 
 void garbage_collect_servers() {
-  IFDBG(D_NONE, FN);
+  XCOM_IFDBG(D_NONE, FN);
   init_collect();
   mark();
   sweep();
-  IFDBG(D_NONE, FN);
+  XCOM_IFDBG(D_NONE, FN);
 }
 
 /* Free a server */
@@ -728,7 +751,7 @@ double server_active(site_def const *s, node_no i) {
 /* Shutdown server */
 static void shut_srv(server *s) {
   if (!s) return;
-  IFDBG(D_NONE, FN; PTREXP(s); STREXP(s->srv));
+  XCOM_IFDBG(D_NONE, FN; PTREXP(s); STREXP(s->srv));
 
   shutdown_connection(s->con);
 
@@ -781,14 +804,15 @@ int incoming_connection_task(task_arg arg [[maybe_unused]]) {
   }
   free(clean_conn);
 
-  IFDBG(D_BUG, FN; STRLIT(" shutdown "));
+  XCOM_IFDBG(D_BUG, FN; STRLIT(" shutdown "));
   TASK_END;
 }
 
 void server_detected(server *s) { s->detected = task_now(); }
 
 /* Try to connect to another node */
-static int dial(server *s) {
+static int dial(server *s,
+                network_provider_dynamic_log_level dial_call_log_level) {
   DECL_ENV
   int dummy;
   ENV_INIT
@@ -796,31 +820,31 @@ static int dial(server *s) {
   END_ENV;
 
   TASK_BEGIN
-  IFDBG(D_BUG, FN; STRLIT(" dial "); NPUT(get_nodeno(get_site_def()), u);
-        STRLIT(s->srv); NDBG(s->port, u));
+  XCOM_IFDBG(D_BUG, FN; STRLIT(" dial "); NPUT(get_nodeno(get_site_def()), u);
+             STRLIT(s->srv); NDBG(s->port, u));
 
   // Delete old connection
   reset_connection(s->con);
   X_FREE(s->con);
   s->con = nullptr;
 
-  s->con = open_new_connection(s->srv, s->port, 1000);
+  s->con = open_new_connection(s->srv, s->port, 1000, dial_call_log_level);
   if (!s->con) {
     s->con = new_connection(-1, nullptr);
   }
 
   if (s->con->fd < 0) {
-    IFDBG(D_NONE, FN; STRLIT("could not dial "); STRLIT(s->srv);
-          NDBG(s->port, u););
+    XCOM_IFDBG(D_NONE, FN; STRLIT("could not dial "); STRLIT(s->srv);
+               NDBG(s->port, u););
   } else {
     if (NAGLE == 0) {
       set_nodelay(s->con->fd);
     }
 
     unblock_fd(s->con->fd);
-    IFDBG(D_BUG, FN; STRLIT(" dial connected ");
-          NPUT(get_nodeno(get_site_def()), u); STRLIT(s->srv);
-          NDBG(s->port, u));
+    XCOM_IFDBG(D_BUG, FN; STRLIT(" dial connected ");
+               NPUT(get_nodeno(get_site_def()), u); STRLIT(s->srv);
+               NDBG(s->port, u));
     set_connected(s->con, CON_FD);
     alive(s);
     update_detected(get_site_def_rw());
@@ -836,14 +860,14 @@ int send_msg(server *s, node_no from, node_no to, uint32_t group_id,
   assert(s);
   {
     msg_link *link = msg_link_new(p, to);
-    IFDBG(D_NONE, FN; PTREXP(&s->outgoing);
-          COPY_AND_FREE_GOUT(dbg_msg_link(link)););
+    XCOM_IFDBG(D_NONE, FN; PTREXP(&s->outgoing);
+               COPY_AND_FREE_GOUT(dbg_msg_link(link)););
     p->from = from;
     p->group_id = group_id;
     p->max_synode = get_max_synode();
     p->delivered_msg = get_delivered_msg();
-    IFDBG(D_NONE, FN; PTREXP(p); STREXP(s->srv); NDBG(p->from, d);
-          NDBG(p->to, d); NDBG(p->group_id, u));
+    XCOM_IFDBG(D_NONE, FN; PTREXP(p); STREXP(s->srv); NDBG(p->from, d);
+               NDBG(p->to, d); NDBG(p->group_id, u));
     channel_put(&s->outgoing, &link->l);
   }
   return 0;
@@ -887,8 +911,8 @@ static inline int send_to_node_set(site_def const *s, node_no max, pax_msg *p,
     node_no i = 0;
     for (i = 0; i < max; i++) {
       if (test_func(s, i)) {
-        IFDBG(D_NONE, FN; STRLIT(dbg); STRLIT(" "); NDBG(i, u); NDBG(max, u);
-              PTREXP(p));
+        XCOM_IFDBG(D_NONE, FN; STRLIT(dbg); STRLIT(" "); NDBG(i, u);
+                   NDBG(max, u); PTREXP(p));
         retval = _send_server_msg(s, i, p);
       }
     }
@@ -930,8 +954,8 @@ static inline int send_other_loop(site_def const *s, pax_msg *p,
 #endif
   for (i = 0; i < max; i++) {
     if (i != s->nodeno) {
-      IFDBG(D_NONE, FN; STRLIT(dbg); STRLIT(" "); NDBG(i, u); NDBG(max, u);
-            PTREXP(p));
+      XCOM_IFDBG(D_NONE, FN; STRLIT(dbg); STRLIT(" "); NDBG(i, u); NDBG(max, u);
+                 PTREXP(p));
       retval = _send_server_msg(s, i, p);
     }
   }
@@ -958,14 +982,14 @@ int send_to_someone(site_def const *s, pax_msg *p,
   assert(s);
   max = get_maxnodes(s);
 #endif
-  /* IFDBG(D_NONE, FN; NDBG(max,u); NDBG(s->maxnodes,u)); */
+  /* XCOM_IFDBG(D_NONE, FN; NDBG(max,u); NDBG(s->maxnodes,u)); */
   assert(max > 0);
   prev = i % max;
   i = (i + 1) % max;
   while (i != prev) {
-    /* IFDBG(D_NONE, FN; NDBG(i,u); NDBG(prev,u)); */
+    /* XCOM_IFDBG(D_NONE, FN; NDBG(i,u); NDBG(prev,u)); */
     if (i != s->nodeno && !may_be_dead(s->detected, i, task_now())) {
-      IFDBG(D_NONE, FN; STRLIT(dbg); NDBG(i, u); NDBG(max, u); PTREXP(p));
+      XCOM_IFDBG(D_NONE, FN; STRLIT(dbg); NDBG(i, u); NDBG(max, u); PTREXP(p));
       retval = _send_server_msg(s, i, p);
       break;
     }
@@ -1016,7 +1040,7 @@ static int read_bytes(connection_descriptor const *rfd, char *p, uint32_t n,
 
   int64_t nread = 0;
 
-  IFDBG(D_TRANSPORT, FN; NDBG(rfd->fd, d); PTREXP(s); NDBG(n, u));
+  XCOM_IFDBG(D_TRANSPORT, FN; NDBG(rfd->fd, d); PTREXP(s); NDBG(n, u));
   TASK_BEGIN
 
       (void)
@@ -1026,11 +1050,12 @@ static int read_bytes(connection_descriptor const *rfd, char *p, uint32_t n,
   while (ep->left > 0) {
     TASK_CALL(task_read(rfd, ep->bytes,
                         ep->left >= INT_MAX ? INT_MAX : (int)ep->left, &nread));
-    IFDBG(D_TRANSPORT, FN; NDBG(rfd->fd, d); NDBG64(nread); NDBG(ep->left, u));
+    XCOM_IFDBG(D_TRANSPORT, FN; NDBG(rfd->fd, d); NDBG64(nread);
+               NDBG(ep->left, u));
     if (nread == 0) {
       TASK_RETURN(0);
     } else if (nread < 0) {
-      IFDBG(D_NONE, FN; NDBG64(nread));
+      XCOM_IFDBG(D_NONE, FN; NDBG64(nread));
       TASK_FAIL;
     } else {
       ep->bytes += nread;
@@ -1068,7 +1093,7 @@ static int buffered_read_bytes(connection_descriptor const *rfd, srv_buf *buf,
   END_ENV;
   uint32_t nget = 0;
 
-  IFDBG(D_TRANSPORT, FN; NDBG(rfd->fd, d); PTREXP(s); NDBG(n, u));
+  XCOM_IFDBG(D_TRANSPORT, FN; NDBG(rfd->fd, d); PTREXP(s); NDBG(n, u));
 
   int64_t nread{0};
   TASK_BEGIN(void) s;
@@ -1082,7 +1107,7 @@ static int buffered_read_bytes(connection_descriptor const *rfd, srv_buf *buf,
 
   if (ep->left >= srv_buf_capacity(buf)) {
     /* Too big, do direct read of rest */
-    IFDBG(D_TRANSPORT, FN; STRLIT("Too big, do direct read of rest"));
+    XCOM_IFDBG(D_TRANSPORT, FN; STRLIT("Too big, do direct read of rest"));
     TASK_CALL(read_bytes(rfd, ep->bytes, ep->left, s, ret));
     if (*ret <= 0) {
       TASK_FAIL;
@@ -1096,11 +1121,11 @@ static int buffered_read_bytes(connection_descriptor const *rfd, srv_buf *buf,
 
       TASK_CALL(task_read(rfd, srv_buf_insert_ptr(buf),
                           (int)srv_buf_free_space(buf), &nread));
-      IFDBG(D_TRANSPORT, FN; NDBG(rfd->fd, d); NDBG64(nread););
+      XCOM_IFDBG(D_TRANSPORT, FN; NDBG(rfd->fd, d); NDBG64(nread););
       if (nread == 0) {
         TASK_RETURN(0);
       } else if (nread < 0) {
-        IFDBG(D_NONE, FN; NDBG64(nread));
+        XCOM_IFDBG(D_NONE, FN; NDBG64(nread));
         TASK_FAIL;
       } else {
         /* Update buffer to reflect number of bytes read */
@@ -1122,12 +1147,13 @@ void get_header_1_0(unsigned char header_buf[], uint32_t *msgsize,
   *msgsize = get_32(LENGTH_PTR(header_buf));
   *x_type = (x_msg_type)header_buf[X_TYPE];
   *tag = get_16(X_TAG_PTR(header_buf));
-  IFDBG(D_TRANSPORT, FN; NDBG(*msgsize, u); NDBG(*x_type, d); NDBG(*tag, u));
+  XCOM_IFDBG(D_TRANSPORT, FN; NDBG(*msgsize, u); NDBG(*x_type, d);
+             NDBG(*tag, u));
 }
 
 void put_header_1_0(unsigned char header_buf[], uint32_t msgsize,
                     x_msg_type x_type, unsigned int tag) {
-  IFDBG(D_TRANSPORT, FN; NDBG(msgsize, u); NDBG(x_type, d); NDBG(tag, u));
+  XCOM_IFDBG(D_TRANSPORT, FN; NDBG(msgsize, u); NDBG(x_type, d); NDBG(tag, u));
   put_32(LENGTH_PTR(header_buf), msgsize);
   header_buf[X_TYPE] = (unsigned char)x_type;
   put_16(X_TAG_PTR(header_buf), tag);
@@ -1154,13 +1180,13 @@ int read_msg(connection_descriptor *rfd, pax_msg *p, server *s, int64_t *ret) {
     ep->bytes = nullptr;
     /* Read length field, protocol version, and checksum */
     ep->n = 0;
-    IFDBG(D_TRANSPORT, FN; STRLIT("reading header"));
+    XCOM_IFDBG(D_TRANSPORT, FN; STRLIT("reading header"));
     TASK_CALL(read_bytes(rfd, (char *)ep->header_buf, MSG_HDR_SIZE, s, &ep->n));
 
     if (ep->n != MSG_HDR_SIZE) {
       G_INFO("Failure reading from fd=%d n=%" PRIu64 " from %s:%d", rfd->fd,
              ep->n, s->srv, s->port);
-      IFDBG(D_TRANSPORT, FN; NDBG(rfd->fd, d); NDBG64(ep->n));
+      XCOM_IFDBG(D_TRANSPORT, FN; NDBG(rfd->fd, d); NDBG64(ep->n));
       TASK_FAIL;
     }
 
@@ -1170,10 +1196,10 @@ int read_msg(connection_descriptor *rfd, pax_msg *p, server *s, int64_t *ret) {
     if (ep->x_type == x_version_req) {
       /* Negotiation request. See what we can offer */
       rfd->x_proto = negotiate_protocol(ep->x_version);
-      IFDBG(D_TRANSPORT,
-            STRLIT("incoming connection will use protcol version ");
-            NDBG(rfd->x_proto, u); STRLIT(xcom_proto_to_str(rfd->x_proto));
-            NDBG(rfd->fd, d));
+      XCOM_IFDBG(D_TRANSPORT,
+                 STRLIT("incoming connection will use protcol version ");
+                 NDBG(rfd->x_proto, u); STRLIT(xcom_proto_to_str(rfd->x_proto));
+                 NDBG(rfd->fd, d));
       ADD_DBG(
           D_TRANSPORT,
           add_event(EVENT_DUMP_PAD,
@@ -1195,9 +1221,10 @@ int read_msg(connection_descriptor *rfd, pax_msg *p, server *s, int64_t *ret) {
       /* Mark connection with negotiated protocol version */
       if (rfd->snd_tag == ep->tag) {
         rfd->x_proto = ep->x_version;
-        IFDBG(D_TRANSPORT, STRLIT("peer connection will use protcol version ");
-              NDBG(rfd->x_proto, u); STRLIT(xcom_proto_to_str(rfd->x_proto));
-              NDBG(rfd->fd, d));
+        XCOM_IFDBG(
+            D_TRANSPORT, STRLIT("peer connection will use protcol version ");
+            NDBG(rfd->x_proto, u); STRLIT(xcom_proto_to_str(rfd->x_proto));
+            NDBG(rfd->fd, d));
 
         ADD_DBG(D_TRANSPORT,
                 add_event(
@@ -1229,18 +1256,19 @@ int read_msg(connection_descriptor *rfd, pax_msg *p, server *s, int64_t *ret) {
 
   /* Read message */
   ep->n = 0;
-  IFDBG(D_TRANSPORT, FN; STRLIT("reading message"));
+  XCOM_IFDBG(D_TRANSPORT, FN; STRLIT("reading message"));
   TASK_CALL(read_bytes(rfd, ep->bytes, ep->msgsize, s, &ep->n));
 
   if (ep->n > 0) {
     /* Deserialize message */
     deserialize_ok = deserialize_msg(p, rfd->x_proto, ep->bytes, ep->msgsize);
-    IFDBG(D_NONE, FN; STRLIT(" deserialized message"));
+    XCOM_IFDBG(D_NONE, FN; STRLIT(" deserialized message"));
   }
   /* Deallocate buffer */
   X_FREE(ep->bytes);
   if (ep->n <= 0 || !deserialize_ok) {
-    IFDBG(D_NONE, FN; NDBG(rfd->fd, d); NDBG64(ep->n); NDBG(deserialize_ok, d));
+    XCOM_IFDBG(D_NONE, FN; NDBG(rfd->fd, d); NDBG64(ep->n);
+               NDBG(deserialize_ok, d));
     TASK_FAIL;
   }
   TASK_RETURN(ep->n);
@@ -1272,12 +1300,12 @@ int buffered_read_msg(connection_descriptor *rfd, srv_buf *buf, pax_msg *p,
     ep->bytes = nullptr;
     /* Read length field, protocol version, and checksum */
     ep->n = 0;
-    IFDBG(D_TRANSPORT, FN; STRLIT("reading header"));
+    XCOM_IFDBG(D_TRANSPORT, FN; STRLIT("reading header"));
     TASK_CALL(buffered_read_bytes(rfd, buf, (char *)ep->header_buf,
                                   MSG_HDR_SIZE, s, &ep->n));
 
     if (ep->n != MSG_HDR_SIZE) {
-      IFDBG(D_TRANSPORT, FN; NDBG(rfd->fd, d); NDBG64(ep->n));
+      XCOM_IFDBG(D_TRANSPORT, FN; NDBG(rfd->fd, d); NDBG64(ep->n));
       TASK_FAIL;
     }
 
@@ -1287,9 +1315,9 @@ int buffered_read_msg(connection_descriptor *rfd, srv_buf *buf, pax_msg *p,
     if (ep->x_type == x_version_req) {
       /* Negotiation request. See what we can offer */
       rfd->x_proto = negotiate_protocol(ep->x_version);
-      IFDBG(D_TRANSPORT,
-            STRLIT("incoming connection will use protcol version ");
-            NDBG(rfd->x_proto, u); STRLIT(xcom_proto_to_str(rfd->x_proto)));
+      XCOM_IFDBG(
+          D_TRANSPORT, STRLIT("incoming connection will use protcol version ");
+          NDBG(rfd->x_proto, u); STRLIT(xcom_proto_to_str(rfd->x_proto)));
       ADD_DBG(
           D_TRANSPORT,
           add_event(EVENT_DUMP_PAD,
@@ -1312,8 +1340,9 @@ int buffered_read_msg(connection_descriptor *rfd, srv_buf *buf, pax_msg *p,
       /* Mark connection with negotiated protocol version */
       if (rfd->snd_tag == ep->tag) {
         rfd->x_proto = ep->x_version;
-        IFDBG(D_TRANSPORT, STRLIT("peer connection will use protcol version ");
-              NDBG(rfd->x_proto, u); STRLIT(xcom_proto_to_str(rfd->x_proto)));
+        XCOM_IFDBG(
+            D_TRANSPORT, STRLIT("peer connection will use protcol version ");
+            NDBG(rfd->x_proto, u); STRLIT(xcom_proto_to_str(rfd->x_proto)));
         ADD_DBG(D_TRANSPORT,
                 add_event(
                     0, string_arg("peer connection will use protcol version"));
@@ -1343,18 +1372,19 @@ int buffered_read_msg(connection_descriptor *rfd, srv_buf *buf, pax_msg *p,
   }
   /* Read message */
   ep->n = 0;
-  IFDBG(D_TRANSPORT, FN; STRLIT("reading message"));
+  XCOM_IFDBG(D_TRANSPORT, FN; STRLIT("reading message"));
   TASK_CALL(buffered_read_bytes(rfd, buf, ep->bytes, ep->msgsize, s, &ep->n));
 
   if (ep->n > 0) {
     /* Deserialize message */
     deserialize_ok = deserialize_msg(p, rfd->x_proto, ep->bytes, ep->msgsize);
-    IFDBG(D_NONE, FN; STRLIT(" deserialized message"));
+    XCOM_IFDBG(D_NONE, FN; STRLIT(" deserialized message"));
   }
   /* Deallocate buffer */
   X_FREE(ep->bytes);
   if (ep->n <= 0 || !deserialize_ok) {
-    IFDBG(D_NONE, FN; NDBG(rfd->fd, d); NDBG64(ep->n); NDBG(deserialize_ok, d));
+    XCOM_IFDBG(D_NONE, FN; NDBG(rfd->fd, d); NDBG64(ep->n);
+               NDBG(deserialize_ok, d));
     TASK_FAIL;
   }
   TASK_RETURN(ep->n);
@@ -1375,11 +1405,11 @@ int recv_proto(connection_descriptor const *rfd, xcom_proto *x_proto,
 
   /* Read length field, protocol version, and checksum */
   ep->n = 0;
-  IFDBG(D_TRANSPORT, FN; STRLIT("reading header"));
+  XCOM_IFDBG(D_TRANSPORT, FN; STRLIT("reading header"));
   TASK_CALL(read_bytes(rfd, (char *)ep->header_buf, MSG_HDR_SIZE, 0, &ep->n));
 
   if (ep->n != MSG_HDR_SIZE) {
-    IFDBG(D_NONE, FN; NDBG64(ep->n));
+    XCOM_IFDBG(D_NONE, FN; NDBG64(ep->n));
     TASK_FAIL;
   }
 
@@ -1400,7 +1430,8 @@ static inline unsigned int incr_tag(unsigned int tag) {
 
 static void start_protocol_negotiation(channel *outgoing) {
   msg_link *link = msg_link_new(nullptr, VOID_NODE_NO);
-  IFDBG(D_NONE, FN; PTREXP(outgoing); COPY_AND_FREE_GOUT(dbg_msg_link(link)););
+  XCOM_IFDBG(D_NONE, FN; PTREXP(outgoing);
+             COPY_AND_FREE_GOUT(dbg_msg_link(link)););
   channel_put_front(outgoing, &link->l);
 }
 
@@ -1410,7 +1441,35 @@ linkage connect_wait = {
 
 void wakeup_sender() { task_wakeup(&connect_wait); }
 
+static server *find_server(server *table[], int n, char *name, xcom_port port) {
+  int i;
+  for (i = 0; i < n; i++) {
+    server *s = table[i];
+    if (s && strcmp(s->srv, name) == 0 &&
+        s->port == port) /* FIXME should use IP address */
+      return s;
+  }
+  return nullptr;
+}
+
 #define TAG_START 313
+
+/**
+ * @brief Checks if a given server is currently in use in the current view
+ *
+ * @param sp the server to check
+ *
+ * @return true if it is in the current view, false otherwise.
+ */
+bool is_server_in_current_view(server *sp) {
+  if (site_def *current_site_def = get_site_def_rw(); current_site_def) {
+    return find_server(current_site_def->servers,
+                       current_site_def->nodes.node_list_len, sp->srv,
+                       sp->port);
+  }
+
+  return false;
+}
 
 /* Fetch messages from queue and send to other server.  Having a
    separate queue and task for doing this simplifies the logic since we
@@ -1425,6 +1484,10 @@ int sender_task(task_arg arg) {
 #if defined(_WIN32)
   bool was_connected;
 #endif
+  bool attempt_connect;
+  double attempt_connect_wait_total_time_not_in_current_view;
+  bool server_in_current_view;
+  network_provider_dynamic_log_level dial_call_log_level;
   ENV_INIT
   END_ENV_INIT
   END_ENV;
@@ -1432,12 +1495,17 @@ int sender_task(task_arg arg) {
   int64_t ret_code{0};
   TASK_BEGIN
 
+  ep->dial_call_log_level = network_provider_dynamic_log_level::PROVIDED;
+
   ep->channel_empty_time = task_now();
   ep->dtime = INITIAL_CONNECT_WAIT; /* Initial wait is short, to avoid
                                        unnecessary waiting */
 #if defined(_WIN32)
   ep->was_connected = false;
 #endif
+  ep->attempt_connect = true;
+  ep->attempt_connect_wait_total_time_not_in_current_view = 0.0;
+  ep->server_in_current_view = true;
   ep->s = (server *)get_void_arg(arg);
   ep->link = nullptr;
   ep->tag = TAG_START;
@@ -1445,21 +1513,77 @@ int sender_task(task_arg arg) {
 
   while (!xcom_shutdown) {
     /* Loop until connected */
-    G_MESSAGE("Connecting to %s:%d", ep->s->srv, ep->s->port);
+    G_INFO("Connecting to %s:%d", ep->s->srv, ep->s->port);
     for (;;) {
+      if (ep->attempt_connect) {
 #if defined(_WIN32)
-      if (!ep->was_connected) {
+        if (!ep->was_connected) {
 #endif
-        TASK_CALL(dial(ep->s));
+          TASK_CALL(dial(ep->s, ep->dial_call_log_level));
 #if defined(_WIN32)
-      } else {
-        ep->s->reconnect = true;
+        } else {
+          ep->s->reconnect = true;
+        }
+#endif
       }
-#endif
       if (is_connected(ep->s->con)) break;
 
-      if (ep->dtime < MAX_CONNECT_WAIT) {
-        G_MESSAGE("Connection to %s:%d failed", ep->s->srv, ep->s->port);
+      // Check, for each reconnect loop, if we belong to this configuration
+      ep->server_in_current_view = is_server_in_current_view(ep->s);
+
+      if (ep->attempt_connect) {
+        ep->dial_call_log_level =
+            ep->server_in_current_view
+                ? network_provider_dynamic_log_level::PROVIDED
+                : network_provider_dynamic_log_level::DEBUG;
+
+        if (ep->dtime < MAX_CONNECT_WAIT) {
+          if (ep->dial_call_log_level !=
+              network_provider_dynamic_log_level::DEBUG) {
+            G_INFO("Connection to %s:%d failed", ep->s->srv, ep->s->port);
+          }
+        }
+
+        if (!ep->server_in_current_view) {
+          ep->attempt_connect_wait_total_time_not_in_current_view += ep->dtime;
+
+          /*
+            Stop connection attempts if we reached MAX_CONNECT_WAIT_TOTAL_TIME
+            and the server we want to connect to is not in the current view.
+            We do not fail this task to avoid consider this a critical
+            error that would cause the local server to leave the group.
+          */
+          if (ep->attempt_connect_wait_total_time_not_in_current_view >=
+              MAX_CONNECT_WAIT_TOTAL_TIME) {
+            ep->attempt_connect = false;
+#if defined(_WIN32)
+            ep->s->reconnect = false;
+#endif
+
+            G_INFO(
+                "Connection attempts to %s:%d stopped because this server "
+                "belongs to a previous connfiguration",
+                ep->s->srv, ep->s->port);
+          }
+        }
+      } else {
+        if (ep->server_in_current_view) {
+          /*
+            Server rejoined, resume connection attempts on next loop
+            iteration.
+          */
+          ep->dtime = INITIAL_CONNECT_WAIT;
+          ep->attempt_connect = true;
+          ep->attempt_connect_wait_total_time_not_in_current_view = 0.0;
+#if defined(_WIN32)
+          ep->s->reconnect = true;
+#endif
+
+          G_INFO(
+              "Connection attempts to %s:%d resumed because this server "
+              "belongs to the current connfiguration",
+              ep->s->srv, ep->s->port);
+        }
       }
 
       TIMED_TASK_WAIT(&connect_wait, ep->dtime);
@@ -1476,12 +1600,14 @@ int sender_task(task_arg arg) {
       }
     }
 
-    G_MESSAGE("Connected to %s:%d", ep->s->srv, ep->s->port);
+    G_INFO("Connected to %s:%d", ep->s->srv, ep->s->port);
     ep->dtime = INITIAL_CONNECT_WAIT;
 #if defined(_WIN32)
     ep->was_connected = true;
     ep->s->reconnect = false;
 #endif
+    ep->attempt_connect = true;
+    ep->attempt_connect_wait_total_time_not_in_current_view = 0.0;
     reset_srv_buf(&ep->s->out_buf);
 
     /* We are ready to start sending messages.
@@ -1494,22 +1620,22 @@ int sender_task(task_arg arg) {
       if (false && link_empty(&ep->s->outgoing.data)) {
         TASK_DELAY(0.1 * xcom_drand48());
       }
-      /* FWD_ITER(&ep->s->outgoing.data, msg_link, IFDBG(D_NONE, FN;
+      /* FWD_ITER(&ep->s->outgoing.data, msg_link, XCOM_IFDBG(D_NONE, FN;
        * PTREXP(link_iter));); */
       if (link_empty(&ep->s->outgoing.data)) {
         TASK_CALL(flush_srv_buf(ep->s, &ret));
       }
       CHANNEL_GET(&ep->s->outgoing, &ep->link, msg_link);
       {
-        /* IFDBG(D_NONE, FN; PTREXP(stack); PTREXP(ep->link));
-        IFDBG(D_NONE, FN; PTREXP(&ep->s->outgoing);
+        /* XCOM_IFDBG(D_NONE, FN; PTREXP(stack); PTREXP(ep->link));
+        XCOM_IFDBG(D_NONE, FN; PTREXP(&ep->s->outgoing);
                COPY_AND_FREE_GOUT(dbg_msg_link(ep->link)););
-        IFDBG(D_NONE, FN; STRLIT(" extracted ");
+        XCOM_IFDBG(D_NONE, FN; STRLIT(" extracted ");
                         COPY_AND_FREE_GOUT(dbg_linkage(&ep->link->l));
             ); */
 
         /* If ep->link->p is 0, it is a protocol (re)negotiation request */
-        /* IFDBG(D_NONE, FN;
+        /* XCOM_IFDBG(D_NONE, FN;
                 NDBG(ep->s->con.x_proto,u);
            STRLIT(xcom_proto_to_str(ep->s->con.x_proto));
                 NDBG(get_latest_common_proto(),u);
@@ -1566,21 +1692,21 @@ int sender_task(task_arg arg) {
               D_TRANSPORT,
               add_event(EVENT_DUMP_PAD, string_arg("will use protocol"));
               add_event(EVENT_DUMP_PAD,
-                        string_arg(xcom_proto_to_str(ep->s->con.x_proto))););
+                        string_arg(xcom_proto_to_str(ep->s->con->x_proto))););
         }
       }
     next:
       msg_link_delete(&ep->link);
       /* TASK_YIELD; */
     }
-    G_MESSAGE("Sender task disconnected from %s:%d", ep->s->srv, ep->s->port);
+    G_INFO("Sender task disconnected from %s:%d", ep->s->srv, ep->s->port);
   }
   FINALLY
   empty_msg_channel(&ep->s->outgoing);
   ep->s->sender = nullptr;
   srv_unref(ep->s);
   if (ep->link) msg_link_delete(&ep->link);
-  IFDBG(D_BUG, FN; STRLIT(" shutdown "));
+  XCOM_IFDBG(D_BUG, FN; STRLIT(" shutdown "));
   TASK_END;
 }
 
@@ -1591,6 +1717,7 @@ int tcp_reconnection_task(task_arg arg [[maybe_unused]]) {
   int dummy;
   server *s;
   int i;
+  network_provider_dynamic_log_level dial_call_log_level;
   ENV_INIT
   END_ENV_INIT
   END_ENV;
@@ -1598,14 +1725,22 @@ int tcp_reconnection_task(task_arg arg [[maybe_unused]]) {
 
   ep->s = nullptr;
   ep->i = 0;
+  ep->dial_call_log_level = network_provider_dynamic_log_level::PROVIDED;
 
   while (!xcom_shutdown) {
     {
       ep->s = nullptr;
       for (ep->i = 0; ep->i < maxservers; ep->i++) {
         ep->s = all_servers[ep->i];
+
         if (ep->s && ep->s->reconnect && !is_connected(ep->s->con)) {
-          TASK_CALL(dial(ep->s));
+          // Check if the server belongs in the current view
+          ep->dial_call_log_level =
+              is_server_in_current_view(ep->s)
+                  ? network_provider_dynamic_log_level::PROVIDED
+                  : network_provider_dynamic_log_level::DEBUG;
+
+          TASK_CALL(dial(ep->s, ep->dial_call_log_level));
           if (is_connected(ep->s->con)) {
             ep->s->reconnect = false;
           }
@@ -1616,7 +1751,7 @@ int tcp_reconnection_task(task_arg arg [[maybe_unused]]) {
     TASK_DELAY(2.0);
   }
   FINALLY
-  IFDBG(D_BUG, FN; STRLIT(" shutdown "));
+  XCOM_IFDBG(D_BUG, FN; STRLIT(" shutdown "));
   TASK_END;
 }
 #endif
@@ -1644,11 +1779,11 @@ int local_sender_task(task_arg arg) {
     assert(!ep->link);
     CHANNEL_GET(&ep->s->outgoing, &ep->link, msg_link);
     {
-      /* IFDBG(D_NONE, FN; PTREXP(stack); PTREXP(ep->link)); */
-      IFDBG(D_NONE, FN; PTREXP(&ep->s->outgoing);
-            COPY_AND_FREE_GOUT(dbg_msg_link(ep->link)););
-      IFDBG(D_NONE, FN; STRLIT(" extracted ");
-            COPY_AND_FREE_GOUT(dbg_linkage(&ep->link->l)););
+      /* XCOM_IFDBG(D_NONE, FN; PTREXP(stack); PTREXP(ep->link)); */
+      XCOM_IFDBG(D_NONE, FN; PTREXP(&ep->s->outgoing);
+                 COPY_AND_FREE_GOUT(dbg_msg_link(ep->link)););
+      XCOM_IFDBG(D_NONE, FN; STRLIT(" extracted ");
+                 COPY_AND_FREE_GOUT(dbg_linkage(&ep->link->l)););
       assert(ep->link->p);
       ep->link->p->to = ep->link->p->from;
       dispatch_op(find_site_def(ep->link->p->synode), ep->link->p, nullptr);
@@ -1660,19 +1795,8 @@ int local_sender_task(task_arg arg) {
   ep->s->sender = nullptr;
   srv_unref(ep->s);
   if (ep->link) msg_link_delete(&ep->link);
-  IFDBG(D_BUG, FN; STRLIT(" shutdown "));
+  XCOM_IFDBG(D_BUG, FN; STRLIT(" shutdown "));
   TASK_END;
-}
-
-static server *find_server(server *table[], int n, char *name, xcom_port port) {
-  int i;
-  for (i = 0; i < n; i++) {
-    server *s = table[i];
-    if (s && strcmp(s->srv, name) == 0 &&
-        s->port == port) /* FIXME should use IP address */
-      return s;
-  }
-  return nullptr;
 }
 
 void update_servers(site_def *s, cargo_type operation) {
@@ -1682,7 +1806,7 @@ void update_servers(site_def *s, cargo_type operation) {
     u_int i = 0;
     n = s->nodes.node_list_len;
 
-    IFDBG(D_NONE, FN; NDBG(get_maxnodes(s), u); NDBG(n, d); PTREXP(s));
+    XCOM_IFDBG(D_NONE, FN; NDBG(get_maxnodes(s), u); NDBG(n, d); PTREXP(s));
 
     G_INFO("Updating physical connections to other servers");
 
@@ -1729,7 +1853,7 @@ void update_servers(site_def *s, cargo_type operation) {
             /* purecov: end */
           }
         }
-        IFDBG(D_BUG, FN; PTREXP(s->servers[i]));
+        XCOM_IFDBG(D_BUG, FN; PTREXP(s->servers[i]));
       }
     }
     /* Zero the rest */
@@ -1802,7 +1926,7 @@ int tcp_reaper_task(task_arg arg [[maybe_unused]]) {
     TASK_DELAY(1.0);
   }
   FINALLY
-  IFDBG(D_BUG, FN; STRLIT(" shutdown "));
+  XCOM_IFDBG(D_BUG, FN; STRLIT(" shutdown "));
   TASK_END;
 }
 
@@ -1821,11 +1945,15 @@ void ssl_free_con(connection_descriptor *con) {
 #endif
 
 void close_connection(connection_descriptor *con) {
+  if (con == nullptr) return;
+
   close_open_connection(con);
   set_connected(con, CON_NULL);
 }
 
 void shutdown_connection(connection_descriptor *con) {
+  if (con == nullptr) return;
+
   /* printstack(1); */
   ADD_DBG(D_TRANSPORT, add_event(EVENT_DUMP_PAD, string_arg("con->fd"));
           add_event(EVENT_DUMP_PAD, int_arg(con->fd)););

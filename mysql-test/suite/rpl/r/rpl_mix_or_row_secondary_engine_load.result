@@ -1,4 +1,4 @@
-include/master-slave.inc
+include/rpl/init_source_replica.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
@@ -17,7 +17,7 @@ INSTALL PLUGIN mock SONAME 'ha_mock.so';
 SET @@secondary_engine_cost_threshold = 0;
 [ Connection Master ]
 CREATE TABLE t1 (pk INT PRIMARY KEY AUTO_INCREMENT, vc VARCHAR(10), j JSON, b BLOB, vb VARBINARY(32)) SECONDARY_ENGINE=MOCK;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 [ Connection Slave ]
 SHOW CREATE TABLE t1;
 Table	Create Table
@@ -42,7 +42,7 @@ INSERT INTO t1 VALUES(NULL, 'Beagle', '[1,2,3]', 'Pitbull', x'abcd1234');
 INSERT INTO t1 VALUES(NULL, 'Collie', '["ab","bc","cd"]', 'Huskey', x'1ab2c3d4');
 INSERT INTO t1 VALUES(NULL, 'Shiba', '{"1":"one"}', 'Mastiff', x'ffff');
 ALTER TABLE t1 SECONDARY_LOAD;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 [ Connection Slave ]
 FLUSH STATUS;
 SELECT * FROM t1;
@@ -96,31 +96,37 @@ Variable_name	Value
 Secondary_engine_execution_count	1
 [ Connection Master ]
 CREATE TABLE t2 LIKE t1;
-ANALYZE TABLE t1;
+ANALYZE TABLE t1, t2;
 Table	Op	Msg_type	Msg_text
 test.t1	analyze	status	OK
-EXPLAIN INSERT INTO t2 SELECT * FROM t1;
-id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	INSERT	t2	NULL	ALL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
-1	SIMPLE	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	Using secondary engine MOCK
+test.t2	analyze	status	OK
+EXPLAIN FORMAT=TREE INSERT INTO t2 SELECT * FROM t1;
+EXPLAIN
+-> Insert into t2
+    -> Table scan on t1 in secondary engine MOCK  (rows=5)
+
 Warnings:
-Note	1003	insert into `test`.`t2` /* select#1 */ select `test`.`t1`.`pk` AS `pk`,`test`.`t1`.`vc` AS `vc`,`test`.`t1`.`j` AS `j`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`vb` AS `vb` from `test`.`t1`
-EXPLAIN INSERT INTO t2 SELECT * FROM t1 UNION SELECT * FROM t1;
-id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	INSERT	t2	NULL	ALL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
-1	PRIMARY	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	Using secondary engine MOCK
-2	UNION	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	Using secondary engine MOCK
-3	UNION RESULT	<union1,2>	NULL	ALL	NULL	NULL	NULL	NULL	NULL	NULL	Using temporary
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+EXPLAIN FORMAT=TREE INSERT INTO t2 SELECT * FROM t1 UNION SELECT * FROM t1;
+EXPLAIN
+-> Insert into t2
+    -> Table scan on <union temporary>  (rows=10)
+        -> Union materialize with deduplication  (rows=10)
+            -> Table scan on t1 in secondary engine MOCK  (rows=5)
+            -> Table scan on t1 in secondary engine MOCK  (rows=5)
+
 Warnings:
-Note	1003	insert into `test`.`t2` /* select#1 */ select `test`.`t1`.`pk` AS `pk`,`test`.`t1`.`vc` AS `vc`,`test`.`t1`.`j` AS `j`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`vb` AS `vb` from `test`.`t1` union /* select#2 */ select `test`.`t1`.`pk` AS `pk`,`test`.`t1`.`vc` AS `vc`,`test`.`t1`.`j` AS `j`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`vb` AS `vb` from `test`.`t1`
-EXPLAIN INSERT INTO t2 SELECT * FROM t1 UNION ALL SELECT * FROM t1;
-id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	INSERT	t2	NULL	ALL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
-1	PRIMARY	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	Using secondary engine MOCK
-2	UNION	t1	NULL	ALL	NULL	NULL	NULL	NULL	5	100.00	Using secondary engine MOCK
-3	UNION RESULT	<union1,2>	NULL	ALL	NULL	NULL	NULL	NULL	NULL	NULL	Using temporary
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+EXPLAIN FORMAT=TREE INSERT INTO t2 SELECT * FROM t1 UNION ALL SELECT * FROM t1;
+EXPLAIN
+-> Insert into t2
+    -> Table scan on <union temporary>  (rows=10)
+        -> Union all materialize  (rows=10)
+            -> Table scan on t1 in secondary engine MOCK  (rows=5)
+            -> Table scan on t1 in secondary engine MOCK  (rows=5)
+
 Warnings:
-Note	1003	insert into `test`.`t2` /* select#1 */ select `test`.`t1`.`pk` AS `pk`,`test`.`t1`.`vc` AS `vc`,`test`.`t1`.`j` AS `j`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`vb` AS `vb` from `test`.`t1` union all /* select#2 */ select `test`.`t1`.`pk` AS `pk`,`test`.`t1`.`vc` AS `vc`,`test`.`t1`.`j` AS `j`,`test`.`t1`.`b` AS `b`,`test`.`t1`.`vb` AS `vb` from `test`.`t1`
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
 Secondary_engine_execution_count	0
@@ -136,7 +142,7 @@ INSERT INTO t2 VALUES(NULL, 'Collie', '["ab","bc","cd"]', 'Huskey',
 x'1ab2c3d4');
 INSERT INTO t2 VALUES(NULL, 'Shiba', '{"1":"one"}', 'Mastiff', x'ffff');
 ALTER TABLE t2 SECONDARY_LOAD;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 [ Connection Slave ]
 SHOW CREATE TABLE t2;
 Table	Create Table
@@ -172,7 +178,7 @@ Variable_name	Value
 Secondary_engine_execution_count	1
 ALTER TABLE t1 SECONDARY_UNLOAD;
 DROP TABLE t3;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 [ Connection Slave ]
 FLUSH STATUS;
 SELECT * FROM t1;
@@ -202,13 +208,13 @@ SHOW SESSION STATUS LIKE 'Secondary_engine_execution_count';
 Variable_name	Value
 Secondary_engine_execution_count	0
 ALTER TABLE t2 SECONDARY_ENGINE=NULL;
-include/stop_slave_sql.inc
+include/rpl/stop_applier.inc
 [ Connection Master ]
 ALTER TABLE t2 SECONDARY_LOAD;
 [ Connection Slave ]
 ALTER TABLE t2 SECONDARY_ENGINE=MOCK;
-include/start_slave_sql.inc
-include/wait_for_slave_param.inc [Slave_SQL_Running_State]
+include/rpl/start_applier.inc
+include/rpl/wait_for_replica_status.inc [Replica_SQL_Running_State]
 FLUSH STATUS;
 SELECT * FROM t2;
 pk	vc	j	b	vb
@@ -217,7 +223,7 @@ Variable_name	Value
 Secondary_engine_execution_count	1
 [ Connection Master ]
 ALTER TABLE t1 SECONDARY_ENGINE=NULL;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 [ Connection Slave ]
 SHOW CREATE TABLE t1;
 Table	Create Table
@@ -242,7 +248,7 @@ Variable_name	Value
 Secondary_engine_execution_count	0
 [ Connection Master ]
 ALTER TABLE t1 SECONDARY_ENGINE=HELLO;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 [ Connection Slave ]
 SHOW CREATE TABLE t1;
 Table	Create Table
@@ -302,16 +308,16 @@ ALTER TABLE t2 SECONDARY_UNLOAD;
 [ Connection Master ]
 ALTER TABLE t1 SECONDARY_ENGINE=NULL;
 ALTER TABLE t1 SECONDARY_ENGINE=MOCK;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 [ Connection Slave ]
 UNINSTALL PLUGIN mock;
-include/stop_slave_sql.inc
+include/rpl/stop_applier.inc
 [ Connection Master ]
 ALTER TABLE t1 SECONDARY_LOAD;
 [ Connection Slave ]
 INSTALL PLUGIN mock SONAME 'ha_mock.so';
-include/start_slave_sql.inc
-include/wait_for_slave_param.inc [Slave_SQL_Running_State]
+include/rpl/start_applier.inc
+include/rpl/wait_for_replica_status.inc [Replica_SQL_Running_State]
 FLUSH STATUS;
 SELECT * FROM t1;
 pk	vc	j	b	vb
@@ -323,7 +329,7 @@ DROP TABLE t1;
 DROP TABLE t2;
 UNINSTALL PLUGIN mock;
 SET @@secondary_engine_cost_threshold = DEFAULT;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 UNINSTALL PLUGIN mock;
 SET @@secondary_engine_cost_threshold = DEFAULT;
-include/rpl_end.inc
+include/rpl/deinit.inc

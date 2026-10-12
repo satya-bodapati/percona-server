@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,20 +22,21 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include <functional>
+#include <utility>
 
 #include "data.h"
 
-namespace keyring_common {
-namespace data {
+namespace keyring_common::data {
 
 /** Constructor to create a data object */
-Data::Data(const Sensitive_data data, Type type) : data_(data), type_(type) {
+Data::Data(const Sensitive_data &data, Type type)
+    : data_(data), type_(std::move(type)) {
   set_validity();
 }
 
 /* Following constructors imply no data */
 Data::Data() : Data("", "") {}
-Data::Data(Type type) : Data("", type) {}
+Data::Data(Type type) : Data("", std::move(type)) {}
 
 /** Copy constructor */
 Data::Data(const Data &src) : Data(src.data_, src.type_) {}
@@ -58,10 +60,13 @@ Data &Data::operator=(Data &&src) noexcept {
 }
 
 /** Destructor */
-Data::~Data() { valid_ = false; }
+Data::~Data() {
+  data_.mask();
+  valid_ = false;
+}
 
 /** Return self */
-const Data Data::get_data() const { return *this; }
+Data Data::get_data() const { return *this; }
 
 /** Get data */
 Sensitive_data Data::data() const { return data_; }
@@ -83,7 +88,7 @@ void Data::set_data(const Data &src) { *this = src; }
 
 /** Set type */
 void Data::set_type(Type type) {
-  type_ = type;
+  type_ = std::move(type);
   set_validity();
 }
 
@@ -93,7 +98,6 @@ bool Data::operator==(const Data &other) const {
 }
 
 /** Set validity of the data object */
-void Data::set_validity() { valid_ = type_ != ""; }
+void Data::set_validity() { valid_ = !type_.empty(); }
 
-}  // namespace data
-}  // namespace keyring_common
+}  // namespace keyring_common::data

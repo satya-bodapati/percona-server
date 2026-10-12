@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,6 +30,7 @@
 
 #include "my_dbug.h"
 #include "my_sys.h"
+#include "mysql/components/library_mysys/my_system.h"
 #include "mysql/components/services/log_builtins.h"
 #include "mysqld_error.h"
 
@@ -91,7 +93,7 @@ bool unbind_thread(my_thread_os_id_t thread_id) {
   cpuset_t cpu_set;
 
   CPU_ZERO(&cpu_set);
-  uint32_t num_cpus = num_vcpus_using_config();
+  uint32_t num_cpus = my_num_vcpus();
   if (num_cpus == 0) {
     char errbuf[MYSQL_ERRMSG_SIZE];
     LogErr(ERROR_LEVEL, ER_RES_GRP_THD_UNBIND_FROM_CPU_FAILED, thread_id,
@@ -134,28 +136,6 @@ bool set_thread_priority(int, my_thread_os_id_t) {
   DBUG_TRACE;
   // Thread priority setting unsupported in FreeBSD.
   return false;
-}
-
-uint32_t num_vcpus_using_affinity() {
-  uint32_t num_vcpus = 0;
-
-#ifdef HAVE_PTHREAD_GETAFFINITY_NP
-  cpuset_t set;
-
-  if (pthread_getaffinity_np(pthread_self(), sizeof(set), &set) == 0)
-    num_vcpus = CPU_COUNT(&set);
-#endif  // HAVE_PTHREAD_GETAFFINITY_NP
-  return num_vcpus;
-}
-
-uint32_t num_vcpus_using_config() {
-  cpu_id_t num_vcpus = 0;
-  size_t num_vcpus_size = sizeof(cpu_id_t);
-  if (sysctlbyname("hw.ncpu", &num_vcpus, &num_vcpus_size, nullptr, 0) != 0) {
-    LogErr(ERROR_LEVEL, ER_RES_GRP_FAILED_DETERMINE_CPU_COUNT);
-    num_vcpus = 0;
-  }
-  return num_vcpus;
 }
 
 bool can_thread_priority_be_set() { return false; }

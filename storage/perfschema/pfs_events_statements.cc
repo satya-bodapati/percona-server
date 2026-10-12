@@ -1,15 +1,16 @@
-/* Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -158,8 +159,13 @@ void cleanup_events_statements_history_long() {
 
 static inline void copy_events_statements(PFS_events_statements *dest,
                                           const PFS_events_statements *source) {
-  /* Copy all attributes except SQL TEXT and DIGEST */
+  /* Copy all attributes except SQL TEXT, DIGEST and MESSAGE_TEXT */
+  // Ignore warning C26437: Do not slice (es.63).
+  MY_COMPILER_DIAGNOSTIC_PUSH()
+  MY_COMPILER_MSVC_DIAGNOSTIC_IGNORE(26437)
   dest->PFS_events::operator=(*source);
+  MY_COMPILER_DIAGNOSTIC_POP()
+
   memcpy(&dest->m_statement_id, &source->m_statement_id,
          pointer_cast<const char *>(&source->m_sqltext) -
              pointer_cast<const char *>(&source->m_statement_id));
@@ -176,6 +182,15 @@ static inline void copy_events_statements(PFS_events_statements *dest,
 
   /* Copy DIGEST */
   dest->m_digest_storage.copy(&source->m_digest_storage);
+
+  /* Copy MESSAGE_TEXT */
+  const uint message_text_length = source->m_message_text_length;
+
+  if (message_text_length > 0) {
+    memcpy(dest->m_message_text, source->m_message_text, message_text_length);
+  }
+  dest->m_message_text[message_text_length] = '\0';
+  dest->m_message_text_length = message_text_length;
 }
 
 /**
@@ -236,7 +251,7 @@ void insert_events_statements_history_long(PFS_events_statements *statement) {
 
 static void fct_reset_events_statements_current(PFS_thread *pfs_thread) {
   PFS_events_statements *pfs_stmt = &pfs_thread->m_statement_stack[0];
-  PFS_events_statements *pfs_stmt_last = pfs_stmt + statement_stack_max;
+  const PFS_events_statements *pfs_stmt_last = pfs_stmt + statement_stack_max;
 
   for (; pfs_stmt < pfs_stmt_last; pfs_stmt++) {
     pfs_stmt->m_class = nullptr;
@@ -250,7 +265,8 @@ void reset_events_statements_current() {
 
 static void fct_reset_events_statements_history(PFS_thread *pfs_thread) {
   PFS_events_statements *pfs = pfs_thread->m_statements_history;
-  PFS_events_statements *pfs_last = pfs + events_statements_history_per_thread;
+  const PFS_events_statements *pfs_last =
+      pfs + events_statements_history_per_thread;
 
   pfs_thread->m_statements_history_index = 0;
   pfs_thread->m_statements_history_full = false;
@@ -270,7 +286,8 @@ void reset_events_statements_history_long() {
   events_statements_history_long_full = false;
 
   PFS_events_statements *pfs = events_statements_history_long_array;
-  PFS_events_statements *pfs_last = pfs + events_statements_history_long_size;
+  const PFS_events_statements *pfs_last =
+      pfs + events_statements_history_long_size;
   for (; pfs < pfs_last; pfs++) {
     pfs->m_class = nullptr;
   }
@@ -320,7 +337,7 @@ void reset_events_statements_by_host() {
 /** Reset table EVENTS_STATEMENTS_GLOBAL_BY_EVENT_NAME data. */
 void reset_events_statements_global() {
   PFS_statement_stat *stat = global_instr_class_statements_array;
-  PFS_statement_stat *stat_last =
+  const PFS_statement_stat *stat_last =
       global_instr_class_statements_array + statement_class_max;
 
   for (; stat < stat_last; stat++) {

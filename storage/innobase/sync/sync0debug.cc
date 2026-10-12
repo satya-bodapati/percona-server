@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2012, 2023, Oracle and/or its affiliates.
+Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -12,12 +12,13 @@ This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -37,6 +38,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
  *******************************************************/
 
 #include "sync0debug.h"
+#include "univ.i"
 
 #include <stddef.h>
 #include <algorithm>
@@ -449,6 +451,7 @@ LatchDebug::LatchDebug() {
   LEVEL_MAP_INSERT(SYNC_LOCK_FREE_HASH);
   LEVEL_MAP_INSERT(SYNC_MONITOR_MUTEX);
   LEVEL_MAP_INSERT(SYNC_ANY_LATCH);
+  LEVEL_MAP_INSERT(SYNC_ALTER_STAGE);
   LEVEL_MAP_INSERT(SYNC_FIL_SHARD);
   LEVEL_MAP_INSERT(SYNC_DBLWR);
   LEVEL_MAP_INSERT(SYNC_BUF_CHUNKS);
@@ -470,6 +473,7 @@ LatchDebug::LatchDebug() {
   LEVEL_MAP_INSERT(SYNC_FTS_BG_THREADS);
   LEVEL_MAP_INSERT(SYNC_FTS_CACHE_INIT);
   LEVEL_MAP_INSERT(SYNC_RECV);
+  LEVEL_MAP_INSERT(SYNC_RECV_WRITER);
   LEVEL_MAP_INSERT(SYNC_LOG_ONLINE);
   LEVEL_MAP_INSERT(SYNC_LOG_SN);
   LEVEL_MAP_INSERT(SYNC_LOG_SN_MUTEX);
@@ -513,7 +517,6 @@ LatchDebug::LatchDebug() {
   LEVEL_MAP_INSERT(SYNC_RSEG_HEADER_NEW);
   LEVEL_MAP_INSERT(SYNC_TEMP_SPACE_RSEG);
   LEVEL_MAP_INSERT(SYNC_UNDO_SPACE_RSEG);
-  LEVEL_MAP_INSERT(SYNC_TRX_SYS_RSEG);
   LEVEL_MAP_INSERT(SYNC_RSEGS);
   LEVEL_MAP_INSERT(SYNC_UNDO_SPACES);
   LEVEL_MAP_INSERT(SYNC_UNDO_DDL);
@@ -523,6 +526,7 @@ LatchDebug::LatchDebug() {
   LEVEL_MAP_INSERT(SYNC_TREE_NODE_FROM_HASH);
   LEVEL_MAP_INSERT(SYNC_TREE_NODE_NEW);
   LEVEL_MAP_INSERT(SYNC_INDEX_TREE);
+  LEVEL_MAP_INSERT(SYNC_TABLE_STATS_COMPUTE);
   LEVEL_MAP_INSERT(SYNC_PERSIST_DIRTY_TABLES);
   LEVEL_MAP_INSERT(SYNC_PERSIST_AUTOINC);
   LEVEL_MAP_INSERT(SYNC_IBUF_PESS_INSERT_MUTEX);
@@ -540,6 +544,7 @@ LatchDebug::LatchDebug() {
   LEVEL_MAP_INSERT(SYNC_TRX_I_S_RWLOCK);
   LEVEL_MAP_INSERT(SYNC_LEVEL_VARYING);
   LEVEL_MAP_INSERT(SYNC_NO_ORDER_CHECK);
+  LEVEL_MAP_INSERT(SYNC_PAGE_ZIP_STAT);
 
   /* Enum count starts from 0 */
   ut_ad(m_levels.size() == SYNC_LEVEL_MAX + 1);
@@ -680,7 +685,12 @@ const latch_t *LatchDebug::find(const Latches *latches,
 @param[in]      level           The level to lookup
 @return latch if found or NULL */
 const latch_t *LatchDebug::find(latch_level_t level) UNIV_NOTHROW {
-  return (find(thread_latches(), level));
+  /* A thread which has not acquired any latch yet has no latch list
+  allocated (thread_latches() without the create flag returns nullptr)
+  and thus holds nothing at any level. */
+  const Latches *latches = thread_latches();
+
+  return (latches != nullptr ? find(latches, level) : nullptr);
 }
 
 /**
@@ -714,6 +724,7 @@ Latches *LatchDebug::check_order(const latch_t *latch,
     case SYNC_LOCK_FREE_HASH:
     case SYNC_MONITOR_MUTEX:
     case SYNC_RECV:
+    case SYNC_RECV_WRITER:
     case SYNC_FTS_BG_THREADS:
     case SYNC_WORK_QUEUE:
     case SYNC_FTS_TOKENIZE:
@@ -743,7 +754,6 @@ Latches *LatchDebug::check_order(const latch_t *latch,
     case SYNC_IBUF_BITMAP_MUTEX:
     case SYNC_TEMP_SPACE_RSEG:
     case SYNC_UNDO_SPACE_RSEG:
-    case SYNC_TRX_SYS_RSEG:
     case SYNC_RSEGS:
     case SYNC_UNDO_SPACES:
     case SYNC_UNDO_DDL:
@@ -765,6 +775,9 @@ Latches *LatchDebug::check_order(const latch_t *latch,
     case SYNC_PARSER:
     case SYNC_DICT:
     case SYNC_AHI_ENABLED:
+    case SYNC_ALTER_STAGE:
+    case SYNC_PAGE_ZIP_STAT:
+    case SYNC_TABLE_STATS_COMPUTE:
 
       /* This is the most typical case, in which we expect requested<held. */
       assert_requested_is_lower_than_held(level, latches);
@@ -845,8 +858,7 @@ Latches *LatchDebug::check_order(const latch_t *latch,
 
       if (find(latches, SYNC_TRX_UNDO) == nullptr &&
           find(latches, SYNC_TEMP_SPACE_RSEG) == nullptr &&
-          find(latches, SYNC_UNDO_SPACE_RSEG) == nullptr &&
-          find(latches, SYNC_TRX_SYS_RSEG) == nullptr) {
+          find(latches, SYNC_UNDO_SPACE_RSEG) == nullptr) {
         assert_requested_is_lower_or_equal_to_held(level, latches);
       }
       break;
@@ -854,8 +866,7 @@ Latches *LatchDebug::check_order(const latch_t *latch,
     case SYNC_RSEG_HEADER:
 
       ut_a(find(latches, SYNC_TEMP_SPACE_RSEG) != nullptr ||
-           find(latches, SYNC_UNDO_SPACE_RSEG) != nullptr ||
-           find(latches, SYNC_TRX_SYS_RSEG) != nullptr);
+           find(latches, SYNC_UNDO_SPACE_RSEG) != nullptr);
       break;
 
     case SYNC_RSEG_HEADER_NEW:
@@ -1203,6 +1214,8 @@ static void sync_latch_meta_init() UNIV_NOTHROW {
 
   LATCH_ADD_MUTEX(AHI_ENABLED, SYNC_AHI_ENABLED, ahi_enabled_mutex_key);
 
+  LATCH_ADD_MUTEX(ALTER_STAGE, SYNC_ALTER_STAGE, alter_stage_mutex_key);
+
   LATCH_ADD_MUTEX(AUTOINC, SYNC_DICT_AUTOINC_MUTEX, autoinc_mutex_key);
 
   LATCH_ADD_MUTEX(DDL_AUTOINC, SYNC_NO_ORDER_CHECK, ddl_autoinc_mutex_key);
@@ -1262,7 +1275,9 @@ static void sync_latch_meta_init() UNIV_NOTHROW {
   LATCH_ADD_MUTEX(FTS_PLL_TOKENIZE, SYNC_FTS_TOKENIZE,
                   fts_pll_tokenize_mutex_key);
 
-  LATCH_ADD_MUTEX(HASH_TABLE_MUTEX, SYNC_BUF_PAGE_HASH, hash_table_mutex_key);
+  /* Do not use SYNC_BUF_PAGE_HASH for HASH_TABLE_MUTEX.
+  @see buf_buddy_no_page_hash_latch_validate(). */
+  LATCH_ADD_MUTEX(HASH_TABLE_MUTEX, SYNC_ANY_LATCH, hash_table_mutex_key);
 
   LATCH_ADD_MUTEX(IBUF_BITMAP, SYNC_IBUF_BITMAP_MUTEX, ibuf_bitmap_mutex_key);
 
@@ -1315,13 +1330,13 @@ static void sync_latch_meta_init() UNIV_NOTHROW {
 
   LATCH_ADD_MUTEX(RECV_SYS, SYNC_RECV, recv_sys_mutex_key);
 
+  LATCH_ADD_MUTEX(RECV_WRITER, SYNC_RECV_WRITER, recv_writer_mutex_key);
+
   LATCH_ADD_MUTEX(TEMP_SPACE_RSEG, SYNC_TEMP_SPACE_RSEG,
                   temp_space_rseg_mutex_key);
 
   LATCH_ADD_MUTEX(UNDO_SPACE_RSEG, SYNC_UNDO_SPACE_RSEG,
                   undo_space_rseg_mutex_key);
-
-  LATCH_ADD_MUTEX(TRX_SYS_RSEG, SYNC_TRX_SYS_RSEG, trx_sys_rseg_mutex_key);
 
 #ifdef UNIV_DEBUG
   /* Mutex names starting with '.' are not tracked. They are assumed
@@ -1387,7 +1402,7 @@ static void sync_latch_meta_init() UNIV_NOTHROW {
 
   LATCH_ADD_MUTEX(SRV_SYS_TASKS, SYNC_ANY_LATCH, srv_threads_mutex_key);
 
-  LATCH_ADD_MUTEX(PAGE_ZIP_STAT_PER_INDEX, SYNC_ANY_LATCH,
+  LATCH_ADD_MUTEX(PAGE_ZIP_STAT_PER_INDEX, SYNC_PAGE_ZIP_STAT,
                   page_zip_stat_per_index_mutex_key);
 
 #ifndef PFS_SKIP_EVENT_MUTEX
@@ -1461,6 +1476,9 @@ static void sync_latch_meta_init() UNIV_NOTHROW {
   LATCH_ADD_RWLOCK(INDEX_TREE, SYNC_INDEX_TREE, index_tree_rw_lock_key);
 
   LATCH_ADD_RWLOCK(DICT_TABLE_STATS, SYNC_INDEX_TREE, dict_table_stats_key);
+
+  LATCH_ADD_MUTEX(DICT_TABLE_STATS_COMPUTE, SYNC_TABLE_STATS_COMPUTE,
+                  dict_table_stats_compute_mutex_key);
 
   LATCH_ADD_RWLOCK(HASH_TABLE_RW_LOCK, SYNC_BUF_PAGE_HASH,
                    hash_table_locks_key);

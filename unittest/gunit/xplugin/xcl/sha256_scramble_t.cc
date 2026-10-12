@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,20 +25,19 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include "plugin/x/client/authentication/sha256_scramble_generator.h"
 
-namespace xcl {
-namespace sha256_scramble_unittest {
+namespace xcl::sha256_scramble_unittest {
 
 using namespace xcl::sha256_password;
 
 TEST(SHA256_digest_test, init_digest_context) {
-  SHA256_digest sha256_digest;
+  SHA256_digest const sha256_digest;
   ASSERT_TRUE(sha256_digest.all_ok());
 }
 
 TEST(SHA256_digest_test, digest_single_stage) {
   SHA256_digest sha256_digest;
   const char *plaintext1 = "quick brown fox jumped over the lazy dog";
-  size_t plaintext1_length = strlen(plaintext1);
+  size_t const plaintext1_length = strlen(plaintext1);
   unsigned char expected_digest1[] = {
       0x5c, 0xa1, 0xa2, 0x08, 0xc4, 0x61, 0x95, 0x3f, 0x7c, 0x12, 0xd2,
       0x79, 0xc7, 0xa8, 0x62, 0x0f, 0x3f, 0x83, 0x87, 0xf4, 0x09, 0x8c,
@@ -54,7 +54,7 @@ TEST(SHA256_digest_test, digest_single_stage) {
   sha256_digest.scrub();
 
   const char *plaintext2 = "ABCD1234%^&*";
-  size_t plaintext2_length = strlen(plaintext2);
+  size_t const plaintext2_length = strlen(plaintext2);
 
   unsigned char expected_digest2[] = {
       0xdd, 0xaf, 0x2b, 0xa0, 0x31, 0x73, 0x45, 0x3d, 0x72, 0x34, 0x51,
@@ -73,11 +73,11 @@ TEST(SHA256_digest_test, digest_single_stage) {
 TEST(SHA256_digest_test, digest_multi_stage) {
   SHA256_digest sha256_digest;
   const char *plaintext_input1 = "quick brown fox jumped over the lazy dog";
-  size_t plaintext_input1_length = strlen(plaintext_input1);
+  size_t const plaintext_input1_length = strlen(plaintext_input1);
   const char *plaintext_input2 = "ABCD1234%^&*";
-  size_t plaintext_input2_length = strlen(plaintext_input2);
+  size_t const plaintext_input2_length = strlen(plaintext_input2);
   const char *plaintext_input3 = "Hello World";
-  size_t plaintext_input3_length = strlen(plaintext_input3);
+  size_t const plaintext_input3_length = strlen(plaintext_input3);
 
   unsigned char digest_output[CACHING_SHA2_DIGEST_LENGTH];
 
@@ -119,8 +119,8 @@ TEST(SHA256_digest_test, digest_multi_stage) {
 }
 
 TEST(SHA256_digest_test, generate_scramble) {
-  std::string source = "Ab12#$Cd56&*";
-  std::string rnd = "eF!@34gH%^78";
+  std::string const source = "Ab12#$Cd56&*";
+  std::string const rnd = "eF!@34gH%^78";
   unsigned char scramble[CACHING_SHA2_DIGEST_LENGTH];
 
   Generate_scramble generate_scramble(source, rnd);
@@ -136,8 +136,8 @@ TEST(SHA256_digest_test, generate_scramble) {
 }
 
 TEST(SHA256_digest_test, generate_sha256_scramble) {
-  std::string source = "Ab12#$Cd56&*";
-  std::string rnd = "eF!@34gH%^78";
+  std::string const source = "Ab12#$Cd56&*";
+  std::string const rnd = "eF!@34gH%^78";
 
   unsigned char scramble[CACHING_SHA2_DIGEST_LENGTH];
 
@@ -154,5 +154,4 @@ TEST(SHA256_digest_test, generate_sha256_scramble) {
       memcmp(expected_scramble1, scramble, CACHING_SHA2_DIGEST_LENGTH) == 0);
 }
 
-}  // namespace sha256_scramble_unittest
-}  // namespace xcl
+}  // namespace xcl::sha256_scramble_unittest

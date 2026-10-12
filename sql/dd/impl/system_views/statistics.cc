@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,10 +25,10 @@
 
 #include <string>
 
+#include "sql/dd_table_share.h"  // dd::PERCONA_VECTOR_INDEX_TYPE_KEY
 #include "sql/stateless_allocator.h"
 
-namespace dd {
-namespace system_views {
+namespace dd::system_views {
 
 const Statistics_base &Statistics::instance() {
   static Statistics_base *s_instance = new Statistics();
@@ -69,10 +70,15 @@ Statistics_base::Statistics_base() {
   m_target_def.add_field(FIELD_PACKED, "PACKED", "NULL");
   m_target_def.add_field(FIELD_NULLABLE, "NULLABLE",
                          "IF (col.is_nullable = 1, 'YES','')");
-  m_target_def.add_field(FIELD_INDEX_TYPE, "INDEX_TYPE",
-                         "CASE WHEN idx.type = 'SPATIAL' THEN 'SPATIAL' "
-                         "WHEN idx.algorithm = 'SE_PRIVATE' THEN '' "
-                         "ELSE idx.algorithm END ");
+  m_target_def.add_field(
+      FIELD_INDEX_TYPE, "INDEX_TYPE",
+      dd::String_type("CASE WHEN idx.type = 'SPATIAL' THEN 'SPATIAL' "
+                      "WHEN idx.algorithm = 'SE_PRIVATE' THEN '' "
+                      "WHEN idx.algorithm = 'SE_SPECIFIC' AND "
+                      "GET_DD_PROPERTY_KEY_VALUE(idx.options, '") +
+          dd::PERCONA_VECTOR_INDEX_MARKER_KEY +
+          "') THEN 'VECTOR' "
+          "ELSE idx.algorithm END ");
   m_target_def.add_field(
       FIELD_COMMENT, "COMMENT",
       "IF (idx.type = 'PRIMARY' OR idx.type = 'UNIQUE', "
@@ -132,5 +138,4 @@ Show_statistics::Show_statistics() {
                          "COLUMN_ORDINAL_POSITION", "icu.ordinal_position");
 }
 
-}  // namespace system_views
-}  // namespace dd
+}  // namespace dd::system_views

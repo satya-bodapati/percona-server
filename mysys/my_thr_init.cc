@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -31,36 +32,34 @@
   thread variables.
 */
 
-#include <stdlib.h>
-#include <sys/types.h>
+#include <cassert>
+#include <cstdlib>  // IWYU pragma: keep free()
 #ifdef _WIN32
 #include <signal.h>
 #endif
-#include <time.h>
+#include <ctime>  // IWYU pragma: keep timespec
 
-#include "my_dbug.h"
-#include "my_inttypes.h"
-#include "my_macros.h"
+#include "my_dbug.h"  // IWYU pragma: keep DBUG_POP()
 #include "my_psi_config.h"
 #include "my_sys.h"
-#include "my_systime.h"
+#include "my_systime.h"  // IWYU pragma: keep Timeout_type
 #include "my_thread.h"
 #include "my_thread_local.h"
-#include "mysql/my_loglevel.h"
-#include "mysql/psi/mysql_cond.h"
+#include "mysql/my_loglevel.h"     // IWYU pragma: keep ERROR_LEVEL
+#include "mysql/psi/mysql_cond.h"  // IWYU pragma: keep mysql_cond_destroy
 #include "mysql/psi/mysql_mutex.h"
 #include "mysql/psi/mysql_thread.h"
-#include "mysql/psi/psi_thread.h"
 #include "mysys/mysys_priv.h"
-#include "mysys_err.h"
+#include "mysys_err.h"  // IWYU pragma: keep EE_FAILED_TO_KILL_ALL_THREADS
 #include "thr_mutex.h"
 
 static bool my_thread_global_init_done = false;
 #ifndef NDEBUG
-static uint THR_thread_count = 0;
+static unsigned THR_thread_count = 0;
 static Timeout_type my_thread_end_wait_time = 5;
 static my_thread_id thread_id = 0;
 struct st_my_thread_var;
+static st_my_thread_var *THR_mysys_main = nullptr;
 static thread_local st_my_thread_var *THR_mysys = nullptr;
 #endif
 static thread_local int THR_myerrno = 0;
@@ -91,6 +90,7 @@ static void install_sigabrt_handler();
 #endif
 
 #ifndef NDEBUG
+struct CODE_STATE;
 struct st_my_thread_var {
   my_thread_id id;
   struct CODE_STATE *dbug;
@@ -102,6 +102,8 @@ static int set_mysys_thread_var(struct st_my_thread_var *mysys_var) {
   THR_mysys = mysys_var;
   return 0;
 }
+
+static void free_dbug_and_decr_thread_count(st_my_thread_var *);
 #endif
 
 /**
@@ -259,7 +261,7 @@ void my_thread_global_end() {
   @retval true   Fatal error; mysys/dbug functions can't be used
 */
 
-extern "C" bool my_thread_init() {
+bool my_thread_init() {
 #ifndef NDEBUG
   struct st_my_thread_var *tmp;
 #endif
@@ -278,12 +280,28 @@ extern "C" bool my_thread_init() {
 
   mysql_mutex_lock(&THR_LOCK_threads);
   tmp->id = ++thread_id;
+  if (thread_id == 1) THR_mysys_main = tmp;
   ++THR_thread_count;
   mysql_mutex_unlock(&THR_LOCK_threads);
   set_mysys_thread_var(tmp);
 #endif
 
   return false;
+}
+
+bool my_thread_is_inited() {
+#ifndef NDEBUG
+  return mysys_thread_var() != nullptr;
+#else
+  /*
+    Return true here because for non-debug binaries my_thread_end() should not
+    be called on native threads because my_thread_init() is a no-op for these
+    and my_thread_end() just deregisters the thread from P_S.
+    And since there's no registration in P_S at my_thread_init() we should not
+    be calling my_thread_end() for these threads.
+  */
+  return true;
+#endif
 }
 
 /**
@@ -294,11 +312,7 @@ extern "C" bool my_thread_init() {
   mysql_server_end() and then ends with a mysql_end().
 */
 
-extern "C" void my_thread_end() {
-#ifndef NDEBUG
-  struct st_my_thread_var *tmp = mysys_thread_var();
-#endif
-
+void my_thread_end() {
 #ifdef HAVE_PSI_THREAD_INTERFACE
   /*
     Remove the instrumentation for this thread.
@@ -309,6 +323,21 @@ extern "C" void my_thread_end() {
 #endif
 
 #if !defined(NDEBUG)
+  free_dbug_and_decr_thread_count(mysys_thread_var());
+  set_mysys_thread_var(nullptr);
+#endif
+}
+
+#if !defined(NDEBUG)
+/* my_main_thread_end() is used when my_end() is called from a different
+   thread than my_init() and with flag MY_END_PROXY_MAIN_THD set.
+*/
+extern void my_main_thread_end() {
+  assert(mysys_thread_var() == nullptr);  // calling thread is not a mysys thd
+  free_dbug_and_decr_thread_count(THR_mysys_main);
+}
+
+static void free_dbug_and_decr_thread_count(st_my_thread_var *tmp) {
   if (tmp) {
     /* tmp->dbug is allocated inside DBUG library */
     if (tmp->dbug) {
@@ -329,9 +358,8 @@ extern "C" void my_thread_end() {
     if (--THR_thread_count == 0) mysql_cond_signal(&THR_COND_threads);
     mysql_mutex_unlock(&THR_LOCK_threads);
   }
-  set_mysys_thread_var(nullptr);
-#endif
 }
+#endif
 
 int my_errno() { return THR_myerrno; }
 

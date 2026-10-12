@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -106,7 +107,9 @@ int Primary_election_secondary_process::launch_secondary_election_process(
   while (election_process_thd_state.is_alive_not_running()) {
     DBUG_PRINT("sleep",
                ("Waiting for the Primary election process thread to start"));
-    mysql_cond_wait(&election_cond, &election_lock);
+    struct timespec abstime;
+    set_timespec(&abstime, 1);
+    mysql_cond_timedwait(&election_cond, &election_lock, &abstime);
   }
   mysql_mutex_unlock(&election_lock);
 
@@ -140,14 +143,16 @@ int Primary_election_secondary_process::secondary_election_process_handler() {
   mysql_mutex_lock(&election_lock);
   while (!primary_ready && !election_process_aborted) {
     DBUG_PRINT("sleep", ("Waiting for the primary member to be ready"));
-    mysql_cond_wait(&election_cond, &election_lock);
+    struct timespec abstime;
+    set_timespec(&abstime, 1);
+    mysql_cond_timedwait(&election_cond, &election_lock, &abstime);
   }
   mysql_mutex_unlock(&election_lock);
   stage_handler->set_completed_work(1);
 
   if (election_process_aborted) goto end;
 
-  if (enable_read_mode_on_server()) {
+  if (enable_read_mode_on_server("(GR) new primary elected")) {
     if (!election_process_aborted && !get_server_shutdown_status()) {
       abort_plugin_process(
           "Cannot enable the super read only mode on a secondary member.");
@@ -187,7 +192,9 @@ int Primary_election_secondary_process::secondary_election_process_handler() {
   mysql_mutex_lock(&election_lock);
   while (!group_in_read_mode && !election_process_aborted) {
     DBUG_PRINT("sleep", ("Waiting for the group to be in read mode."));
-    mysql_cond_wait(&election_cond, &election_lock);
+    struct timespec abstime;
+    set_timespec(&abstime, 1);
+    mysql_cond_timedwait(&election_cond, &election_lock, &abstime);
   }
   mysql_mutex_unlock(&election_lock);
 
@@ -203,7 +210,9 @@ wait_for_queued_message:
   while (waiting_on_old_primary_transactions && !election_process_aborted) {
     DBUG_PRINT("sleep", ("Waiting for the primary member to execute all "
                          "previous transactions"));
-    mysql_cond_wait(&election_cond, &election_lock);
+    struct timespec abstime;
+    set_timespec(&abstime, 1);
+    mysql_cond_timedwait(&election_cond, &election_lock, &abstime);
   }
   mysql_mutex_unlock(&election_lock);
 
@@ -214,13 +223,12 @@ end:
   primary_election_handler->set_election_running(false);
 
   if (!election_process_aborted && !error) {
-    Group_member_info *primary_member_info =
-        group_member_mgr->get_group_member_info(primary_uuid);
-    if (primary_member_info != nullptr) {
+    Group_member_info primary_member_info;
+    if (!group_member_mgr->get_group_member_info(primary_uuid,
+                                                 primary_member_info)) {
       LogPluginErr(SYSTEM_LEVEL, ER_GRP_RPL_SRV_SECONDARY_MEM,
-                   primary_member_info->get_hostname().c_str(),
-                   primary_member_info->get_port());
-      delete primary_member_info;
+                   primary_member_info.get_hostname().c_str(),
+                   primary_member_info.get_port());
     }
   }
 
@@ -262,13 +270,14 @@ bool Primary_election_secondary_process::is_election_process_running() {
   return election_process_thd_state.is_thread_alive();
 }
 
-bool Primary_election_secondary_process::enable_read_mode_on_server() {
+bool Primary_election_secondary_process::enable_read_mode_on_server(
+    const std::string &reason) {
   int error = 0;
   remote_clone_handler->lock_gr_clone_read_mode_lock();
 
   if (!plugin_is_group_replication_cloning()) {
     if (!error && !election_process_aborted) {
-      error = enable_server_read_mode();
+      error = enable_server_read_mode(reason);
     }
   }
 
@@ -326,9 +335,7 @@ int Primary_election_secondary_process::after_view_change(
     }
   }
 
-  Group_member_info *member_info =
-      group_member_mgr->get_group_member_info(primary_uuid);
-  if (member_info == nullptr) {
+  if (!group_member_mgr->is_member_info_present(primary_uuid)) {
     if (!group_in_read_mode) {
       election_process_aborted = true;
     } else {
@@ -337,7 +344,6 @@ int Primary_election_secondary_process::after_view_change(
     }
     mysql_cond_broadcast(&election_cond);
   }
-  delete member_info;
 
   mysql_mutex_unlock(&election_lock);
   return 0;
@@ -422,7 +428,9 @@ int Primary_election_secondary_process::terminate_election_process(bool wait) {
     while (election_process_thd_state.is_thread_alive()) {
       DBUG_PRINT("sleep", ("Waiting for the Primary election secondary process "
                            "thread to finish"));
-      mysql_cond_wait(&election_cond, &election_lock);
+      struct timespec abstime;
+      set_timespec(&abstime, 1);
+      mysql_cond_timedwait(&election_cond, &election_lock, &abstime);
     }
 
     assert(election_process_thd_state.is_thread_dead());

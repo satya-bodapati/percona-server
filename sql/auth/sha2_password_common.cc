@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,13 +30,14 @@
 #include <alloca.h>
 #endif
 #include <openssl/evp.h>
-#include <string.h>
 #include <sys/types.h>
+#include <cstring>
 #include <string>
 
 #include "my_compiler.h"
 #include "my_dbug.h"      /* DBUG instrumentation */
 #include "my_inttypes.h"  // IWYU pragma: keep
+#include "my_ssl_algo_cache.h"
 #include "sql/auth/i_sha2_password_common.h"
 
 namespace sha2_password {
@@ -135,7 +137,7 @@ void SHA256_digest::init() {
     return;
   }
 
-  m_ok = (bool)EVP_DigestInit_ex(md_context, EVP_sha256(), nullptr);
+  m_ok = (bool)EVP_DigestInit_ex(md_context, my_EVP_sha256(), nullptr);
 
   if (!m_ok) {
     EVP_MD_CTX_destroy(md_context);
@@ -162,7 +164,7 @@ void SHA256_digest::deinit() {
   @param [in] digest_type Digest type
 */
 Generate_scramble::Generate_scramble(
-    const std::string source, const std::string rnd,
+    const std::string &source, const std::string &rnd,
     Digest_info digest_type) /* = Digest_info::SHA256_DIGEST */
     : m_src(source), m_rnd(rnd), m_digest_type(digest_type) {
   switch (m_digest_type) {
@@ -181,7 +183,7 @@ Generate_scramble::Generate_scramble(
 */
 
 Generate_scramble::~Generate_scramble() {
-  if (m_digest_generator) delete m_digest_generator;
+  delete m_digest_generator;
   m_digest_generator = nullptr;
 }
 
@@ -295,7 +297,7 @@ Validate_scramble::Validate_scramble(
 /** Validate_scramble destructor */
 
 Validate_scramble::~Validate_scramble() {
-  if (m_digest_generator) delete m_digest_generator;
+  delete m_digest_generator;
   m_digest_generator = nullptr;
 }
 
@@ -387,8 +389,8 @@ bool generate_sha256_scramble(unsigned char *scramble, size_t scramble_size,
                               const char *src, size_t src_size, const char *rnd,
                               size_t rnd_size) {
   DBUG_TRACE;
-  std::string source(src, src_size);
-  std::string random(rnd, rnd_size);
+  std::string const source(src, src_size);
+  std::string const random(rnd, rnd_size);
 
   sha2_password::Generate_scramble scramble_generator(source, random);
   if (scramble_generator.scramble(scramble, scramble_size)) {

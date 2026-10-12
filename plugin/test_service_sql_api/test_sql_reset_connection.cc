@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,8 +25,8 @@
 
 #include <fcntl.h>
 #include <mysql/plugin.h>
-#include <stdlib.h>
 #include <sys/types.h>
+#include <cstdlib>
 #include <memory>
 
 #include <mysql/components/my_service.h>
@@ -54,6 +55,10 @@ static void WRITE_STR(const char *format) {
   my_write(outfile, (uchar *)buffer, strlen(buffer), MYF(0));
 }
 
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wmissing-format-attribute"
+#endif
 template <typename T>
 void WRITE_VAL(const char *format, T value) {
   char buffer[STRING_BUFFER];
@@ -67,6 +72,9 @@ void WRITE_VAL2(const char *format, T1 value1, T2 value2) {
   snprintf(buffer, sizeof(buffer), format, value1, value2);
   my_write(outfile, (uchar *)buffer, strlen(buffer), MYF(0));
 }
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 static const char *sep =
     "=======================================================================\n";
@@ -144,7 +152,7 @@ struct st_plugin_ctx {
 
 static int sql_start_result_metadata(void *ctx, uint num_cols, uint,
                                      const CHARSET_INFO *resultcs) {
-  auto pctx = (struct st_plugin_ctx *)ctx;
+  auto *pctx = (struct st_plugin_ctx *)ctx;
   DBUG_TRACE;
   DBUG_PRINT("info", ("resultcs->number: %d", resultcs->number));
   DBUG_PRINT("info", ("resultcs->csname: %s", resultcs->csname));
@@ -157,7 +165,7 @@ static int sql_start_result_metadata(void *ctx, uint num_cols, uint,
 
 static int sql_field_metadata(void *ctx, struct st_send_field *field,
                               const CHARSET_INFO *) {
-  auto pctx = (struct st_plugin_ctx *)ctx;
+  auto *pctx = (struct st_plugin_ctx *)ctx;
   st_send_field_n *cfield = &pctx->sql_field[pctx->current_col];
   DBUG_TRACE;
   DBUG_PRINT("info", ("field->db_name: %s", field->db_name));
@@ -188,7 +196,7 @@ static int sql_field_metadata(void *ctx, struct st_send_field *field,
 
 static int sql_end_result_metadata(void *ctx, uint server_status,
                                    uint warn_count) {
-  struct st_plugin_ctx *pctx = (struct st_plugin_ctx *)ctx;
+  auto *pctx = (struct st_plugin_ctx *)ctx;
   DBUG_TRACE;
   pctx->meta_server_status = server_status;
   pctx->meta_warn_count = warn_count;
@@ -197,21 +205,21 @@ static int sql_end_result_metadata(void *ctx, uint server_status,
 }
 
 static int sql_start_row(void *ctx) {
-  struct st_plugin_ctx *pctx = (struct st_plugin_ctx *)ctx;
+  auto *pctx = (struct st_plugin_ctx *)ctx;
   DBUG_TRACE;
   pctx->current_col = 0;
   return false;
 }
 
 static int sql_end_row(void *ctx) {
-  struct st_plugin_ctx *pctx = (struct st_plugin_ctx *)ctx;
+  auto *pctx = (struct st_plugin_ctx *)ctx;
   DBUG_TRACE;
   pctx->num_rows++;
   return false;
 }
 
 static void sql_abort_row(void *ctx) {
-  struct st_plugin_ctx *pctx = (struct st_plugin_ctx *)ctx;
+  auto *pctx = (struct st_plugin_ctx *)ctx;
   DBUG_TRACE;
   pctx->current_col = 0;
 }
@@ -222,7 +230,7 @@ static ulong sql_get_client_capabilities(void *) {
 }
 
 static int sql_get_null(void *ctx) {
-  struct st_plugin_ctx *pctx = (struct st_plugin_ctx *)ctx;
+  auto *pctx = (struct st_plugin_ctx *)ctx;
   DBUG_TRACE;
   const uint row = pctx->num_rows;
   const uint col = pctx->current_col;
@@ -235,7 +243,7 @@ static int sql_get_null(void *ctx) {
 }
 
 static int sql_get_integer(void *ctx, longlong value) {
-  struct st_plugin_ctx *pctx = (struct st_plugin_ctx *)ctx;
+  auto *pctx = (struct st_plugin_ctx *)ctx;
   DBUG_TRACE;
   const uint row = pctx->num_rows;
   const uint col = pctx->current_col;
@@ -250,7 +258,7 @@ static int sql_get_integer(void *ctx, longlong value) {
 }
 
 static int sql_get_longlong(void *ctx, longlong value, uint is_unsigned) {
-  struct st_plugin_ctx *pctx = (struct st_plugin_ctx *)ctx;
+  auto *pctx = (struct st_plugin_ctx *)ctx;
   DBUG_TRACE;
   const uint row = pctx->num_rows;
   const uint col = pctx->current_col;
@@ -266,7 +274,7 @@ static int sql_get_longlong(void *ctx, longlong value, uint is_unsigned) {
 }
 
 static int sql_get_decimal(void *ctx, const decimal_t *value) {
-  struct st_plugin_ctx *pctx = (struct st_plugin_ctx *)ctx;
+  auto *pctx = (struct st_plugin_ctx *)ctx;
   DBUG_TRACE;
   const uint row = pctx->num_rows;
   const uint col = pctx->current_col;
@@ -282,7 +290,7 @@ static int sql_get_decimal(void *ctx, const decimal_t *value) {
 }
 
 static int sql_get_double(void *ctx, double value, uint32 /*decimals*/) {
-  struct st_plugin_ctx *pctx = (struct st_plugin_ctx *)ctx;
+  auto *pctx = (struct st_plugin_ctx *)ctx;
   DBUG_TRACE;
   const uint row = pctx->num_rows;
   const uint col = pctx->current_col;
@@ -298,7 +306,7 @@ static int sql_get_double(void *ctx, double value, uint32 /*decimals*/) {
 }
 
 static int sql_get_date(void *ctx, const MYSQL_TIME *value) {
-  struct st_plugin_ctx *pctx = (struct st_plugin_ctx *)ctx;
+  auto *pctx = (struct st_plugin_ctx *)ctx;
   DBUG_TRACE;
   const uint row = pctx->num_rows;
   const uint col = pctx->current_col;
@@ -314,7 +322,7 @@ static int sql_get_date(void *ctx, const MYSQL_TIME *value) {
 }
 
 static int sql_get_time(void *ctx, const MYSQL_TIME *value, uint /*decimals*/) {
-  struct st_plugin_ctx *pctx = (struct st_plugin_ctx *)ctx;
+  auto *pctx = (struct st_plugin_ctx *)ctx;
   DBUG_TRACE;
   const uint row = pctx->num_rows;
   const uint col = pctx->current_col;
@@ -333,7 +341,7 @@ static int sql_get_time(void *ctx, const MYSQL_TIME *value, uint /*decimals*/) {
 
 static int sql_get_datetime(void *ctx, const MYSQL_TIME *value,
                             uint /*decimals*/) {
-  struct st_plugin_ctx *pctx = (struct st_plugin_ctx *)ctx;
+  auto *pctx = (struct st_plugin_ctx *)ctx;
   DBUG_TRACE;
   const uint row = pctx->num_rows;
   const uint col = pctx->current_col;
@@ -351,7 +359,7 @@ static int sql_get_datetime(void *ctx, const MYSQL_TIME *value,
 
 static int sql_get_string(void *ctx, const char *const value, size_t length,
                           const CHARSET_INFO *const) {
-  struct st_plugin_ctx *pctx = (struct st_plugin_ctx *)ctx;
+  auto *pctx = (struct st_plugin_ctx *)ctx;
   DBUG_TRACE;
   const uint row = pctx->num_rows;
   const uint col = pctx->current_col;
@@ -366,7 +374,7 @@ static int sql_get_string(void *ctx, const char *const value, size_t length,
 static void sql_handle_ok(void *ctx, uint server_status,
                           uint statement_warn_count, ulonglong affected_rows,
                           ulonglong last_insert_id, const char *const message) {
-  struct st_plugin_ctx *pctx = (struct st_plugin_ctx *)ctx;
+  auto *pctx = (struct st_plugin_ctx *)ctx;
   DBUG_TRACE;
   /* This could be an EOF */
   if (!pctx->num_cols) pctx->num_rows = 0;
@@ -381,7 +389,7 @@ static void sql_handle_ok(void *ctx, uint server_status,
 static void sql_handle_error(void *ctx, uint sql_errno,
                              const char *const err_msg,
                              const char *const sqlstate) {
-  struct st_plugin_ctx *pctx = (struct st_plugin_ctx *)ctx;
+  auto *pctx = (struct st_plugin_ctx *)ctx;
   DBUG_TRACE;
   pctx->sql_errno = sql_errno;
   if (pctx->sql_errno) {
@@ -520,7 +528,7 @@ struct Thread_data {
 };
 
 static void *test_session_thread(void *ctxt) {
-  auto thread_data = (Thread_data *)ctxt;
+  auto *thread_data = (Thread_data *)ctxt;
 
   if (srv_session_init_thread(thread_data->p))
     LogPluginErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG,
@@ -590,7 +598,7 @@ static void test_com_reset_connection(void *p) {
 
   const my_thread_id session_id = srv_session_info_get_session_id(st_session);
 
-  std::unique_ptr<st_plugin_ctx> ctx(new st_plugin_ctx());
+  std::unique_ptr<st_plugin_ctx> const ctx(new st_plugin_ctx());
   query_execute(st_session, ctx.get(), "set @secret = 123");
   query_execute(st_session, ctx.get(), "select @secret");
   reset_connection(st_session, ctx.get());
@@ -612,7 +620,7 @@ static void test_com_reset_connection_from_another_session(void *p) {
 
   const my_thread_id session_id = srv_session_info_get_session_id(st_session);
 
-  std::unique_ptr<st_plugin_ctx> ctx(new st_plugin_ctx());
+  std::unique_ptr<st_plugin_ctx> const ctx(new st_plugin_ctx());
   query_execute(st_session, ctx.get(), "set @another_secret = 456");
   query_execute(st_session, ctx.get(), "select @another_secret");
   WRITE_STR(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n");
@@ -665,9 +673,9 @@ long long reset_connection_exe(UDF_INIT *, UDF_ARGS *, unsigned char *,
 
 void register_udf_reset_connection() {
   DBUG_TRACE;
-  auto reg = mysql_plugin_registry_acquire();
+  const auto *reg = mysql_plugin_registry_acquire();
   {
-    Udf_registrator udf_reg{"udf_registration", reg};
+    Udf_registrator const udf_reg{"udf_registration", reg};
     if (udf_reg.is_valid()) {
       udf_reg->udf_register(
           "reset_connection", INT_RESULT,
@@ -682,9 +690,9 @@ void register_udf_reset_connection() {
 
 void unregister_udf_reset_connection() {
   DBUG_TRACE;
-  auto reg = mysql_plugin_registry_acquire();
+  const auto *reg = mysql_plugin_registry_acquire();
   {
-    Udf_registrator udf_reg{"udf_registration", reg};
+    Udf_registrator const udf_reg{"udf_registration", reg};
     if (udf_reg.is_valid()) {
       int was_present = 0;
       udf_reg->udf_unregister("reset_connection", &was_present);

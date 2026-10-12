@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,12 +21,12 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
-#include <assert.h>
+#include <cassert>
 #ifdef _MSC_VER
 #include <stdint.h>
 #endif
 #include <rpc/rpc.h>
-#include <stdlib.h>
+#include <cstdlib>
 
 #include "xcom/app_data.h"
 #include "xcom/bitset.h"
@@ -77,19 +78,19 @@ static pax_msg *init_pax_msg(pax_msg *p, int refcnt, synode_no synode,
 
 pax_msg *pax_msg_new(synode_no synode, site_def const *site) {
   pax_msg *p = (pax_msg *)xcom_calloc((size_t)1, sizeof(pax_msg));
-  IFDBG(D_NONE, FN; PTREXP(p));
+  XCOM_IFDBG(D_NONE, FN; PTREXP(p));
   return init_pax_msg(p, 0, synode, site);
 }
 
 pax_msg *pax_msg_new_0(synode_no synode) {
   pax_msg *p = (pax_msg *)xcom_calloc((size_t)1, sizeof(pax_msg));
-  IFDBG(D_NONE, FN; PTREXP(p));
+  XCOM_IFDBG(D_NONE, FN; PTREXP(p));
   return init_pax_msg(p, 0, synode, nullptr);
 }
 
 pax_msg *clone_pax_msg_no_app(pax_msg *msg) {
   pax_msg *p = (pax_msg *)xcom_calloc((size_t)1, sizeof(pax_msg));
-  IFDBG(D_NONE, FN; STRLIT("clone_pax_msg"); PTREXP(p));
+  XCOM_IFDBG(D_NONE, FN; STRLIT("clone_pax_msg"); PTREXP(p));
   *p = *msg;
   p->refcnt = 0;
   p->receivers = clone_bit_set(msg->receivers);
@@ -112,7 +113,7 @@ pax_msg *clone_pax_msg(pax_msg *msg) {
 }
 
 void delete_pax_msg(pax_msg *p) {
-  IFDBG(D_NONE, FN; STRLIT("delete_pax_msg"); PTREXP(p));
+  XCOM_IFDBG(D_NONE, FN; STRLIT("delete_pax_msg"); PTREXP(p));
   XCOM_XDR_FREE(xdr_pax_msg, p);
 }
 

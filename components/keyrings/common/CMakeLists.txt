@@ -1,15 +1,16 @@
-# Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,6 +23,10 @@
 
 ADD_WSHADOW_WARNING()
 
+# Use default value for -ftls-model which is global-dynamic with -fPIC
+REMOVE_CMAKE_COMPILER_FLAGS(CMAKE_C_FLAGS "-ftls-model=initial-exec")
+REMOVE_CMAKE_COMPILER_FLAGS(CMAKE_CXX_FLAGS "-ftls-model=initial-exec")
+
 SET(KEYRING_COMMON_SOURCES
   # Component implementation helpers
   component_helpers/src/keyring_log_builtins_definition.cc
@@ -29,7 +34,6 @@ SET(KEYRING_COMMON_SOURCES
   # Data representation
   data/data.cc
   data/meta.cc
-  data/pfs_string.cpp
   # File reader/writer
   data_file/reader.cc
   data_file/writer.cc
@@ -65,3 +69,14 @@ ADD_CONVENIENCE_LIBRARY(
     $<TARGET_PROPERTY:extra::rapidjson,INTERFACE_COMPILE_DEFINITIONS>
   LINK_LIBRARIES library_mysys extra::rapidjson
 )
+
+IF(MY_COMPILER_IS_GNU AND FPROFILE_USE)
+  ADD_COMPILE_FLAGS(
+    component_helpers/src/keyring_log_builtins_definition.cc
+    json_data/json_reader.cc
+    COMPILE_FLAGS
+    "-Wno-array-bounds"
+    "-Wno-restrict"
+    "-Wno-stringop-overflow"
+    )
+ENDIF()

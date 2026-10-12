@@ -1,6 +1,12 @@
 --echo #
 --echo # Start out by testing some simple in-memory inner hash joins.
 --echo #
+
+# Note: With the current cost model for the hypergraph optimizer
+# we need at least ~6 rows in each table in order for the optimizer to select a hash join.
+# Once the hypergraph optimizer supports the right type of hints, we should force it to
+# use hash joins where possible rather than relying on the cost model.
+
 # Test case is unstable in valgrind
 --source include/not_valgrind.inc
 --source include/elide_costs.inc
@@ -8,9 +14,10 @@
 --echo # Join on two integer columns.
 CREATE TABLE t1 (col1 INTEGER);
 CREATE TABLE t2 (col1 INTEGER);
-INSERT INTO t1 VALUES (1), (3), (5), (7);
-INSERT INTO t2 VALUES (1), (2), (5), (6);
+INSERT INTO t1 VALUES (1), (3), (5), (7), (7), (7);
+INSERT INTO t2 VALUES (1), (2), (5), (6), (6), (6);
 ANALYZE TABLE t1, t2;
+--replace_regex $elide_costs
 EXPLAIN FORMAT=tree
   SELECT t1.col1, t2.col1 FROM t1 JOIN t2 ON t1.col1 = t2.col1 ORDER BY t1.col1;
 SELECT t1.col1, t2.col1 FROM t1 JOIN t2 ON t1.col1 = t2.col1 ORDER BY t1.col1;
@@ -19,9 +26,10 @@ DROP TABLE t1, t2;
 --echo # Join on a integer column and a string column.
 CREATE TABLE t1 (col1 INTEGER);
 CREATE TABLE t2 (col1 VARCHAR(255));
-INSERT INTO t1 VALUES (1), (3), (5), (7);
-INSERT INTO t2 VALUES (1), (2), (5), (6);
+INSERT INTO t1 VALUES (1), (3), (5), (7), (7), (7);
+INSERT INTO t2 VALUES (1), (2), (5), (6), (6), (6);
 ANALYZE TABLE t1, t2;
+--replace_regex $elide_costs
 EXPLAIN FORMAT=tree
   SELECT t1.col1, t2.col1 FROM t1 JOIN t2 ON t1.col1 = t2.col1 ORDER BY t1.col1;
 SELECT t1.col1, t2.col1 FROM t1 JOIN t2 ON t1.col1 = t2.col1 ORDER BY t1.col1;
@@ -55,10 +63,11 @@ DROP TABLE t1, t2;
 --echo # Join on a string and datetime column, where datetime comparison is
 --echo # picked.
 CREATE TABLE t1 (a DATETIME);
-INSERT INTO t1 VALUES ('2001-01-01 00:00:00'), (NULL);
+INSERT INTO t1 VALUES ('2001-01-01 00:00:00'), (NULL), ('2002-01-01 00:00:00'),
+('2002-01-01 00:00:00'), ('2002-01-01 00:00:00'), ('2002-01-01 00:00:00');
 
 CREATE TABLE t2 (b VARCHAR(64));
-INSERT INTO t2 VALUES ('2001#01#01'), (NULL), (NULL);
+INSERT INTO t2 VALUES ('2001#01#01'), (NULL), (NULL), ('1999-01-01'), ('1999-01-01'), ('1999-01-01');
 ANALYZE TABLE t1, t2;
 --replace_regex $elide_costs
 EXPLAIN FORMAT=tree SELECT * FROM t1, t2 WHERE a=b;
@@ -108,9 +117,9 @@ DROP TABLE t1, t2;
 --echo # zeroes should compare equally.
 CREATE TABLE t1 (col1 BIGINT);
 CREATE TABLE t2 (col1 DECIMAL(64,30));
-INSERT INTO t1 VALUES (0), (1), (5), (NULL);
+INSERT INTO t1 VALUES (0), (1), (5), (10), (10), (NULL);
 INSERT INTO t2 VALUES (0), (0.1), (0.000000000000000000000000000001),
-                      (5.000000000000000000000000000000), (NULL);
+                      (5.000000000000000000000000000000), (6), (NULL);
 ANALYZE TABLE t1, t2;
 --replace_regex $elide_costs
 EXPLAIN FORMAT=tree SELECT * FROM t1,t2 WHERE t1.col1 = t2.col1;
@@ -123,8 +132,8 @@ DROP TABLE t1, t2;
 
 CREATE TABLE t1 (col1 DECIMAL(5));
 CREATE TABLE t2 (col1 BIGINT);
-INSERT INTO t1 VALUES (1), (NULL);
-INSERT INTO t2 VALUES (1), (0), (NULL);
+INSERT INTO t1 VALUES (1), (2), (2), (2), (2), (NULL);
+INSERT INTO t2 VALUES (1), (0), (3), (3), (3), (NULL);
 ANALYZE TABLE t1, t2;
 --replace_regex $elide_costs
 EXPLAIN FORMAT=tree SELECT * FROM t1,t2 where t1.col1=t2.col1;
@@ -139,8 +148,8 @@ DROP TABLE t1, t2;
 --echo # Bit fields, which is a bit different depending on the storage engine.
 create table t1 (id1 int, b1 bit(1)) engine = myisam;
 create table t2 (id2 int, b2 bit(1)) engine = myisam;
-insert into t1 values (2, 0), (3, 1), (null, null);
-insert into t2 values (2, 1), (3, 0), (null, null);
+insert into t1 values (2, 0), (3, 1), (4, 0), (4, 0), (4, 0), (null, null);
+insert into t2 values (2, 1), (3, 0), (5, 0), (5, 0), (5, 0), (null, null);
 ANALYZE TABLE t1, t2;
 --replace_regex $elide_costs
 EXPLAIN FORMAT=tree SELECT * FROM t1, t2 WHERE id1 = id2;
@@ -153,8 +162,8 @@ DROP TABLE t1, t2;
 
 create table t1 (id1 int, b1 bit(64)) engine = innodb;
 create table t2 (id2 int, b2 bit(64)) engine = innodb;
-insert into t1 values (2, 0), (3, 2), (null, null);
-insert into t2 values (2, 2), (3, 0), (null, null);
+insert into t1 values (2, 0), (3, 2), (4, 4), (4, 4), (4, 4), (null, null);
+insert into t2 values (2, 2), (3, 0), (5, 4), (5, 4), (5, 4), (null, null);
 ANALYZE TABLE t1, t2;
 --replace_regex $elide_costs
 EXPLAIN FORMAT=tree SELECT * FROM t1, t2 WHERE id1 = id2;
@@ -168,8 +177,8 @@ DROP TABLE t1, t2;
 --echo # See that we handle NULL values properly.
 CREATE TABLE t1 (col1 VARCHAR(255));
 CREATE TABLE t2 (col1 VARCHAR(255));
-INSERT INTO t1 VALUES (NULL), ('a');
-INSERT INTO t2 VALUES (''), (NULL), ('x'), ('y');
+INSERT INTO t1 VALUES (NULL), ('a'), ('a'), ('a'), ('a'), ('a');
+INSERT INTO t2 VALUES (''), (NULL), ('x'), ('y'), ('y'), ('y');
 ANALYZE TABLE t1, t2;
 --replace_regex $elide_costs
 EXPLAIN FORMAT=tree SELECT * FROM t1, t2 WHERE t1.col1 = t2.col1;
@@ -349,14 +358,27 @@ SET time_zone = DEFAULT;
 --echo # join to keep the row ID for each row, so that the duplicate removal
 --echo # works.
 --echo #
+
+# It seems like the intention of this test case is to test that the following type of plan works,
+#
+# -> Remove duplicate t2 rows using temporary table (weedout)  (rows=2)
+#     -> Inner hash join (t1.i = t2.i)  (rows=2)
+#         -> Table scan on t1  (rows=3)
+#         -> Hash
+#             -> Table scan on t2  (rows=2)
+#
+# However, the hypergraph optimizer seems to prefer either using a hash semijoin
+# or a NLJ with sorting for duplicate removal.
+
 SET optimizer_switch="materialization=off,firstmatch=off";
 CREATE TABLE t1 (i BIGINT);
 CREATE TABLE t2 (i BIGINT);
 INSERT INTO t1 VALUES (1), (2), (3);
-INSERT INTO t2 VALUES (2), (3);
+INSERT INTO t2 VALUES (2), (3), (4);
 ANALYZE TABLE t1, t2;
 --replace_regex $elide_costs
 EXPLAIN FORMAT=tree SELECT * FROM t2 WHERE (t2.i) IN (SELECT t1.i FROM t1);
+
 SELECT * FROM t2 WHERE (t2.i) IN (SELECT t1.i FROM t1);
 
 --echo # Increase the data volume, and reduce the join_buffer_size, in order to
@@ -416,8 +438,8 @@ DROP TABLE t;
 --echo # make this query deterministic.
 CREATE TABLE t1 (col1 INTEGER);
 CREATE TABLE t2 (col1 INTEGER);
-INSERT INTO t1 VALUES (1), (2);
-INSERT INTO t2 VALUES (1), (2);
+INSERT INTO t1 VALUES (1), (2), (3), (3), (3), (3);
+INSERT INTO t2 VALUES (1), (2), (4), (4), (4), (4);
 ANALYZE TABLE t1, t2;
 
 let $query = SELECT
@@ -441,8 +463,7 @@ CREATE TABLE c (
   col1 varchar(1)
 ) ENGINE = myisam;
 
-INSERT INTO c VALUES ('w');
-INSERT INTO c VALUES ('d');
+INSERT INTO c VALUES ('a'), ('b'), ('c'), ('d'), ('e'), ('f');
 ANALYZE TABLE c;
 
 let $query = SELECT *
@@ -473,10 +494,12 @@ CREATE TABLE t1 (i INTEGER) ENGINE = MyISAM;
 CREATE TABLE t2 (i INTEGER) ENGINE = MyISAM;
 CREATE TABLE t3 (i INTEGER) ENGINE = MyISAM;
 
-INSERT INTO t1 VALUES (2);
-INSERT INTO t2 VALUES (2);
+INSERT INTO t1 VALUES (2), (3), (3), (3), (3), (3);
+INSERT INTO t2 VALUES (2), (4), (4), (4), (4), (4);
 ANALYZE TABLE t1, t2;
 
+--echo # Note: plan change with new hypergraph cost model.
+--echo # Seems to avoid the undesirable plan.
 --replace_regex $elide_costs
 EXPLAIN FORMAT=tree
   SELECT * FROM t1 WHERE (t1.i) IN  (SELECT t3.i FROM t2 STRAIGHT_JOIN t3);
@@ -506,8 +529,8 @@ DROP TABLE t1,t3;
 --echo # but still uses join buffering.
 CREATE TABLE t1 (col1 INTEGER);
 CREATE TABLE t2 (col1 INTEGER);
-INSERT INTO t1 VALUES (1), (2);
-INSERT INTO t2 VALUES (2);
+INSERT INTO t1 VALUES (1), (2), (3), (3), (3), (3), (3), (3), (3), (3);
+INSERT INTO t2 VALUES (2), (4), (4), (4), (4), (4), (4), (4), (4), (4);
 ANALYZE TABLE t1, t2;
 --replace_regex $elide_costs
 EXPLAIN FORMAT=tree SELECT * FROM t1 LEFT JOIN t2 ON t1.col1 = t2.col1;
@@ -519,8 +542,8 @@ DROP TABLE t1, t2;
 --echo # the join.
 CREATE TABLE t1 (col1 INTEGER, col2 INTEGER);
 CREATE TABLE t2 (col1 INTEGER, col2 INTEGER);
-INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3);
-INSERT INTO t2 VALUES (1, 1), (2, 4), (3, 6);
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3), (4, 3), (4, 3), (4, 3);
+INSERT INTO t2 VALUES (1, 1), (2, 4), (3, 6), (5, 3), (5, 3), (5, 3);
 ANALYZE TABLE t1, t2;
 
 --replace_regex $elide_costs
@@ -535,6 +558,8 @@ DROP TABLE t1, t2;
 CREATE TABLE t1 (col1 BIGINT);
 INSERT INTO t1 VALUES (1), (1), (1), (1), (1), (1), (1), (1), (1), (1);
 ANALYZE TABLE t1;
+--echo # Should use hash joins only, since there are no indexes that could
+--echo # help speed up nested loop joins.
 --replace_regex $elide_costs
 EXPLAIN FORMAT=tree SELECT SUM(t1.col1)
   FROM t1, t1 t2, t1 t3, t1 t4, t1 t5, t1 t6;
@@ -555,13 +580,13 @@ CREATE TABLE t1 (col1 INT);
 CREATE TABLE t2 (col1 INT);
 CREATE TABLE t3 (col1 INT);
 
-INSERT INTO t1 VALUES (1), (2), (3);
-INSERT INTO t2 VALUES (1), (2), (3);
-INSERT INTO t3 VALUES (1), (2), (3);
+INSERT INTO t1 VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9);
+INSERT INTO t2 VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9);
+INSERT INTO t3 VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9);
 ANALYZE TABLE t1, t2, t3;
 
 let $query = SELECT STRAIGHT_JOIN * FROM t1
-  JOIN t2 ON t1.col1 + 10 = t2.col1
+  JOIN t2 ON t1.col1 + 999 = t2.col1
   JOIN t3 ON t2.col1 = t3.col1;
 
 --replace_regex $elide_costs
@@ -581,6 +606,7 @@ eval $query;
 --enable_result_log
 --enable_query_log
 
+--echo # The test doesn't specify what we expect here, rendering it meaningless and unmaintainable.
 SELECT SUM(variable_value) AS Total_handler_reads
    FROM performance_schema.session_status
    WHERE variable_name LIKE 'Handler_read%';
@@ -599,9 +625,10 @@ CREATE TABLE t1 (
   KEY idx_CC_col_varchar_key (col_varchar_key)
 );
 
-INSERT INTO t1 VALUES (1,'n','X'),(2,'Y','8'),(3,'R','l');
+INSERT INTO t1 VALUES (1,'n','X'), (2,'Y','8'), (3,'R','l'), (4,'a','b'), (5,'c','d'), (6,'e','f');
 
 let $query = SELECT
+SQL_SMALL_RESULT # Fix one plan between streaming and temp-table-aggregate
   t1.col_varchar_key AS field1
 FROM
   (t1, t1 as alias1)
@@ -686,6 +713,9 @@ let $query = SELECT 1 FROM (b AS table1
       WHERE alias3.pk >= table1.pk));
 
 ANALYZE TABLE a, b;
+--echo # It will be difficult to trigger the same plan using the hypergraph optimizer
+--echo # and to keep it stable under cost model changes. We avoid changing the original
+--echo # test so that it at least tests for the bug with the original optimizer.
 --replace_regex $elide_costs
 eval EXPLAIN FORMAT=tree $query;
 # The result is not important; we only want to see that we do not assert.
@@ -701,17 +731,18 @@ DROP TABLE a, b;
 # We want to get the hash join to spill to disk while having exactly one row in
 # the hash table. Since the hash table checks for out of memory _before_ a row
 # is inserted, we will always manage to put one row in the hash table. Thus,
-# insert two large rows and reduce the join buffer size so that the hash join
+# insert large rows and reduce the join buffer size so that the hash join
 # spills to disk when trying to write the second row to the hash table.
 CREATE TABLE t1 (col1 TEXT);
-INSERT INTO t1 VALUES (REPEAT('A', 50000)), (REPEAT('A', 50000));
-
+INSERT INTO t1 VALUES (REPEAT('A', 50000)), (REPEAT('B', 50000)), (REPEAT('C', 50000)),
+(REPEAT('D', 50000)), (REPEAT('E', 50000)), (REPEAT('F', 50000));
+ANALYZE TABLE t1;
 # Mask out the cost estimates, since they will differ with innodb_page_size.
 --replace_regex $elide_costs
-EXPLAIN FORMAT=tree SELECT a.col1 FROM t1 AS a, t1 AS b;
+EXPLAIN FORMAT=tree SELECT a.col1 FROM t1 AS a, t1 AS b WHERE a.col1 = b.col1;
 --disable_result_log
 SET join_buffer_size = 128;
-SELECT a.col1 FROM t1 AS a, t1 AS b;
+SELECT a.col1 FROM t1 AS a, t1 AS b WHERE a.col1 = b.col1;
 --enable_result_log
 DROP TABLE t1;
 
@@ -788,6 +819,8 @@ INSERT INTO t1 VALUES (0);
 CREATE TABLE t2 (col1 INTEGER);
 INSERT INTO t2 VALUES (0);
 
+ANALYZE TABLE t1, t2;
+
 --replace_regex $elide_costs
 EXPLAIN FORMAT=tree SELECT * FROM t1 JOIN t2 ON t1.col1 = t2.col1;
 SELECT * FROM t1 JOIN t2 ON t1.col1 = t2.col1;
@@ -805,6 +838,8 @@ CREATE TABLE t2 (
   col1 CHAR(40)
 ) DEFAULT CHARSET=latin1 COLLATE=latin1_general_cs;
 INSERT INTO t2 VALUES ("foo");
+
+ANALYZE TABLE t1, t2;
 
 SET sql_mode="PAD_CHAR_TO_FULL_LENGTH";
 --replace_regex $elide_costs
@@ -903,7 +938,6 @@ DROP TABLE t1;
 
 --echo # A case where we have a hash join iterator both above and below a
 --echo # WeedoutIterator.
-
 CREATE TABLE t1(f1 INT(11) NOT NULL);
 INSERT INTO t1 VALUES (10);
 
@@ -914,7 +948,7 @@ CREATE TABLE t2
   PRIMARY KEY (f1),
   KEY (f2)
 );
-INSERT INTO t2 VALUES (1, 7), (2, 1), (4, 7);
+INSERT INTO t2 VALUES (1, 7), (2, 1), (4, 7), (5, 6), (8, 9), (10, 11);
 
 CREATE TABLE t4(f1 INT DEFAULT NULL);
 INSERT INTO t4 VALUES (2);
@@ -938,6 +972,7 @@ DROP TABLE t1, t2, t4;
 --echo #              SQL/HASH_JOIN_ITERATOR.CC
 --echo #
 --echo # Note that this test case needs ASAN to reproduce.
+--echo # Note: Different plan with new hypergraph cost model.
 
 CREATE TABLE t1 (a INT);
 INSERT INTO t1 VALUES (7), (7);
@@ -1235,6 +1270,7 @@ CREATE TABLE b(pk INT PRIMARY KEY, col_varchar VARCHAR(1));
 CREATE TABLE cc(pk INT PRIMARY KEY, col_varchar VARCHAR(1));
 INSERT INTO b VALUES (1, '4');
 INSERT INTO cc VALUES (1, 'c'), (2, 'c');
+ANALYZE TABLE b, cc;
 
 # A complicated test case, but what we want to achieve is a weedout over a
 # hash join, where the hash join build input is a combination of left join over
@@ -1250,6 +1286,7 @@ INSERT INTO cc VALUES (1, 'c'), (2, 'c');
 #
 # The behavior we want to trigger is that hash join should ask for the row ID
 # from a temporary table, where the temporary table row is NULL-complemented.
+
 let $query = SELECT
   table1.col_varchar
 FROM
@@ -1280,6 +1317,7 @@ FROM
               b AS subquery3_t1
           );
 
+--echo # Note: Different plan with new hypergraph cost model.
 --replace_regex $elide_costs
 eval EXPLAIN FORMAT=tree $query;
 eval $query;
@@ -1391,6 +1429,7 @@ CREATE TABLE t1 (col1 INTEGER);
 CREATE TABLE t2 (col1 INTEGER);
 INSERT INTO t1 VALUES (1);
 INSERT INTO t2 VALUES (1);
+ANALYZE TABLE t1, t2;
 
 let $query = SELECT /*+ JOIN_ORDER(table1, t2) */
   *
@@ -1439,6 +1478,7 @@ CREATE TABLE t1 (c VARCHAR(255) COLLATE utf8mb4_bin);
 CREATE TABLE t2 (c VARCHAR(255) COLLATE utf8mb4_bin);
 INSERT INTO t1 VALUES ('foo');
 INSERT INTO t2 VALUES ('foo ');
+ANALYZE TABLE t1, t2;
 
 let $query = SELECT * FROM t1 JOIN t2 ON t1.c = t2.c;
 --replace_regex $elide_costs
@@ -1583,8 +1623,8 @@ DROP TABLE t1, t2;
 
 CREATE TABLE t1 (col1 INTEGER, col2 INTEGER);
 CREATE TABLE t2 (col1 INTEGER, col2 INTEGER);
-INSERT INTO t1 VALUES (1, 1), (2, 2);
-INSERT INTO t2 VALUES (1, 1), (1, 2);
+INSERT INTO t1 VALUES (1, 1), (2, 2), (2, 2), (2, 2), (2, 2), (2, 2);
+INSERT INTO t2 VALUES (1, 1), (1, 2), (3, 3), (3, 3), (3, 3), (3, 3);
 ANALYZE TABLE t1, t2;
 --replace_regex $elide_costs
 EXPLAIN FORMAT=tree
@@ -1687,6 +1727,7 @@ INSERT INTO probe SELECT col1 + POW(2, 7) FROM probe;
 INSERT INTO build SELECT col1 FROM probe;
 INSERT INTO build SELECT col1 * 2 FROM probe;
 INSERT INTO build SELECT col1 * 3 FROM probe;
+ANALYZE TABLE build, probe;
 
 let $query = SELECT COUNT(*) FROM probe WHERE col1 IN (SELECT col1 FROM build);
 
@@ -1721,8 +1762,9 @@ INSERT INTO probe SELECT col1 + POW(2, 6) FROM probe;
 INSERT INTO probe SELECT col1 + POW(2, 7) FROM probe;
 INSERT INTO build SELECT col1 FROM probe;
 INSERT INTO build SELECT col1 FROM probe ORDER BY col1 DESC;
+ANALYZE TABLE build, probe;
 
-SET optimizer_switch = "materialization=off";
+SET optimizer_switch = "materialization=off,loosescan=off";
 SET join_buffer_size = 1024;
 
 # Note that we cannot use ORDER BY in the query, as that will allow hash join to
@@ -1815,6 +1857,7 @@ DROP TABLE t1, t2;
 CREATE TABLE t1 (col1 INTEGER);
 CREATE TABLE t2 (col1 INTEGER);
 INSERT INTO t1 VALUES (NULL);
+ANALYZE TABLE t1, t2;
 let $query = SELECT * FROM t1
   WHERE 1 IN (SELECT 1 FROM t2 WHERE t1.col1 = t2.col1) IS FALSE;
 --replace_regex $elide_costs
@@ -1884,6 +1927,8 @@ INSERT INTO build SELECT col1 * 3 FROM probe;
 # This value should be the only one returned from the antijoin below.
 DELETE FROM build WHERE col1 = 254;
 
+ANALYZE TABLE build, probe;
+
 let $query = SELECT * FROM probe WHERE col1 NOT IN (SELECT col1 FROM build);
 
 SET join_buffer_size = 128;
@@ -1903,6 +1948,7 @@ CREATE TABLE t1 (col1 INTEGER);
 CREATE TABLE t2 (col1 INTEGER);
 INSERT INTO t1 VALUES (1), (2);
 INSERT INTO t2 VALUES (1);
+ANALYZE TABLE t1, t2;
 
 --replace_regex $elide_costs
 EXPLAIN FORMAT=tree SELECT * FROM t1 LEFT JOIN t2 ON t1.col1 = t2.col1;
@@ -1961,6 +2007,7 @@ DROP TABLE t1, t2, t3, t4;
 CREATE TABLE t1 (col1 INTEGER);
 CREATE TABLE t2 (col1 INTEGER);
 CREATE TABLE t3 (col1 INTEGER);
+ANALYZE TABLE t1, t2, t3;
 
 let $query = SELECT * FROM t1 LEFT JOIN (t2 INNER JOIN t3 ON t2.col1 = t3.col1)
   ON t1.col1 = t2.col1;
@@ -1976,6 +2023,7 @@ CREATE TABLE t1 (col1 INTEGER);
 CREATE TABLE t2 (col1 INTEGER);
 INSERT INTO t1 VALUES (1);
 INSERT INTO t2 VALUES (1);
+ANALYZE TABLE t1, t2;
 
 # RAND() always returns a number in the range [0.0, 1.0), so the query is
 # deterministic (the condition will always be false).
@@ -2002,6 +2050,7 @@ DROP TABLE t1, t2;
 --echo # hash join iterator, and not as a filter after it.
 CREATE TABLE t1 (f1 INTEGER, f2 INTEGER);
 INSERT INTO t1 VALUES (1,1), (2,2);
+ANALYZE TABLE t1;
 let $query = SELECT
   tt.t
 FROM
@@ -2023,6 +2072,7 @@ DROP TABLE t1;
 --echo # condition.
 CREATE TABLE t1 (col1 INTEGER);
 CREATE TABLE t2 (col1 INTEGER);
+ANALYZE TABLE t1, t2;
 --replace_regex $elide_costs
 EXPLAIN FORMAT=tree
   SELECT * FROM t1 LEFT JOIN t2 ON t1.col1 = t2.col1 AND RAND() < RAND();
@@ -2066,6 +2116,7 @@ DROP TABLE t1, t2;
 CREATE TABLE t1 (i INTEGER);
 CREATE TABLE t2 (i INTEGER);
 CREATE TABLE t3 (i INTEGER);
+ANALYZE TABLE t1, t2, t3;
 --replace_regex $elide_costs
 EXPLAIN FORMAT=tree
   SELECT * FROM t1 LEFT JOIN
@@ -2077,6 +2128,7 @@ DROP TABLE t1, t2, t3;
 --echo # join iterator.
 CREATE TABLE t1 (i INTEGER);
 CREATE TABLE t2 (i INTEGER);
+ANALYZE TABLE t1, t2;
 --replace_regex $elide_costs
 EXPLAIN FORMAT=tree SELECT * FROM t1 LEFT JOIN t2 ON 1=1;
 DROP TABLE t1, t2;
@@ -2088,6 +2140,7 @@ DROP TABLE t1, t2;
 CREATE TABLE t1 (i INTEGER);
 CREATE TABLE t2 (i INTEGER);
 CREATE TABLE t3 (i INTEGER);
+ANALYZE TABLE t1, t2, t3;
 --replace_regex $elide_costs
 EXPLAIN FORMAT=tree
   SELECT * FROM t1 LEFT JOIN (t2 LEFT JOIN t3 ON TRUE) ON t3.i = t2.i;
@@ -2153,8 +2206,8 @@ DROP TABLE t1;
 --echo #
 
 CREATE TABLE t1 (f1 INTEGER);
-
 INSERT INTO t1 VALUES ( 100 ), ( 200 );
+ANALYZE TABLE t1;
 
 let $query =
   SELECT * FROM t1 AS alias1 LEFT JOIN t1 AS alias2 ON alias2.f1 = alias1.f1
@@ -2287,7 +2340,7 @@ DROP TABLE t1, t2;
 CREATE TABLE t1 (
   a LONGTEXT COLLATE utf32_sinhala_ci
 );
-INSERT INTO t1 (a) VALUES ('abc');
+INSERT INTO t1 (a) VALUES ('abc'), ('abc'), ('abc'), ('abc'), ('abc'), ('abc');
 ANALYZE TABLE t1;
 
 --replace_regex $elide_costs
@@ -2355,6 +2408,8 @@ CREATE TABLE t (
   c TEXT
 );
 
+ANALYZE TABLE t;
+
 # The join condition attached to the topmost hash join iterator should not be
 # inside a "found_match" trigger.
 --replace_regex $elide_costs
@@ -2379,13 +2434,19 @@ CREATE TABLE t1 (
   b INTEGER
 );
 
-INSERT INTO t1 VALUES (1, 1);
+CREATE TABLE t2 (
+  a INTEGER,
+  b INTEGER
+);
+
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6);
+INSERT INTO t2 VALUES (1, 1);
 ANALYZE TABLE t1;
 
 # See that conditions having a non-scalar subquery is attached as extra
 # conditions, and not as join conditions.
 let $query = SELECT * FROM t1 as table1
-  WHERE (SELECT a, b FROM t1 WHERE table1.a <> 6) IN (SELECT a, b FROM t1);
+  WHERE (SELECT a, b FROM t2 WHERE table1.a <> 6) IN (SELECT a, b FROM t1);
 --replace_regex $elide_costs
 eval EXPLAIN FORMAT=tree $query;
 eval $query;
@@ -2393,13 +2454,13 @@ eval $query;
 # Conditions having a scalar subquery (subquery with one column) should be used
 # as a proper join condition.
 let $query = SELECT * FROM t1 as table1
-  WHERE (SELECT a FROM t1 WHERE table1.a <> 6) IN (SELECT a FROM t1);
+  WHERE (SELECT a FROM t2 WHERE table1.a <> 6) IN (SELECT a FROM t1);
 --replace_regex $elide_costs
 eval EXPLAIN FORMAT=tree $query;
 eval $query;
 
 DROP TABLE t1;
-
+DROP TABLE t2;
 
 --echo #
 --echo # Bug#30792727 ERRORS WHEN BUILDING HASH TABLE FOR HASH JOIN NOT
@@ -2407,6 +2468,7 @@ DROP TABLE t1;
 --echo #
 CREATE TABLE t (i INTEGER);
 INSERT INTO t VALUES (1), (2);
+ANALYZE TABLE t;
 
 # The first argument to JSON_EXTRACT should be a JSON document. An error
 # is expected when building the hash table for t1 since
@@ -2562,7 +2624,8 @@ CREATE TABLE t (
   a TEXT CHARACTER SET ucs2 COLLATE ucs2_sinhala_ci,
   b TEXT CHARACTER SET utf32 COLLATE utf32_german2_ci
 );
-INSERT INTO t(a, b) VALUES('h','k'), ('w','e');
+INSERT INTO t(a, b) VALUES('h','k'), ('w','e'), ('a','b'), ('c','d'), ('e','f'), ('x','y');
+ANALYZE TABLE t;
 let $query =
 SELECT 1 FROM t AS a INNER JOIN t AS b ON a.a=b.b;
 --replace_regex $elide_costs
@@ -2577,6 +2640,8 @@ CREATE TABLE t2(str_name VARCHAR(64) COLLATE ascii_general_ci);
 
 INSERT INTO t1 VALUES('9337a53f-cfd6-4a68-a1fc-e2d84eba8079');
 INSERT INTO t2 VALUES('9337a53f-cfd6-4a68-a1fc-e2d84eba8079');
+
+ANALYZE TABLE t1, t2;
 
 let $query =
 SELECT wstr_name, str_name
@@ -2618,8 +2683,14 @@ CREATE TABLE t1 (f1 INTEGER);
 CREATE TABLE t2 (f1 INTEGER);
 CREATE VIEW vmerge AS SELECT 1 AS f1, f1 AS b_f1 FROM t2;
 
-INSERT INTO t1 VALUES (1),(2),(3),(4);
-INSERT INTO t2 VALUES (1),(2);
+INSERT INTO t1 VALUES (1),(2),(3),(4),(5);
+INSERT INTO t1 SELECT * FROM t1;
+INSERT INTO t1 SELECT * FROM t1;
+INSERT INTO t1 SELECT * FROM t1;
+INSERT INTO t2 SELECT * FROM t1;
+ANALYZE TABLE t1, t2;
+
+ANALYZE TABLE t1, t2;
 
 --replace_regex $elide_costs_and_rows
 EXPLAIN FORMAT=tree SELECT * FROM t1 LEFT JOIN vmerge AS v ON t1.f1 = v.f1;
@@ -2649,10 +2720,11 @@ DROP TABLE t1;
 --echo #
 
 CREATE TABLE t1(varchar_col VARCHAR(10), decimal_col DECIMAL(10, 0));
-INSERT INTO t1 VALUES ('', 0), ('', 0), ('', 0), ('', 0);
+INSERT INTO t1 VALUES ('', 0), ('', 0), ('', 0), ('', 0), ('', 0), ('', 0);
 
 CREATE TABLE t2(id INT, varchar_col VARCHAR(10), decimal_col DECIMAL(10, 0));
-INSERT INTO t2 VALUES (1, NULL, NULL), (2, NULL, NULL), (3, NULL, NULL);
+INSERT INTO t2 VALUES (1, NULL, NULL), (2, NULL, NULL), (3, NULL, NULL),
+(4, NULL, NULL), (5, NULL, NULL), (6, NULL, NULL);
 
 ANALYZE TABLE t1, t2;
 
@@ -2697,19 +2769,246 @@ CREATE TABLE t1 (
   b INT NOT NULL
 );
 
-INSERT INTO t1 VALUES (1,1),(1,2),(2,1),(2,2);
+INSERT INTO t1 VALUES (1,1),(1,2),(2,1);
+INSERT INTO t1 SELECT * FROM t1;
+INSERT INTO t1 SELECT * FROM t1;
 
 ANALYZE TABLE t1;
 
 # We should check if the probe (outer) input is empty first if it is a left
 # join or antijoin. If the probe is empty, we can skip reading the build input.
 
---replace_regex $elide_costs_and_time_and_row_estimate
+--echo # Plan change with new hypergraph cost model.
+--replace_regex $elide_costs_and_time
 EXPLAIN ANALYZE FORMAT=tree SELECT * FROM t1 x1 LEFT JOIN t1 x2 ON x1.a=x2.a
   WHERE x1.b < 0;
 
---replace_regex $elide_costs_and_time_and_row_estimate
+--echo # Plan change with new hypergraph cost model.
+--replace_regex $elide_costs_and_time
 EXPLAIN ANALYZE FORMAT=tree SELECT * FROM t1 x1 WHERE x1.a < 0 AND x1.a NOT IN
   (SELECT a FROM t1 x2 WHERE x2.b = x1.b);
 
 DROP TABLE t1;
+
+--echo #
+--echo # Bug#35703114 Assertion `m_psi_batch_mode == PSI_BATCH_MODE_NONE'
+--echo # failed.
+--echo #
+
+CREATE TABLE t1(i1 int primary key, i2 int, c varchar(10));
+
+INSERT INTO t1 VALUES (1,1,'a'), (2,2,'a'), (3,3,'a'), (4,4,'a'), (5,5,'a');
+INSERT INTO t1 SELECT 5 + t.i1, 5 + t.i2, t.c FROM t1 AS t;
+INSERT INTO t1 SELECT 10 + t.i1, 10 + t.i2, t.c FROM t1 AS t;
+INSERT INTO t1 SELECT 20 + t.i1, 20 + t.i2, t.c FROM t1 AS t;
+
+ANALYZE TABLE t1;
+
+# To reproduce the bug we need a query with these properties:
+# - It should be planned as a hash join.
+# - We should start reading from the probe input (i.e. outer input).
+#   Therefore we use a left join.
+# - There should be a filter on the probe input.
+# - Evaluating this filter should give an error for the first row.
+#   Therefore we use an invalid Unicode code point.
+let $query =
+    SELECT * FROM t1 x1 LEFT JOIN t1 x2 ON x1.i2=x2.i2
+    WHERE x1.c <= CHAR(0xd83f);
+
+--replace_regex $elide_costs
+--eval EXPLAIN FORMAT=TREE $query
+
+--error ER_CANNOT_CONVERT_STRING
+--eval $query
+
+DROP TABLE t1;
+
+--echo #
+--echo # Bug#35789589 Assertion `m_index_cursor.is_positioned()' failed.
+--echo #
+
+SET optimizer_switch = 'materialization=off,derived_merge=off';
+
+CREATE TABLE bb (
+  pk INT auto_increment,
+  col_int INT,
+  col_int_key INT,
+  col_varchar VARCHAR(1),
+  col_varchar_key VARCHAR(1),
+  PRIMARY KEY(pk)
+);
+
+CREATE TABLE cc (
+  pk INT AUTO_INCREMENT,
+  col_int_key INT,
+  col_varchar_key VARCHAR(1),
+  PRIMARY KEY(pk)
+);
+
+INSERT INTO cc (pk,col_int_key,col_varchar_key) VALUES
+  (DEFAULT,867110528,'8'),
+  (DEFAULT,-1926290568,'9'),
+  (DEFAULT,428174454,'f'),
+  (DEFAULT,127754401,'a'),
+  (DEFAULT,-923329804,'p');
+
+INSERT INTO bb (pk,col_int,col_int_key,col_varchar,col_varchar_key) VALUES
+  (DEFAULT,-1777898150,-1744771058,'b','Z');
+
+ANALYZE TABLE bb, cc;
+
+# To reproduce this issue we need a query where the query plan has:
+# * A left hash-join H1. The first row it produces must have a
+#   NULL-row right half.
+# * Another hash join H2 with H1 as its probe input. H2 must start with
+#   reading from the probe input (i.e. H1).
+# * A third hash-join H3. H3 must have H2 as its build input.
+#
+# With such a plan, H3 calls H2.Init() which causes the first
+# (partial null) row to be read from H1. H3 then calls
+# H2.SetNullRow(false), which erroneously resets the null flag in the
+# H1 row. Producing such a plan was tricky, so the somewhat complex query
+# below is taken from the bug report.
+
+SELECT alias1.col_int_key AS field2 FROM
+  (bb AS alias1 RIGHT OUTER JOIN
+        (((SELECT SQL_SMALL_RESULT SQ2_alias1.* FROM
+          (bb AS SQ2_alias1 INNER JOIN bb AS SQ2_alias2 ON
+            (SQ2_alias2.col_int_key = SQ2_alias1.col_int_key))
+          WHERE SQ2_alias1.col_int < SQ2_alias2.col_int) AS alias2
+          RIGHT OUTER JOIN bb AS alias3 ON
+            (alias3.col_varchar_key = alias2.col_varchar_key))) ON
+          (alias3.col_varchar_key = alias2.col_varchar_key))
+        WHERE EXISTS ((SELECT SQ3_alias1.col_int_key AS SQ3_field1 FROM
+          (cc AS SQ3_alias1 STRAIGHT_JOIN
+            (cc AS SQ3_alias2 INNER JOIN bb AS SQ3_alias3 ON
+              (SQ3_alias3.col_varchar = SQ3_alias2.col_varchar_key))
+            ON (SQ3_alias3.pk = SQ3_alias2.pk))));
+
+DROP TABLE bb, cc;
+SET optimizer_switch=DEFAULT;
+
+--echo #
+--echo # Bug#31969607: THE RESULT IS INCONSISTENT BETWEEN JOIN AND GROUP BY
+--echo #
+
+CREATE TABLE t1 (id INT PRIMARY KEY AUTO_INCREMENT, j JSON);
+INSERT INTO t1(j) VALUES
+  (NULL), ('-1'), ('1'), ('1.0'), ('"1"'), ('[1, 2]'), ('[1.0, 2.0]'),
+  ('9223372036854775806'), ('9223372036854775807'), ('"abc"'), ('"Abc"');
+CREATE TABLE t2 (id INT PRIMARY KEY AUTO_INCREMENT, vc VARCHAR(100));
+INSERT INTO t2(vc) VALUES
+  (NULL), ('-1'), ('1'), ('1.0'), ('"1"'), ('[1, 2]'), ('[1.0, 2.0]'),
+  ('9223372036854775806'), ('9223372036854775807'), ('abc'), ('Abc');
+CREATE TABLE t3 (i BIGINT);
+INSERT INTO t3 VALUES (NULL), (-1), (0), (1), (2), (3),
+                      (9223372036854775806), (9223372036854775807);
+
+--sorted_result
+SELECT * FROM t1 AS a, t1 AS b WHERE a.j = b.j;
+--sorted_result
+SELECT * FROM t1 AS a, t1 AS b WHERE a.j <=> b.j;
+
+--sorted_result
+SELECT * FROM t1, t2 WHERE t1.j = t2.vc;
+--sorted_result
+SELECT * FROM t1, t2 WHERE t1.j <=> t2.vc;
+
+--sorted_result
+SELECT * FROM t1, t3 WHERE t1.j = t3.i;
+--sorted_result
+SELECT * FROM t1, t3 WHERE t1.j <=> t3.i;
+
+DROP TABLE t1, t2, t3;
+
+--echo #
+--echo # Bug#37057380: Wrong results with sorting or hash join reading from
+--echo #               single-record index lookups
+--echo #
+
+CREATE TABLE t1(a INT);
+INSERT INTO t1 VALUES (1), (2), (3), (4);
+
+CREATE TABLE t2(a INT);
+INSERT INTO t2 VALUES (1), (2), (3), (4);
+
+CREATE TABLE t3 (a INT, b INT);
+INSERT INTO t3 VALUES (1, 1), (2, 2), (3, 3), (4, 1);
+
+CREATE TABLE t4 (id INT PRIMARY KEY, a INT);
+INSERT INTO t4 VALUES (1, 1), (2, 2), (3, 3), (4, 4);
+
+ANALYZE TABLE t1, t2, t3, t4;
+
+--sorted_result
+SELECT t1.a AS t1a, dt.* FROM t1,
+LATERAL (
+  SELECT dt1.*, t2.a AS t2a FROM
+    (SELECT * FROM t3 JOIN t4 ON t3.b = t4.id AND t3.a = t4.a)
+       AS dt1(t3a, t3b, id, t4a)
+    JOIN t2 ON t2.a = t3a AND t1.a <> 100 LIMIT 100
+) AS dt;
+
+DROP TABLE t1, t2, t3, t4;
+
+--echo #
+--echo # Bug#37161583: Incorrect result with LEFT JOIN and small
+--echo #               join_buffer_size
+
+CREATE TABLE t1(a INT);
+INSERT INTO t1 VALUES (NULL);
+
+CREATE TABLE t2(b INT);
+INSERT INTO t2
+  WITH RECURSIVE
+    s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 1000)
+  SELECT n FROM s;
+
+ANALYZE TABLE t1, t2;
+
+--let $query = SELECT * FROM t1 WHERE NOT EXISTS (SELECT * FROM t2 WHERE a = b)
+
+# We want to test a hash antijoin.
+--replace_regex $elide_costs
+--eval EXPLAIN FORMAT=TREE $query
+
+# First verify that we get the correct result with DEFAULT
+# join_buffer_size, when the operation does not spill to disk.
+TRUNCATE performance_schema.file_summary_by_event_name;
+SET join_buffer_size = DEFAULT;
+--sorted_result
+--eval $query
+# Verify that the operation did not spill to disk.
+--eval $hash_join_file_operations
+
+# Then verify that we get the correct result with a so small join
+# buffer that the operation spills to disk. It used to return zero
+# rows.
+TRUNCATE performance_schema.file_summary_by_event_name;
+SET join_buffer_size = 128;
+--sorted_result
+--eval $query
+SET join_buffer_size = DEFAULT;
+# Verify that the operation spilled to disk.
+--eval $hash_join_file_operations
+
+DROP TABLE t1, t2;
+
+--echo #
+--echo # Bug#37273221: Hypergraph: Inefficient join order when using LIMIT
+--echo #
+
+CREATE TABLE t1(x INT);
+CREATE TABLE t2(x INT, y VARCHAR(10000));
+INSERT INTO t1 VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10);
+INSERT INTO t2 SELECT x, REPEAT('x', x * 1000) FROM t1 WHERE t1.x < 10;
+ANALYZE TABLE t1, t2;
+
+# Expect the smaller table to be used as build table, since that
+# allows us to start returning rows earlier and hit the LIMIT earlier.
+# t1 has slightly more rows than t2, but it's much smaller in data
+# volume, so we want t1 to be the build table.
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT * FROM t1, t2 WHERE t1.x = t2.x LIMIT 1;
+
+DROP TABLE t1, t2;

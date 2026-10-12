@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,11 +26,14 @@
 #include "cluster_metadata_gr.h"
 
 #include <algorithm>
+#include <charconv>  // from_chars
+#include <iomanip>
 #include <optional>
 
 #include "dim.h"
 #include "group_replication_metadata.h"
 #include "log_suppressor.h"
+#include "mysql/harness/destination.h"
 #include "mysql/harness/event_state_tracker.h"
 #include "mysql/harness/logging/logging.h"
 #include "mysql/harness/stdx/ranges.h"  // enumerate
@@ -107,24 +111,6 @@ class GRMetadataBackend {
 
 GRMetadataBackend::~GRMetadataBackend() = default;
 
-/* Connection to the GR metadata version 1.x */
-class GRMetadataBackendV1 : public GRMetadataBackend {
- public:
-  GRMetadataBackendV1(GRClusterMetadata *metadata, ConnectCallback &connect_clb)
-      : GRMetadataBackend(metadata, connect_clb) {}
-
-  /** @brief Queries the metadata server for the list of instances that belong
-   * to the desired cluster.
-   */
-  metadata_cache::ClusterTopology fetch_instances_from_metadata_server(
-      const mysqlrouter::TargetCluster &target_cluster,
-      const std::string &clusterset_id = "") override;
-
-  mysqlrouter::ClusterType get_cluster_type() override {
-    return mysqlrouter::ClusterType::GR_V1;
-  }
-};
-
 /* Connection to the GR metadata version 2.x */
 class GRMetadataBackendV2 : public GRMetadataBackend {
  public:
@@ -174,7 +160,7 @@ class GRClusterSetMetadataBackend : public GRMetadataBackendV2 {
    * filters or policies (like target_cluster etc.)
    * @return object containing cluster topology information in case of success,
    * or error code in case of failure
-   * @throws metadata_cache::metadata_error
+   * @throws metadata_cache::metadata_error If fetching metadata fails.
    */
   stdx::expected<metadata_cache::ClusterTopology, std::error_code>
   fetch_cluster_topology(
@@ -311,7 +297,8 @@ GRClusterMetadata::GRClusterMetadata(
 }
 
 // throws metadata_cache::metadata_error
-void GRClusterMetadata::update_cluster_status_from_gr(
+stdx::expected<void, std::error_code>
+GRClusterMetadata::update_cluster_status_from_gr(
     const bool unreachable_quorum_allowed_traffic,
     metadata_cache::ManagedCluster &cluster) {
   log_debug("Updating cluster status from GR for '%s'", cluster.name.c_str());
@@ -333,7 +320,7 @@ void GRClusterMetadata::update_cluster_status_from_gr(
   bool single_primary_mode = true, metadata_gr_discrepancy = false;
   bool found_quorum = false;
   for (const metadata_cache::ManagedInstance *mi : gr_members) {
-    const std::string mi_addr = mi->host + ":" + std::to_string(mi->port);
+    const std::string mi_addr = mi->classic_destination().str();
 
     auto connection = get_connection();
 
@@ -344,8 +331,7 @@ void GRClusterMetadata::update_cluster_status_from_gr(
       gr_member_connection = connection;
     } else {
       try {
-        gr_member_connection = std::make_shared<MySQLSession>(
-            std::make_unique<MySQLSession::LoggingStrategyDebugLogger>());
+        gr_member_connection = std::make_shared<MySQLSession>();
       } catch (const std::logic_error &e) {
         // defensive programming, shouldn't really happen. If it does, there's
         // nothing we can do really, we give up
@@ -476,7 +462,59 @@ void GRClusterMetadata::update_cluster_status_from_gr(
           "in cluster '");
       msg += cluster.name + "'";
       log_error("%s", msg.c_str());
+      return stdx::unexpected(make_error_code(
+          metadata_cache::metadata_errc::gr_status_update_fail));
   }
+
+  return {};
+}
+
+static std::optional<uint16_t> parse_server_version(
+    std::string_view version_str) {
+  if (version_str.empty()) return std::nullopt;
+
+  size_t dot1 = version_str.find('.');
+  if (dot1 == std::string::npos || dot1 == version_str.size() - 1) {
+    return std::nullopt;
+  }
+
+  size_t dot2 = version_str.find('.', dot1 + 1);
+  if (dot2 == std::string::npos || dot2 == version_str.size() - 1) {
+    return std::nullopt;
+  }
+
+  // Extract substrings
+  const auto major_part = version_str.substr(0, dot1);
+  const auto minor_part = version_str.substr(dot1 + 1, dot2 - dot1 - 1);
+  const auto patch_part = version_str.substr(dot2 + 1);
+
+  if (minor_part.length() > 2 || patch_part.length() > 2) return std::nullopt;
+
+  uint8_t major, minor, patch;
+  // Convert to integers
+  auto [ptr1, ec1] = std::from_chars(
+      major_part.data(), major_part.data() + major_part.size(), major);
+  if (ec1 != std::errc()) return std::nullopt;
+
+  auto [ptr2, ec2] = std::from_chars(
+      minor_part.data(), minor_part.data() + minor_part.size(), minor);
+  if (ec2 != std::errc()) return std::nullopt;
+
+  auto [ptr3, ec3] = std::from_chars(
+      patch_part.data(), patch_part.data() + patch_part.size(), patch);
+  if (ec3 != std::errc()) return std::nullopt;
+
+  std::stringstream result;
+
+  result << major;
+  // Convert and pad the second and third parts to two digits
+  result << std::setw(2) << std::setfill('0') << minor;
+  result << std::setw(2) << std::setfill('0') << patch;
+
+  int combinedInt;
+  result >> combinedInt;
+
+  return combinedInt;
 }
 
 GRClusterStatus GRClusterMetadata::check_cluster_status_in_gr(
@@ -520,9 +558,9 @@ GRClusterStatus GRClusterMetadata::check_cluster_status_in_gr(
       const auto log_level =
           node_in_metadata_changed ? LogLevel::kWarning : LogLevel::kDebug;
       log_custom(log_level,
-                 "GR member %s:%d (%s), state: '%s' missing in the metadata, "
+                 "GR member %s (%s), state: '%s' missing in the metadata, "
                  "ignoring",
-                 status_node.second.host.c_str(), status_node.second.port,
+                 status_node.second.dest.str().c_str(),
                  status_node.first.c_str(),
                  to_string(status_node.second.state));
 
@@ -541,6 +579,18 @@ GRClusterStatus GRClusterMetadata::check_cluster_status_in_gr(
         member->mysql_server_uuid);
 
     if (node_in_gr) {
+      auto version_res = parse_server_version(status->second.version);
+      if (!version_res) {
+        log_warning("Member %s (%s): invalid member version format '%s'",
+                    mysql_harness::TcpDestination(member->host, member->port)
+                        .str()
+                        .c_str(),
+                    member->mysql_server_uuid.c_str(),
+                    status->second.version.c_str());
+      } else {
+        member->version = *version_res;
+      }
+
       switch (status->second.state) {
         case GR_State::Online:
           switch (status->second.role) {
@@ -607,10 +657,6 @@ void GRClusterMetadata::reset_metadata_backend(const ClusterType type) {
   };
 
   switch (type) {
-    case ClusterType::GR_V1:
-      metadata_backend_ =
-          std::make_unique<GRMetadataBackendV1>(this, connect_clb);
-      break;
     case ClusterType::GR_V2:
       metadata_backend_ =
           std::make_unique<GRMetadataBackendV2>(this, connect_clb);
@@ -622,12 +668,12 @@ void GRClusterMetadata::reset_metadata_backend(const ClusterType type) {
     default:
       throw std::runtime_error(
           "Invalid cluster type '" + mysqlrouter::to_string(type) +
-          "'. Configured '" + mysqlrouter::to_string(ClusterType::GR_V1) + "'");
+          "'. Configured '" + mysqlrouter::to_string(ClusterType::GR_V2) + "'");
   }
 }
 
 mysqlrouter::ClusterType GRClusterMetadata::get_cluster_type() {
-  if (!metadata_backend_) return ClusterType::GR_V1;
+  if (!metadata_backend_) return ClusterType::GR_V2;
   return metadata_backend_->get_cluster_type();
 }
 
@@ -635,15 +681,7 @@ GRClusterMetadata::auth_credentials_t GRClusterMetadata::fetch_auth_credentials(
     const metadata_cache::metadata_server_t &md_server,
     const mysqlrouter::TargetCluster &target_cluster) {
   if (!metadata_backend_) return {};
-  switch (metadata_backend_->get_cluster_type()) {
-    case mysqlrouter::ClusterType::GR_V1:
-      log_warning(
-          "metadata_cache authentication backend is not supported for metadata "
-          "version 1.0");
-      return {};
-    default:
-      return ClusterMetadata::fetch_auth_credentials(md_server, target_cluster);
-  }
+  return ClusterMetadata::fetch_auth_credentials(md_server, target_cluster);
 }
 
 metadata_cache::ClusterTopology
@@ -661,10 +699,14 @@ bool backends_compatible(const ClusterType a, const ClusterType b) {
 }
 }  // namespace
 
-void GRClusterMetadata::update_backend(
+stdx::expected<void, std::string> GRClusterMetadata::update_backend(
     const mysqlrouter::MetadataSchemaVersion &version, unsigned int router_id) {
-  const auto cluster_type = mysqlrouter::get_cluster_type(
+  const auto res = mysqlrouter::get_cluster_type(
       version, metadata_connection_.get(), router_id);
+  if (!res) {
+    return stdx::unexpected(res.error());
+  }
+  const auto cluster_type = res.value();
 
   // if the current backend does not fit the metadata version that we just
   // discovered, we need to recreate it
@@ -673,15 +715,13 @@ void GRClusterMetadata::update_backend(
     if (metadata_backend_) {
       if (!backends_compatible(cluster_type,
                                metadata_backend_->get_cluster_type())) {
-        return;
+        return {};
       }
-      log_info(
-          "Metadata version change was discovered. New metadata version is "
-          "%d.%d.%d",
-          version.major, version.minor, version.patch);
     }
     reset_metadata_backend(cluster_type);
   }
+
+  return {};
 }
 
 // sort the cluster nodes based on already sorted metadata servers list in the
@@ -790,10 +830,13 @@ GRMetadataBackend::fetch_cluster_topology(
   // unreachable_quorum_allowed_traffic option is configured for the Router)
   const auto unreachable_quorum_allowed_traffic =
       router_options.get_unreachable_quorum_allowed_traffic();
-  metadata_->update_cluster_status_from_gr(
+  const auto update_res = metadata_->update_cluster_status_from_gr(
       unreachable_quorum_allowed_traffic !=
           QuorumConnectionLostAllowTraffic::none,
       cluster);  // throws metadata_cache::metadata_error
+  if (!update_res) {
+    return stdx::unexpected(update_res.error());
+  }
 
   // we are using status reported by the node with no quorum, since the
   // unreachable_quorum_allowed_traffic configured is "read" we demote potential
@@ -842,11 +885,11 @@ GRClusterMetadata::fetch_cluster_topology(
     mysqlrouter::TargetCluster &target_cluster, const unsigned router_id,
     const metadata_cache::metadata_servers_list_t &metadata_servers,
     bool needs_writable_node, const std::string &clusterset_id,
-    bool whole_topology, std::size_t &instance_id) {
+    std::size_t &instance_id, std::string &routing_guidelines) {
   log_debug("Updating metadata information for cluster '%s'",
             target_cluster.c_str());
   stdx::expected<metadata_cache::ClusterTopology, std::error_code> result{
-      stdx::make_unexpected(make_error_code(
+      stdx::unexpected(make_error_code(
           metadata_cache::metadata_errc::no_metadata_server_reached))},
       result_tmp;
   instance_id = 0;
@@ -871,11 +914,11 @@ GRClusterMetadata::fetch_cluster_topology(
           last_fetch_cluster_id == i)
         continue;
 
-      result_tmp = stdx::make_unexpected(make_error_code(
+      result_tmp = stdx::unexpected(make_error_code(
           metadata_cache::metadata_errc::no_metadata_read_successful));
 
       if (terminated) {
-        return stdx::make_unexpected(make_error_code(
+        return stdx::unexpected(make_error_code(
             metadata_cache::metadata_errc::metadata_refresh_terminated));
       }
 
@@ -886,12 +929,22 @@ GRClusterMetadata::fetch_cluster_topology(
 
         MySQLSession::Transaction transaction(metadata_connection_.get());
 
+        if (!is_server_version_compatible(metadata_connection_.get())) {
+          log_warning("%s", get_incompatible_server_version_msg(
+                                metadata_connection_.get())
+                                .c_str());
+        }
+
         // throws metadata_cache::metadata_error and
         // MetadataUpgradeInProgressException
         const auto version =
             get_and_check_metadata_schema_version(*metadata_connection_);
 
-        update_backend(version, router_id);
+        if (const auto res = update_backend(version, router_id); !res) {
+          log_warning("Failed determining the type of the cluster: %s.",
+                      res.error().c_str());
+          continue;
+        }
 
         if (!backend_reset) {
           metadata_backend_->reset();
@@ -901,8 +954,8 @@ GRClusterMetadata::fetch_cluster_topology(
         if (!mysqlrouter::check_group_replication_online(
                 metadata_connection_.get())) {
           log_warning(
-              "Metadata server %s:%d is not an online GR member - skipping.",
-              metadata_server.address().c_str(), metadata_server.port());
+              "Metadata server %s is not an online GR member - skipping.",
+              metadata_server.str().c_str());
           continue;
         }
 
@@ -917,13 +970,27 @@ GRClusterMetadata::fetch_cluster_topology(
                 QuorumConnectionLostAllowTraffic::none &&
             !mysqlrouter::check_group_has_quorum(metadata_connection_.get())) {
           log_warning(
-              "Metadata server %s:%d is not a member of quorum group - "
+              "Metadata server %s is not a member of quorum group - "
               "skipping.",
-              metadata_server.address().c_str(), metadata_server.port());
+              metadata_server.str().c_str());
           continue;
         }
 
         router_options_ = std::move(router_options);
+
+        bool whole_topology = false;
+        const auto &routing_guidelines_doc_res =
+            fetch_routing_guidelines_document(router_id);
+        if (routing_guidelines_doc_res) {
+          if (!routing_guidelines_doc_res->empty()) whole_topology = true;
+
+          //  Check if we need to report back the guideline name in use
+          if (routing_guidelines != routing_guidelines_doc_res.value()) {
+            needs_writable_node = true;
+          }
+
+          routing_guidelines = *routing_guidelines_doc_res;
+        }
 
         result_tmp = metadata_backend_->fetch_cluster_topology(
             transaction, target_cluster, metadata_server, metadata_servers,
@@ -934,10 +1001,8 @@ GRClusterMetadata::fetch_cluster_topology(
       } catch (const mysqlrouter::MetadataUpgradeInProgressException &) {
         throw;
       } catch (const std::exception &e) {
-        log_warning(
-            "Failed fetching metadata from metadata server on %s:%d - %s",
-            metadata_server.address().c_str(), metadata_server.port(),
-            e.what());
+        log_warning("Failed fetching metadata from metadata server on %s - %s",
+                    metadata_server.str().c_str(), e.what());
       }
 
       if (result_tmp) {
@@ -959,97 +1024,18 @@ GRClusterMetadata::fetch_cluster_topology(
         if (!result) {
           result = std::move(result_tmp);
         }
+
+        // if we failed updating the GR status we leave the inner loop (the one
+        // that iterates over cluster nodes) as GR state update already iterated
+        // over GR nodes and failed. For standalone cluster that means return,
+        // for ClusterSet we go for the next Cluster nodes.
+        if (result_tmp.error() ==
+            metadata_cache::metadata_errc::gr_status_update_fail) {
+          break;
+        }
       }
     }
   }
-
-  return result;
-}
-
-static std::string where_target_cluster_v1(
-    MySQLSession &session, const mysqlrouter::TargetCluster &target_cluster) {
-  switch (target_cluster.target_type()) {
-    case mysqlrouter::TargetCluster::TargetType::ByUUID:
-      // If we have group replication id we want to limit the results only
-      // for that group replication. We didn't store that information before
-      // introducing dynamic state file, so we fallback to cheking cluster name
-      // in that case.
-      return " WHERE R.attributes->>'$.group_replication_group_name' = " +
-             session.quote(target_cluster.to_string());
-    case mysqlrouter::TargetCluster::TargetType::ByName:
-      return " WHERE F.cluster_name = " +
-             session.quote(target_cluster.to_string());
-    default:
-      return "";
-  }
-}
-
-// throws metadata_cache::metadata_error
-metadata_cache::ClusterTopology
-GRMetadataBackendV1::fetch_instances_from_metadata_server(
-    const mysqlrouter::TargetCluster &target_cluster,
-    const std::string & /*clusterset_id*/) {
-  auto connection = metadata_->get_connection();
-
-  const std::string where_cluster =
-      where_target_cluster_v1(*connection.get(), target_cluster);
-
-  // Get expected topology (what was configured) from metadata server. This
-  // will later be compared against current topology (what exists NOW)
-  // obtained from one of the nodes belonging to a quorum. Note that this
-  // topology will also be successfully returned when a particular metadata
-  // server is not part of GR, as serving metadata and being part of
-  // replicaset are two orthogonal ideas.
-  std::string query(
-      "SELECT "
-      "F.cluster_id, F.cluster_name, "
-      "R.replicaset_name, "
-      "I.mysql_server_uuid, "
-      "I.addresses->>'$.mysqlClassic', "
-      "I.addresses->>'$.mysqlX' "
-      "FROM "
-      "mysql_innodb_cluster_metadata.clusters AS F "
-      "JOIN mysql_innodb_cluster_metadata.replicasets AS R "
-      "ON F.cluster_id = R.cluster_id "
-      "JOIN mysql_innodb_cluster_metadata.instances AS I "
-      "ON R.replicaset_id = I.replicaset_id" +
-      where_cluster);
-
-  metadata_cache::ManagedCluster cluster;
-  auto result_processor = [&cluster](const MySQLSession::Row &row) -> bool {
-    if (row.size() != 6) {
-      throw metadata_cache::metadata_error(
-          "Unexpected number of fields in the resultset. "
-          "Expected = 6, got = " +
-          std::to_string(row.size()));
-    }
-
-    metadata_cache::ManagedInstance s{mysqlrouter::InstanceType::GroupMember};
-    s.mysql_server_uuid = as_string(row[3]);
-    if (!set_instance_ports(s, row, 4, 5)) {
-      return true;  // next row
-    }
-
-    cluster.members.push_back(s);
-    cluster.single_primary_mode =
-        true;  // actual value set elsewhere from GR metadata
-    cluster.id = as_string(row[0]);
-    cluster.name = as_string(row[1]);
-
-    return true;  // false = I don't want more rows
-  };
-
-  assert(connection->is_connected());
-
-  try {
-    connection->query(query, result_processor);
-  } catch (const MySQLSession::Error &e) {
-    throw metadata_cache::metadata_error(e.what());
-  }
-
-  metadata_cache::ClusterTopology result;
-  result.clusters_data.push_back(cluster);
-  result.target_cluster_pos = 0;
 
   return result;
 }
@@ -1087,7 +1073,7 @@ GRMetadataBackendV2::fetch_instances_from_metadata_server(
   // obtained from one of the nodes belonging to a quorum.
   std::string query(
       "select C.cluster_id, C.cluster_name, I.mysql_server_uuid, I.endpoint, "
-      "I.xendpoint, I.attributes "
+      "I.xendpoint, I.attributes, I.label "
       "from "
       "mysql_innodb_cluster_metadata.v2_instances I join "
       "mysql_innodb_cluster_metadata.v2_gr_clusters C on I.cluster_id = "
@@ -1096,10 +1082,10 @@ GRMetadataBackendV2::fetch_instances_from_metadata_server(
 
   metadata_cache::ManagedCluster cluster;
   auto result_processor = [&cluster](const MySQLSession::Row &row) -> bool {
-    if (row.size() != 6) {
+    if (row.size() != 7) {
       throw metadata_cache::metadata_error(
           "Unexpected number of fields in the resultset. "
-          "Expected = 6, got = " +
+          "Expected = 7, got = " +
           std::to_string(row.size()));
     }
 
@@ -1110,6 +1096,7 @@ GRMetadataBackendV2::fetch_instances_from_metadata_server(
       return true;  // next row
     }
     set_instance_attributes(instance, as_string(row[5]));
+    instance.label = as_string(row[6]);
 
     cluster.id = as_string(row[0]);
     cluster.name = as_string(row[1]);
@@ -1161,7 +1148,7 @@ static stdx::expected<uint64_t, std::error_code> get_member_view_id(
 
   std::unique_ptr<MySQLSession::ResultRow> row(session.query_one(query));
   if (!row) {
-    return stdx::make_unexpected(
+    return stdx::unexpected(
         make_error_code(metadata_cache::metadata_errc::cluster_not_found));
   }
 
@@ -1199,7 +1186,7 @@ static stdx::expected<std::string, std::error_code> get_clusterset_id(
 
   std::unique_ptr<MySQLSession::ResultRow> row(session.query_one(query));
   if (!row) {
-    return stdx::make_unexpected(
+    return stdx::unexpected(
         make_error_code(metadata_cache::metadata_errc::cluster_not_found));
   }
 
@@ -1267,6 +1254,7 @@ GRClusterSetMetadataBackend::update_clusterset_topology_from_metadata_server(
 
   std::string query =
       "select I.mysql_server_uuid, I.endpoint, I.xendpoint, I.attributes, "
+      "I.label, "
       "C.cluster_id, C.cluster_name, CSM.member_role, CSM.invalidated, "
       "CS.domain_name "
       "from mysql_innodb_cluster_metadata.v2_instances I join "
@@ -1289,10 +1277,11 @@ GRClusterSetMetadataBackend::update_clusterset_topology_from_metadata_server(
           const std::string node_addr_classic = as_string(row[1]);
           const std::string node_addr_x = as_string(row[2]);
           const std::string node_attributes = as_string(row[3]);
-          const std::string cluster_id = as_string(row[4]);
-          const std::string cluster_name = as_string(row[5]);
-          const bool cluster_is_primary = as_string(row[6]) == "PRIMARY";
-          const bool cluster_is_invalidated = strtoui_checked(row[7]) == 1;
+          const std::string label = as_string(row[4]);
+          const std::string cluster_id = as_string(row[5]);
+          const std::string cluster_name = as_string(row[6]);
+          const bool cluster_is_primary = as_string(row[7]) == "PRIMARY";
+          const bool cluster_is_invalidated = strtoui_checked(row[8]) == 1;
 
           if (result.clusters_data.empty() ||
               result.clusters_data.back().name != cluster_name) {
@@ -1314,7 +1303,8 @@ GRClusterSetMetadataBackend::update_clusterset_topology_from_metadata_server(
               metadata_cache::ServerRole::Secondary,
               uri_classic.host,
               uri_classic.port,
-              uri_x.port};
+              uri_x.port,
+              label};
 
           set_instance_attributes(instance, node_attributes);
 
@@ -1322,7 +1312,7 @@ GRClusterSetMetadataBackend::update_clusterset_topology_from_metadata_server(
               instance.type == mysqlrouter::InstanceType::ReadReplica) {
             result.clusters_data.back().members.push_back(instance);
             if (result.name.empty()) {
-              result.name = as_string(row[8]);
+              result.name = as_string(row[9]);
             }
           } else {
             log_warning("Ignoring unsupported instance %s:%d, type: %s",
@@ -1397,7 +1387,7 @@ std::optional<metadata_cache::metadata_server_t>
 GRClusterSetMetadataBackend::find_rw_server() {
   if (cluster_topology_) {
     for (auto &cluster : (*cluster_topology_).clusters_data) {
-      if (!cluster.is_primary) continue;
+      if (!cluster.is_primary || cluster.is_invalidated) continue;
 
       log_debug("Updating the status of cluster '%s' to find the writable node",
                 cluster.name.c_str());
@@ -1406,7 +1396,9 @@ GRClusterSetMetadataBackend::find_rw_server() {
       // figure out the current Primary node
       metadata_->update_cluster_status_from_gr(false, cluster);
 
-      return metadata_->find_rw_server(cluster.members);
+      if (cluster.has_quorum) {
+        return metadata_->find_rw_server(cluster.members);
+      }
     }
   }
 
@@ -1431,12 +1423,11 @@ GRClusterSetMetadataBackend::fetch_cluster_topology(
     const auto cluster_id_res = get_clusterset_id(*connection, target_cluster);
     if (!cluster_id_res) {
       log_warning(
-          "Failed fetching clusterset_id from the metadata server on %s:%d - "
+          "Failed fetching clusterset_id from the metadata server on %s - "
           "could not find Cluster '%s' in the metadata",
-          metadata_server.address().c_str(), metadata_server.port(),
-          target_cluster.c_str());
+          metadata_server.str().c_str(), target_cluster.c_str());
 
-      return stdx::make_unexpected(cluster_id_res.error());
+      return stdx::unexpected(cluster_id_res.error());
     }
     cs_id = cluster_id_res.value();
   }
@@ -1444,11 +1435,10 @@ GRClusterSetMetadataBackend::fetch_cluster_topology(
   const auto view_id_res = get_member_view_id(*connection, cs_id);
   if (!view_id_res) {
     log_warning(
-        "Failed fetching view_id from the metadata server on %s:%d - "
+        "Failed fetching view_id from the metadata server on %s - "
         "could not find ClusterSet with ID '%s' in the metadata",
-        metadata_server.address().c_str(), metadata_server.port(),
-        cs_id.c_str());
-    return stdx::make_unexpected(view_id_res.error());
+        metadata_server.str().c_str(), cs_id.c_str());
+    return stdx::unexpected(view_id_res.error());
   }
   const uint64_t view_id = view_id_res.value();
 
@@ -1457,24 +1447,23 @@ GRClusterSetMetadataBackend::fetch_cluster_topology(
             view_id, this->view_id_, metadata_read_ ? "yes" : "no");
 
   if (view_id < this->view_id_) {
-    log_info("Metadata server %s:%d has outdated metadata view_id = %" PRIu64
+    log_info("Metadata server %s has outdated metadata view_id = %" PRIu64
              ", current view_id = %" PRIu64 ", ignoring",
-             metadata_server.address().c_str(), metadata_server.port(), view_id,
-             this->view_id_);
+             metadata_server.str().c_str(), view_id, this->view_id_);
 
-    return stdx::make_unexpected(
+    return stdx::unexpected(
         make_error_code(metadata_cache::metadata_errc::outdated_view_id));
   }
 
   if (view_id == this->view_id_ && metadata_read_) {
-    return stdx::make_unexpected(
+    return stdx::unexpected(
         make_error_code(metadata_cache::metadata_errc::outdated_view_id));
   }
 
   // get target_cluster info
   auto new_target_cluster_op = router_options.get_target_cluster();
   if (!new_target_cluster_op) {
-    return stdx::make_unexpected(make_error_code(
+    return stdx::unexpected(make_error_code(
         metadata_cache::metadata_errc::no_metadata_read_successful));
   }
   const auto [target_cluster_id, target_cluster_name, new_target_cluster] =
@@ -1490,7 +1479,7 @@ GRClusterSetMetadataBackend::fetch_cluster_topology(
   if (target_cluster_id.empty()) {
     log_error("Could not find target_cluster '%s' in the metadata",
               (*new_target_cluster_op).c_str());
-    return stdx::make_unexpected(
+    return stdx::unexpected(
         make_error_code(metadata_cache::metadata_errc::cluster_not_found));
   } else {
     if (target_cluster_changed) {
@@ -1545,6 +1534,14 @@ GRClusterSetMetadataBackend::fetch_cluster_topology(
       result.clusters_data = {cluster};
     } else
       result.clusters_data.clear();
+  } else if (target_cluster.invalidated_cluster_routing_policy() ==
+             mysqlrouter::TargetCluster::InvalidatedClusterRoutingPolicy::
+                 DropAll) {
+    result.clusters_data.erase(
+        std::remove_if(
+            std::begin(result.clusters_data), std::end(result.clusters_data),
+            [](const auto &cluster) { return cluster.is_invalidated; }),
+        std::end(result.clusters_data));
   }
 
   this->view_id_ = view_id;

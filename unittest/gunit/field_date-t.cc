@@ -1,15 +1,16 @@
-/* Copyright (c) 2012, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -59,14 +60,14 @@ const sql_mode_t FieldDateTest::strict_modes[no_modes] = {
 const type_conversion_status FieldDateTest::nozero_expected_status[] = {
     TYPE_ERR_BAD_VALUE, TYPE_ERR_BAD_VALUE, TYPE_ERR_BAD_VALUE};
 
-class Mock_field_date : public Field_newdate {
+class Mock_field_date : public Field_date {
  public:
   Mock_field_date()
-      : Field_newdate(nullptr,                    // ptr_arg
-                      &Field::dummy_null_buffer,  // null_ptr_arg
-                      1,                          // null_bit_arg
-                      Field::NONE,                // auto_flags_arg
-                      "field_name")               // field_name_arg
+      : Field_date(nullptr,                    // ptr_arg
+                   &Field::dummy_null_buffer,  // null_ptr_arg
+                   1,                          // null_bit_arg
+                   Field::NONE,                // auto_flags_arg
+                   "field_name")               // field_name_arg
   {}
 
   void make_writable() { bitmap_set_bit(table->write_set, field_index()); }

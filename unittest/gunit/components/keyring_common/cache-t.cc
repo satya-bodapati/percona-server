@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,6 +22,7 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include <string>
+#include <utility>
 
 #include <gtest/gtest.h>
 
@@ -38,7 +40,7 @@ class KeyringCommonCache_test : public ::testing::Test {};
 
 class Dummy_extension {
  public:
-  Dummy_extension(std::string ext_data) : ext_data_(ext_data) {}
+  Dummy_extension(std::string ext_data) : ext_data_(std::move(ext_data)) {}
   Dummy_extension() : Dummy_extension(std::string{""}) {}
   std::string ext_data() const { return ext_data_; }
 
@@ -51,12 +53,12 @@ TEST_F(KeyringCommonCache_test, CacheDataTest) {
       metadata3("key3", "foo@bar.com");
   Metadata metadata4("key1", "bar@foo.com"), metadata5("key2", "bar@foo.com"),
       metadata6("key3", "bar@foo.com"), metadata7("key4", "bar@foo.com");
-  Metadata metadata8("key", "foo@bar.com");
+  Metadata const metadata8("key", "foo@bar.com");
 
   Data data1("Data1", "Type1"), data2("Data2", "Type2"),
       data3("Data3", "Type3");
-  Data data4("Data1", "Type1");
-  Data invalid_data;
+  Data const data4("Data1", "Type1");
+  Data const invalid_data;
 
   Datacache<Data> cache;
 

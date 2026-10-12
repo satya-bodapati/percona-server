@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -81,10 +82,10 @@ Member_actions_handler_configuration::enable_disable_action(
   char buffer[MAX_FIELD_WIDTH];
   String string(buffer, sizeof(buffer), &my_charset_bin);
   table->field[3]->val_str(&string);
-  std::string type(string.c_ptr_safe(), string.length());
+  std::string type = to_string(string);
   uint priority = static_cast<uint>(table->field[4]->val_int());
   table->field[5]->val_str(&string);
-  std::string error_handling(string.c_ptr_safe(), string.length());
+  std::string error_handling = to_string(string);
 
   // delete row
   error |= table->file->ha_delete_row(table->record[0]);
@@ -187,21 +188,21 @@ bool Member_actions_handler_configuration::get_actions_for_event(
       protobuf_replication_group_member_actions::Action *action =
           action_list.add_action();
       table->field[0]->val_str(&string);
-      action->set_name(string.c_ptr_safe(), string.length());
+      action->set_name(to_string(string));
 
       table->field[1]->val_str(&string);
-      action->set_event(string.c_ptr_safe(), string.length());
+      action->set_event(to_string(string));
 
       action->set_enabled(table->field[2]->val_int());
 
       table->field[3]->val_str(&string);
-      action->set_type(string.c_ptr_safe(), string.length());
+      action->set_type(to_string(string));
 
       uint priority = static_cast<uint>(table->field[4]->val_int());
       action->set_priority(priority);
 
       table->field[5]->val_str(&string);
-      action->set_error_handling(string.c_ptr_safe(), string.length());
+      action->set_error_handling(to_string(string));
     } while (!key_access.next());
   } else if (HA_ERR_END_OF_FILE == key_error) {
     /* Table is empty, nothing to read. */
@@ -264,21 +265,21 @@ bool Member_actions_handler_configuration::get_all_actions_internal(
       protobuf_replication_group_member_actions::Action *action =
           action_list.add_action();
       table->field[0]->val_str(&string);
-      action->set_name(string.c_ptr_safe(), string.length());
+      action->set_name(to_string(string));
 
       table->field[1]->val_str(&string);
-      action->set_event(string.c_ptr_safe(), string.length());
+      action->set_event(to_string(string));
 
       action->set_enabled(table->field[2]->val_int());
 
       table->field[3]->val_str(&string);
-      action->set_type(string.c_ptr_safe(), string.length());
+      action->set_type(to_string(string));
 
       uint priority = static_cast<uint>(table->field[4]->val_int());
       action->set_priority(priority);
 
       table->field[5]->val_str(&string);
-      action->set_error_handling(string.c_ptr_safe(), string.length());
+      action->set_error_handling(to_string(string));
     } while (!key_access.next());
   } else if (HA_ERR_END_OF_FILE == key_error) {
     /* Table is already empty, nothing to read. */

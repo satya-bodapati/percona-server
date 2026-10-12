@@ -1,3 +1,4 @@
+include/rpl/set_gtid_mode_off.inc
 CALL mtr.add_suppression("Enabling keys got errno");
 drop table if exists t1,t2;
 SET SQL_WARNINGS=1;
@@ -683,9 +684,9 @@ count(*)
 2
 drop table t1;
 create table t1 (c1 int, c2 varchar(4) not null default '',
-key(c2(3))) default charset=utf8;
+key(c2(3))) default charset=utf8mb3;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 insert into t1 values (1,'A'), (2, 'B'), (3, 'A');
 update t1 set c2='A  B' where c1=2;
 check table t1;
@@ -1326,14 +1327,14 @@ Warnings:
 Note	1003	/* select#1 */ select count(0) AS `count(*)` from `test`.`t1` where (`test`.`t1`.`v` like 'a%')
 explain select count(*) from t1 where v between 'a' and 'a ';
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t1	NULL	ref	v	v	13	const	#	100.00	Using where; Using index
+1	SIMPLE	t1	NULL	ref	v	v	13	const	#	100.00	Using index
 Warnings:
-Note	1003	/* select#1 */ select count(0) AS `count(*)` from `test`.`t1` where (`test`.`t1`.`v` between 'a' and 'a ')
+Note	1003	/* select#1 */ select count(0) AS `count(*)` from `test`.`t1` where (`test`.`t1`.`v` = 'a')
 explain select count(*) from t1 where v between 'a' and 'a ' and v between 'a  ' and 'b\n';
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t1	NULL	ref	v	v	13	const	#	100.00	Using where; Using index
+1	SIMPLE	t1	NULL	ref	v	v	13	const	#	100.00	Using index
 Warnings:
-Note	1003	/* select#1 */ select count(0) AS `count(*)` from `test`.`t1` where ((`test`.`t1`.`v` between 'a' and 'a ') and (`test`.`t1`.`v` between 'a  ' and 'b\n'))
+Note	1003	/* select#1 */ select count(0) AS `count(*)` from `test`.`t1` where (`test`.`t1`.`v` = 'a')
 alter table t1 add unique(v);
 ERROR 23000: Duplicate entry '{ ' for key 't1.v_2'
 alter table t1 add key(v);
@@ -1529,14 +1530,14 @@ Warnings:
 Note	1003	/* select#1 */ select count(0) AS `count(*)` from `test`.`t1` where (`test`.`t1`.`v` like 'a%')
 explain select count(*) from t1 where v between 'a' and 'a ';
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t1	NULL	ref	v	v	303	const	#	100.00	Using where; Using index
+1	SIMPLE	t1	NULL	ref	v	v	303	const	#	100.00	Using index
 Warnings:
-Note	1003	/* select#1 */ select count(0) AS `count(*)` from `test`.`t1` where (`test`.`t1`.`v` between 'a' and 'a ')
+Note	1003	/* select#1 */ select count(0) AS `count(*)` from `test`.`t1` where (`test`.`t1`.`v` = 'a')
 explain select count(*) from t1 where v between 'a' and 'a ' and v between 'a  ' and 'b\n';
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	t1	NULL	ref	v	v	303	const	#	100.00	Using where; Using index
+1	SIMPLE	t1	NULL	ref	v	v	303	const	#	100.00	Using index
 Warnings:
-Note	1003	/* select#1 */ select count(0) AS `count(*)` from `test`.`t1` where ((`test`.`t1`.`v` between 'a' and 'a ') and (`test`.`t1`.`v` between 'a  ' and 'b\n'))
+Note	1003	/* select#1 */ select count(0) AS `count(*)` from `test`.`t1` where (`test`.`t1`.`v` = 'a')
 explain select * from t1 where v='a';
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	t1	NULL	ref	v	v	303	const	#	100.00	NULL
@@ -1621,12 +1622,12 @@ explain select count(*) from t1 where v between 'a' and 'a ';
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	t1	NULL	ref	v	v	33	const	#	100.00	Using where
 Warnings:
-Note	1003	/* select#1 */ select count(0) AS `count(*)` from `test`.`t1` where (`test`.`t1`.`v` between 'a' and 'a ')
+Note	1003	/* select#1 */ select count(0) AS `count(*)` from `test`.`t1` where (`test`.`t1`.`v` = 'a')
 explain select count(*) from t1 where v between 'a' and 'a ' and v between 'a  ' and 'b\n';
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	t1	NULL	ref	v	v	33	const	#	100.00	Using where
 Warnings:
-Note	1003	/* select#1 */ select count(0) AS `count(*)` from `test`.`t1` where ((`test`.`t1`.`v` between 'a' and 'a ') and (`test`.`t1`.`v` between 'a  ' and 'b\n'))
+Note	1003	/* select#1 */ select count(0) AS `count(*)` from `test`.`t1` where (`test`.`t1`.`v` = 'a')
 explain select * from t1 where v='a';
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	t1	NULL	ref	v	v	33	const	#	100.00	Using where
@@ -1760,9 +1761,9 @@ t1	CREATE TABLE `t1` (
   KEY `t` (`t`(5))
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 drop table t1;
-create table t1 (v char(10) character set utf8);
+create table t1 (v char(10) character set utf8mb3);
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 show create table t1;
 Table	Create Table
 t1	CREATE TABLE `t1` (
@@ -1812,9 +1813,9 @@ t1	CREATE TABLE `t1` (
   `v` mediumtext
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 drop table t1;
-create table t1 (v varchar(65530) character set utf8);
+create table t1 (v varchar(65530) character set utf8mb3);
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 Note	1246	Converting column 'v' from VARCHAR to TEXT
 show create table t1;
 Table	Create Table
@@ -2331,12 +2332,12 @@ DROP TABLE t1;
 CREATE TABLE t1 (
 c1 CHAR(50),
 c2 VARCHAR(1)
-) ENGINE=MyISAM DEFAULT CHARSET UTF8;
+) ENGINE=MyISAM DEFAULT CHARSET utf8mb3;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
-INSERT INTO t1 VALUES(REPEAT(_utf8 x'e0ae85',43), 'b');
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+INSERT INTO t1 VALUES(REPEAT(_utf8mb3 x'e0ae85',43), 'b');
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 SELECT COUNT(*) FROM t1;
 COUNT(*)
 1
@@ -2356,12 +2357,12 @@ DROP TABLE t1;
 CREATE TABLE t1 (
 c1 CHAR(50),
 c2 VARCHAR(1)
-) ENGINE=MyISAM DEFAULT CHARSET UTF8;
+) ENGINE=MyISAM DEFAULT CHARSET utf8mb3;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
-INSERT INTO t1 VALUES(REPEAT(_utf8 x'e0ae85',43), 'b');
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+INSERT INTO t1 VALUES(REPEAT(_utf8mb3 x'e0ae85',43), 'b');
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 SELECT COUNT(*) FROM t1;
 COUNT(*)
 1
@@ -2381,12 +2382,12 @@ DROP TABLE t1;
 CREATE TABLE t1 (
 c1 CHAR(50),
 c2 VARCHAR(1)
-) ENGINE=MyISAM DEFAULT CHARSET UTF8;
+) ENGINE=MyISAM DEFAULT CHARSET utf8mb3;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
-INSERT INTO t1 VALUES(REPEAT(_utf8 x'e0ae85',43), 'b');
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+INSERT INTO t1 VALUES(REPEAT(_utf8mb3 x'e0ae85',43), 'b');
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 INSERT INTO t1 VALUES('b', 'b');
 INSERT INTO t1 VALUES('c', 'b');
 DELETE FROM t1 WHERE c1='b';
@@ -2404,13 +2405,13 @@ CREATE TABLE t1 (
 c1 CHAR(50),
 c2 VARCHAR(1),
 KEY (c1)
-) ENGINE=MyISAM DEFAULT CHARSET UTF8;
+) ENGINE=MyISAM DEFAULT CHARSET utf8mb3;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 # Insert 100 rows. Query log disabled.
-UPDATE t1 SET c1=REPEAT(_utf8 x'e0ae85',43) LIMIT 90;
+UPDATE t1 SET c1=REPEAT(_utf8mb3 x'e0ae85',43) LIMIT 90;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 SELECT COUNT(*) FROM t1;
 COUNT(*)
 100
@@ -2431,9 +2432,9 @@ c2 CHAR(10) DEFAULT NULL,
 c3 VARCHAR(10) NOT NULL,
 KEY (c1),
 KEY (c2)
-) ENGINE=MyISAM DEFAULT CHARSET=utf8 PACK_KEYS=0;
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb3 PACK_KEYS=0;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 
 MyISAM file:         MYSQLD_DATADIR/test/t1
 Record format:       Packed
@@ -2782,3 +2783,13 @@ count(*)
 0
 DROP TABLE t1;
 SET sql_mode = default;
+CREATE TABLE ta (pk INT, embedding VECTOR(4), PRIMARY KEY (pk)) ENGINE=MyISAM;
+INSERT INTO ta VALUES
+(0, TO_VECTOR("[1,2,3,4]")),
+(1, TO_VECTOR("[4,5,6,7]"));
+SELECT FROM_VECTOR(embedding) FROM ta;
+FROM_VECTOR(embedding)
+[1.00000e+00,2.00000e+00,3.00000e+00,4.00000e+00]
+[4.00000e+00,5.00000e+00,6.00000e+00,7.00000e+00]
+DROP TABLE ta;
+include/rpl/set_gtid_mode_on.inc

@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -37,9 +38,10 @@
 #include "my_inttypes.h"
 #include "mysql/strings/m_ctype.h"
 #include "sql/enum_query_type.h"
+#include "sql/join_optimizer/relational_expression.h"
 #include "sql/mem_root_array.h"  // Mem_root_array
 #include "sql/sql_bitmap.h"      // Bitmap
-#include "sql/sql_show.h"        // append_identifier
+#include "sql/sql_show.h"        // append_identifier_*
 #include "sql_string.h"          // String
 #include "string_with_len.h"
 
@@ -54,6 +56,7 @@ class sys_var;
 struct MEM_ROOT;
 struct TABLE;
 class Table_ref;
+class PT_hint_list;
 
 /**
   Hint types, MAX_HINT_ENUM should be always last.
@@ -350,11 +353,15 @@ class Opt_hints_global : public Opt_hints {
  public:
   PT_hint_max_execution_time *max_exec_time;
   Sys_var_hint *sys_var_hint;
+  PT_hint_list *deferred_hints;
+  bool deferred_hints_flag;
 
   Opt_hints_global(MEM_ROOT *mem_root_arg)
       : Opt_hints(nullptr, nullptr, mem_root_arg) {
     max_exec_time = nullptr;
     sys_var_hint = nullptr;
+    deferred_hints = nullptr;
+    deferred_hints_flag = false;
   }
 
   void append_name(const THD *, String *) override {}
@@ -471,6 +478,18 @@ class Opt_hints_qb : public Opt_hints {
   Subquery_strategy subquery_strategy() const;
 
   void print_irregular_hints(const THD *thd, String *str) override;
+  const mem_root_deque<Table_ref *> *sort_tables_in_join_order(
+      THD *thd, const mem_root_deque<Table_ref *> &join_list,
+      bool toplevel = false);
+  bool check_join_order_hints(RelationalExpression *left,
+                              RelationalExpression *right,
+                              const mem_root_deque<Table_ref *> *join_list);
+  bool hinted_join_order(PT_qb_level_hint *hint, RelationalExpression *left,
+                         RelationalExpression *right,
+                         const mem_root_deque<Table_ref *> *join_list);
+
+  bool has_join_order_hints() const;
+  void clear_join_order_hints();
 
   /**
     Checks if join order hints are applicable and

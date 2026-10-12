@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -54,12 +55,12 @@ static std::optional<std::vector<uint8_t>> scramble(
     std::string_view nonce, std::string_view password,
     const EVP_MD *digest_func, bool nonce_before_double_hashed_password) {
   // in case of empty password, the hash is empty too
-  if (password.size() == 0) return std::vector<uint8_t>{};
+  if (password.empty()) return std::vector<uint8_t>{};
 
   const auto digest_size = EVP_MD_size(digest_func);
 
 #if OPENSSL_VERSION_NUMBER >= 0x1010000fL
-  std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> digest_ctx(
+  std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> const digest_ctx(
       EVP_MD_CTX_new(), &EVP_MD_CTX_free);
 #else
   std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_destroy)> digest_ctx(
@@ -68,7 +69,8 @@ static std::optional<std::vector<uint8_t>> scramble(
 
   std::vector<uint8_t> hashed_password(digest_size);
   std::vector<uint8_t> double_hashed_password(digest_size);
-  std::vector<uint8_t> hashed_nonce_and_double_hashed_password(digest_size);
+  std::vector<uint8_t> const hashed_nonce_and_double_hashed_password(
+      digest_size);
 
   int ok{1};
   ok &= EVP_DigestInit_ex(digest_ctx.get(), digest_func, nullptr);

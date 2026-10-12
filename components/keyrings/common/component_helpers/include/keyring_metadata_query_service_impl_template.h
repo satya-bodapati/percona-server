@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -33,8 +34,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include <components/keyrings/common/component_helpers/include/service_requirements.h>
 
-namespace keyring_common {
-namespace service_implementation {
+namespace keyring_common::service_implementation {
 
 /**
   Returns status of the keyring component
@@ -104,7 +104,7 @@ bool keyring_metadata_query_deinit_template(
 bool keyring_metadata_query_is_valid_template(
     std::unique_ptr<config_vector> &it) {
   try {
-    return ((it.get() != nullptr) && (it.get()->size() > 0));
+    return (it != nullptr) && !it->empty();
   } catch (...) {
     LogComponentErr(ERROR_LEVEL, ER_KEYRING_COMPONENT_EXCEPTION, "is_valid",
                     "keyring_component_metadata_query");
@@ -123,10 +123,10 @@ bool keyring_metadata_query_is_valid_template(
 */
 bool keyring_metadata_query_next_template(std::unique_ptr<config_vector> &it) {
   try {
-    if (it.get()->size() == 0) {
+    if (it->empty()) {
       return true;
     }
-    it.get()->erase(it.get()->begin());
+    it->erase(it->begin());
     return false;
   } catch (...) {
     LogComponentErr(ERROR_LEVEL, ER_KEYRING_COMPONENT_EXCEPTION, "next",
@@ -150,7 +150,7 @@ bool keyring_metadata_query_get_length_template(
     std::unique_ptr<config_vector> &it, size_t *key_buffer_length,
     size_t *value_buffer_length) {
   try {
-    if (it->size() == 0) {
+    if (it->empty()) {
       return true;
     }
 
@@ -192,7 +192,7 @@ bool keyring_metadata_query_get_template(char *key_buffer,
                                          size_t value_buffer_length,
                                          std::unique_ptr<config_vector> &it) {
   try {
-    if (it->size() == 0) {
+    if (it->empty()) {
       return true;
     }
 
@@ -221,6 +221,5 @@ bool keyring_metadata_query_get_template(char *key_buffer,
   }
 }
 
-}  // namespace service_implementation
-}  // namespace keyring_common
+}  // namespace keyring_common::service_implementation
 #endif  // !KEYRING_METADATA_QUERY_SERVICE_IMPL_TEMPLATE_INCLUDED

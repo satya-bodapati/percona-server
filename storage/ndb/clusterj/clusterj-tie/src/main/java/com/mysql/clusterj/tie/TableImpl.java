@@ -1,16 +1,17 @@
 /*
- *  Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+ *  Copyright (c) 2010, 2026, Oracle and/or its affiliates.
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License, version 2.0,
  *  as published by the Free Software Foundation.
  *
- *  This program is also distributed with certain software (including
+ *  This program is designed to work with certain software (including
  *  but not limited to OpenSSL) that is licensed under separate terms,
  *  as designated in a particular file or component or in included license
  *  documentation.  The authors of MySQL hereby grant you an additional
  *  permission to link the program and your derivative works with the
- *  separately licensed software that they have included with MySQL.
+ *  separately licensed software that they have either included with
+ *  the program or referenced in the documentation.
  *
  *  This program is distributed in the hope that it will be useful,
  *  but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -55,7 +56,7 @@ class TableImpl implements Table {
             .getInstance(TableImpl.class);
 
     /** The TableConst wrapped by this */
-    protected TableConst ndbTable;
+    final protected TableConst ndbTable;
 
     /** The projected column names */
     protected String[] projectedColumnNames;
@@ -64,22 +65,22 @@ class TableImpl implements Table {
     protected String key;
 
     /** The table name */
-    private String tableName;
+    final private String tableName;
 
     /** The column names */
-    private String[] columnNames;
+    final private String[] columnNames;
 
     /** The primary key column names */
-    private String[] primaryKeyColumnNames;
+    final private String[] primaryKeyColumnNames;
 
     /** The partition key column names */
-    private String[] partitionKeyColumnNames;
+    final private String[] partitionKeyColumnNames;
 
     /** The columns in this table */
-    private Map<String, ColumnImpl> columns = new HashMap<String, ColumnImpl>();
+    final private Map<String, ColumnImpl> columns = new HashMap<String, ColumnImpl>();
 
     /** The index names for this table */
-    private String[] indexNames;
+    final private String[] indexNames;
 
     /** The array of lengths of column space indexed by column id */
     private int[] lengths;
@@ -87,14 +88,14 @@ class TableImpl implements Table {
     /** The array of offsets of column space indexed by column id */
     private int[] offsets;
 
-    /** The total size of buffer needed for all columns */
-    private int bufferSize;
+    /** This value is never set; used by possibly dead code in OperationImpl */
+    final private int bufferSize = 0;
 
     /** The maximum column id */
     private int maximumColumnId;
 
-    /** The maximum column length */
-    private int maximumColumnLength = 0;
+    /** This value is never set; used by possibly dead code in OperationImpl */
+    final private int maximumColumnLength = 0;
 
     /** The autoincrement column */
     private Column autoIncrementColumn = null;
@@ -225,4 +226,10 @@ class TableImpl implements Table {
         return maximumColumnLength;
     }
 
+    public String getVersion() {
+        int version = ndbTable.getObjectVersion();
+        int major = version & 0xFFFFFF;
+        int minor = (version >> 24);
+        return Integer.toString(major) + "." + Integer.toString(minor);
+    }
 }

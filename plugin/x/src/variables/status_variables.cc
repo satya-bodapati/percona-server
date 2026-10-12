@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -196,11 +197,14 @@ int global_status_variable(THD *, SHOW_VAR *var, char *buff) {
 
   if (!server.container()) return 0;
 
-  if (!server->ssl_context()) return 0;
+  // creating a copy of the context's shared_pointer in order to
+  // extend its lifetime
+  auto context = server->ssl_context();
+  if (!context) return 0;
 
-  auto &context = server->ssl_context()->options();
+  auto &options = context->options();
   auto context_method = method;  // workaround on VC compiler internal error
-  ReturnType result = (context.*context_method)();
+  ReturnType result = (options.*context_method)();
 
   mysqld::xpl_show_var(var).assign(result);
   return 0;
@@ -457,6 +461,7 @@ struct SHOW_VAR Plugin_status_variables::m_plugin_status_variables[] = {
 
 // simple (no measurement attributes supported) common Variable metric
 // callback
+#ifdef HAVE_PSI_METRICS_INTERFACE
 static void get_metric_simple_variable(void *measurement_context,
                                        measurement_delivery_callback_t delivery,
                                        void *delivery_context) {
@@ -858,5 +863,5 @@ PSI_meter_info_v1 Plugin_status_variables::m_xpl_meter[] = {
 size_t Plugin_status_variables::get_meter_count() {
   return std::size(m_xpl_meter);
 }
-
+#endif /* HAVE_PSI_METRICS_INTERFACE */
 }  // namespace xpl

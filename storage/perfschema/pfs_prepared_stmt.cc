@@ -1,15 +1,16 @@
-/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -73,11 +74,11 @@ PFS_prepared_stmt *create_prepared_stmt(
     void *identity, PFS_thread *thread, PFS_program *pfs_program,
     PFS_events_statements *pfs_stmt, uint stmt_id, const char *stmt_name,
     uint stmt_name_length, const char *sqltext, uint sqltext_length) {
-  PFS_prepared_stmt *pfs = nullptr;
   pfs_dirty_state dirty_state;
 
   /* Create a new record in prepared stmt stat array. */
-  pfs = global_prepared_stmt_container.allocate(&dirty_state);
+  PFS_prepared_stmt *pfs =
+      global_prepared_stmt_container.allocate(&dirty_state);
   if (pfs != nullptr) {
     /* Reset the stats. */
     pfs->reset_data();

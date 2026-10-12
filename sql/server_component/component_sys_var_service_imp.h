@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,6 +28,100 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 #include <mysql/components/services/component_sys_var_service.h>
 
 void mysql_comp_sys_var_services_init();
+
+#define COPY_MYSQL_PLUGIN_VAR_HEADER(sys_var_type, type, sys_var_check, \
+                                     sys_var_update)                    \
+  sys_var_type->flags = flags;                                          \
+  sys_var_type->name = var_name;                                        \
+  sys_var_type->comment = comment;                                      \
+  sys_var_type->check = check_func ? check_func : sys_var_check;        \
+  sys_var_type->update = update_func ? update_func : sys_var_update;    \
+  sys_var_type->value = (type *)variable_value;
+
+#define COPY_MYSQL_PLUGIN_THDVAR_HEADER(sys_var_type, type, sys_var_check, \
+                                        sys_var_update)                    \
+  sys_var_type->flags = flags;                                             \
+  sys_var_type->name = var_name;                                           \
+  sys_var_type->comment = comment;                                         \
+  sys_var_type->check = check_func ? check_func : sys_var_check;           \
+  sys_var_type->update = update_func ? update_func : sys_var_update;       \
+  sys_var_type->offset = -1;
+
+#define COPY_MYSQL_PLUGIN_VAR_REMAINING(sys_var_type, check_arg_type) \
+  sys_var_type->def_val = check_arg_type->def_val;                    \
+  sys_var_type->min_val = check_arg_type->min_val;                    \
+  sys_var_type->max_val = check_arg_type->max_val;                    \
+  sys_var_type->blk_sz = check_arg_type->blk_sz;
+
+#define THDVAR_FUNC(type) type *(*resolve)(MYSQL_THD thd, int offset)
+
+#define SYSVAR_INTEGRAL_TYPE(type) \
+  struct sysvar_##type##_type {    \
+    MYSQL_PLUGIN_VAR_HEADER;       \
+    type *value;                   \
+    type def_val;                  \
+    type min_val;                  \
+    type max_val;                  \
+    type blk_sz;                   \
+  }
+
+#define THDVAR_INTEGRAL_TYPE(type) \
+  struct thdvar_##type##_type {    \
+    MYSQL_PLUGIN_VAR_HEADER;       \
+    int offset;                    \
+    type def_val;                  \
+    type min_val;                  \
+    type max_val;                  \
+    type blk_sz;                   \
+    THDVAR_FUNC(type);             \
+  }
+
+#define SYSVAR_ENUM_TYPE(type)  \
+  struct sysvar_##type##_type { \
+    MYSQL_PLUGIN_VAR_HEADER;    \
+    unsigned long *value;       \
+    unsigned long def_val;      \
+    TYPE_LIB *typelib;          \
+  }
+
+#define THDVAR_ENUM_TYPE(type)  \
+  struct thdvar_##type##_type { \
+    MYSQL_PLUGIN_VAR_HEADER;    \
+    int offset;                 \
+    unsigned long def_val;      \
+    THDVAR_FUNC(unsigned long); \
+    TYPE_LIB *typelib;          \
+  }
+
+#define SYSVAR_BOOL_TYPE(type)  \
+  struct sysvar_##type##_type { \
+    MYSQL_PLUGIN_VAR_HEADER;    \
+    bool *value;                \
+    bool def_val;               \
+  }
+
+#define THDVAR_BOOL_TYPE(type)  \
+  struct thdvar_##type##_type { \
+    MYSQL_PLUGIN_VAR_HEADER;    \
+    int offset;                 \
+    bool def_val;               \
+    THDVAR_FUNC(type);          \
+  }
+
+#define SYSVAR_STR_TYPE(type)   \
+  struct sysvar_##type##_type { \
+    MYSQL_PLUGIN_VAR_HEADER;    \
+    char **value;               \
+    char *def_val;              \
+  }
+
+#define THDVAR_STR_TYPE(type)   \
+  struct thdvar_##type##_type { \
+    MYSQL_PLUGIN_VAR_HEADER;    \
+    int offset;                 \
+    char *def_val;              \
+    THDVAR_FUNC(char *);        \
+  }
 
 /**
   An implementation of the configuration system variables Service to register

@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,23 +26,24 @@
 #ifndef MYSQLROUTER_LOG_FILTER_INCLUDED
 #define MYSQLROUTER_LOG_FILTER_INCLUDED
 
-#include "mysqlrouter/router_export.h"
+#include "mysqlrouter/router_mysql_export.h"
 
+#include <memory>
 #include <string>
 #include <vector>
-
-#include <regex>
-using regex_search_and_replace_patterns = std::pair<std::regex, std::string>;
 
 namespace mysqlrouter {
 
 /*
  * A LogFilter allows to replace substring with '***'.
  */
-class ROUTER_LIB_EXPORT LogFilter {
+class ROUTER_MYSQL_EXPORT LogFilter {
  public:
   static const char kFillCharacter;
   static const unsigned int kFillSize = 3;
+
+  LogFilter();
+  ~LogFilter();
 
   /*
    * @param statement The string to be filtered.
@@ -66,7 +68,8 @@ class ROUTER_LIB_EXPORT LogFilter {
   void add_pattern(const std::string &pattern, const std::string &replacement);
 
  private:
-  std::vector<regex_search_and_replace_patterns> patterns_;
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
 };
 
 /**
@@ -75,6 +78,9 @@ class ROUTER_LIB_EXPORT LogFilter {
  */
 class SQLLogFilter : public LogFilter {
  public:
+  SQLLogFilter() { add_default_sql_patterns(); }
+
+ private:
   /*
    * Adds default patterns defined as regular expressions.
    */

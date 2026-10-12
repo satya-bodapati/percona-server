@@ -18,26 +18,24 @@
 
 # start group replication on server1
 --let $rpl_connection_name= server1
---source include/rpl_connection.inc
+--source include/connection.inc
 --source include/start_and_bootstrap_group_replication.inc
 
 # enable MTS in server2
 --let $rpl_connection_name= server2
---source include/rpl_connection.inc
+--source include/connection.inc
 # Save defaults.
-SET @replica_parallel_type_saved= @@GLOBAL.REPLICA_PARALLEL_TYPE;
 SET @replica_parallel_workers_saved= @@GLOBAL.REPLICA_PARALLEL_WORKERS;
 SET @slave_preserver_commit_order_saved= @@GLOBAL.REPLICA_PRESERVE_COMMIT_ORDER;
 #
-SET GLOBAL replica_parallel_type= 'LOGICAL_CLOCK';
 SET GLOBAL replica_parallel_workers= 4;
 SET GLOBAL replica_preserve_commit_order= ON;
 CHANGE REPLICATION SOURCE TO SOURCE_USER='root', SOURCE_PASSWORD='' FOR CHANNEL 'group_replication_recovery';
 --source include/start_group_replication.inc
 
-# check that both view change transactions have been executed
---let $assert_text= GTID_EXECUTED must be UUID:1-2
---let $assert_cond= "[SELECT @@GLOBAL.GTID_EXECUTED]" = "$group_replication_group_name:1-2"
+# check that view change are not logged
+--let $assert_text= GTID_EXECUTED must be None
+--let $assert_cond= "[SELECT @@GLOBAL.GTID_EXECUTED]" = ""
 --source include/assert.inc
 
 # check that no inactive worker has applying transactions
@@ -46,7 +44,6 @@ CHANGE REPLICATION SOURCE TO SOURCE_USER='root', SOURCE_PASSWORD='' FOR CHANNEL 
 --source include/assert.inc
 
 # Restore defaults
-SET @@GLOBAL.REPLICA_PARALLEL_TYPE= @replica_parallel_type_saved;
 --disable_warnings
 SET @@GLOBAL.REPLICA_PARALLEL_WORKERS= @replica_parallel_workers_saved;
 --enable_warnings

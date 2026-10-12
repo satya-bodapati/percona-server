@@ -1,15 +1,16 @@
-# Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -158,6 +159,20 @@ STRING(TIMESTAMP MYSQL_COPYRIGHT_YEAR "%Y")
 IF(MSVC)
   GET_FILENAME_COMPONENT(MYSQL_CMAKE_SCRIPT_DIR ${CMAKE_CURRENT_LIST_FILE} PATH)
 
+  IF(WITH_NDB)
+    SET(VINFO_PRODUCT_NAME "MySQL NDB Cluster")
+  ELSE()
+    SET(VINFO_PRODUCT_NAME "MySQL Server")
+  ENDIF()
+
+  # Find the copyright line from the top README file
+  FILE(STRINGS ${CMAKE_SOURCE_DIR}/README VINFO_COPYRIGHT_LINE
+       ENCODING UTF-8 LIMIT_COUNT 1 REGEX "^Copyright")
+  IF(NOT VINFO_COPYRIGHT_LINE)
+    MESSAGE(FATAL_ERROR "Can't read copyright line from top README")
+  ENDIF()
+  MESSAGE(STATUS "Windows EXE/DLL file info copyright line: ${VINFO_COPYRIGHT_LINE}")
+
   SET(FILETYPE VFT_APP)
   CONFIGURE_FILE(${MYSQL_CMAKE_SCRIPT_DIR}/versioninfo.rc.in
     ${CMAKE_BINARY_DIR}/versioninfo_exe.rc)
@@ -166,15 +181,47 @@ IF(MSVC)
   CONFIGURE_FILE(${MYSQL_CMAKE_SCRIPT_DIR}/versioninfo.rc.in
     ${CMAKE_BINARY_DIR}/versioninfo_dll.rc)
 
-  FUNCTION(ADD_VERSION_INFO target target_type sources_var)
+  SET(VINFO_PRODUCT_NAME "MySQL Router")
+
+  SET(FILETYPE VFT_APP)
+  CONFIGURE_FILE(${MYSQL_CMAKE_SCRIPT_DIR}/versioninfo.rc.in
+    ${CMAKE_BINARY_DIR}/router_versioninfo_exe.rc)
+
+  SET(FILETYPE VFT_DLL)
+  CONFIGURE_FILE(${MYSQL_CMAKE_SCRIPT_DIR}/versioninfo.rc.in
+    ${CMAKE_BINARY_DIR}/router_versioninfo_dll.rc)
+
+  SET(VERSION_INFO_RC_EXE_Router ${CMAKE_BINARY_DIR}/router_versioninfo_exe.rc)
+  SET(VERSION_INFO_RC_DLL_Router ${CMAKE_BINARY_DIR}/router_versioninfo_dll.rc)
+
+  # ADD_VERSION_INFO:
+  #     add version info the executables/shared libraries on windows
+  #
+  # @param target_type  type of the target: SHARED|MODULE|EXE
+  # @param sources_var  caller's variable name to append the rc-files to
+  # @param component    component name
+  #
+  FUNCTION(ADD_VERSION_INFO target_type sources_var component)
+    SET(exe_rc_file ${CMAKE_BINARY_DIR}/versioninfo_exe.rc)
+    SET(dll_rc_file ${CMAKE_BINARY_DIR}/versioninfo_dll.rc)
+
+    # Override default when VERSION_INFO_RC_[EXE|DLL]_{$component} defined
+    IF(component)
+      IF(VERSION_INFO_RC_EXE_${component})
+        SET(exe_rc_file ${VERSION_INFO_RC_EXE_${component}})
+      ENDIF()
+      IF(VERSION_INFO_RC_DLL_${component})
+        SET(dll_rc_file ${VERSION_INFO_RC_DLL_${component}})
+      ENDIF()
+    ENDIF()
+
     IF("${target_type}" MATCHES "SHARED" OR "${target_type}" MATCHES "MODULE")
-      SET(rcfile ${CMAKE_BINARY_DIR}/versioninfo_dll.rc)
+      SET(rcfile ${dll_rc_file})
     ELSEIF("${target_type}" MATCHES "EXE")
-      SET(rcfile ${CMAKE_BINARY_DIR}/versioninfo_exe.rc)
+      SET(rcfile ${exe_rc_file})
     ENDIF()
     SET(${sources_var} ${${sources_var}} ${rcfile} PARENT_SCOPE)
   ENDFUNCTION()
-
 ELSE()
   FUNCTION(ADD_VERSION_INFO)
   ENDFUNCTION()

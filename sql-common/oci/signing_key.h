@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -30,8 +31,8 @@
 
 #include <string>
 
-#include "sql-common/oci/ssl.h"
-#include "sql-common/oci/ssl_ptr.h"
+#include "include/base64_encode.h"
+#include "include/encode_ptr.h"
 
 namespace oci {
 class Signing_Key {
@@ -45,18 +46,18 @@ class Signing_Key {
 
  public:
   Signing_Key(const std::string &file_name);
-  explicit Signing_Key(ssl::Key_Content);
+  explicit Signing_Key(const ssl::Key_Content &);
   Signing_Key();
   Signing_Key(const Signing_Key &) = delete;
   Signing_Key &operator=(const Signing_Key &) = delete;
   Signing_Key(Signing_Key &&) = default;
   Signing_Key &operator=(Signing_Key &&) = delete;
   operator bool() const { return m_private_key.operator bool(); }
-  std::string get_public_key() { return m_public_key; }
+  std::string get_public_key() const { return m_public_key; }
 
   // main operation
-  Data sign(const std::string &message);
-  Data sign(const void *message, size_t length);
+  Data sign(const std::string &message) const;
+  Data sign(const void *message, size_t length) const;
 };
 }  // namespace oci
 #endif

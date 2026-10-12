@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1997, 2023, Oracle and/or its affiliates.
+Copyright (c) 1997, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -299,10 +300,14 @@ static ulint opt_calc_index_goodness(
   ulint op;
   ulint j;
 
-  /* At least for now we don't support using FTS indexes, or
-  virtual index for queries done through InnoDB's own SQL parser. */
+  /* At least for now we don't support using FTS indexes, vector
+  indexes, or virtual indexes for queries done through InnoDB's
+  own SQL parser. The vector arm is reached: FULLTEXT runs internal SQL
+  against the base table itself (fetching a document by FTS_DOC_ID), and
+  a table can have both a FULLTEXT and a vector index. A vector index has
+  no key fields to match, so it must never be chosen here. */
   if (dict_index_is_online_ddl(index) || (index->type & DICT_FTS) ||
-      dict_index_has_virtual(index)) {
+      dict_index_is_vector(index) || dict_index_has_virtual(index)) {
     return (0);
   }
 
@@ -954,13 +959,6 @@ static void opt_clust_access(sel_node_t *sel_node, /*!< in: select node */
 
     /* We optimize here only queries to InnoDB's internal system
     tables, and they should not contain column prefix indexes. */
-
-    if (dict_is_old_sys_table(index->table->id) &&
-        (index->get_field(pos)->prefix_len != 0 ||
-         clust_index->get_field(i)->prefix_len != 0)) {
-      ib::error(ER_IB_MSG_916) << "Error in pars0opt.cc: table "
-                               << index->table->name << " has prefix_len != 0";
-    }
 
     *(plan->clust_map + i) = pos;
 

@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -363,6 +364,62 @@ static bool check_boolean_value(const char *value, String &bool_str) {
 }
 
 /**
+  Remove persisted variable with a given name from a collection.
+
+  @param name      Name of the variable.
+  @param variables Variables collection.
+*/
+static inline void remove_persisted_variable(
+    const char *name, Persisted_variables_umap &variables) {
+  auto it = variables.find(name);
+  if (it != variables.end()) {
+    variables.erase(it);
+  }
+}
+
+/**
+  Remove persisted variable with a given name from a collection.
+
+  @param name      Name of the variable.
+  @param variables Variables collection.
+*/
+static inline void remove_persisted_variable(
+    const char *name, Persisted_variables_uset &variables) {
+  auto it = std::find_if(
+      variables.begin(), variables.end(),
+      [name](st_persist_var const &s) { return !strcmp(s.key.c_str(), name); });
+  if (it != variables.end()) {
+    variables.erase(it);
+  }
+}
+
+/**
+  Remove persisted variable from all collections.
+
+  @param name Name of the variable to be removed.
+              Make sure, the name is lowercase.
+*/
+void Persisted_variables_cache::remove_persisted_variable_from_all(
+    const char *name) {
+  assert_lock_owner();
+
+  /* Remove from static variable collections. */
+  remove_persisted_variable(name, m_persisted_static_sensitive_variables);
+  remove_persisted_variable(name, m_persisted_static_parse_early_variables);
+  remove_persisted_variable(name, m_persisted_static_variables);
+
+  /* Remove from dynamic variable collections. */
+  remove_persisted_variable(name, m_persisted_dynamic_parse_early_variables);
+  remove_persisted_variable(name, m_persisted_dynamic_sensitive_variables);
+  remove_persisted_variable(name, m_persisted_dynamic_variables);
+
+  /* Remove from plugin variable collections. */
+  remove_persisted_variable(name,
+                            m_persisted_dynamic_sensitive_plugin_variables);
+  remove_persisted_variable(name, m_persisted_dynamic_plugin_variables);
+}
+
+/**
   Retrieve variables name/value and update the in-memory copy with
   this new values. If value is default then remove this entry from
   in-memory copy, else update existing key with new value
@@ -451,6 +508,13 @@ bool Persisted_variables_cache::set_variable(THD *thd, set_var *setvar) {
 
       /* modification to in-memory must be thread safe */
       lock();
+
+      /*
+        Before adding the variable into a collection, remove the variable from
+        all collections.
+      */
+      remove_persisted_variable_from_all(name);
+
       DEBUG_SYNC(thd, "in_set_persist_variables");
       if ((setvar->type == OPT_PERSIST_ONLY && system_var->is_readonly()) ||
           system_var->is_persist_readonly()) {
@@ -462,20 +526,6 @@ bool Persisted_variables_cache::set_variable(THD *thd, set_var *setvar) {
                                 ? m_persisted_static_sensitive_variables
                                 : m_persisted_static_variables;
           variables[tmp_var.key] = tmp_var;
-          /**
-            If server was upgraded, it is possible that persisted variables were
-            initially read from an old format file. If so, all RO variables:
-            PARSE_EARLY or otherwise, persisted before the upgrade may be
-            present in m_persisted_static_parse_early_variables container.
-
-            This SET PERSIST/SET PERSIST_ONLY call may be setting one of those
-            variables. If so, remove those values from
-            m_persisted_static_parse_early_variables.
-          */
-          auto it = m_persisted_static_parse_early_variables.find(name);
-          if (it != m_persisted_static_parse_early_variables.end()) {
-            m_persisted_static_parse_early_variables.erase(it);
-          }
         }
       } else {
         /*
@@ -483,24 +533,11 @@ bool Persisted_variables_cache::set_variable(THD *thd, set_var *setvar) {
        it again with new value.
         */
         if (system_var->is_parse_early()) {
-          m_persisted_dynamic_parse_early_variables.erase(tmp_var);
           m_persisted_dynamic_parse_early_variables.insert(tmp_var);
-          /*
-            If server was upgraded, it is possible that persisted variables were
-            initially read from an old format file. If so, all variables:
-            PARSE_EARLY or otherwise, persisted before the upgrade may be
-            present in m_persisted_dynamic_variables container.
-
-            This SET PERSIST/SET PERSIST_ONLY call may be setting one of those
-            variables. If so, remove those values from
-            m_persisted_dynamic_variables.
-          */
-          m_persisted_dynamic_variables.erase(tmp_var);
         } else {
           auto &variables = is_sensitive
                                 ? m_persisted_dynamic_sensitive_variables
                                 : m_persisted_dynamic_variables;
-          variables.erase(tmp_var);
           variables.insert(tmp_var);
           /*
             for plugin variables update m_persisted_dynamic_plugin_variables
@@ -511,7 +548,6 @@ bool Persisted_variables_cache::set_variable(THD *thd, set_var *setvar) {
                 system_var->is_sensitive()
                     ? m_persisted_dynamic_sensitive_plugin_variables
                     : m_persisted_dynamic_plugin_variables;
-            plugin_variables.erase(tmp_var);
             plugin_variables.insert(tmp_var);
           }
         }
@@ -810,17 +846,21 @@ bool Persisted_variables_cache::flush_to_file() {
     /* write to file */
     if (mysql_file_fputs(dest.c_ptr(), m_fd) < 0) {
       ret = true;
+    } else {
+      DBUG_EXECUTE_IF("crash_after_write_persist_file", DBUG_SUICIDE(););
+      /* flush contents to disk immediately */
+      if ((mysql_file_fflush(m_fd) != 0) ||
+          (my_sync(my_fileno(m_fd->m_file), MYF(MY_WME)) == -1))
+        ret = true;
     }
-    DBUG_EXECUTE_IF("crash_after_write_persist_file", DBUG_SUICIDE(););
-    /* flush contents to disk immediately */
-    if (mysql_file_fflush(m_fd) != 0) ret = true;
-    if (my_sync(my_fileno(m_fd->m_file), MYF(MY_WME)) == -1) ret = true;
+    close_persist_file();
   }
-  close_persist_file();
   if (!ret) {
     DBUG_EXECUTE_IF("crash_after_close_persist_file", DBUG_SUICIDE(););
-    my_rename(m_persist_backup_filename.c_str(), m_persist_filename.c_str(),
-              MYF(MY_WME));
+    if (my_rename(m_persist_backup_filename.c_str(), m_persist_filename.c_str(),
+                  MYF(MY_WME)))
+      ret = true;
+    DBUG_EXECUTE_IF("crash_after_rename_persist_file", DBUG_SUICIDE(););
   }
   if (ret == false && do_cleanup == true) clear_sensitive_blob_and_iv();
   mysql_mutex_unlock(&m_LOCK_persist_file);
@@ -941,7 +981,7 @@ bool Persisted_variables_cache::set_persisted_options(
   const std::vector<std::string> priv_list = {
       "ENCRYPTION_KEY_ADMIN", "ROLE_ADMIN",          "SYSTEM_VARIABLES_ADMIN",
       "AUDIT_ADMIN",          "TELEMETRY_LOG_ADMIN", "CONNECTION_ADMIN"};
-  const ulong static_priv_list = (SUPER_ACL | FILE_ACL);
+  const Access_bitmask static_priv_list = (SUPER_ACL | FILE_ACL);
   Sctx_ptr<Security_context> ctx;
   /*
     if persisted_globals_load is set to false or --no-defaults is set
@@ -2068,8 +2108,11 @@ bool Persisted_variables_cache::append_read_only_variables(
 
   auto result = decrypt_sensitive_variables();
   if (result == return_status::ERROR) {
-    LogErr(ERROR_LEVEL, ER_CANNOT_INTERPRET_PERSISTED_SENSITIVE_VARIABLES);
-    return true;
+    if (!opt_persist_sensitive_variables_in_plaintext) {
+      LogErr(ERROR_LEVEL, ER_CANNOT_INTERPRET_PERSISTED_SENSITIVE_VARIABLES);
+      return true;
+    }
+    LogErr(WARNING_LEVEL, ER_CANNOT_INTERPRET_PERSISTED_SENSITIVE_VARIABLES);
   }
 
   /* create a set of values sorted by timestamp */

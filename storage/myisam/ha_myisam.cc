@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,11 +29,11 @@
 #include <limits.h>
 #include <stdarg.h>
 #include <algorithm>
+#include <bit>
 #include <new>
 
 #include "lex_string.h"
 #include "m_string.h"
-#include "my_bit.h"
 #include "my_compiler.h"
 #include "my_dbug.h"
 #include "my_io.h"
@@ -308,6 +309,7 @@ int table2myisam(TABLE *table_arg, MI_KEYDEF **keydef_out,
         keydef[i].seg[j].null_pos = 0;
       }
       if (field->type() == MYSQL_TYPE_BLOB ||
+          field->type() == MYSQL_TYPE_VECTOR ||
           field->type() == MYSQL_TYPE_GEOMETRY) {
         keydef[i].seg[j].flag |= HA_BLOB_PART;
         /* save number of bytes used to pack length */
@@ -367,10 +369,10 @@ int table2myisam(TABLE *table_arg, MI_KEYDEF **keydef_out,
       recinfo_pos->type =
           (int)((length <= 3 || (found->is_flag_set(ZEROFILL_FLAG)))
                     ? FIELD_NORMAL
-                    : found->type() == MYSQL_TYPE_STRING ||
-                              found->type() == MYSQL_TYPE_VAR_STRING
-                          ? FIELD_SKIP_ENDSPACE
-                          : FIELD_SKIP_PRESPACE);
+                : found->type() == MYSQL_TYPE_STRING ||
+                        found->type() == MYSQL_TYPE_VAR_STRING
+                    ? FIELD_SKIP_ENDSPACE
+                    : FIELD_SKIP_PRESPACE);
     if (found->is_nullable()) {
       recinfo_pos->null_bit = found->null_bit;
       recinfo_pos->null_pos = found->null_offset();
@@ -1128,8 +1130,9 @@ int ha_myisam::repair(THD *thd, MI_CHECK &param, bool do_optimize) {
   }
   thd_proc_info(thd, old_proc_info);
   if (!has_old_locks) mi_lock_database(file, F_UNLCK);
-  return error ? HA_ADMIN_FAILED
-               : !optimize_done ? HA_ADMIN_ALREADY_DONE : HA_ADMIN_OK;
+  return error            ? HA_ADMIN_FAILED
+         : !optimize_done ? HA_ADMIN_ALREADY_DONE
+                          : HA_ADMIN_OK;
 }
 
 /*
@@ -1981,7 +1984,7 @@ static int myisam_init(void *p) {
   else
     myisam_recover_options = HA_RECOVER_OFF;
 
-  myisam_block_size = (uint)1 << my_bit_log2(opt_myisam_block_size);
+  myisam_block_size = std::bit_floor(opt_myisam_block_size);
 
   myisam_hton = (handlerton *)p;
   myisam_hton->state = SHOW_OPTION_YES;
@@ -2023,11 +2026,10 @@ int ha_myisam::multi_range_read_next(char **range_info) {
   return ds_mrr.dsmrr_next(range_info);
 }
 
-ha_rows ha_myisam::multi_range_read_info_const(uint keyno, RANGE_SEQ_IF *seq,
-                                               void *seq_init_param,
-                                               uint n_ranges, uint *bufsz,
-                                               uint *flags,
-                                               Cost_estimate *cost) {
+ha_rows ha_myisam::multi_range_read_info_const(
+    uint keyno, RANGE_SEQ_IF *seq, void *seq_init_param, uint n_ranges,
+    uint *bufsz, uint *flags, bool *force_default_mrr [[maybe_unused]],
+    Cost_estimate *cost) {
   /*
     This call is here because there is no location where this->table would
     already be known.

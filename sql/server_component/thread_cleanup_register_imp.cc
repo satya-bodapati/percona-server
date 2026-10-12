@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -44,8 +45,8 @@ class Thread_cleanup {
 
       // Invoke exit_handler for all the components, that requested
       // callback.
-      for (auto component_name : requested_component_names) {
-        my_service<SERVICE_TYPE(thread_cleanup_handler)> service(
+      for (const auto &component_name : requested_component_names) {
+        my_service<SERVICE_TYPE(thread_cleanup_handler)> const service(
             ("thread_cleanup_handler." + component_name).c_str(), srv_registry);
 
         // Ignore handler invocation if the component service is not installed
@@ -57,7 +58,7 @@ class Thread_cleanup {
   };
 
  public:
-  void setup_thread_exit_handler(std::string component_name) {
+  void setup_thread_exit_handler(const std::string &component_name) {
     thread_local ThreadExitHandler teh;
     teh.requested_component_names.push_back(component_name);
   }

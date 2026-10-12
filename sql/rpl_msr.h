@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,6 +28,8 @@
 
 #include <stddef.h>
 #include <sys/types.h>
+#include <cstdint>   // std::ptrdiff_t
+#include <iterator>  // std::forward_iterator
 #include <map>
 #include <string>
 #include <utility>
@@ -53,6 +56,189 @@ typedef std::map<std::string, Master_info *> mi_map;
 typedef std::map<int, mi_map> replication_channel_map;
 // Maps a replication filter to a channel name.
 typedef std::map<std::string, Rpl_filter *> filter_map;
+
+// Deduce the iterator type for a range/collection/container as the return
+// type for begin(). This is usually either T::iterator or T::const_iterator,
+// depending on the const-ness of T.
+template <class T>
+using Iterator_for = decltype(std::begin(std::declval<T>()));
+
+/// Iterator that provides the elements of a nested map as a linear sequence.
+///
+/// This satisfies std::forward_iterator.
+///
+/// @tparam Outer_iterator_t Forward iterator over the outer map.
+///
+/// @tparam outer_is_map If true, the outer map iterator yields pairs, and the
+/// second component of each pair contains the inner map. If false, the outer
+/// map iterator yields inner maps directly.
+///
+/// @tparam inner_is_map If true, the inner map iterator yields pairs, and the
+/// second component of each pair contains the value. If false, the inner
+/// map iterator yields values directly.
+///
+/// @todo move this to a library
+///
+/// @todo support bidirectional/random_access/contiguous iterators when both
+/// maps support it.
+///
+/// @todo Once we have ranges, remove the build-in map support and let users use
+/// Denested_map_view<Map | std::ranges::value_view> |
+/// std::ranges::value_view instead
+template <std::forward_iterator Outer_iterator_t, bool outer_is_map,
+          bool inner_is_map>
+class Denested_map_iterator {
+  using Self_t =
+      Denested_map_iterator<Outer_iterator_t, outer_is_map, inner_is_map>;
+
+  /// @return Reference to the container that the given outer iterator points
+  /// to, taking the 'second' element of the pair in case the outer iterator is
+  /// a map.
+  static auto &mapped_value(const Outer_iterator_t &outer_iterator) {
+    if constexpr (outer_is_map)
+      return outer_iterator->second;
+    else
+      return *outer_iterator;
+  }
+
+  using Inner_map_t = decltype(mapped_value(Outer_iterator_t()));
+  using Inner_iterator_t = Iterator_for<Inner_map_t>;
+
+  /// @return Reference to the value that the given inner iterator points to,
+  /// taking the 'second' element of the pair in case the inner iterator is a
+  /// map.
+  static auto &mapped_value(const Inner_iterator_t &inner_iterator) {
+    if constexpr (inner_is_map)
+      return inner_iterator->second;
+    else
+      return *inner_iterator;
+  }
+
+ public:
+  using value_type = decltype(mapped_value(Inner_iterator_t()));
+  using difference_type = std::ptrdiff_t;
+
+  /// Default constructor.
+  ///
+  /// The result is an object that is useless in itself since all member
+  /// functions are undefined. It can be assigned or moved to, and it is
+  /// required for iterators to be default-constructible.
+  Denested_map_iterator() = default;
+
+  /// Constructor.
+  ///
+  /// @param outer_begin Iterator to the first element of the nested map.
+  ///
+  /// @param outer_end Iterator to the one-past-the-last element of the nested
+  /// map.
+  ///
+  /// @param at_end If true, position at the end; if false, position at the
+  /// beginning.
+  explicit constexpr Denested_map_iterator(const Outer_iterator_t &outer_begin,
+                                           const Outer_iterator_t &outer_end,
+                                           bool at_end)
+      : m_outer_begin(outer_begin),
+        m_outer_end(outer_end),
+        m_outer_it(at_end ? outer_end : outer_begin),
+        m_inner_it(m_outer_it == outer_end
+                       ? Inner_iterator_t()
+                       : std::begin(mapped_value(m_outer_it))) {
+    skip_inner_end_positions();
+  }
+
+  /// Pre-increment
+  constexpr Self_t &operator++() {
+    ++m_inner_it;
+    skip_inner_end_positions();
+    return *this;
+  }
+
+  /// Post-increment
+  constexpr Self_t operator++(int) {
+    auto tmp = *this;
+    ++*this;
+    return tmp;
+  }
+
+  /// Dereference
+  constexpr decltype(auto) operator*() const {
+    return mapped_value(m_inner_it);
+  }
+
+  /// Comparison
+  constexpr bool operator==(const Self_t &other) const {
+    // Different outer iterators -> different
+    if (m_outer_it != other.m_outer_it) return false;
+    // Both outer iterators positioned at end -> equal (don't compare inner
+    // iterators)
+    if (m_outer_it == m_outer_end) return true;
+    // Outer iterators point to same inner array -> inner iterators determine
+    // equality.
+    return m_inner_it == other.m_inner_it;
+  }
+
+ private:
+  /// Maintain the invariant that *either* m_outer_it points to the end, *or*
+  /// m_inner_it *doesn't* point to the end.
+  ///
+  /// This may moves the iterators forward until the condition is met.
+  constexpr void skip_inner_end_positions() {
+    if (m_outer_it != m_outer_end) {
+      while (m_inner_it == std::end(mapped_value(m_outer_it))) {
+        ++m_outer_it;
+        if (m_outer_it == m_outer_end) break;
+        m_inner_it = std::begin(mapped_value(m_outer_it));
+      }
+    }
+  }
+
+  /// Beginning of outer map.
+  Outer_iterator_t m_outer_begin{};
+
+  /// End of outer map.
+  Outer_iterator_t m_outer_end{};
+
+  /// Iterator to the outer map.
+  Outer_iterator_t m_outer_it{};
+
+  /// Iterator to the inner map, or undefined if the outer map points to the
+  /// end.
+  Inner_iterator_t m_inner_it{};
+};
+
+/// View over a nested map structure, which provides iterators over the elements
+/// of the second-level map.
+///
+/// For example, a view over std::map<int, std::map<std::string, T>> provides
+/// iterators over the T objects.
+///
+/// @tparam Nested_map_t The nested map type.
+///
+/// @tparam outer_is_map If true, the outer map is assumed to be a map, i.e.,
+/// its iterators yield pairs that hold inner maps in their second components.
+/// Otherwise, it is assumed that iterators of the outer map provide inner maps
+/// directly.
+///
+/// @tparam inner_is_map If true, the inner maps are assumed to be maps, i.e.,
+/// their iterators yield pairs and the view's iterator provides the second
+/// components. Otherwise, the view's iterator provides the values of the
+/// iterators of the inner maps directly.
+template <class Nested_map_t, bool outer_is_map, bool inner_is_map>
+class Denested_map_view {
+  using Iterator_t = Denested_map_iterator<Iterator_for<Nested_map_t>,
+                                           outer_is_map, inner_is_map>;
+
+ public:
+  Denested_map_view(Nested_map_t &map) : m_map(&map) {}
+
+  auto begin() { return Iterator_t(m_map->begin(), m_map->end(), false); }
+  auto end() { return Iterator_t(m_map->begin(), m_map->end(), true); }
+  auto begin() const { return Iterator_t(m_map->begin(), m_map->end(), false); }
+  auto end() const { return Iterator_t(m_map->begin(), m_map->end(), true); }
+
+ private:
+  Nested_map_t *m_map;
+};
 
 /**
   Class to store all the Master_info objects of a slave
@@ -267,8 +453,33 @@ class Multisource_info {
   }
 
   /**
+    Get the number of configured asynchronous replication channels,
+    ignoring the Group Replication channels.
+
+    @return The number of channels.
+  */
+  size_t get_number_of_configured_channels() {
+    DBUG_TRACE;
+    m_channel_map_lock->assert_some_lock();
+    size_t count = 0;
+
+    replication_channel_map::iterator map_it =
+        rep_channel_map.find(SLAVE_REPLICATION_CHANNEL);
+
+    for (mi_map::iterator it = map_it->second.begin();
+         it != map_it->second.end(); it++) {
+      Master_info *mi = it->second;
+      if (Master_info::is_configured(mi)) {
+        count++;
+      }
+    }
+
+    return count;
+  }
+
+  /**
     Get the number of running channels which have asynchronous replication
-    failover feature, i.e. CHANGE MASTER TO option
+    failover feature, i.e. CHANGE REPLICATION SOURCE TO option
     SOURCE_CONNECTION_AUTO_FAILOVER, enabled.
 
     @return The number of channels.
@@ -319,17 +530,33 @@ class Multisource_info {
     return (is_valid);
   }
 
+  /// @brief Checks if a channel is the group replication applier channel
+  /// @param[in] channel Name of the channel to check
+  /// @returns true if it is the gr applier channel
+  static bool is_group_replication_applier_channel_name(const char *channel);
+
+  /// @brief Checks if a channel is the group replication recovery channel
+  /// @param[in] channel Name of the channel to check
+  /// @returns true if it is the gr recovery channel
+  static bool is_group_replication_recovery_channel_name(const char *channel);
+
   /**
     Returns if a channel name is one of the reserved group replication names
 
     @param channel    the channel name to test
-    @param is_applier compare only with applier name
 
     @retval      true   the name is a reserved name
     @retval      false  non reserved name
   */
-  bool is_group_replication_channel_name(const char *channel,
-                                         bool is_applier = false);
+  static bool is_group_replication_channel_name(const char *channel);
+
+  /// @brief Check if the channel has an hostname or is a GR channel
+  /// @return true if the channel is configured or is a gr channel,
+  ///         false otherwise
+  static bool is_channel_configured(const Master_info *mi) {
+    return mi && (mi->host[0] ||
+                  is_group_replication_channel_name(mi->get_channel()));
+  }
 
   /**
      Forward iterators to initiate traversing of a map.
@@ -360,6 +587,16 @@ class Multisource_info {
     }
 
     return empty_mi_map.end();
+  }
+
+  auto all_channels_view() {
+    return Denested_map_view<replication_channel_map, true, true>(
+        rep_channel_map);
+  }
+
+  auto all_channels_view() const {
+    return Denested_map_view<const replication_channel_map, true, true>(
+        rep_channel_map);
   }
 
  private:
@@ -461,9 +698,9 @@ class Multisource_info {
   channel_map.rdlock() when querying P_S.replication_applier_filters table,
   we keep the rpl_channel_filters. So that we just need to hold the small
   rpl_channel_filters.rdlock() when querying P_S.replication_applier_filters
-  table. Many operations (RESET SLAVE [FOR CHANNEL], START SLAVE, INIT SLAVE,
-  END SLAVE, CHANGE MASTER TO, FLUSH RELAY LOGS, START CHANNEL, PURGE CHANNEL,
-  and so on) hold the channel_map.wrlock().
+  table. Many operations (RESET REPLICA [FOR CHANNEL], START REPLICA, INIT
+  SLAVE, END SLAVE, CHANGE REPLICATION SOURCE TO, FLUSH RELAY LOGS, START
+  CHANNEL, PURGE CHANNEL, and so on) hold the channel_map.wrlock().
 
   There is one instance, rpl_channel_filters, created globally for Multisource
   channel filters. The rpl_channel_filters is created when the server is
@@ -479,14 +716,14 @@ class Rpl_channel_filters {
     This lock was designed to protect the channel_to_filter from reading,
     adding, or removing its objects from the map. It is used to preventing
     the following commands to run in parallel:
-      RESET SLAVE ALL [FOR CHANNEL '<channel_name>']
-      CHANGE MASTER TO ... FOR CHANNEL
+      RESET REPLICA ALL [FOR CHANNEL '<channel_name>']
+      CHANGE REPLICATION SOURCE TO ... FOR CHANNEL
       SELECT FROM performance_schema.replication_applier_filters
 
-    Please acquire a wrlock when modifying the map structure (RESET SLAVE ALL
-    [FOR CHANNEL '<channel_name>'], CHANGE MASTER TO ... FOR CHANNEL).
-    Please acqurie a rdlock when querying existing filter(s) (SELECT FROM
-    performance_schema.replication_applier_filters).
+    Please acquire a wrlock when modifying the map structure (RESET REPLICA ALL
+    [FOR CHANNEL '<channel_name>'], CHANGE REPLICATION SOURCE TO ... FOR
+    CHANNEL). Please acqurie a rdlock when querying existing filter(s) (SELECT
+    FROM performance_schema.replication_applier_filters).
 
     Note: To modify the object from the map, please see the protection of
     m_rpl_filter_lock in Rpl_filter.
@@ -621,12 +858,7 @@ extern Rpl_channel_filters rpl_channel_filters;
 static bool inline is_slave_configured() {
   /* Server was started with server_id == 0
      OR
-     failure to load slave info repositories because of repository
-     mismatch i.e Assume slave had a multisource replication with several
-     channels setup with TABLE repository. Then if the slave is restarted
-     with FILE repository, we fail to load any of the slave repositories,
-     including the default channel one.
-     Hence, channel_map.get_default_channel_mi() will return NULL.
+     failure to load applier metadata repositories
   */
   return (channel_map.get_default_channel_mi() != nullptr);
 }

@@ -1,15 +1,16 @@
-/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -32,34 +33,34 @@
 #include "storage/perfschema/pfs_instr_class.h"
 #include "storage/perfschema/pfs_server.h"
 #include "storage/perfschema/unittest/stub_pfs_defaults.h"
+#include "storage/perfschema/unittest/stub_pfs_global.h"
 #include "storage/perfschema/unittest/stub_pfs_plugin_table.h"
-#include "storage/perfschema/unittest/stub_print_error.h"
 #include "unittest/mytap/tap.h"
 
 static void test_noop() {
-  PSI_mutex *mutex;
-  PSI_rwlock *rwlock;
-  PSI_cond *cond;
-  PSI_socket *socket;
-  PSI_table_share *table_share;
-  PSI_table *table;
-  PSI_file *file;
-  PSI_thread *thread;
-  PSI_file_locker *file_locker;
-  PSI_idle_locker *idle_locker;
-  PSI_mutex_locker *mutex_locker;
-  PSI_rwlock_locker *rwlock_locker;
-  PSI_cond_locker *cond_locker;
-  PSI_table_locker *table_locker;
-  PSI_statement_locker *statement_locker;
-  PSI_transaction_locker *transaction_locker;
-  PSI_socket_locker *socket_locker;
-  PSI_digest_locker *digest_locker;
-  PSI_sp_locker *sp_locker;
-  PSI_sp_share *sp_share;
+  const PSI_mutex *mutex;
+  const PSI_rwlock *rwlock;
+  const PSI_cond *cond;
+  const PSI_socket *socket;
+  const PSI_table_share *table_share;
+  const PSI_table *table;
+  const PSI_file *file;
+  const PSI_thread *thread;
+  const PSI_file_locker *file_locker;
+  const PSI_idle_locker *idle_locker;
+  const PSI_mutex_locker *mutex_locker;
+  const PSI_rwlock_locker *rwlock_locker;
+  const PSI_cond_locker *cond_locker;
+  const PSI_table_locker *table_locker;
+  const PSI_statement_locker *statement_locker;
+  const PSI_transaction_locker *transaction_locker;
+  const PSI_socket_locker *socket_locker;
+  const PSI_digest_locker *digest_locker;
+  const PSI_sp_locker *sp_locker;
+  const PSI_sp_share *sp_share;
   PSI_memory_key memory_key;
-  PSI_metadata_lock *metadata_lock;
-  PSI_metadata_locker *metadata_locker;
+  const PSI_metadata_lock *metadata_lock;
+  const PSI_metadata_locker *metadata_locker;
   PSI_thread *owner;
 
   diag("test_noop");
@@ -169,7 +170,7 @@ static void test_noop() {
   psi_file_service->end_file_rename_wait(nullptr, nullptr, nullptr, 0);
   psi_stage_service->start_stage(1, nullptr, 0);
 
-  PSI_stage_progress *progress;
+  const PSI_stage_progress *progress;
   progress = psi_stage_service->get_current_stage_progress();
   ok(progress == nullptr, "no progress");
 
@@ -263,6 +264,10 @@ int main(int, char **) {
   plan(35);
 
   MY_INIT("pfs_noop-t");
+
+  stub_alloc_always_fails = false;
+  stub_alloc_maybe_fails = false;
+
   test_noop();
   my_end(0);
   return (exit_status());

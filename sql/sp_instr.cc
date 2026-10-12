@@ -1,15 +1,16 @@
-/* Copyright (c) 2012, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,6 +28,7 @@
 #include <algorithm>
 #include <atomic>
 #include <functional>
+#include <memory>
 
 #include "debug_sync.h"  // DEBUG_SYNC
 #include "my_command.h"
@@ -365,9 +367,10 @@ bool sp_lex_instr::execute_expression(THD *thd, uint *nextp) {
     return true;
   }
 
-  m_lex->restore_cmd_properties();
-  bind_fields(m_arena.item_list());
-
+  if (m_arena.get_state() != Query_arena::STMT_INITIALIZED_FOR_SP) {
+    m_lex->restore_cmd_properties();
+    bind_fields(m_arena.item_list());
+  }
   /*
     Trace the expression. This is not an SQL statement, but pretend it is
     a SELECT query expression.
@@ -569,12 +572,18 @@ bool sp_lex_instr::reset_lex_and_exec_core(THD *thd, uint *nextp,
   return error || thd->is_error();
 }
 
-LEX *sp_lex_instr::parse_expr(THD *thd, sp_head *sp) {
+LEX *sp_lex_instr::parse_statement(THD *thd, sp_head *sp) {
   String sql_query;
   sql_digest_state *parent_digest = thd->m_digest;
   PSI_statement_locker *parent_locker = thd->m_statement_psi;
   SQL_I_List<Item_trigger_field> *next_trig_list_bkp = nullptr;
   sql_query.set_charset(system_charset_info);
+
+  /*
+    This function must be entered with a clean execution context. Otherwise
+    we may have dangling references into the statement's mem_root.
+  */
+  assert(thd->item_list() == nullptr);
 
   get_query(&sql_query);
 
@@ -607,6 +616,8 @@ LEX *sp_lex_instr::parse_expr(THD *thd, sp_head *sp) {
   thd->mem_root = &m_lex_mem_root;
   thd->stmt_arena->set_query_arena(parse_arena);
 
+  assert(thd->item_list() == nullptr);
+
   // Prepare parser state. It can be done just before parse_sql(), do it here
   // only to simplify exit in case of failure (out-of-memory error).
 
@@ -614,12 +625,6 @@ LEX *sp_lex_instr::parse_expr(THD *thd, sp_head *sp) {
 
   if (parser_state.init(thd, sql_query.c_ptr(), sql_query.length()))
     return nullptr;
-
-  // Switch THD's item list. It is used to remember the newly created set
-  // of Items during parsing. We should clean those items after each execution.
-
-  Item *execution_item_list = thd->item_list();
-  thd->reset_item_list();
 
   // Create a new LEX and initialize it.
 
@@ -632,7 +637,7 @@ LEX *sp_lex_instr::parse_expr(THD *thd, sp_head *sp) {
   thd->lex->set_sp_current_parsing_ctx(get_parsing_ctx());
   sp->m_parser_data.set_current_stmt_start_ptr(sql_query.c_ptr());
 
-  // Parse the just constructed SELECT-statement.
+  // Parse the just constructed SQL statement.
 
   thd->m_digest = nullptr;
   thd->m_statement_psi = nullptr;
@@ -698,7 +703,7 @@ LEX *sp_lex_instr::parse_expr(THD *thd, sp_head *sp) {
   // Restore execution mem-root and item list.
 
   thd->mem_root = execution_mem_root;
-  thd->set_item_list(execution_item_list);
+  thd->reset_item_list();
 
   // That's it.
 
@@ -713,21 +718,47 @@ bool sp_lex_instr::validate_lex_and_execute_core(THD *thd, uint *nextp,
 
   Reprepare_observer reprepare_observer;
 
+  // Keep track of operation status
+  bool error = false;
+
   thd->set_secondary_engine_optimization(
       Secondary_engine_optimization::PRIMARY_TENTATIVELY);
 
-  while (true) {
-    DBUG_EXECUTE_IF("simulate_bug18831513", { invalidate(); });
-    if (is_invalid() || (m_lex->has_udf() && !m_first_execution)) {
-      free_lex();
-      LEX *lex = parse_expr(thd, thd->sp_runtime_ctx->sp);
-      if (lex == nullptr) return true;
+  // Track whether the statement needs to be reprepared:
+  bool need_reprepare = false;
 
+  // Reprepare statement unconditionally if it contains UDF references
+  if (m_lex != nullptr && m_lex->has_udf() && !m_first_execution) {
+    need_reprepare = true;
+  }
+
+  // Reprepare statement if its Sql_cmd requires it
+  if (!m_first_execution && m_lex != nullptr && m_lex->m_sql_cmd != nullptr &&
+      m_lex->m_sql_cmd->reprepare_on_execute_required()) {
+    need_reprepare = true;
+  }
+
+  DBUG_EXECUTE_IF("simulate_bug18831513", { invalidate(); });
+  /*
+    Retry execution in a loop until successful, or a fatal error has occurred,
+    or the statement is killed, or a non-fatal error is encountered but
+    no retry option is possible.
+  */
+  while (true) {
+    if (is_invalid()) {
+      need_reprepare = true;
+    }
+    if (need_reprepare) {
+      free_lex();
+      LEX *lex = parse_statement(thd, thd->sp_runtime_ctx->sp);
+      if (lex == nullptr) {
+        error = true;
+        break;
+      }
       set_lex(lex, true);
 
       m_first_execution = true;
     }
-
     /*
       Install the metadata observer. If some metadata version is
       different from prepare time and an observer is installed,
@@ -756,7 +787,9 @@ bool sp_lex_instr::validate_lex_and_execute_core(THD *thd, uint *nextp,
 
     thd->push_reprepare_observer(stmt_reprepare_observer);
 
-    const bool rc = reset_lex_and_exec_core(thd, nextp, open_tables);
+    error = reset_lex_and_exec_core(thd, nextp, open_tables);
+
+    assert(error == thd->is_error());
 
     thd->pop_reprepare_observer();
 
@@ -771,55 +804,31 @@ bool sp_lex_instr::validate_lex_and_execute_core(THD *thd, uint *nextp,
 
     m_first_execution = false;
 
-    // Exit immediately if  execution is successful
-    if (!rc) return false;
-
+    // Exit immediately if execution is successful
+    if (!error) {
+      break;
+    }
     // Exit if a fatal error has occurred or statement execution was killed.
     if (thd->is_fatal_error() || thd->is_killed()) {
-      return true;
+      break;
     }
-    int my_errno = thd->get_stmt_da()->mysql_errno();
+    const int my_errno = thd->get_stmt_da()->mysql_errno();
 
-    if (my_errno != ER_NEED_REPREPARE &&
-        my_errno != ER_PREPARE_FOR_PRIMARY_ENGINE &&
-        my_errno != ER_PREPARE_FOR_SECONDARY_ENGINE) {
-      if (m_lex->m_sql_cmd != nullptr &&
-          thd->secondary_engine_optimization() ==
-              Secondary_engine_optimization::SECONDARY &&
-          !m_lex->unit->is_executed()) {
-        if (has_external_table(m_lex->query_tables)) {
-          set_external_engine_fail_reason(m_lex,
-                                          thd->get_stmt_da()->message_text());
-        }
-        if (!thd->is_secondary_engine_forced()) {
-          /*
-            Some error occurred during resolving or optimization in
-            the secondary engine, and secondary engine execution is not forced.
-            Retry execution of the statement in the primary engine.
-          */
-          thd->clear_error();
-          thd->set_secondary_engine_optimization(
-              Secondary_engine_optimization::PRIMARY_ONLY);
-          invalidate();
-          // Disable the general log. The query was written to the general log
-          // in the first attempt to execute it. No need to write it twice.
-          if ((thd->variables.option_bits & OPTION_LOG_OFF) == 0) {
-            thd->variables.option_bits |= OPTION_LOG_OFF;
-            general_log_temporarily_disabled = true;
-          }
-          continue;
-        }
-      }
-      assert(thd->is_error());
-      return true;
-    }
     if (my_errno == ER_NEED_REPREPARE) {
+      /*
+        Reprepare observer is not set for the first execution of the stored
+        routine. This is because the first execution will both prepare and
+        execute the statement. However, when executing a prepared statement, we
+        can expect ER_NEED_REPREPARE to be set during the first execution of the
+        stored routine. In this case, we would need to report the error to the
+        user.
+      */
+      if (stmt_reprepare_observer == nullptr) break;
       /*
         Reprepare_observer ensures that the statement is retried
         a maximum number of times, to avoid an endless loop.
       */
-      assert(stmt_reprepare_observer != nullptr &&
-             stmt_reprepare_observer->is_invalidated());
+      assert(stmt_reprepare_observer->is_invalidated());
       if (!stmt_reprepare_observer->can_retry()) {
         /*
           Reprepare_observer sets error status in DA but Sql_condition is not
@@ -830,15 +839,12 @@ bool sp_lex_instr::validate_lex_and_execute_core(THD *thd, uint *nextp,
         da->push_warning(thd, da->mysql_errno(), da->returned_sqlstate(),
                          Sql_condition::SL_ERROR, da->message_text());
         assert(thd->is_error());
-        return true;
+        break;
       }
-      thd->clear_error();
-    } else {
-      assert(my_errno == ER_PREPARE_FOR_PRIMARY_ENGINE ||
-             my_errno == ER_PREPARE_FOR_SECONDARY_ENGINE);
+    } else if (my_errno == ER_PREPARE_FOR_PRIMARY_ENGINE ||
+               my_errno == ER_PREPARE_FOR_SECONDARY_ENGINE) {
       assert(thd->secondary_engine_optimization() ==
              Secondary_engine_optimization::PRIMARY_TENTATIVELY);
-      thd->clear_error();
       if (my_errno == ER_PREPARE_FOR_SECONDARY_ENGINE) {
         thd->set_secondary_engine_optimization(
             Secondary_engine_optimization::SECONDARY);
@@ -846,15 +852,56 @@ bool sp_lex_instr::validate_lex_and_execute_core(THD *thd, uint *nextp,
         thd->set_secondary_engine_optimization(
             Secondary_engine_optimization::PRIMARY_ONLY);
       }
-      // Disable the general log. The query was written to the general log in
-      // the first attempt to execute it. No need to write it twice.
-      if ((thd->variables.option_bits & OPTION_LOG_OFF) == 0) {
-        thd->variables.option_bits |= OPTION_LOG_OFF;
-        general_log_temporarily_disabled = true;
+    } else {
+      if (m_lex->m_sql_cmd == nullptr ||
+          thd->secondary_engine_optimization() !=
+              Secondary_engine_optimization::SECONDARY ||
+          m_lex->unit->is_executed() || thd->is_secondary_engine_forced()) {
+        break;
       }
+      /*
+        Some error occurred during resolving or optimization in
+        the secondary engine, and secondary engine execution is not forced.
+        Retry execution of the statement in the primary engine.
+      */
+      thd->set_secondary_engine_optimization(
+          Secondary_engine_optimization::PRIMARY_ONLY);
     }
+    /*
+      Disable the general log. The query was written to the general log in
+      the first attempt to execute it. No need to write it twice.
+    */
+    if ((thd->variables.option_bits & OPTION_LOG_OFF) == 0) {
+      thd->variables.option_bits |= OPTION_LOG_OFF;
+      general_log_temporarily_disabled = true;
+    }
+    /*
+      Prepare for re-prepare and re-optimization:
+      - Clear the current diagnostics area.
+      - Invalidate the statement object.
+      - Clean up the statement's LEX, including release of plugins.
+      - Clean up and free items, both permanent in stmt. and transient in THD.
+    */
+    thd->clear_error();
+    error = false;
     invalidate();
+    m_lex->sphead = nullptr;
+    lex_end(m_lex);
+    cleanup_items(thd->item_list());
+    thd->free_items();
+    cleanup_items(m_arena.item_list());
+    need_reprepare = true;
   }
+  thd->cleanup_after_statement_execution();
+
+  // Re-enable the general log if it was temporarily disabled while repreparing
+  // and executing a statement for a secondary engine.
+  if (general_log_temporarily_disabled) {
+    thd->variables.option_bits &= ~OPTION_LOG_OFF;
+    general_log_temporarily_disabled = false;
+  }
+
+  return error;
 }
 
 void sp_lex_instr::set_lex(LEX *lex, bool is_lex_owner) {
@@ -873,7 +920,8 @@ void sp_lex_instr::free_lex() {
   /* Prevent endless recursion. */
   m_lex->sphead = nullptr;
   lex_end(m_lex);
-  destroy(m_lex->result);
+  if (m_lex->result != nullptr) ::destroy_at(m_lex->result);
+  m_lex->set_secondary_engine_execution_context(nullptr);
   m_lex->destroy();
   delete (st_lex_local *)m_lex;
 
@@ -912,7 +960,8 @@ void sp_lex_instr::get_query(String *sql_query) const {
 ///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
-PSI_statement_info sp_instr_stmt::psi_info = {0, "stmt", 0, PSI_DOCUMENT_ME};
+PSI_statement_info sp_instr_stmt::psi_info = {0, "stmt", 0,
+                                              "Stored Program: SQL statement"};
 #endif
 
 bool sp_instr_stmt::execute(THD *thd, uint *nextp) {
@@ -1089,18 +1138,21 @@ bool sp_instr_stmt::exec_core(THD *thd, uint *nextp) {
 ///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
-PSI_statement_info sp_instr_set::psi_info = {0, "set", 0, PSI_DOCUMENT_ME};
+PSI_statement_info sp_instr_set::psi_info = {
+    0, "set", PSI_FLAG_DISABLED | PSI_FLAG_UNTIMED,
+    "Stored Program: SET statement"};
 #endif
 
 bool sp_instr_set::exec_core(THD *thd, uint *nextp) {
   *nextp = get_ip() + 1;
 
-  if (!thd->sp_runtime_ctx->set_variable(thd, m_offset, &m_value_item))
+  // LEX of instruction keeps execution state of the assignment operation
+  if (!thd->sp_runtime_ctx->set_variable(thd, true, m_offset, &m_value_item))
     return false;
 
   /* Failed to evaluate the value. Reset the variable to NULL. */
 
-  if (thd->sp_runtime_ctx->set_variable(thd, m_offset, nullptr)) {
+  if (thd->sp_runtime_ctx->set_variable(thd, true, m_offset, nullptr)) {
     /* If this also failed, let's abort. */
     my_error(ER_OUT_OF_RESOURCES, MYF(ME_FATALERROR));
   }
@@ -1132,7 +1184,8 @@ void sp_instr_set::print(const THD *thd, String *str) {
 
 #ifdef HAVE_PSI_INTERFACE
 PSI_statement_info sp_instr_set_trigger_field::psi_info = {
-    0, "set_trigger_field", 0, PSI_DOCUMENT_ME};
+    0, "set_trigger_field", PSI_FLAG_DISABLED | PSI_FLAG_UNTIMED,
+    "Stored Program: SET NEW.<field> in TRIGGER"};
 #endif
 
 bool sp_instr_set_trigger_field::exec_core(THD *thd, uint *nextp) {
@@ -1192,7 +1245,9 @@ void sp_instr_set_trigger_field::cleanup_before_parsing(THD *thd) {
 ///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
-PSI_statement_info sp_instr_jump::psi_info = {0, "jump", 0, PSI_DOCUMENT_ME};
+PSI_statement_info sp_instr_jump::psi_info = {
+    0, "jump", PSI_FLAG_DISABLED | PSI_FLAG_UNTIMED,
+    "Stored Program: jump microcode instruction"};
 #endif
 
 void sp_instr_jump::print(const THD *, String *str) {
@@ -1238,16 +1293,17 @@ void sp_instr_jump::opt_move(uint dst, List<sp_branch_instr> *bp) {
 ///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
-PSI_statement_info sp_instr_jump_if_not::psi_info = {0, "jump_if_not", 0,
-                                                     PSI_DOCUMENT_ME};
+PSI_statement_info sp_instr_jump_if_not::psi_info = {
+    0, "jump_if_not", PSI_FLAG_DISABLED | PSI_FLAG_UNTIMED,
+    "Stored Program: jump if false microcode instruction"};
 #endif
 
 bool sp_instr_jump_if_not::exec_core(THD *thd, uint *nextp) {
-  assert(m_expr_item);
+  assert(m_expr_item != nullptr);
 
-  Item *item = sp_prepare_func_item(thd, &m_expr_item);
-
-  if (!item) return true;
+  // LEX of instruction keeps execution state of the expression evaluation
+  Item *item = sp_prepare_func_item(thd, true, &m_expr_item);
+  if (item == nullptr) return true;
 
   *nextp = item->val_bool() ? get_ip() + 1 : m_dest;
 
@@ -1320,16 +1376,17 @@ void sp_lex_branch_instr::opt_move(uint dst, List<sp_branch_instr> *bp) {
 ///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
-PSI_statement_info sp_instr_jump_case_when::psi_info = {0, "jump_case_when", 0,
-                                                        PSI_DOCUMENT_ME};
+PSI_statement_info sp_instr_jump_case_when::psi_info = {
+    0, "jump_case_when", PSI_FLAG_DISABLED | PSI_FLAG_UNTIMED,
+    "Stored Program: jump CASE WHEN microcode instruction"};
 #endif
 
 bool sp_instr_jump_case_when::exec_core(THD *thd, uint *nextp) {
-  assert(m_eq_item);
+  assert(m_eq_item != nullptr);
 
-  Item *item = sp_prepare_func_item(thd, &m_eq_item);
-
-  if (!item) return true;
+  // LEX of instruction keeps execution state of the case expression
+  Item *item = sp_prepare_func_item(thd, true, &m_eq_item);
+  if (item == nullptr) return true;
 
   *nextp = item->val_bool() ? get_ip() + 1 : m_dest;
 
@@ -1391,8 +1448,9 @@ bool sp_instr_jump_case_when::on_after_expr_parsing(THD *thd) {
 ///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
-PSI_statement_info sp_instr_freturn::psi_info = {0, "freturn", 0,
-                                                 PSI_DOCUMENT_ME};
+PSI_statement_info sp_instr_freturn::psi_info = {
+    0, "freturn", PSI_FLAG_DISABLED | PSI_FLAG_UNTIMED,
+    "Stored Program: RETURN from STORED FUNCTION"};
 #endif
 
 bool sp_instr_freturn::exec_core(THD *thd, uint *nextp) {
@@ -1411,7 +1469,7 @@ bool sp_instr_freturn::exec_core(THD *thd, uint *nextp) {
     do it in scope of execution the current context/block.
   */
 
-  return thd->sp_runtime_ctx->set_return_value(thd, &m_expr_item);
+  return thd->sp_runtime_ctx->set_return_value(thd, true, &m_expr_item);
 }
 
 void sp_instr_freturn::print(const THD *thd, String *str) {
@@ -1429,8 +1487,9 @@ void sp_instr_freturn::print(const THD *thd, String *str) {
 ///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
-PSI_statement_info sp_instr_hpush_jump::psi_info = {0, "hpush_jump", 0,
-                                                    PSI_DOCUMENT_ME};
+PSI_statement_info sp_instr_hpush_jump::psi_info = {
+    0, "hpush_jump", PSI_FLAG_DISABLED | PSI_FLAG_UNTIMED,
+    "Stored Program: install a DECLARE HANDLER microcode instruction"};
 #endif
 
 sp_instr_hpush_jump::sp_instr_hpush_jump(uint ip, sp_pcontext *ctx,
@@ -1504,7 +1563,9 @@ uint sp_instr_hpush_jump::opt_mark(sp_head *sp, List<sp_instr> *leads) {
 ///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
-PSI_statement_info sp_instr_hpop::psi_info = {0, "hpop", 0, PSI_DOCUMENT_ME};
+PSI_statement_info sp_instr_hpop::psi_info = {
+    0, "hpop", PSI_FLAG_DISABLED | PSI_FLAG_UNTIMED,
+    "Stored Program: uninstall a DECLARE HANDLER microcode instruction"};
 #endif
 
 bool sp_instr_hpop::execute(THD *thd, uint *nextp) {
@@ -1518,8 +1579,9 @@ bool sp_instr_hpop::execute(THD *thd, uint *nextp) {
 ///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
-PSI_statement_info sp_instr_hreturn::psi_info = {0, "hreturn", 0,
-                                                 PSI_DOCUMENT_ME};
+PSI_statement_info sp_instr_hreturn::psi_info = {
+    0, "hreturn", PSI_FLAG_DISABLED | PSI_FLAG_UNTIMED,
+    "Stored Program: return from a DECLARE HANDLER microcode instruction"};
 #endif
 
 sp_instr_hreturn::sp_instr_hreturn(uint ip, sp_pcontext *ctx)
@@ -1582,7 +1644,9 @@ uint sp_instr_hreturn::opt_mark(sp_head *, List<sp_instr> *) {
 ///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
-PSI_statement_info sp_instr_cpush::psi_info = {0, "cpush", 0, PSI_DOCUMENT_ME};
+PSI_statement_info sp_instr_cpush::psi_info = {
+    0, "cpush", PSI_FLAG_DISABLED | PSI_FLAG_UNTIMED,
+    "Stored Program: install a DECLARE CURSOR microcode instruction"};
 #endif
 
 bool sp_instr_cpush::execute(THD *thd, uint *nextp) {
@@ -1625,7 +1689,9 @@ void sp_instr_cpush::print(const THD *, String *str) {
 ///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
-PSI_statement_info sp_instr_cpop::psi_info = {0, "cpop", 0, PSI_DOCUMENT_ME};
+PSI_statement_info sp_instr_cpop::psi_info = {
+    0, "cpop", PSI_FLAG_DISABLED | PSI_FLAG_UNTIMED,
+    "Stored Program: uninstall a DECLARE CURSOR microcode instruction"};
 #endif
 
 bool sp_instr_cpop::execute(THD *thd, uint *nextp) {
@@ -1647,7 +1713,9 @@ void sp_instr_cpop::print(const THD *, String *str) {
 ///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
-PSI_statement_info sp_instr_copen::psi_info = {0, "copen", 0, PSI_DOCUMENT_ME};
+PSI_statement_info sp_instr_copen::psi_info = {
+    0, "copen", PSI_FLAG_DISABLED | PSI_FLAG_UNTIMED,
+    "Stored Program: OPEN cursor"};
 #endif
 
 bool sp_instr_copen::execute(THD *thd, uint *nextp) {
@@ -1712,8 +1780,9 @@ void sp_instr_copen::print(const THD *, String *str) {
 ///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
-PSI_statement_info sp_instr_cclose::psi_info = {0, "cclose", 0,
-                                                PSI_DOCUMENT_ME};
+PSI_statement_info sp_instr_cclose::psi_info = {
+    0, "cclose", PSI_FLAG_DISABLED | PSI_FLAG_UNTIMED,
+    "Stored Program: CLOSE cursor"};
 #endif
 
 bool sp_instr_cclose::execute(THD *thd, uint *nextp) {
@@ -1748,8 +1817,9 @@ void sp_instr_cclose::print(const THD *, String *str) {
 ///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
-PSI_statement_info sp_instr_cfetch::psi_info = {0, "cfetch", 0,
-                                                PSI_DOCUMENT_ME};
+PSI_statement_info sp_instr_cfetch::psi_info = {
+    0, "cfetch", PSI_FLAG_DISABLED | PSI_FLAG_UNTIMED,
+    "Stored Program: FETCH cursor"};
 #endif
 
 bool sp_instr_cfetch::execute(THD *thd, uint *nextp) {
@@ -1793,7 +1863,9 @@ void sp_instr_cfetch::print(const THD *, String *str) {
 ///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
-PSI_statement_info sp_instr_error::psi_info = {0, "error", 0, PSI_DOCUMENT_ME};
+PSI_statement_info sp_instr_error::psi_info = {
+    0, "error", PSI_FLAG_DISABLED | PSI_FLAG_UNTIMED,
+    "Stored Program: CASE WHEN not found microcode instruction"};
 #endif
 
 void sp_instr_error::print(const THD *, String *str) {
@@ -1808,8 +1880,9 @@ void sp_instr_error::print(const THD *, String *str) {
 ///////////////////////////////////////////////////////////////////////////
 
 #ifdef HAVE_PSI_INTERFACE
-PSI_statement_info sp_instr_set_case_expr::psi_info = {0, "set_case_expr", 0,
-                                                       PSI_DOCUMENT_ME};
+PSI_statement_info sp_instr_set_case_expr::psi_info = {
+    0, "set_case_expr", PSI_FLAG_DISABLED | PSI_FLAG_UNTIMED,
+    "Stored Program: CASE microcode instruction"};
 #endif
 
 bool sp_instr_set_case_expr::exec_core(THD *thd, uint *nextp) {
@@ -1817,21 +1890,21 @@ bool sp_instr_set_case_expr::exec_core(THD *thd, uint *nextp) {
 
   sp_rcontext *rctx = thd->sp_runtime_ctx;
 
-  if (rctx->set_case_expr(thd, m_case_expr_id, &m_expr_item)) {
+  // LEX of instruction keeps execution state of the case expression
+  if (rctx->set_case_expr(thd, true, m_case_expr_id, &m_expr_item)) {
     if (!rctx->get_case_expr(m_case_expr_id)) {
       // Failed to evaluate the value, the case expression is still not
       // initialized. Set to NULL so we can continue.
       Item *null_item = new Item_null();
 
-      if (!null_item || rctx->set_case_expr(thd, m_case_expr_id, &null_item)) {
+      if (null_item == nullptr ||
+          rctx->set_case_expr(thd, true, m_case_expr_id, &null_item)) {
         // If this also failed, we have to abort.
         my_error(ER_OUT_OF_RESOURCES, MYF(ME_FATALERROR));
       }
     }
-
     return true;
   }
-
   return false;
 }
 

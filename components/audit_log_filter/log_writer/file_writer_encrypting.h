@@ -31,13 +31,6 @@ class FileWriterEncrypting final : public FileWriterDecoratorBase {
   ~FileWriterEncrypting() override;
 
   /**
-   * @brief Init file writer.
-   *
-   * @return true in case of success, false otherwise
-   */
-  bool init() noexcept override;
-
-  /**
    * @brief Prepare writer for work with newly opened log file.
    *
    * @return true in case of success, false otherwise
@@ -54,7 +47,7 @@ class FileWriterEncrypting final : public FileWriterDecoratorBase {
    * @brief Write file.
    *
    * @param record Log record
-   * @param record Log record size
+   * @param size Log record size
    */
   void write(const char *record, size_t size) noexcept override;
 

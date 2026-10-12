@@ -1,15 +1,16 @@
-/* Copyright (c) 2008, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -171,8 +172,8 @@ void PFS_memory_shared_stat::rebase() {
 void PFS_memory_shared_stat::count_builtin_alloc(size_t size) {
   m_used = true;
 
-  m_alloc_count++;
-  m_free_count_capacity++;
+  ++m_alloc_count;
+  ++m_free_count_capacity;
   m_alloc_size += size;
   m_free_size_capacity += size;
 
@@ -182,8 +183,8 @@ void PFS_memory_shared_stat::count_builtin_alloc(size_t size) {
   old_value = m_alloc_count_capacity.fetch_sub(1);
 
   /* Adjustment */
-  if (old_value <= 0) {
-    m_alloc_count_capacity++;
+  if (old_value == 0) {
+    ++m_alloc_count_capacity;
   }
 
   /* Optimistic */
@@ -198,8 +199,8 @@ void PFS_memory_shared_stat::count_builtin_alloc(size_t size) {
 void PFS_memory_shared_stat::count_builtin_free(size_t size) {
   m_used = true;
 
-  m_free_count++;
-  m_alloc_count_capacity++;
+  ++m_free_count;
+  ++m_alloc_count_capacity;
   m_free_size += size;
   m_alloc_size_capacity += size;
 
@@ -209,8 +210,8 @@ void PFS_memory_shared_stat::count_builtin_free(size_t size) {
   old_value = m_free_count_capacity.fetch_sub(1);
 
   /* Adjustment */
-  if (old_value <= 0) {
-    m_free_count_capacity++;
+  if (old_value == 0) {
+    ++m_free_count_capacity;
   }
 
   /* Optimistic */
@@ -226,19 +227,19 @@ PFS_memory_stat_alloc_delta *PFS_memory_shared_stat::count_alloc(
     size_t size, PFS_memory_stat_alloc_delta *delta) {
   m_used = true;
 
-  m_alloc_count++;
-  m_free_count_capacity++;
+  ++m_alloc_count;
+  ++m_free_count_capacity;
   m_alloc_size += size;
   m_free_size_capacity += size;
 
   if ((m_alloc_count_capacity >= 1) && (m_alloc_size_capacity >= size)) {
-    m_alloc_count_capacity--;
+    --m_alloc_count_capacity;
     m_alloc_size_capacity -= size;
     return nullptr;
   }
 
   if (m_alloc_count_capacity >= 1) {
-    m_alloc_count_capacity--;
+    --m_alloc_count_capacity;
     delta->m_alloc_count_delta = 0;
   } else {
     delta->m_alloc_count_delta = 1;
@@ -259,19 +260,19 @@ PFS_memory_stat_free_delta *PFS_memory_shared_stat::count_free(
     size_t size, PFS_memory_stat_free_delta *delta) {
   m_used = true;
 
-  m_free_count++;
-  m_alloc_count_capacity++;
+  ++m_free_count;
+  ++m_alloc_count_capacity;
   m_free_size += size;
   m_alloc_size_capacity += size;
 
   if ((m_free_count_capacity >= 1) && (m_free_size_capacity >= size)) {
-    m_free_count_capacity--;
+    --m_free_count_capacity;
     m_free_size_capacity -= size;
     return nullptr;
   }
 
   if (m_free_count_capacity >= 1) {
-    m_free_count_capacity--;
+    --m_free_count_capacity;
     delta->m_free_count_delta = 0;
   } else {
     delta->m_free_count_delta = 1;

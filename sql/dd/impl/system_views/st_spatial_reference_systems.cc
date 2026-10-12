@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,12 +23,10 @@
 
 #include "sql/dd/impl/system_views/st_spatial_reference_systems.h"
 
-namespace dd {
-namespace system_views {
+namespace dd::system_views {
 
 const St_spatial_reference_systems &St_spatial_reference_systems::instance() {
-  static St_spatial_reference_systems *s_instance =
-      new St_spatial_reference_systems();
+  static auto *s_instance = new St_spatial_reference_systems();
   return *s_instance;
 }
 
@@ -46,5 +45,4 @@ St_spatial_reference_systems::St_spatial_reference_systems() {
   m_target_def.add_from("mysql.st_spatial_reference_systems");
 }
 
-}  // namespace system_views
-}  // namespace dd
+}  // namespace dd::system_views

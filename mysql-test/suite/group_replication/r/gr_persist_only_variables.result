@@ -22,7 +22,6 @@ WHERE VARIABLE_NAME LIKE 'group_replication%'
  ORDER BY VARIABLE_NAME;
 
 SET PERSIST_ONLY group_replication_advertise_recovery_endpoints = @@GLOBAL.group_replication_advertise_recovery_endpoints;
-SET PERSIST_ONLY group_replication_allow_local_lower_version_join = @@GLOBAL.group_replication_allow_local_lower_version_join;
 SET PERSIST_ONLY group_replication_auto_evict_timeout = @@GLOBAL.group_replication_auto_evict_timeout;
 SET PERSIST_ONLY group_replication_auto_increment_increment = @@GLOBAL.group_replication_auto_increment_increment;
 SET PERSIST_ONLY group_replication_autorejoin_tries = @@GLOBAL.group_replication_autorejoin_tries;
@@ -30,6 +29,7 @@ SET PERSIST_ONLY group_replication_bootstrap_group = @@GLOBAL.group_replication_
 SET PERSIST_ONLY group_replication_certification_loop_chunk_size = @@GLOBAL.group_replication_certification_loop_chunk_size;
 SET PERSIST_ONLY group_replication_certification_loop_sleep_time = @@GLOBAL.group_replication_certification_loop_sleep_time;
 SET PERSIST_ONLY group_replication_clone_threshold = @@GLOBAL.group_replication_clone_threshold;
+SET PERSIST_ONLY group_replication_communication_debug_max_file_size = @@GLOBAL.group_replication_communication_debug_max_file_size;
 SET PERSIST_ONLY group_replication_communication_debug_options = @@GLOBAL.group_replication_communication_debug_options;
 SET PERSIST_ONLY group_replication_communication_max_message_size = @@GLOBAL.group_replication_communication_max_message_size;
 SET PERSIST_ONLY group_replication_communication_stack = @@GLOBAL.group_replication_communication_stack;
@@ -52,14 +52,14 @@ SET PERSIST_ONLY group_replication_group_name = @@GLOBAL.group_replication_group
 SET PERSIST_ONLY group_replication_group_seeds = @@GLOBAL.group_replication_group_seeds;
 SET PERSIST_ONLY group_replication_gtid_assignment_block_size = @@GLOBAL.group_replication_gtid_assignment_block_size;
 SET PERSIST_ONLY group_replication_ip_allowlist = @@GLOBAL.group_replication_ip_allowlist;
-SET PERSIST_ONLY group_replication_ip_whitelist = @@GLOBAL.group_replication_ip_whitelist;
 SET PERSIST_ONLY group_replication_local_address = @@GLOBAL.group_replication_local_address;
 SET PERSIST_ONLY group_replication_member_expel_timeout = @@GLOBAL.group_replication_member_expel_timeout;
 SET PERSIST_ONLY group_replication_member_weight = @@GLOBAL.group_replication_member_weight;
 SET PERSIST_ONLY group_replication_message_cache_size = @@GLOBAL.group_replication_message_cache_size;
 SET PERSIST_ONLY group_replication_paxos_single_leader = @@GLOBAL.group_replication_paxos_single_leader;
 SET PERSIST_ONLY group_replication_poll_spin_loops = @@GLOBAL.group_replication_poll_spin_loops;
-SET PERSIST_ONLY group_replication_recovery_complete_at = @@GLOBAL.group_replication_recovery_complete_at;
+SET PERSIST_ONLY group_replication_preemptive_garbage_collection = @@GLOBAL.group_replication_preemptive_garbage_collection;
+SET PERSIST_ONLY group_replication_preemptive_garbage_collection_rows_threshold = @@GLOBAL.group_replication_preemptive_garbage_collection_rows_threshold;
 SET PERSIST_ONLY group_replication_recovery_compression_algorithms = @@GLOBAL.group_replication_recovery_compression_algorithms;
 SET PERSIST_ONLY group_replication_recovery_get_public_key = @@GLOBAL.group_replication_recovery_get_public_key;
 SET PERSIST_ONLY group_replication_recovery_public_key_path = @@GLOBAL.group_replication_recovery_public_key_path;
@@ -93,7 +93,7 @@ include/assert.inc ['Expect 65 persisted variables.']
 # 2. Restart server, it must bootstrap the group and preserve
 #    the persisted settings. Verify persisted configuration.
 # restart
-include/rpl_reconnect.inc
+include/rpl/reconnect.inc
 include/gr_wait_for_member_state.inc
 
 include/assert.inc ['Expect 65 persisted variables in persisted_variables table.']
@@ -104,7 +104,6 @@ include/assert.inc ['Expect 64 persisted variables with matching persisted and g
 # 3. Test RESET PERSIST IF EXISTS.
 #    Verify that there are no persisted variables.
 RESET PERSIST IF EXISTS group_replication_advertise_recovery_endpoints;
-RESET PERSIST IF EXISTS group_replication_allow_local_lower_version_join;
 RESET PERSIST IF EXISTS group_replication_auto_evict_timeout;
 RESET PERSIST IF EXISTS group_replication_auto_increment_increment;
 RESET PERSIST IF EXISTS group_replication_autorejoin_tries;
@@ -112,6 +111,7 @@ RESET PERSIST IF EXISTS group_replication_bootstrap_group;
 RESET PERSIST IF EXISTS group_replication_certification_loop_chunk_size;
 RESET PERSIST IF EXISTS group_replication_certification_loop_sleep_time;
 RESET PERSIST IF EXISTS group_replication_clone_threshold;
+RESET PERSIST IF EXISTS group_replication_communication_debug_max_file_size;
 RESET PERSIST IF EXISTS group_replication_communication_debug_options;
 RESET PERSIST IF EXISTS group_replication_communication_max_message_size;
 RESET PERSIST IF EXISTS group_replication_communication_stack;
@@ -134,14 +134,14 @@ RESET PERSIST IF EXISTS group_replication_group_name;
 RESET PERSIST IF EXISTS group_replication_group_seeds;
 RESET PERSIST IF EXISTS group_replication_gtid_assignment_block_size;
 RESET PERSIST IF EXISTS group_replication_ip_allowlist;
-RESET PERSIST IF EXISTS group_replication_ip_whitelist;
 RESET PERSIST IF EXISTS group_replication_local_address;
 RESET PERSIST IF EXISTS group_replication_member_expel_timeout;
 RESET PERSIST IF EXISTS group_replication_member_weight;
 RESET PERSIST IF EXISTS group_replication_message_cache_size;
 RESET PERSIST IF EXISTS group_replication_paxos_single_leader;
 RESET PERSIST IF EXISTS group_replication_poll_spin_loops;
-RESET PERSIST IF EXISTS group_replication_recovery_complete_at;
+RESET PERSIST IF EXISTS group_replication_preemptive_garbage_collection;
+RESET PERSIST IF EXISTS group_replication_preemptive_garbage_collection_rows_threshold;
 RESET PERSIST IF EXISTS group_replication_recovery_compression_algorithms;
 RESET PERSIST IF EXISTS group_replication_recovery_get_public_key;
 RESET PERSIST IF EXISTS group_replication_recovery_public_key_path;

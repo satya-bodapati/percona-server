@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -113,6 +114,10 @@ enum dd_table_keys {
   DD_TABLE_DISCARD,
   /** Columns before first instant ADD COLUMN, used only for V1 */
   DD_TABLE_INSTANT_COLS,
+  /** Next percona_vec_aux_id label. Kept here, not only in the buffered
+  dynamic metadata, because dd_set_autoinc bumps DD_TABLE_VERSION to
+  invalidate that buffer - which would take this counter with it. */
+  DD_TABLE_VEC_NEXT_ID,
   /** Sentinel */
   DD_TABLE__LAST
 };
@@ -233,7 +238,8 @@ const char *const dd_space_state_values[DD_SPACE_STATE__LAST + 1] = {
 
 /** InnoDB private key strings for dd::Table. @see dd_table_keys */
 const char *const dd_table_key_strings[DD_TABLE__LAST] = {
-    "autoinc", "data_directory", "version", "discard", "instant_col"};
+    "autoinc", "data_directory", "version",
+    "discard", "instant_col",    "vec_next_id"};
 
 /** InnoDB private key strings for dd::Column, @see dd_column_keys */
 const char *const dd_column_key_strings[DD_COLUMN__LAST] = {
@@ -405,6 +411,16 @@ in dd::Table
 @return true if consistent, otherwise false */
 bool dd_instant_columns_consistent(const dd::Table &dd_table);
 #endif /* UNIV_DEBUG */
+
+/** Scan through all the keys to identify the key parts which are
+greater than the maximum size supported by the table record format.
+@param table         MySQL table definition.
+@param max_part_len  Maximum index part length allowed.
+@param visitor       Function wrapper to invoke lambda expression.
+*/
+void dd_visit_keys_with_too_long_parts(
+    const TABLE *table, const size_t max_part_len,
+    std::function<void(const KEY &)> visitor);
 
 /** Determine if a dd::Table has any INSTANT ADD column(s) in V1
 @param[in]      table   dd::Table
@@ -863,6 +879,11 @@ void dd_update_v_cols(dd::Table *dd_table, table_id_t id);
 void dd_write_tablespace(dd::Tablespace *dd_space, space_id_t space_id,
                          uint32_t fsp_flags, dd_space_states state);
 
+/** Re-add the hidden percona_vec_aux_id column to a new dd::Table that lost it
+@param[in,out]  new_table       New dd table
+@param[in]      old_table       Old dd table */
+void dd_add_vec_aux_id_column(dd::Table &new_table, const dd::Table &old_table);
+
 /** Add fts doc id column and index to new table
 when old table has hidden fts doc id without fulltext index
 @param[in,out]  new_table       New dd table
@@ -899,12 +920,12 @@ void dd_mdl_release(THD *thd, MDL_ticket **mdl);
 /** Returns thd associated with the trx or current_thd
 @param[in]      trx     transaction
 @return trx->mysql_thd or current_thd */
-THD *dd_thd_for_undo(const trx_t *trx);
+THD *dd_thd_for_undo(const trx_t &trx);
 
 /** Check if current undo needs a MDL or not
 @param[in]      trx     transaction
 @return true if MDL is necessary, otherwise false */
-bool dd_mdl_for_undo(const trx_t *trx);
+bool dd_mdl_for_undo(const trx_t &trx);
 
 /** Load foreign key constraint info for the dd::Table object.
 @param[out]     m_table         InnoDB table handle
@@ -919,11 +940,6 @@ dberr_t dd_table_load_fk_from_dd(dict_table_t *m_table,
                                  const char **col_names,
                                  dict_err_ignore_t ignore_err,
                                  bool dict_locked);
-
-/** Set the AUTO_INCREMENT attribute.
-@param[in,out]  se_private_data dd::Table::se_private_data
-@param[in]      autoinc         the auto-increment value */
-void dd_set_autoinc(dd::Properties &se_private_data, uint64_t autoinc);
 
 /** Scan a new dd system table, like mysql.tables...
 @param[in]      thd             THD
@@ -1193,6 +1209,13 @@ dict_table_t *dd_table_open_on_name(THD *thd, MDL_ticket **mdl,
                                     ulint ignore_err, int *error = nullptr);
 
 /** Returns a cached table object based on table id.
+This function does NOT move the table to the front of MRU, because currently it
+is called in contexts where we don't really mean to "use" the table, and believe
+that it would actually hurt performance if we moved it to the front, such as:
+1. The table would be evicted soon anyway.
+2. A batch of FTS tables would be opened from background thread,
+   and it is not proper to move these tables to mru.
+3. All tables in memory will be accessed sequentially, so it is useless to move.
 @param[in]      table_id        table id
 @param[in]      dict_locked     true=data dictionary locked
 @return table, NULL if does not exist */
@@ -1239,6 +1262,13 @@ operation.
 @retval DB_SUCCESS on success. */
 dberr_t dd_tablespace_rename(dd::Object_id dd_space_id, bool is_system_cs,
                              const char *new_space_name, const char *new_path);
+
+/** Update the data directory flag in dd::Table key strings
+@param[in]      object_id       dd tablespace object id
+@param[in]      path            path where the ibd file is located currently
+@retval DB_SUCCESS on success. */
+dberr_t dd_update_table_and_partitions_after_dir_change(dd::Object_id object_id,
+                                                        std::string path);
 
 /** Create metadata for specified tablespace, acquiring exclusive MDL first
 @param[in,out]  dd_client       data dictionary client
@@ -1381,17 +1411,27 @@ bool dd_create_fts_index_table(const dict_table_t *parent_table,
 bool dd_create_fts_common_table(const dict_table_t *parent_table,
                                 dict_table_t *table, bool is_config);
 
-/** Drop dd table & tablespace for fts aux table
+/** Create dd table for the auxiliary table of a vector (HNSW) index.
+Mirrors dd_create_fts_index_table; the schema is the fixed 5-column
+(id, vec, base_pk, level, neighbors) layout from vec0aux.h.
+@param[in]      parent_table    parent table that owns the vector index
+@param[in,out]  table           in-memory aux table (its dd_space_id is
+                                populated as a side effect)
+@return true on success, false on failure */
+bool dd_create_vec_aux_table(const dict_table_t *parent_table,
+                             dict_table_t *table);
+
+/** Drop dd table & tablespace for an auxiliary table - FTS or vector
 @param[in]      name            table name
 @param[in]      file_per_table  flag whether use file per table
 @return true on success, false on failure. */
-bool dd_drop_fts_table(const char *name, bool file_per_table);
+bool dd_drop_aux_table(const char *name, bool file_per_table);
 
-/** Rename dd table & tablespace files for fts aux table
+/** Rename dd table & tablespace files for an auxiliary table - FTS or vector
 @param[in]      table           dict table
 @param[in]      old_name        old innodb table name
 @return true on success, false on failure. */
-bool dd_rename_fts_table(const dict_table_t *table, const char *old_name);
+bool dd_rename_aux_table(const dict_table_t *table, const char *old_name);
 
 /** Open a table from its database and table name, this is currently used by
 foreign constraint parser to get the referenced table.

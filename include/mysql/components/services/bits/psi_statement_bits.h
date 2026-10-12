@@ -1,15 +1,16 @@
-/* Copyright (c) 2008, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -78,16 +79,23 @@ typedef unsigned int PSI_statement_key;
 /**
   @def PSI_STATEMENT_VERSION_5
   Performance Schema Statement Interface number for version 5.
-  This version is supported.
+  This version is obsolete.
 */
 #define PSI_STATEMENT_VERSION_5 5
 
 /**
+  @def PSI_STATEMENT_VERSION_6
+  Performance Schema Statement Interface number for version 6.
+  This version is supported.
+*/
+#define PSI_STATEMENT_VERSION_6 6
+
+/**
   @def PSI_CURRENT_STATEMENT_VERSION
   Performance Schema Statement Interface number for the most recent version.
-  The most current version is @c PSI_STATEMENT_VERSION_5
+  The most current version is @c PSI_STATEMENT_VERSION_6
 */
-#define PSI_CURRENT_STATEMENT_VERSION 5
+#define PSI_CURRENT_STATEMENT_VERSION 6
 
 /**
   Interface for an instrumented statement.
@@ -540,6 +548,17 @@ typedef struct PSI_digest_locker *(*digest_start_v1_t)(
   @param digest the computed digest
 */
 typedef void (*digest_end_v1_t)(struct PSI_digest_locker *locker,
+                                const struct sql_digest_storage *digest);
+
+/**
+  Set a digest for the current statement.
+  @param locker a statement locker for the running thread
+  @param digest the computed digest
+  This API is used to set a complete digest directly.
+  This is useful for prepared statements, where the digest is
+  computed up front and already available.
+*/
+typedef void (*digest_set_v6_t)(struct PSI_statement_locker *locker,
                                 const struct sql_digest_storage *digest);
 
 /**

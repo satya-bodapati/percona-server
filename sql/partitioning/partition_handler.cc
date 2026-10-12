@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2005, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2005, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -549,7 +550,7 @@ exit:
 
   @param old_data  The old record in MySQL Row Format.
   @param new_data  The new record in MySQL Row Format.
-  @param lookup_rows Indicator for TokuDB read free replication.
+  @param lookup_rows Indicator for MyRocks read free replication.
 
   @return Operation status.
     @retval    0 Success
@@ -591,7 +592,7 @@ int Partition_helper::ph_update_row(const uchar *old_data, uchar *new_data,
     error instead of correcting m_last_part, to make the user aware of the
     problem!
 
-    For TokuDB Read-Free-Replication optimization, there is no need to do
+    For MyRocks Read-Free-Replication optimization, there is no need to do
     a read before update(row lookup is omitted), so m_last_part is not
     necessarily same with old_part_id.
 
@@ -664,7 +665,7 @@ int Partition_helper::ph_update_row(const uchar *old_data, uchar *new_data,
   buf is either record[0] or record[1]
 
   @param buf  The record in MySQL Row Format.
-  @param lookup_rows Indicator for TokuDB read free replication.
+  @param lookup_rows Indicator for MyRocks read free replication.
 
   @return Operation status.
     @retval    0 Success
@@ -701,7 +702,7 @@ int Partition_helper::ph_delete_row(const uchar *buf, bool lookup_rows) {
     error instead of forwarding the delete to the correct (m_last_part)
     partition!
 
-    For TokuDB Read-Free-Replication optimization, there is no need to do
+    For MyRocks Read-Free-Replication optimization, there is no need to do
     a read before delete(row lookup is omitted), so m_last_part is not
     necessarily same with part_id.
 
@@ -922,6 +923,7 @@ uint32 Partition_helper::ph_calculate_key_hash_value(Field **field_array) {
         case MYSQL_TYPE_MEDIUM_BLOB:
         case MYSQL_TYPE_LONG_BLOB:
         case MYSQL_TYPE_BLOB:
+        case MYSQL_TYPE_VECTOR:
         case MYSQL_TYPE_VAR_STRING:
         case MYSQL_TYPE_GEOMETRY:
         case MYSQL_TYPE_INVALID:

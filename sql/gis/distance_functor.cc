@@ -1,15 +1,16 @@
-// Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+// Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License, version 2.0,
 // as published by the Free Software Foundation.
 //
-// This program is also distributed with certain software (including
+// This program is designed to work with certain software (including
 // but not limited to OpenSSL) that is licensed under separate terms,
 // as designated in a particular file or component or in included license
 // documentation.  The authors of MySQL hereby grant you an additional
 // permission to link the program and your derivative works with the
-// separately licensed software that they have included with MySQL.
+// separately licensed software that they have either included with
+// the program or referenced in the documentation.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -34,7 +35,6 @@
 
 namespace bg = boost::geometry;
 namespace bgs = boost::geometry::srs;
-namespace bgsd = boost::geometry::strategy::distance;
 
 namespace gis {
 
@@ -57,28 +57,28 @@ static double geometry_collection_apply_min(const Functor<double> *f,
   double min = std::numeric_limits<double>::infinity();
 
   if (g1->type() == Geometry_type::kGeometrycollection) {
-    const auto gc1 = down_cast<const GC *>(g1);
+    const auto *const gc1 = down_cast<const GC *>(g1);
     for (const auto g1_i : *gc1) {
       if (g2->type() == Geometry_type::kGeometrycollection) {
-        const auto gc2 = down_cast<const GC *>(g2);
+        const auto *const gc2 = down_cast<const GC *>(g2);
         for (const auto g2_j : *gc2) {
-          double res = geometry_collection_apply_min<GC>(f, g1_i, g2_j);
+          double const res = geometry_collection_apply_min<GC>(f, g1_i, g2_j);
           if (res < min) min = res;
         }
       } else {
-        double res = geometry_collection_apply_min<GC>(f, g1_i, g2);
+        double const res = geometry_collection_apply_min<GC>(f, g1_i, g2);
         if (res < min) min = res;
       }
     }
   } else {
     if (g2->type() == Geometry_type::kGeometrycollection) {
-      const auto gc2 = down_cast<const GC *>(g2);
+      const auto *const gc2 = down_cast<const GC *>(g2);
       for (const auto g2_j : *gc2) {
-        double res = geometry_collection_apply_min<GC>(f, g1, g2_j);
+        double const res = geometry_collection_apply_min<GC>(f, g1, g2_j);
         if (res < min) min = res;
       }
     } else {
-      double res = (*f)(g1, g2);
+      double const res = (*f)(g1, g2);
       if (res < min) min = res;
     }
   }

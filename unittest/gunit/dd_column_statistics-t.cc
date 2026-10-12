@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,6 +25,7 @@
 #include <cstring>
 
 #include "my_inttypes.h"
+#include "my_temporal.h"
 #include "sql/dd/impl/dictionary_impl.h"
 #include "sql/dd/impl/raw/raw_record.h"
 #include "sql/dd/impl/types/column_statistics_impl.h"
@@ -64,8 +66,18 @@ void add_values(histograms::Value_map<String> &value_map) {
   value_map.add_values(String(), 10);
 }
 
-void add_values(histograms::Value_map<MYSQL_TIME> &value_map) {
-  MYSQL_TIME my_time;
+void add_values(histograms::Value_map<Time_val> &value_map) {
+  Time_val time{false, 10, 0, 0, 0};
+  value_map.add_values(time, 10);
+}
+
+void add_values(histograms::Value_map<Date_val> &value_map) {
+  Date_val date{2000, 1, 1};
+  value_map.add_values(date, 10);
+}
+
+void add_values(histograms::Value_map<Datetime_val> &value_map) {
+  Datetime_val my_time;
   my_time.year = 2017;
   my_time.month = 1;
   my_time.day = 1;
@@ -365,9 +377,9 @@ TEST(ColumnStatisticsTest, StoreAndRestoreAttributesEquiHeight) {
   equi_height_test<ulonglong>(histograms::Value_map_type::UINT);
   equi_height_test<String>(histograms::Value_map_type::STRING);
   equi_height_test<my_decimal>(histograms::Value_map_type::DECIMAL);
-  equi_height_test<MYSQL_TIME>(histograms::Value_map_type::DATE);
-  equi_height_test<MYSQL_TIME>(histograms::Value_map_type::TIME);
-  equi_height_test<MYSQL_TIME>(histograms::Value_map_type::DATETIME);
+  equi_height_test<Date_val>(histograms::Value_map_type::DATE);
+  equi_height_test<Time_val>(histograms::Value_map_type::TIME);
+  equi_height_test<Datetime_val>(histograms::Value_map_type::DATETIME);
   equi_height_test<double>(histograms::Value_map_type::DOUBLE);
   m_init.TearDown();
 }
@@ -381,9 +393,9 @@ TEST(ColumnStatisticsTest, StoreAndRestoreAttributesSingleton) {
   singleton_test<ulonglong>(histograms::Value_map_type::UINT);
   singleton_test<String>(histograms::Value_map_type::STRING);
   singleton_test<my_decimal>(histograms::Value_map_type::DECIMAL);
-  singleton_test<MYSQL_TIME>(histograms::Value_map_type::DATE);
-  singleton_test<MYSQL_TIME>(histograms::Value_map_type::TIME);
-  singleton_test<MYSQL_TIME>(histograms::Value_map_type::DATETIME);
+  singleton_test<Date_val>(histograms::Value_map_type::DATE);
+  singleton_test<Time_val>(histograms::Value_map_type::TIME);
+  singleton_test<Datetime_val>(histograms::Value_map_type::DATETIME);
   singleton_test<double>(histograms::Value_map_type::DOUBLE);
   m_init.TearDown();
 }

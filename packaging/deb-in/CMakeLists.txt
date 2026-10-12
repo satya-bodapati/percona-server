@@ -1,15 +1,16 @@
-# Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -57,6 +58,13 @@ ENDIF()
 # Change uppercase first letter of Ubuntu/Debian
 string(TOLOWER "${DEB_ID}" DEB_ID)
 
+# Ubuntu 20.04 and 22.04 has too old zlib
+IF(DEB_CODENAME STREQUAL "focal" OR DEB_CODENAME STREQUAL "jammy")
+  SET (DEB_ZLIB_OPTION "bundled")
+ELSE()
+  SET (DEB_ZLIB_OPTION "system")
+ENDIF()
+
 IF (WITH_NDB)
   SET (DEB_BASE_PRODUCT "cluster-")
   SET (DEB_BASE_PRODUCTC "Cluster ")
@@ -84,31 +92,37 @@ IF (NOT DEFINED DEB_CHANGELOG_TIMESTAMP)
 ENDIF()
 # Commercial or community
 IF (DEB_PRODUCT STREQUAL "commercial")
+  SET (DEB_CMAKE_EXTRAS "${DEB_CMAKE_EXTRAS} -DWITH_MLE=ON")
   SET (DEB_COPYRIGHT_UPSTREAMNAME "MySQL Commercial Server ${MYSQL_BASE_VERSION}")
   SET (DEB_PRODUCTNAME "${DEB_BASE_PRODUCT}commercial")
   SET (DEB_PRODUCTNAMEC "${DEB_BASE_PRODUCTC}Enterprise")
   SET (DEB_NOTPRODUCTNAME "${DEB_BASE_PRODUCT}community")
   SET (DEB_LICENSENAME "Commercial")
   SET (DEB_SERVERVERSION "${DEB_BASE_VERSION}+commercial-1")
+# Commercial only client
+  SET (DEB_INSTALL_CLIENT_EXTRA
+"
+usr/bin/mysqldm
+")
   # List of plugins that are only in commercial packages
   # Plugins that are in both community and commercial should NOT be added here
   SET (DEB_INSTALL_SERVER_PLUGINS
 "
-usr/lib/mysql/plugin/authentication_fido.so
+usr/lib/mysql/plugin/component_audit_log.so
 usr/lib/mysql/plugin/authentication_kerberos.so
+usr/lib/mysql/plugin/authentication_openid_connect.so
 usr/lib/mysql/plugin/authentication_ldap_sasl.so
 usr/lib/mysql/plugin/authentication_ldap_simple.so
 usr/lib/mysql/plugin/authentication_pam.so
 usr/lib/mysql/plugin/authentication_webauthn.so
 usr/lib/mysql/plugin/component_enterprise_encryption.so
 usr/lib/mysql/plugin/component_keyring_encrypted_file.so
+usr/lib/mysql/plugin/component_keyring_hashicorp.so
+usr/lib/mysql/plugin/component_keyring_kmip.so
 usr/lib/mysql/plugin/component_keyring_oci.so
 usr/lib/mysql/plugin/firewall.so
 usr/lib/mysql/plugin/keyring_okv.so
-usr/lib/mysql/plugin/keyring_encrypted_file.so
 usr/lib/mysql/plugin/keyring_hashicorp.so
-usr/lib/mysql/plugin/keyring_oci.so
-usr/lib/mysql/plugin/openssl_udf.so
 usr/lib/mysql/plugin/thread_pool.so
 usr/lib/mysql/plugin/firewall.so
 usr/lib/mysql/plugin/component_keyring_encrypted_file.so
@@ -116,19 +130,23 @@ usr/lib/mysql/plugin/component_keyring_oci.so
 usr/lib/mysql/plugin/component_enterprise_encryption.so
 usr/lib/mysql/plugin/component_masking.so
 usr/lib/mysql/plugin/component_masking_functions.so
+usr/lib/mysql/plugin/component_mle.so
 usr/lib/mysql/plugin/component_scheduler.so
-usr/lib/mysql/plugin/component_telemetry.so
+usr/lib/mysql/plugin/component_option_tracker.so
+usr/lib/mysql/plugin/component_firewall.so
+usr/lib/mysql/private/libpolyglot.so
+usr/lib/mysql/plugin/component_object_policy.so
 ")
 
    SET (DEB_INSTALL_TEST_PLUGINS
 "
 usr/lib/mysql/plugin/component_test_global_priv_registration.so
 usr/lib/mysql/plugin/component_test_page_track_component.so
+usr/bin/mysql_test_jwt_generator
 ")
 
   SET (DEB_INSTALL_CLIENT_PLUGINS
 "
-usr/lib/mysql/plugin/telemetry_client.so
 ")
 
   IF (DEB_AWS_SDK)
@@ -136,6 +154,18 @@ usr/lib/mysql/plugin/telemetry_client.so
     SET (DEB_INSTALL_SERVER_PLUGINS "${DEB_INSTALL_SERVER_PLUGINS}
 usr/lib/mysql/plugin/keyring_aws.so
 ")
+
+    IF (DEFINED ENV{AWS_VER})
+      IF ($ENV{AWS_VER} STREQUAL "1.11")
+        SET (DEB_INSTALL_SERVER_PLUGINS "${DEB_INSTALL_SERVER_PLUGINS}
+usr/lib/mysql/plugin/component_keyring_aws.so
+")
+      ELSE()
+        MESSAGE(STATUS "Unsupported AWS SDK version: $ENV{AWS_VER}, skip packaging component_keyring_aws.")
+      ENDIF()
+    ELSE()
+      MESSAGE(STATUS "Environment variable AWS_VER not set, skip packaging component_keyring_aws.")
+    ENDIF()
   ENDIF()
 
   IF (WITH_CURL)
@@ -174,15 +204,15 @@ override_dh_strip:
 	dh_strip -pmysql-server
 	dh_strip -pmysql-client
 	dh_strip -pmysql-testsuite
-	dh_strip -plibmysqlclient22 --dbg-package=libmysqlclient22-dbgsym
+	dh_strip -plibmysqlclient24 --dbg-package=libmysqlclient24-dbgsym
 	dh_strip -plibmysqlclient-dev
 ")
 SET (DEB_CONTROL_DBGSYM_DEFAULT
 "
-Package: libmysqlclient22-dbgsym
+Package: libmysqlclient24-dbgsym
 Architecture: any
 Section: debug
-Depends: libmysqlclient22 (=\${binary:Version}), \${misc:Depends}
+Depends: libmysqlclient24 (=\${binary:Version}), \${misc:Depends}
 Description: Debugging symbols for client library
 
 Package: mysql-${DEB_PRODUCTNAME}-test-dbgsym
@@ -255,23 +285,14 @@ ENDIF()
 
 # Enable various apparmor systems for Ubuntu
 IF(DEB_ID STREQUAL "ubuntu")
-  IF(DEB_CODENAME STREQUAL "bionic")
-    SET (DEB_CONTROL_BDEPS ", dh-apparmor, gcc-8, g++-8")
-  ELSE()
-    SET (DEB_CONTROL_BDEPS ", dh-apparmor")
-  ENDIF()
-  SET (DEB_RULES_INSTALL_APPARMOR "install -g root -o root -m 0644 -D debian/extra/apparmor-profile debian/tmp/etc/apparmor.d/usr.sbin.mysqld")
+  SET (DEB_CONTROL_BDEPS ", dh-apparmor")
+  SET (DEB_RULES_INSTALL_APPARMOR "install -m 0644 -D debian/extra/apparmor-profile debian/tmp/etc/apparmor.d/usr.sbin.mysqld")
   SET (DEB_RULES_APPARMOR_LOAD "dh_apparmor -pmysql-${DEB_PRODUCTNAME}-server --profile-name=usr.sbin.mysqld")
   SET (DEB_INSTALL_SERVER_APPARMOR "etc/apparmor.d/usr.sbin.mysqld")
   SET (DEB_INSTALL_ROUTER_APPARMOR "etc/apparmor.d/usr.bin.mysqlrouter")
   SET (DEB_INIT_SERVER_APPARMOR "/lib/apparmor/profile-load usr.sbin.mysqld")
   SET (DEB_INIT_ROUTER_APPARMOR "/lib/apparmor/profile-load usr.bin.mysqlrouter")
 
-  # Ubuntu 16.04 doesn't automatically create debug symbol packages
-  IF(DEB_CODENAME STREQUAL "xenial")
-    SET (DEB_CONTROL_DBGSYM ${DEB_CONTROL_DBGSYM_DEFAULT})
-    SET (DEB_RULES_STRIP ${DEB_RULES_STRIP_DEFAULT})
-  ENDIF()
 ENDIF()
 
 IF (NOT DEFINED DEB_NOROUTER)
@@ -283,7 +304,7 @@ ENDIF()
 if (DEFINED DEB_WITH_DEBUG)
   INCLUDE(deb_debug.cmake)
 ENDIF()
-# All files are configured and copied to the debian/ directory, which is used 
+# All files are configured and copied to the debian/ directory, which is used
 # by debuild to make the packages
 SET (DEB_ROOT ${CMAKE_SOURCE_DIR}/packaging/deb-in)
 FILE(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/debian)
@@ -308,4 +329,3 @@ ENDFOREACH()
 EXECUTE_PROCESS(
   COMMAND chmod +x ${CMAKE_BINARY_DIR}/debian/rules
 )
-

@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -58,6 +59,7 @@ enum TA_field_type {
   TA_TYPE_VARCHAR = 2,
   TA_TYPE_JSON = 3,
   TA_TYPE_ENUM = 4,
+  TA_TYPE_TEXT = 5
 };
 
 /**
@@ -362,6 +364,14 @@ typedef int (*set_field_any_value_v1_t)(Table_access ta, TA_table table,
 typedef int (*get_field_any_value_v1_t)(Table_access ta, TA_table table,
                                         size_t index, my_h_string v);
 
+/**
+  Turns on or off the binlogging flag for the current thread
+*/
+typedef void (*table_access_binlog_set_t)(Table_access ta, bool is_binlogging);
+/**
+  Gets the binlogging flag for the current thread
+*/
+typedef bool (*table_access_binlog_get_t)(Table_access ta);
 /** @} (end of group_table_access_services) */
 
 #endif /* COMPONENTS_SERVICES_TABLE_ACCESS_BITS_H */

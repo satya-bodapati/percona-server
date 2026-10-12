@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,9 +30,11 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 #include <sql_string.h>
 #include "sql/command_mapping.h"
 #include "sql/current_thd.h"
+#include "sql/mysqld.h"
 #include "sql/sql_class.h"
 #include "sql/sql_digest.h"
 #include "sql/sql_lex.h"
+#include "sql/sql_locale.h"
 #include "sql/sql_rewrite.h"
 #include "sql/tztime.h"
 
@@ -43,7 +46,9 @@ DEFINE_BOOL_METHOD(mysql_thd_attributes_imp::get,
       if (t == nullptr) t = current_thd;
       if (t == nullptr) return true;
 
-      if (!strcmp(name, "thd_status")) {
+      if (!strcmp(name, "thread_id")) {
+        *((uint32_t *)inout_pvalue) = t->thread_id();
+      } else if (!strcmp(name, "thd_status")) {
         *((uint16_t *)inout_pvalue) = [](auto state) {
           switch (state) {
             case THD::killed_state::NOT_KILLED:
@@ -96,6 +101,17 @@ DEFINE_BOOL_METHOD(mysql_thd_attributes_imp::get,
           res->append(t->query().str, t->query().length, t->charset());
         }
         *((my_h_string *)inout_pvalue) = (my_h_string)res;
+      } else if (!strcmp(name, "sql_text_string")) {
+        if (t->rewritten_query().length() == 0) mysql_rewrite_query(t);
+
+        if (t->rewritten_query().length() > 0) {
+          *reinterpret_cast<LEX_CSTRING *>(inout_pvalue) = {
+              t->rewritten_query().ptr(), t->rewritten_query().length()};
+        } else if (t->query().length > 0) {
+          *reinterpret_cast<LEX_CSTRING *>(inout_pvalue) = t->query();
+        }
+      } else if (!strcmp(name, "sql_text_charset")) {
+        *reinterpret_cast<const CHARSET_INFO **>(inout_pvalue) = t->charset();
       } else if (!strcmp(name, "host_or_ip")) {
         Security_context *ctx = t->security_context();
         const char *host = (ctx != nullptr && ctx->host_or_ip().length)
@@ -118,15 +134,22 @@ DEFINE_BOOL_METHOD(mysql_thd_attributes_imp::get,
           val.length = strlen(t->charset()->csname);
         }
         *((mysql_cstring_with_length *)inout_pvalue) = val;
+      } else if (!strcmp(name, "collation_connection_charset")) {
+        auto collation_charset = t->variables.collation_connection->csname;
+        auto val = mysql_cstring_with_length{collation_charset,
+                                             strlen(collation_charset)};
+        *((mysql_cstring_with_length *)inout_pvalue) = val;
       } else if (!strcmp(name, "sql_command")) {
-        const char *sql_command = get_sql_command_string(t->lex->sql_command);
         if (t->lex->sql_command == SQLCOM_END &&
             t->get_command() != COM_QUERY) {
-          *((mysql_cstring_with_length *)inout_pvalue) = {"", strlen("")};
+          *((mysql_cstring_with_length *)inout_pvalue) = {STRING_WITH_LEN("")};
         } else {
-          *((mysql_cstring_with_length *)inout_pvalue) = {sql_command,
-                                                          strlen(sql_command)};
+          LEX_CSTRING sql_command = sql_statement_names[t->lex->sql_command];
+          *((mysql_cstring_with_length *)inout_pvalue) = {sql_command.str,
+                                                          sql_command.length};
         }
+      } else if (!strcmp(name, "sql_command_id")) {
+        *((enum_sql_command *)inout_pvalue) = t->lex->sql_command;
       } else if (!strcmp(name, "command")) {
         const char *command = get_server_command_string(t->get_command());
         *((mysql_cstring_with_length *)inout_pvalue) = {command,
@@ -134,6 +157,33 @@ DEFINE_BOOL_METHOD(mysql_thd_attributes_imp::get,
       } else if (!strcmp(name, "time_zone_name")) {
         *reinterpret_cast<MYSQL_LEX_CSTRING *>(inout_pvalue) =
             t->time_zone()->get_name()->lex_cstring();
+      } else if (!strcmp(name, "locale")) {
+        auto locale = t->variables.lc_time_names;
+        const char *locale_name = locale->name;
+        *((mysql_cstring_with_length *)inout_pvalue) = {locale_name,
+                                                        strlen(locale_name)};
+      } else if (!strcmp(name, "da_status")) {
+        *((uint16_t *)inout_pvalue) = [&t](auto status) {
+          switch (status) {
+            case Diagnostics_area::DA_EMPTY:
+              return STATUS_DA_EMPTY;
+            case Diagnostics_area::DA_OK:
+              return STATUS_DA_OK;
+            case Diagnostics_area::DA_EOF:
+              return STATUS_DA_EOF;
+            case Diagnostics_area::DA_ERROR:
+              if (t->is_fatal_error()) {
+                return STATUS_DA_FATAL_ERROR;
+              }
+              return STATUS_DA_ERROR;
+            case Diagnostics_area::DA_DISABLED:
+              return STATUS_DA_DISABLED;
+            default:
+              return STATUS_DA_OK;
+          }
+        }(t->get_stmt_da()->status());
+      } else if (!strcmp(name, "is_global_read_lock_acquired")) {
+        *((bool *)inout_pvalue) = t->global_read_lock.is_acquired();
       } else
         return true; /* invalid option */
     }
@@ -145,9 +195,24 @@ DEFINE_BOOL_METHOD(mysql_thd_attributes_imp::get,
 }
 
 DEFINE_BOOL_METHOD(mysql_thd_attributes_imp::set,
-                   (MYSQL_THD thd [[maybe_unused]],
-                    const char *name [[maybe_unused]],
-                    void *inout_pvalue [[maybe_unused]])) {
+                   (MYSQL_THD thd, const char *name, void *inout_pvalue)) {
+  try {
+    if (inout_pvalue) {
+      THD *t = static_cast<THD *>(thd);
+      if (t == nullptr) t = current_thd;
+      if (t == nullptr) return true;
+      if (!strcmp(name, "da_status")) {
+        auto status = *((uint16_t *)inout_pvalue);
+        if (status == STATUS_DA_EMPTY) {
+          t->get_stmt_da()->reset_diagnostics_area();
+          t->get_stmt_da()->reset_condition_info(t);
+        }
+      }
+      return false;
+    }
+  } catch (...) {
+    mysql_components_handle_std_exception(__func__);
+  }
   return true;
 }
 

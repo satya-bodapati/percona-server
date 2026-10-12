@@ -1,15 +1,16 @@
-/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,8 +24,8 @@
 /* See http://code.google.com/p/googletest/wiki/Primer */
 
 #include <gtest/gtest.h>
-#include <string.h>
 #include <array>
+#include <cstring>
 #include <iostream>
 
 #include "storage/innobase/include/univ.i"
@@ -42,7 +43,7 @@ bool can_use_poly_mul();
 #endif /* !CRC32_DEFAULT */
 namespace software {
 uint32_t crc32(const byte *data, size_t len);
-}
+}  // namespace software
 
 namespace innodb_ut0crc32_unittest {
 
@@ -1532,7 +1533,7 @@ TEST(ut0crc32, software) {
   init();
   for (size_t o = 0; o < 128; ++o) {
     for (size_t size = 0; size <= 512; ++size) {
-      const auto data = &random_data.data[o];
+      auto *const data = &random_data.data[o];
       const auto good = naive_crc32(data, size);
       EXPECT_EQ(good, software::crc32(data, size));
     }
@@ -1543,7 +1544,7 @@ TEST(ut0crc32, hardware) {
   for (size_t o = 0; o < 128; ++o) {
     for (size_t size = 0; size + o <= random_data.data.size(); ++size) {
       if (rand() % 100) continue;
-      const auto data = &random_data.data[o];
+      auto *const data = &random_data.data[o];
       const auto good = software::crc32(data, size);
 
       EXPECT_EQ(good, ut_crc32(data, size));

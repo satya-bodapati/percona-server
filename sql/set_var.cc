@@ -1,15 +1,16 @@
-/* Copyright (c) 2002, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2002, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -70,7 +71,7 @@
 #include "sql/sql_plugin_ref.h"
 #include "sql/sql_plugin_var.h"
 #include "sql/sql_select.h"        // free_underlaid_joins
-#include "sql/sql_show.h"          // append_identifier
+#include "sql/sql_show.h"          // append_identifier_*
 #include "sql/sys_vars_shared.h"   // PolyLock_mutex
 #include "sql/system_variables.h"  // system_variables
 #include "sql/table.h"             // table
@@ -1427,10 +1428,12 @@ int sql_set_variables(THD *thd, List<set_var_base> *var_list, bool opened) {
   LEX *lex = thd->lex;
   set_var_base *var;
   if (!thd->lex->unit->is_prepared()) {
-    lex->using_hypergraph_optimizer =
-        thd->optimizer_switch_flag(OPTIMIZER_SWITCH_HYPERGRAPH_OPTIMIZER);
+    lex->set_using_hypergraph_optimizer(
+        thd->optimizer_switch_flag(OPTIMIZER_SWITCH_HYPERGRAPH_OPTIMIZER));
 
     const Prepared_stmt_arena_holder ps_arena_holder(thd);
+    const Prepare_error_tracker tracker(thd);
+
     while ((var = it++)) {
       if ((error = var->resolve(thd))) goto err;
     }
@@ -1462,7 +1465,6 @@ int sql_set_variables(THD *thd, List<set_var_base> *var_list, bool opened) {
           "lc_messages_dir",
           "plugin_dir",
           "relay_log",
-          "relay_log_info_file",
           "replica_load_tmpdir",
           "socket",
           "tmpdir",
@@ -1536,6 +1538,16 @@ int sql_set_variables(THD *thd, List<set_var_base> *var_list, bool opened) {
     if (pv && pv->flush_to_file()) {
       my_error(ER_VARIABLE_NOT_PERSISTED, MYF(0));
       return 1;
+    }
+
+    /* if GLOBAL system variable changed, reset its attributes */
+    it.rewind();
+    while ((var = it++)) {
+      set_var *setvar = dynamic_cast<set_var *>(var);
+      if (setvar &&
+          (setvar->type == OPT_GLOBAL || setvar->type == OPT_PERSIST)) {
+        set_global_variable_attribute(setvar->m_var_tracker, nullptr, nullptr);
+      }
     }
   }
 
@@ -1740,6 +1752,19 @@ int set_var::check(THD *thd) {
   }
 
   auto f = [this, thd](const System_variable_tracker &, sys_var *var) -> int {
+    if (var->is_readonly()) {
+      if (type != OPT_PERSIST_ONLY) {
+        my_error(ER_INCORRECT_GLOBAL_LOCAL_VAR, MYF(0), var->name.str,
+                 "read only");
+        return -1;
+      }
+      if (type == OPT_PERSIST_ONLY && var->is_non_persistent() &&
+          !can_persist_non_persistent_var(thd, var, type)) {
+        my_error(ER_INCORRECT_GLOBAL_LOCAL_VAR, MYF(0), var->name.str,
+                 "non persistent read only");
+        return -1;
+      }
+    }
     if (var->check_update_type(value->result_type())) {
       my_error(ER_WRONG_TYPE_FOR_VAR, MYF(0), var->name.str);
       return -1;
@@ -2130,4 +2155,111 @@ bool set_var_collation_client::print(const THD *, String *str) {
     }
   }
   return true;
+}
+
+bool get_global_variable_attributes(
+    const char *variable_base, const char *variable_name,
+    std::vector<std::pair<std::string, std::string>> &attributes) {
+  if (variable_name == nullptr || *variable_name == '\0') return true;
+
+  attributes.clear();
+
+  const System_variable_tracker var_tracker =
+      System_variable_tracker::make_tracker(
+          variable_base == nullptr ? "" : variable_base, variable_name);
+
+  auto f = [&attributes](const System_variable_tracker &, sys_var *var) -> int {
+    if ((var->scope() & sys_var::flag_enum::GLOBAL) == 0) {
+      return -1;
+    }
+
+    for (auto &attr : var->m_global_attributes)
+      attributes.emplace_back(attr.first, attr.second);
+    return 0;
+  };
+
+  int ret = var_tracker
+                .access_system_variable<int>(current_thd, f,
+                                             Suppress_not_found_error::NO)
+                .value_or(-1);
+  return ret != 0;
+}
+
+bool get_global_variable_attribute(const char *variable_base,
+                                   const char *variable_name,
+                                   const char *attribute_name,
+                                   std::string &value) {
+  if (variable_name == nullptr || *variable_name == '\0') return true;
+  if (attribute_name == nullptr || *attribute_name == '\0') return true;
+
+  const System_variable_tracker var_tracker =
+      System_variable_tracker::make_tracker(
+          variable_base == nullptr ? "" : variable_base, variable_name);
+
+  auto f = [attribute_name, &value](const System_variable_tracker &,
+                                    sys_var *var) -> int {
+    if ((var->scope() & sys_var::flag_enum::GLOBAL) == 0) {
+      return -1;
+    }
+
+    const auto it = var->m_global_attributes.find(attribute_name);
+    if (it == var->m_global_attributes.end()) return -1;
+
+    value = it->second;
+    return 0;
+  };
+
+  int ret = var_tracker
+                .access_system_variable<int>(current_thd, f,
+                                             Suppress_not_found_error::NO)
+                .value_or(-1);
+  return ret != 0;
+}
+
+bool set_global_variable_attribute(const char *variable_base,
+                                   const char *variable_name,
+                                   const char *attribute_name,
+                                   const char *attribute_value) {
+  const System_variable_tracker var_tracker =
+      System_variable_tracker::make_tracker(
+          variable_base == nullptr ? "" : variable_base, variable_name);
+
+  return set_global_variable_attribute(var_tracker, attribute_name,
+                                       attribute_value);
+}
+
+bool set_global_variable_attribute(const System_variable_tracker &var_tracker,
+                                   const char *attribute_name,
+                                   const char *attribute_value) {
+  auto f = [attribute_name, attribute_value](const System_variable_tracker &,
+                                             sys_var *var) -> int {
+    if ((var->scope() & sys_var::flag_enum::GLOBAL) == 0) {
+      return -1;
+    }
+
+    if (attribute_name == nullptr) {
+      var->m_global_attributes.clear();
+    } else if (attribute_value == nullptr) {
+      var->m_global_attributes.erase(attribute_name);
+    } else {
+      // validate data to prevent wasting memory
+      constexpr size_t COL_SHORT_NAME_SIZE = 32;
+      constexpr size_t COL_INFO_SIZE = 1024;
+
+      const size_t name_len = strlen(attribute_name);
+      if (name_len > COL_SHORT_NAME_SIZE) return -1;
+      if (name_len == 0U) return -1;
+      const size_t value_len = strlen(attribute_value);
+      if (value_len > COL_INFO_SIZE) return -1;
+
+      var->m_global_attributes[attribute_name] = attribute_value;
+    }
+    return 0;
+  };
+
+  int ret = var_tracker
+                .access_system_variable<int>(current_thd, f,
+                                             Suppress_not_found_error::NO)
+                .value_or(-1);
+  return ret != 0;
 }

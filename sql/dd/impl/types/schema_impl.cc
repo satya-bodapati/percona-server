@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -48,6 +49,7 @@
 #include "sql/dd/impl/utils.h"       // dd::my_time_t_to_ull_datetime()
 #include "sql/dd/types/event.h"      // Event
 #include "sql/dd/types/function.h"   // Function
+#include "sql/dd/types/library.h"    // Library
 #include "sql/dd/types/procedure.h"  // Procedure
 #include "sql/dd/types/table.h"
 #include "sql/dd/types/view.h"  // View
@@ -221,6 +223,22 @@ Function *Schema_impl::create_function(THD *thd) const {
 
 Procedure *Schema_impl::create_procedure(THD *thd) const {
   std::unique_ptr<Procedure> p(dd::create_object<Procedure>());
+  p->set_schema_id(this->id());
+
+  // Get statement start time.
+  ulonglong ull_curtime =
+      dd::my_time_t_to_ull_datetime(thd->query_start_in_secs());
+
+  p->set_created(ull_curtime);
+  p->set_last_altered(ull_curtime);
+
+  return p.release();
+}
+
+///////////////////////////////////////////////////////////////////////////
+
+Library *Schema_impl::create_library(THD *thd) const {
+  std::unique_ptr<Library> p(dd::create_object<Library>());
   p->set_schema_id(this->id());
 
   // Get statement start time.

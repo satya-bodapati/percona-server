@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -59,7 +60,7 @@ dberr_t File_reader::prepare() noexcept {
   ut_a(m_buffer_size > 0);
   ut_a(m_read_len == 0);
 
-  if (m_offset == m_size) {
+  if (end_of_range()) {
     return DB_END_OF_INDEX;
   }
 
@@ -100,12 +101,12 @@ dberr_t File_reader::prepare() noexcept {
   const auto n_fields = dict_index_get_n_fields(m_index);
   const auto n = 1 + REC_OFFS_HEADER_SIZE + n_fields;
 
-  ut_a(m_offsets.empty());
+  ut_a(m_field_offsets.empty());
 
-  m_offsets.resize(n);
+  m_field_offsets.resize(n);
 
-  m_offsets[0] = n;
-  m_offsets[1] = n_fields;
+  m_field_offsets[0] = n;
+  m_field_offsets[1] = n_fields;
 
   ut_a(m_aux_buf == nullptr);
   m_aux_buf = ut::new_arr_withkey<byte>(ut::make_psi_memory_key(mem_key_ddl),
@@ -115,38 +116,36 @@ dberr_t File_reader::prepare() noexcept {
     return DB_OUT_OF_MEMORY;
   }
 
-  ut_a(m_size > m_offset);
-  m_read_len = get_read_len_next();
-  const auto err = ddl::pread(m_file.get(), m_io_buffer.first, m_read_len,
-                              m_offset, m_crypt_buffer.first, m_space_id);
-
-  if (err != DB_SUCCESS) {
+  /* Position the m_ptr to the first record. */
+  if (const auto err = seek(); err != DB_SUCCESS) {
     return err;
   }
 
-  /* Fetch and advance to the next record. */
-  m_ptr = m_io_buffer.first;
-
-  /* Position m_mrec on the first record. */
+  /* Position m_mrec on the first record and advance to next record. */
   return next();
 }
 
-dberr_t File_reader::seek(os_offset_t offset) noexcept {
-  ut_a(m_size > offset);
-
-  m_offset = offset;
+dberr_t File_reader::seek() noexcept {
+  ut_a(m_range.second > m_range.first);
 
   m_read_len = get_read_len_next();
   const auto err = ddl::pread(m_file.get(), m_io_buffer.first, m_read_len,
-                              m_offset, m_crypt_buffer.first, m_space_id);
+                              m_range.first, m_crypt_buffer.first, m_space_id);
 
-  m_ptr = m_io_buffer.first;
+  if (err == DB_SUCCESS) {
+    /* Fetch the record. */
+    m_ptr = m_io_buffer.first;
+  }
 
   return err;
 }
 
-dberr_t File_reader::read(os_offset_t offset) noexcept {
-  const auto err = seek(offset);
+dberr_t File_reader::read(const Range &range) noexcept {
+  ut_a(range.first < range.second);
+  m_range = range;
+
+  /* Read the page in the file buffer */
+  const auto err = seek();
 
   if (err == DB_SUCCESS) {
     /* Position m_mrec on the first record. */
@@ -157,8 +156,8 @@ dberr_t File_reader::read(os_offset_t offset) noexcept {
 }
 
 dberr_t File_reader::read_next() noexcept {
-  ut_a(m_size > m_offset);
-  return seek(m_offset + m_read_len);
+  m_range.first = m_range.first + m_read_len;
+  return seek();
 }
 
 dberr_t File_reader::next() noexcept {
@@ -167,8 +166,8 @@ dberr_t File_reader::next() noexcept {
   size_t extra_size = *m_ptr++;
 
   if (extra_size == 0) {
-    /* Mark as eof. */
-    m_offset = m_size;
+    /* Mark as end of range. */
+    m_range.first = m_range.second;
     return DB_END_OF_INDEX;
   }
 
@@ -221,9 +220,10 @@ dberr_t File_reader::next() noexcept {
       m_ptr += len;
     }
 
-    rec_deserialize_init_offsets(rec + extra_size, m_index, &m_offsets[0]);
+    rec_deserialize_init_offsets(rec + extra_size, m_index,
+                                 &m_field_offsets[0]);
 
-    const auto data_size = rec_offs_data_size(&m_offsets[0]);
+    const auto data_size = rec_offs_data_size(&m_field_offsets[0]);
 
     /* These overflows should be impossible given that records are much
     smaller than either buffer, and the record starts near the beginning
@@ -237,9 +237,10 @@ dberr_t File_reader::next() noexcept {
     m_ptr += data_size;
 
   } else {
-    rec_deserialize_init_offsets(rec + extra_size, m_index, &m_offsets[0]);
+    rec_deserialize_init_offsets(rec + extra_size, m_index,
+                                 &m_field_offsets[0]);
 
-    const auto data_size = rec_offs_data_size(&m_offsets[0]);
+    const auto data_size = rec_offs_data_size(&m_field_offsets[0]);
 
     ut_a(extra_size + data_size < UNIV_PAGE_SIZE_MAX);
 
@@ -258,8 +259,8 @@ dberr_t File_reader::next() noexcept {
       are no REC_N_NEW_EXTRA_BYTES between extra_size and data_size.
       Similarly, rec_offs_validate() would fail, because it invokes
       rec_get_status(). */
-      ut_d(m_offsets[3] = (ulint)m_index);
-      ut_d(m_offsets[2] = (ulint)rec + extra_size);
+      ut_d(m_field_offsets[3] = (ulint)m_index);
+      ut_d(m_field_offsets[2] = (ulint)rec + extra_size);
 
       {
         const auto err = read_next();
@@ -302,17 +303,17 @@ dberr_t File_reader::next() noexcept {
 
 [[nodiscard]] size_t File_reader::get_read_len_next() const noexcept {
   if (!log_tmp_is_encrypted()) {
-    return std::min(m_io_buffer.second, m_size - m_offset);
+    return std::min(m_io_buffer.second, m_range.second - m_range.first);
   }
 
   // If encrypted, read the same offset and length that was written
   // so the decryption is correct
-  auto offset_it = get_next_offset(m_write_offsets, m_offset);
+  auto offset_it = get_next_offset(m_write_offsets, m_range.first);
   ut_a(offset_it != m_write_offsets.end());
 
-  const auto len = *offset_it - m_offset;
+  const auto len = *offset_it - m_range.first;
   ut_a(len > 0);
-  ut_a(len <= m_size - m_offset);
+  ut_a(len <= m_range.second - m_range.first);
   ut_a(len <= m_io_buffer.second);
 
   return len;

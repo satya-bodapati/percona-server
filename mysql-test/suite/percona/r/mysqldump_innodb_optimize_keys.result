@@ -1,3 +1,4 @@
+include/rpl/set_gtid_mode_off.inc
 #
 # Test the --innodb-optimize-keys option.
 #
@@ -582,7 +583,9 @@ PRIMARY KEY (`id`),
 KEY `a` (`a`),
 CONSTRAINT `a` FOREIGN KEY (`a`) REFERENCES `t1` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=latin1;
+SET FOREIGN_KEY_CHECKS=0;
 INSERT INTO t1(a) VALUES (1), (2), (3);
+SET FOREIGN_KEY_CHECKS=1;
 ######################################
 
 /*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
@@ -765,7 +768,7 @@ DROP TABLE t1;
 CREATE TABLE `t1` (
 `id` int DEFAULT NULL,
 `a` int DEFAULT NULL,
-KEY (`id`),
+UNIQUE KEY (`id`),
 FOREIGN KEY (`a`) REFERENCES `t1` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=latin1;
 INSERT INTO t1 VALUES (1,1), (2,2), (3,3);
@@ -805,7 +808,7 @@ LOCK TABLES `t1` WRITE;
 /*!40000 ALTER TABLE `t1` DISABLE KEYS */;
 INSERT INTO `t1` VALUES (1,1),(2,2),(3,3),(4,NULL),(NULL,4);
 ALTER TABLE `t1`
-  ADD KEY `id` (`id`),
+  ADD UNIQUE KEY `id` (`id`),
   ADD KEY `a` (`a`);
 ALTER TABLE `t1` ADD CONSTRAINT `t1_ibfk_1` FOREIGN KEY (`a`) REFERENCES `t1` (`id`);
 /*!40000 ALTER TABLE `t1` ENABLE KEYS */;
@@ -1061,3 +1064,4 @@ UNLOCK TABLES;
 
 ######################################
 DROP TABLE t1, t11;
+include/rpl/set_gtid_mode_on.inc

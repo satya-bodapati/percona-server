@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2012, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -112,6 +113,8 @@ class Ndb_rep_tab_row {
 
   Ndb_rep_tab_key key;
   uint binlog_type;
+  uint binlog_row_slice_count;
+  uint binlog_row_slice_id;
   bool cfs_is_null;
   /* Buffer has space for leading length byte */
   char conflict_fn_spec[CONFLICT_FN_SPEC_BUF_LEN + 1];
@@ -154,9 +157,13 @@ class Ndb_rep_tab_reader {
   static const char *nrt_table_name;
   static const char *nrt_server_id;
   static const char *nrt_binlog_type;
+  static const char *nrt_binlog_row_slice_count;
+  static const char *nrt_binlog_row_slice_id;
   static const char *nrt_conflict_fn;
 
   Uint32 binlog_flags;
+  Uint32 binlog_row_slice_count;
+  Uint32 binlog_row_slice_id;
   char conflict_fn_buffer[Ndb_rep_tab_row::CONFLICT_FN_SPEC_BUF_LEN];
   char warning_msg_buffer[FN_REFLEN];
 
@@ -219,9 +226,16 @@ class Ndb_rep_tab_reader {
              const char *db, const char *table_name, uint server_id);
 
   /* Following only valid after a call to lookup() */
-  Uint32 get_binlog_flags() const;
-  const char *get_conflict_fn_spec() const;
-  const char *get_warning_message() const;
+  [[nodiscard]] Uint32 get_binlog_flags() const { return binlog_flags; }
+  [[nodiscard]] Uint32 get_binlog_row_slice_count() const {
+    return binlog_row_slice_count;
+  }
+  [[nodiscard]] Uint32 get_binlog_row_slice_id() const {
+    return binlog_row_slice_id;
+  }
+  [[nodiscard]] const char *get_conflict_fn_spec() const {
+    return conflict_fn_spec;
+  }
+  [[nodiscard]] const char *get_warning_message() const { return warning_msg; }
 };
-
 #endif

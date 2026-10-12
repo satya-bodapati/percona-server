@@ -1,15 +1,16 @@
-/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -45,24 +46,24 @@
 */
 struct row_prepared_stmt_instances {
   /** Column OBJECT_INSTANCE_BEGIN. */
-  const void *m_identity;
+  const void *m_identity{nullptr};
 
   /** Column STMT_ID. */
-  ulonglong m_stmt_id;
+  ulonglong m_stmt_id{0};
 
   /** Column STMT_NAME. */
   char m_stmt_name[COL_INFO_SIZE];
-  int m_stmt_name_length;
+  int m_stmt_name_length{0};
 
   /** Column SQL_TEXT. */
   char m_sql_text[COL_INFO_SIZE];
-  int m_sql_text_length;
+  int m_sql_text_length{0};
 
   /** Column OWNER_THREAD_ID. */
-  ulonglong m_owner_thread_id;
+  ulonglong m_owner_thread_id{0};
 
   /** Column OWNER_EVENT_ID. */
-  ulonglong m_owner_event_id;
+  ulonglong m_owner_event_id{0};
 
   /** Column OWNER_OBJECT_TYPE. */
   enum_object_type m_owner_object_type;
@@ -80,7 +81,7 @@ struct row_prepared_stmt_instances {
   PFS_stat_row m_reprepare_stat;
 
   /** Column EXECUTION_ENGINE. */
-  bool m_secondary;
+  bool m_secondary{false};
 
   /** Columns COUNT_STAR...SUM_NO_GOOD_INDEX_USED. */
   PFS_statement_stat_row m_execute_stat;

@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,7 +25,6 @@
 
 #ifndef COMPONENTS_INCLUDED
 #define COMPONENTS_INCLUDED
-
 #include <mysql/components/minimal_chassis.h> /* Minimal chassis */
 #include <mysql/components/my_service.h>
 #include <mysql/components/service.h>
@@ -34,6 +34,7 @@
 #include <mysql/components/services/keyring_reader_with_status.h>
 #include <mysql/components/services/keyring_writer.h>
 #include <mysql/components/services/registry.h>
+#include <string>
 
 namespace components {
 using registry_type_t = SERVICE_TYPE_NO_CONST(registry);
@@ -50,7 +51,7 @@ void deinit_components_subsystem();
 
 class Keyring_component_load final {
  public:
-  Keyring_component_load(const std::string component_name);
+  Keyring_component_load(const std::string &component_name);
 
   ~Keyring_component_load();
 
@@ -64,7 +65,7 @@ class Keyring_component_load final {
 
 class Keyring_services {
  public:
-  Keyring_services(const std::string implementation_name);
+  Keyring_services(const std::string &implementation_name);
 
   virtual ~Keyring_services();
 
@@ -79,7 +80,7 @@ class Keyring_services {
 
 class AES_encryption_keyring_services final : public Keyring_services {
  public:
-  AES_encryption_keyring_services(const std::string implementation_name);
+  AES_encryption_keyring_services(const std::string &implementation_name);
 
   ~AES_encryption_keyring_services();
 

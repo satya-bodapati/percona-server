@@ -1,16 +1,17 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
    Copyright (c) 2018, Percona and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -34,12 +35,13 @@
 #include "my_inttypes.h"
 #include "my_io.h"
 #include "my_macros.h"
+#include "storage/myisam/array.h"
 #include "storage/myisam/fulltext.h"
 #include "storage/myisam/myisamdef.h"
 #if defined(_WIN32)
 #include <fcntl.h>
 #else
-#include <stddef.h>
+#include <cstddef>
 #endif
 #include "storage/myisam/queues.h"
 #include "template_utils.h"
@@ -220,7 +222,7 @@ int _create_index_by_sort(MI_SORT_PARAM *info, bool no_messages,
 
   if (my_b_inited(&tempfile_for_exceptions)) {
     MI_INFO *idx = info->sort_info->info;
-    uint keyno = info->key;
+    uint const keyno = info->key;
     uint key_length, ref_length = idx->s->rec_reflength;
 
     if (!no_messages) printf("  - Adding exceptions\n"); /* purecov: tested */
@@ -297,7 +299,7 @@ static ha_rows find_all_keys(MI_SORT_PARAM *info, uint keys, uchar **sort_keys,
 static int write_keys(MI_SORT_PARAM *info, uchar **sort_keys, uint count,
                       BUFFPEK *buffpek, IO_CACHE *tempfile) {
   uchar **end;
-  uint sort_length = info->key_length;
+  uint const sort_length = info->key_length;
   DBUG_TRACE;
 
   std::sort(sort_keys, sort_keys + count, [info](uchar *a, uchar *b) {
@@ -549,8 +551,8 @@ static int merge_buffers(MI_SORT_PARAM *info, uint keys, IO_CACHE *from_file,
     count += buffpek->count;
     buffpek->base = strpos;
     buffpek->max_keys = maxcount;
-    strpos += (uint)(
-        error = (int)info->read_to_buffer(from_file, buffpek, sort_length));
+    strpos += (uint)(error = (int)info->read_to_buffer(from_file, buffpek,
+                                                       sort_length));
     if (error == -1) goto err; /* purecov: inspected */
     queue_insert(&queue, (uchar *)buffpek);
   }
@@ -579,7 +581,7 @@ static int merge_buffers(MI_SORT_PARAM *info, uint keys, IO_CACHE *from_file,
         if (!(error =
                   (int)info->read_to_buffer(from_file, buffpek, sort_length))) {
           uchar *base = buffpek->base;
-          uint max_keys = buffpek->max_keys;
+          uint const max_keys = buffpek->max_keys;
 
           (void)queue_remove(&queue, 0);
 
@@ -590,7 +592,8 @@ static int merge_buffers(MI_SORT_PARAM *info, uint keys, IO_CACHE *from_file,
             if (buffpek->base + buffpek->max_keys * sort_length == base) {
               buffpek->max_keys += max_keys;
               break;
-            } else if (base + max_keys * sort_length == buffpek->base) {
+            }
+            if (base + max_keys * sort_length == buffpek->base) {
               buffpek->base = base;
               buffpek->max_keys += max_keys;
               break;

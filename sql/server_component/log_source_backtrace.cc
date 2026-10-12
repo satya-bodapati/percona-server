@@ -1,15 +1,16 @@
-/* Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -422,9 +423,9 @@ static log_service_error log_error_read_backtrace_loop(const char *log_file,
     size = max_backtrace;  // Correct size to the part we'll actually read.
 
     // Seek to the approximate position of the row to start reading at.
-    if (my_fseek(fh, (long)pos, SEEK_SET)) { /* purecov: begin inspected */
+    if (my_fseek(fh, (my_off_t)pos, SEEK_SET) == MY_FILEPOS_ERROR) {
       ret = LOG_SERVICE_SEEK_FAILED;
-      goto fail_with_free; /* purecov: end */
+      goto fail_with_free;
     }
   }
 
@@ -449,7 +450,7 @@ static log_service_error log_error_read_backtrace_loop(const char *log_file,
     - the parse function suggests we stop (LOG_SERVICE_MISC_ERROR)
   */
   do {
-    const size_t processed = (size_t)(line_start - chunk);
+    const auto processed = (size_t)(line_start - chunk);
     const size_t rest = size - processed;
 
     // Find EOL ('\n'). If last line is partial, skip it.

@@ -23,6 +23,7 @@ enum enum_field_types {
   MYSQL_TYPE_DATETIME2,
   MYSQL_TYPE_TIME2,
   MYSQL_TYPE_TYPED_ARRAY,
+  MYSQL_TYPE_VECTOR = 242,
   MYSQL_TYPE_INVALID = 243,
   MYSQL_TYPE_BOOL = 244,
   MYSQL_TYPE_JSON = 245,
@@ -61,12 +62,12 @@ enum enum_server_command {
   COM_FIELD_LIST,
   COM_CREATE_DB,
   COM_DROP_DB,
-  COM_REFRESH,
-  COM_DEPRECATED_1,
+  COM_UNUSED_2,
+  COM_UNUSED_1,
   COM_STATISTICS,
-  COM_PROCESS_INFO,
+  COM_UNUSED_4,
   COM_CONNECT,
-  COM_PROCESS_KILL,
+  COM_UNUSED_5,
   COM_DEBUG,
   COM_PING,
   COM_TIME,
@@ -269,6 +270,7 @@ uint64_t net_field_length_ll(unsigned char **packet);
 unsigned char *net_store_length(unsigned char *pkg, unsigned long long length);
 unsigned int net_length_size(unsigned long long num);
 unsigned int net_field_length_size(const unsigned char *pos);
+uint64_t net_length_size_including_self(uint64_t length_without_self);
 enum connect_stage {
   CONNECT_STAGE_INVALID = 0,
   CONNECT_STAGE_NOT_STARTED,
@@ -310,6 +312,7 @@ struct MYSQL_PLUGIN_VIO_INFO {
     MYSQL_VIO_MEMORY
   } protocol;
   int socket;
+  bool is_tls_established;
 };
 enum net_async_status {
   NET_ASYNC_COMPLETE = 0,
@@ -617,9 +620,9 @@ unsigned long mysql_thread_id(MYSQL *mysql);
 const char * mysql_character_set_name(MYSQL *mysql);
 int mysql_set_character_set(MYSQL *mysql, const char *csname);
 MYSQL * mysql_init(MYSQL *mysql);
-bool
-mysql_ssl_set(MYSQL *mysql, const char *key, const char *cert, const char *ca,
-              const char *capath, const char *cipher);
+bool mysql_ssl_set(MYSQL *mysql, const char *key, const char *cert,
+                   const char *ca, const char *capath,
+                   const char *cipher);
 const char * mysql_get_ssl_cipher(MYSQL *mysql);
 bool mysql_get_ssl_session_reused(MYSQL *mysql);
 void * mysql_get_ssl_session_data(MYSQL *mysql, unsigned int n_ticket,

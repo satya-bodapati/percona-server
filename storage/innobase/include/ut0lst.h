@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -351,6 +352,42 @@ void ut_list_append(List &list, typename List::elem_type *elem) {
  @param LIST list base node (not a pointer to it)
  @param ELEM the element to add */
 #define UT_LIST_ADD_LAST(LIST, ELEM) ut_list_append(LIST, ELEM)
+
+/** Appends all elements of src to the end of dst in O(1) time, leaving src
+ empty. Both lists must be of the same type, i.e. chained through the same node
+ member, and an element must not be present in both lists at once.
+ @param[in,out] dst list that receives the elements
+ @param[in,out] src list whose elements are moved to dst; emptied on return */
+template <typename List>
+void ut_list_concatenate(List &dst, List &src) {
+  ut_ad(UT_LIST_IS_INITIALISED(dst));
+  ut_ad(UT_LIST_IS_INITIALISED(src));
+
+  if (src.first_element == nullptr) {
+    /* Nothing to move. */
+    return;
+  }
+
+  if (dst.last_element != nullptr) {
+    /* Link the two lists at the junction. */
+    List::get_node(*dst.last_element).next = src.first_element;
+    List::get_node(*src.first_element).prev = dst.last_element;
+  } else {
+    /* dst is empty, so it simply becomes src. */
+    dst.first_element = src.first_element;
+  }
+
+  dst.last_element = src.last_element;
+  dst.update_length(static_cast<int>(src.get_length()));
+
+  src.clear();
+}
+
+/** Appends all elements of SRC to the end of DST in O(1) time, leaving SRC
+ empty.
+ @param DST destination list base node (not a pointer to it)
+ @param SRC source list base node (not a pointer to it) */
+#define UT_LIST_CONCATENATE(DST, SRC) ut_list_concatenate(DST, SRC)
 
 /** Inserts a ELEM2 after ELEM1 in a list.
  @param list the base node

@@ -1,3 +1,5 @@
+--source include/elide_costs.inc
+
 #
 # Find string "NOTE NOTE NOTE" in order to find some 'unsure' tests
 #
@@ -1373,6 +1375,7 @@ select distinct substring(fld3,1,3) from t2 where fld3 like "A%";
 select distinct substring(fld3,1,3) as a from t2 having a like "A%" order by a limit 10;
 --replace_result abr Abr
 select distinct substring(fld3,1,3) from t2 where fld3 like "A%" limit 10;
+--skip_if_hypergraph # LIMIT without ORDER BY is non-deterministic.
 --replace_result abr Abr
 select distinct substring(fld3,1,3) as a from t2 having a like "A%" limit 10;
 
@@ -1687,6 +1690,7 @@ select name,count(*) from t3 where name='cloakroom' group by name;
 select name,count(*) from t3 where name='cloakroom' and price>10 group by name;
 select count(*) from t3 where name='cloakroom' and price2=823742;
 select name,count(*) from t3 where name='cloakroom' and price2=823742 group by name;
+--sorted_result
 select name,count(*) from t3 where name >= "extramarital" and price <= 39654943 group by name;
 
 # We see the functional dependency implied by WHERE!
@@ -1803,6 +1807,7 @@ explain select min(fld1),max(fld1),count(*) from t2;
 explain format=tree select min(fld1),max(fld1),count(*) from t2;  # Should be computed at optimize time.
 ANALYZE TABLE t2;
 --skip_if_hypergraph  # Depends on query plan.
+--replace_regex $elide_costs
 explain format=tree select min(fld1),max(fld1),count(*) from t2 where rand() > 0.5;  # Should _not_ be computed at optimize time.
 # PS does correct pre-zero here. MySQL can't do it as it returns a number.
 --disable_ps_protocol
@@ -2858,9 +2863,9 @@ drop view v1, v2, v3;
 
 create table t1 (id int(11) not null default '0');
 insert into t1 values (123),(191),(192);
-create table t2 (id char(16) character set utf8 not null);
+create table t2 (id char(16) character set utf8mb3 not null);
 insert into t2 values ('58013'),('58014'),('58015'),('58016');
-create table t3 (a_id int(11) not null, b_id char(16) character set utf8);
+create table t3 (a_id int(11) not null, b_id char(16) character set utf8mb3);
 insert into t3 values (123,null),(123,null),(123,null),(123,null),(123,null),(123,'58013');
 
 # both queries are equivalent
@@ -3865,7 +3870,7 @@ INSERT INTO t2 VALUES (1, 1), (1, 2), (1, 3), (1, 4), (1, 5),
                       (2, 1), (2, 2), (2, 3), (2, 4), (2, 5),
                       (3, 1), (3, 2), (3, 3), (3, 4), (3, 5),
                       (4, 1), (4, 2), (4, 3), (4, 4), (4, 5);
-
+ANALYZE TABLE t1, t2;
 FLUSH STATUS;
 SELECT DISTINCT b FROM t1 LEFT JOIN t2 USING(a) WHERE c <= 3;
 --skip_if_hypergraph  # Depends on the query plan.
@@ -4215,6 +4220,7 @@ SELECT table4 . `time_nokey` AS field1 FROM
             table1 . `int_nokey` != 'f')
   GROUP BY field1  ORDER BY field1 , field1;
 
+--sorted_result
 SELECT table1 .`time_key` field2  FROM B table1  LEFT JOIN  BB JOIN A table5 ON table5 .`date_nokey`  ON table5 .`int_nokey` GROUP  BY field2;
 --enable_warnings
 

@@ -1,15 +1,16 @@
-/* Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -59,7 +60,7 @@ void print_info(const std::string &event) {
 }
 
 void print_result(const std::string &event, bool result) {
-  std::string retval = result ? "Error." : "Success.";
+  std::string const retval = result ? "Error." : "Success.";
   std::cout << "Component: " << event_tracking_producer::component_name
             << ". Event: " << event << ". Consumer returned: " << retval
             << std::endl;
@@ -298,7 +299,7 @@ bool Event_producer::generate_events() {
     startup_data.argc = 1;
     startup_data.argv = nullptr;
 
-    my_service<SERVICE_TYPE(event_tracking_lifecycle)> lifecycle_service(
+    my_service<SERVICE_TYPE(event_tracking_lifecycle)> const lifecycle_service(
         "event_tracking_lifecycle", mysql_service_registry);
 
     mysql_event_tracking_shutdown_data shutdown_data;
@@ -429,12 +430,11 @@ bool Event_producer::generate_events() {
 
 static mysql_service_status_t init() {
   g_event_producer = new (std::nothrow) Event_producer();
-  if (!g_event_producer || g_event_producer->generate_events()) return true;
-  return false;
+  return !g_event_producer || g_event_producer->generate_events();
 }
 
 static mysql_service_status_t deinit() {
-  if (g_event_producer) delete g_event_producer;
+  delete g_event_producer;
   g_event_producer = nullptr;
   return false;
 }

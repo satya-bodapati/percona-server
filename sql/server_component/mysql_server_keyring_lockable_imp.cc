@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -190,8 +191,7 @@ struct my_h_keyring_keys_metadata_iterator_server {
   rwlock_scoped_lock lock_;
 };
 
-namespace keyring_common {
-namespace service_definition {
+namespace keyring_common::service_definition {
 
 /**
   Helper to check service validity
@@ -280,12 +280,12 @@ DEFINE_BOOL_METHOD(Keyring_keys_metadata_iterator_service_impl::init,
     return true;
 
   rwlock_scoped_lock lock(&LOCK_keyring_component, false, __FILE__, __LINE__);
-  my_h_keyring_keys_metadata_iterator_server *local_object =
+  auto *local_object =
       new my_h_keyring_keys_metadata_iterator_server{nullptr, std::move(lock)};
   if (local_object == nullptr) return true;
   const bool retval =
       internal_keyring_keys_metadata_iterator->init(&local_object->iterator_);
-  if (retval == true) {
+  if (retval) {
     delete local_object;
     return retval;
   }
@@ -301,7 +301,7 @@ DEFINE_BOOL_METHOD(Keyring_keys_metadata_iterator_service_impl::deinit,
                     KEYS_METADATA_ITERATOR))
     return true;
 
-  my_h_keyring_keys_metadata_iterator_server *local_object =
+  auto *local_object =
       reinterpret_cast<my_h_keyring_keys_metadata_iterator_server *>(
           forward_iterator);
   if (!local_object) return true;
@@ -326,7 +326,7 @@ DEFINE_BOOL_METHOD(Keyring_keys_metadata_iterator_service_impl::is_valid,
                     KEYS_METADATA_ITERATOR))
     return false;
 
-  my_h_keyring_keys_metadata_iterator_server *local_object =
+  const auto *local_object =
       reinterpret_cast<my_h_keyring_keys_metadata_iterator_server *>(
           forward_iterator);
   if (!local_object) return false;
@@ -342,7 +342,7 @@ DEFINE_BOOL_METHOD(Keyring_keys_metadata_iterator_service_impl::get_length,
                     KEYS_METADATA_ITERATOR))
     return true;
 
-  my_h_keyring_keys_metadata_iterator_server *local_object =
+  const auto *local_object =
       reinterpret_cast<my_h_keyring_keys_metadata_iterator_server *>(
           forward_iterator);
   if (!local_object) return true;
@@ -357,7 +357,7 @@ DEFINE_BOOL_METHOD(Keyring_keys_metadata_iterator_service_impl::next,
                     KEYS_METADATA_ITERATOR))
     return true;
 
-  my_h_keyring_keys_metadata_iterator_server *local_object =
+  const auto *local_object =
       reinterpret_cast<my_h_keyring_keys_metadata_iterator_server *>(
           forward_iterator);
   if (!local_object) return true;
@@ -373,7 +373,7 @@ DEFINE_BOOL_METHOD(Keyring_keys_metadata_iterator_service_impl::get,
                     KEYS_METADATA_ITERATOR))
     return true;
 
-  my_h_keyring_keys_metadata_iterator_server *local_object =
+  const auto *local_object =
       reinterpret_cast<my_h_keyring_keys_metadata_iterator_server *>(
           forward_iterator);
   if (!local_object) return true;
@@ -474,13 +474,13 @@ DEFINE_BOOL_METHOD(Keyring_reader_service_impl::init,
   if (check_service(internal_keyring_reader, READER_WITH_STATUS)) return true;
 
   rwlock_scoped_lock lock(&LOCK_keyring_component, false, __FILE__, __LINE__);
-  my_h_keyring_reader_object_server *local_object =
+  auto *local_object =
       new my_h_keyring_reader_object_server{nullptr, std::move(lock)};
   if (local_object == nullptr) return true;
 
   const bool retval =
       internal_keyring_reader->init(data_id, auth_id, &(local_object->object_));
-  if (retval == true || local_object->object_ == nullptr) {
+  if (retval || local_object->object_ == nullptr) {
     delete local_object;
     *reader_object = nullptr;
     return retval;
@@ -494,7 +494,7 @@ DEFINE_BOOL_METHOD(Keyring_reader_service_impl::deinit,
                    (my_h_keyring_reader_object reader_object)) {
   if (check_service(internal_keyring_reader, READER_WITH_STATUS)) return true;
 
-  my_h_keyring_reader_object_server *local_object =
+  auto *local_object =
       reinterpret_cast<my_h_keyring_reader_object_server *>(reader_object);
   if (!local_object) return true;
 
@@ -516,7 +516,7 @@ DEFINE_BOOL_METHOD(Keyring_reader_service_impl::fetch_length,
                     size_t *data_type_size)) {
   if (check_service(internal_keyring_reader, READER_WITH_STATUS)) return true;
 
-  my_h_keyring_reader_object_server *local_object =
+  const auto *local_object =
       reinterpret_cast<my_h_keyring_reader_object_server *>(reader_object);
   if (!local_object) return true;
 
@@ -531,7 +531,7 @@ DEFINE_BOOL_METHOD(Keyring_reader_service_impl::fetch,
                     size_t data_type_buffer_length, size_t *data_type_size)) {
   if (check_service(internal_keyring_reader, READER_WITH_STATUS)) return true;
 
-  my_h_keyring_reader_object_server *local_object =
+  const auto *local_object =
       reinterpret_cast<my_h_keyring_reader_object_server *>(reader_object);
   if (!local_object) return true;
 
@@ -580,8 +580,7 @@ DEFINE_BOOL_METHOD(Keyring_writer_service_impl::remove,
   return internal_keyring_writer->remove(data_id, auth_id);
 }
 
-}  // namespace service_definition
-}  // namespace keyring_common
+}  // namespace keyring_common::service_definition
 }  // namespace keyring_lockable
 
 using keyring_aes_t = SERVICE_TYPE_NO_CONST(keyring_aes);
@@ -670,7 +669,7 @@ void keyring_lockable_deinit() {
 
 */
 void set_srv_keyring_implementation_as_default() {
-  my_service<SERVICE_TYPE(registry_registration)> registrator(
+  my_service<SERVICE_TYPE(registry_registration)> const registrator(
       "registry_registration", srv_registry);
 
   auto obtain_service_handles =
@@ -684,7 +683,7 @@ void set_srv_keyring_implementation_as_default() {
          SERVICE_TYPE(keyring_reader_with_status) * *reader,
          SERVICE_TYPE(keyring_load) * *load,
          SERVICE_TYPE(keyring_writer) * *writer) {
-        my_service<SERVICE_TYPE(registry_registration)> lamda_registrator(
+        my_service<SERVICE_TYPE(registry_registration)> const lamda_registrator(
             "registry_registration", srv_registry);
 
         std::string service_name;
@@ -891,7 +890,7 @@ void release_keyring_handles() {
          SERVICE_TYPE(keyring_reader_with_status) * *reader,
          SERVICE_TYPE(keyring_load) * *load,
          SERVICE_TYPE(keyring_writer) * *writer) {
-        my_service<SERVICE_TYPE(registry_registration)> registrator(
+        my_service<SERVICE_TYPE(registry_registration)> const registrator(
             "registry_registration", srv_registry);
         if (*aes_encryption)
           srv_registry->release(reinterpret_cast<my_h_service>(

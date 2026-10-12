@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -66,6 +67,13 @@ this program; if not, write to the Free Software Foundation, Inc.,
 @param[in,out]	log_ptr		pointer to redo log */
 void log_checkpointer(log_t *log_ptr);
 
+/** Requests a checkpoint written for lsn greater or equal to provided one.
+The log.limits_mutex has to be acquired before it is called, and it is not
+released within this function.
+@param[in,out]  log             redo log
+@param[in]      requested_lsn   provided lsn (checkpoint should be not older) */
+void log_request_checkpoint_low(log_t &log, lsn_t requested_lsn);
+
 /** Checks if log checkpointer thread is active.
 @return true if and only if the log checkpointer thread is active */
 inline bool log_checkpointer_is_active() {
@@ -107,7 +115,24 @@ However we do the best effort to avoid such situations, and if
 they happen, user threads wait until the space is reclaimed.
 @param[in]	log	redo log
 @return checkpoint age as number of bytes */
-lsn_t log_get_checkpoint_age(const log_t &log);
+inline lsn_t log_get_checkpoint_age(const log_t &log) {
+  const lsn_t last_checkpoint_lsn = log.last_checkpoint_lsn.load();
+
+  const lsn_t current_lsn = log_get_lsn(log);
+
+  if (current_lsn <= last_checkpoint_lsn) {
+    /* Writes or reads have been somehow reordered.
+    Note that this function does not provide any lock,
+    and does not assume any lock existing. Therefore
+    the calculated result is already outdated when the
+    function is finished. Hence, we might assume that
+    this time we calculated age = 0, because checkpoint
+    lsn is close to current lsn if such race happened. */
+    return 0;
+  }
+
+  return current_lsn - last_checkpoint_lsn;
+}
 
 /** Provides opposite checkpoint header number to the given checkpoint
 header number.
@@ -137,11 +162,6 @@ lsn_t log_sync_flush_lsn(log_t &log);
 @param[in, out]  log   redo log
 @param[in]       sync  whether request is sync (function should wait) */
 void log_request_checkpoint(log_t &log, bool sync);
-
-/** Requests a checkpoint written in the next log file (not in the one,
-to which current log.last_checkpoint_lsn belongs to).
-@param[in,out]   log   redo log */
-void log_request_checkpoint_in_next_file(log_t &log);
 
 /** Requests a checkpoint at the current lsn.
 @param[in,out]   log            redo log
@@ -322,8 +342,9 @@ inline void log_free_check() {
 
 /** @{ */
 
-/** Updates log.free_check_limit_lsn in the log. The log_limits_mutex
-must be acquired before a call (unless srv_is_being_started is true).
+/** Updates log.free_check_limit_lsn in the log. The log_files_mutex and
+log_limits_mutex must be acquired before a call (unless srv_is_being_started is
+true).
 @param[in,out]  log   redo log */
 void log_update_limits_low(log_t &log);
 

@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,8 +26,8 @@
 #include "mysql/harness/logging/logging.h"
 #include "mysql/harness/plugin.h"
 
+#include <array>
 #include <cstdlib>
-#include <iostream>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -35,7 +36,6 @@
 #endif
 
 using mysql_harness::ARCHITECTURE_DESCRIPTOR;
-using mysql_harness::ConfigSection;
 using mysql_harness::Plugin;
 using mysql_harness::PLUGIN_ABI_VERSION;
 using mysql_harness::PluginFuncEnv;
@@ -58,7 +58,7 @@ extern void EXAMPLE_IMPORT do_magic();
 #define EXAMPLE_API
 #endif
 
-static const char *requires_plugins[] = {
+static constexpr std::array required{
     "routertestplugin_magic (>>1.0)",
 };
 
@@ -72,8 +72,8 @@ Plugin EXAMPLE_API harness_plugin_routertestplugin_example = {
     ARCHITECTURE_DESCRIPTOR,
     "An example plugin",
     VERSION_NUMBER(1, 0, 0),
-    sizeof(requires_plugins) / sizeof(*requires_plugins),
-    requires_plugins,
+    required.size(),
+    required.data(),
     0,
     nullptr,  // conflicts
     init,     // init
@@ -83,6 +83,7 @@ Plugin EXAMPLE_API harness_plugin_routertestplugin_example = {
     false,    // declares_readiness
     0,
     nullptr,
+    nullptr,  // expose_configuration
 };
 }
 

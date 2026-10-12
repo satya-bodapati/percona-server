@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -23,25 +24,32 @@ this program; if not, write to the Free Software Foundation, Inc.,
 /** @file storage/temptable/src/table.cc
 TempTable Table implementation. */
 
+#include <algorithm>
+#include <cassert>
 #include <cstddef>
-#include <functional>
+#include <cstdint>
+#include <cstring>
 #include <new>
-#include <string>
-#include <unordered_map>
-#include <utility>
 #include <vector>
 
 #include "my_base.h"
 #include "my_dbug.h"
+#include "my_inttypes.h"
+#include "my_sys.h"
+#include "mysqld_error.h"
 #include "sql/field.h"
 #include "sql/key.h"
+#include "sql/sql_class.h"
 #include "sql/table.h"
 #include "storage/temptable/include/temptable/allocator.h"
+#include "storage/temptable/include/temptable/block.h"
+#include "storage/temptable/include/temptable/column.h"
 #include "storage/temptable/include/temptable/cursor.h"
 #include "storage/temptable/include/temptable/index.h"
 #include "storage/temptable/include/temptable/indexed_cells.h"
 #include "storage/temptable/include/temptable/result.h"
 #include "storage/temptable/include/temptable/row.h"
+#include "storage/temptable/include/temptable/storage.h"
 #include "storage/temptable/include/temptable/table.h"
 
 namespace temptable {
@@ -66,7 +74,8 @@ Table::Table(TABLE *mysql_table, Block *shared_block,
       m_index_entries(0, m_allocator),
       m_insert_undo(m_allocator),
       m_columns(m_allocator),
-      m_mysql_table_share(mysql_table->s) {
+      m_mysql_table_share(mysql_table->s),
+      m_owner_id(mysql_table->in_use->thread_id()) {
   const size_t number_of_indexes = mysql_table->s->keys;
   const size_t number_of_columns = mysql_table->s->fields;
   const unsigned char *mysql_row = nullptr;
@@ -255,6 +264,8 @@ Result Table::remove(const unsigned char *mysql_row_must_be,
   return Result::OK;
 }
 
+my_thread_id Table::owner_id() const { return m_owner_id; }
+
 void Table::indexes_create() {
   assert(m_index_entries.empty());
 
@@ -279,6 +290,7 @@ void Table::indexes_create() {
       case HA_KEY_ALG_SE_SPECIFIC:
       case HA_KEY_ALG_RTREE:
       case HA_KEY_ALG_FULLTEXT:
+      case HA_KEY_ALG_VECTOR:
         DBUG_ABORT();
     }
   }

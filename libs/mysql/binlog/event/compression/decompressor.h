@@ -1,15 +1,16 @@
-/* Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,11 +24,10 @@
 #ifndef MYSQL_BINLOG_EVENT_COMPRESSION_DECOMPRESSOR_H
 #define MYSQL_BINLOG_EVENT_COMPRESSION_DECOMPRESSOR_H
 
-#include "mysql/binlog/event/compression/base.h"                    // type
-#include "mysql/binlog/event/compression/buffer/grow_constraint.h"  // Grow_constraint
-#include "mysql/binlog/event/compression/buffer/managed_buffer.h"  // Managed_buffer
+#include "mysql/binlog/event/compression/base.h"               // type
 #include "mysql/binlog/event/compression/decompress_status.h"  // Decompress_status
-#include "mysql/binlog/event/nodiscard.h"                      // NODISCARD
+#include "mysql/containers/buffers/grow_constraint.h"  // Grow_constraint
+#include "mysql/containers/buffers/managed_buffer.h"   // Managed_buffer
 
 namespace mysql::binlog::event::compression {
 
@@ -56,15 +56,12 @@ namespace mysql::binlog::event::compression {
 class Decompressor {
  public:
   using Char_t = unsigned char;
-  using Size_t =
-      mysql::binlog::event::compression::buffer::Buffer_view<Char_t>::Size_t;
-  using Managed_buffer_t =
-      mysql::binlog::event::compression::buffer::Managed_buffer<Char_t>;
-  using Grow_constraint_t =
-      mysql::binlog::event::compression::buffer::Grow_constraint;
+  using Size_t = mysql::containers::buffers::Buffer_view<Char_t>::Size_t;
+  using Managed_buffer_t = mysql::containers::buffers::Managed_buffer<Char_t>;
+  using Grow_constraint_t = mysql::containers::buffers::Grow_constraint;
 
  private:
-  using Grow_status_t = mysql::binlog::event::compression::buffer::Grow_status;
+  using Grow_status_t = mysql::containers::buffers::Grow_status;
 
  public:
   Decompressor() = default;
@@ -126,7 +123,7 @@ class Decompressor {
   /// The caller may resume decompression after increasing the
   /// capacity, or resetting the buffer (perhaps after moving the data
   /// elsewhere), or using a different output buffer, or similar.
-  [[NODISCARD]] Decompress_status decompress(Managed_buffer_t &out,
+  [[nodiscard]] Decompress_status decompress(Managed_buffer_t &out,
                                              Size_t output_size);
 
   /// Decompress an exact, given number of bytes.
@@ -143,7 +140,7 @@ class Decompressor {
   /// exceeds_max_capacity.  The size will be equal to output_size if
   /// the status is success; strictly between 0 and output_size if the
   /// status is truncated; and 0 for the other cases.
-  [[NODISCARD]] std::pair<Decompress_status, Size_t> decompress(
+  [[nodiscard]] std::pair<Decompress_status, Size_t> decompress(
       Char_t *out, Size_t output_size);
 
   /// Return a `Grow_constraint` that may be used with the
@@ -168,7 +165,7 @@ class Decompressor {
   /// This differs from @c decompress in that it does not have to
   /// reset the frame when returning out_of_memory or corrupted; the
   /// caller does that.
-  [[NODISCARD]] virtual std::pair<Decompress_status, Size_t> do_decompress(
+  [[nodiscard]] virtual std::pair<Decompress_status, Size_t> do_decompress(
       Char_t *out, Size_t output_size) = 0;
 
   /// Implement @c get_grow_constraint_hint.

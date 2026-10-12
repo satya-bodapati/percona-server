@@ -1,15 +1,16 @@
-// Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+// Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License, version 2.0,
 // as published by the Free Software Foundation.
 //
-// This program is also distributed with certain software (including
+// This program is designed to work with certain software (including
 // but not limited to OpenSSL) that is licensed under separate terms,
 // as designated in a particular file or component or in included license
 // documentation.  The authors of MySQL hereby grant you an additional
 // permission to link the program and your derivative works with the
-// separately licensed software that they have included with MySQL.
+// separately licensed software that they have either included with
+// the program or referenced in the documentation.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -55,8 +56,8 @@ static auto remove_overlapping_mpt_mls(MPt const &mpt, MLs const &mls,
                                        Geometrycollection &result) {
   std::unique_ptr<MPt> difference = std::make_unique<MPt>();
   bg::difference(mpt, mls, *difference);
-  for (auto ls : mls) result.push_back(ls);
-  for (auto pt : *difference) result.push_back(pt);
+  for (const auto &ls : mls) result.push_back(ls);
+  for (const auto &pt : *difference) result.push_back(pt);
 }
 
 template <typename MPt, typename MLs, typename MPy>
@@ -188,8 +189,7 @@ static std::unique_ptr<Geometry> typed_geometry_collection_apply_intersection(
       return mpy_result;
     }
     if (is_collection(mpy_result.get())) {
-      Geometrycollection *gc_mpy_result =
-          down_cast<Geometrycollection *>(mpy_result.get());
+      auto *gc_mpy_result = down_cast<Geometrycollection *>(mpy_result.get());
       for (size_t i = 0; i < gc_mpy_result->size(); i++)
         result->push_back((*gc_mpy_result)[i]);
     } else
@@ -202,8 +202,7 @@ static std::unique_ptr<Geometry> typed_geometry_collection_apply_intersection(
       return mls_result;
     }
     if (is_collection(mls_result.get())) {
-      Geometrycollection *gc_mls_result =
-          down_cast<Geometrycollection *>(mls_result.get());
+      auto *gc_mls_result = down_cast<Geometrycollection *>(mls_result.get());
       for (size_t i = 0; i < gc_mls_result->size(); i++)
         result->push_back((*gc_mls_result)[i]);
     } else
@@ -216,8 +215,7 @@ static std::unique_ptr<Geometry> typed_geometry_collection_apply_intersection(
       return mpt_result;
     }
     if (is_collection(mpt_result.get())) {
-      Geometrycollection *gc_mpt_result =
-          down_cast<Geometrycollection *>(mpt_result.get());
+      auto *gc_mpt_result = down_cast<Geometrycollection *>(mpt_result.get());
       for (size_t i = 0; i < gc_mpt_result->size(); i++)
         result->push_back((*gc_mpt_result)[i]);
     } else

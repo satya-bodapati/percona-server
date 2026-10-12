@@ -3,6 +3,10 @@ var common_stmts = require("common_statements");
 var options = {
   cluster_type: "gr",
   gr_id: mysqld.global.gr_id,
+
+  innodb_cluster_name: "my-cluster",
+  innodb_cluster_instances:
+      [["localhost", 5500], ["localhost", 5510], ["localhost", 5520]],
 };
 
 var common_responses = common_stmts.prepare_statement_responses(
@@ -12,9 +16,8 @@ var common_responses = common_stmts.prepare_statement_responses(
       "router_select_schema_version",
       "router_select_cluster_type_v2",
       "router_select_current_instance_attributes",
-      "router_select_group_membership_with_primary_mode",
-      "router_select_group_replication_primary_member",
-      "router_select_metadata_v2",
+      "router_select_group_membership",
+      "router_select_metadata_v2_gr",
       "router_count_clusters_v2",
       "router_check_member_state",
       "router_select_members_count",
@@ -34,9 +37,11 @@ var common_responses_regex = common_stmts.prepare_statement_responses_regex(
       "router_create_user_if_not_exists",
       "router_delete_old_accounts",
       "router_create_user",
+      "router_check_auth_plugin",
       "router_grant_on_pfs_db",
       "router_grant_on_routers",
       "router_grant_on_v2_routers",
+      "router_grant_on_router_stats",
       "router_update_routers_in_metadata",
       "router_update_router_options_in_metadata",
     ],

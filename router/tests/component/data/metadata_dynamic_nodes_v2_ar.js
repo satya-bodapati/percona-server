@@ -9,6 +9,7 @@
  */
 
 var common_stmts = require("common_statements");
+var gr_memberships = require("gr_memberships");
 
 if (mysqld.global.gr_node_host === undefined) {
   mysqld.global.gr_node_host = "127.0.0.1";
@@ -30,8 +31,15 @@ if (mysqld.global.transaction_count === undefined) {
   mysqld.global.transaction_count = 0;
 }
 
-if (mysqld.global.primary_id === undefined) {
-  mysqld.global.primary_id = 0;
+// at start, .connects is undefined
+// at first connect, set it to 0
+// at each following connect, increment it.
+//
+// .globals is shared between mock-server threads
+if (mysqld.global.connects === undefined) {
+  mysqld.global.connects = 0;
+} else {
+  mysqld.global.connects = mysqld.global.connects + 1;
 }
 
 if (mysqld.global.view_id === undefined) {
@@ -75,16 +83,17 @@ var nodes = function(host, port_and_state) {
   });
 };
 
-var cluster_nodes_online =
-    nodes(mysqld.global.gr_node_host, mysqld.global.cluster_nodes);
+if (mysqld.global.server_version === undefined) {
+  mysqld.global.server_version = "8.3.0";
+}
+
+var cluster_nodes = gr_memberships.cluster_nodes(
+    mysqld.global.gr_node_host, mysqld.global.cluster_nodes)
 
 var options = {
-  innodb_cluster_instances: cluster_nodes_online,
+  innodb_cluster_instances: cluster_nodes,
   cluster_id: mysqld.global.gr_id,
   view_id: mysqld.global.view_id,
-  primary_port: (mysqld.global.primary_id >= 0) ?
-      cluster_nodes_online[mysqld.global.primary_id][2] :
-      mysqld.global.primary_id,
   cluster_type: mysqld.global.cluster_type,
   innodb_cluster_name: mysqld.global.cluster_name,
   router_options: mysqld.global.router_options,
@@ -102,8 +111,8 @@ var router_set_gr_consistency_level =
 var router_update_attributes =
     common_stmts.get("router_update_attributes_v2", options);
 
-var router_update_last_check_in_v2 =
-    common_stmts.get("router_update_last_check_in_v2", options);
+var router_update_last_check_in_v2_4 =
+    common_stmts.get("router_update_last_check_in_v2_4", options);
 
 // prepare the responses for common statements
 var common_responses = common_stmts.prepare_statement_responses(
@@ -114,6 +123,8 @@ var common_responses = common_stmts.prepare_statement_responses(
       "router_select_schema_version",
       "router_select_view_id_v2_ar",
       "router_select_router_options_view",
+      "get_guidelines_router_info",
+      "get_routing_guidelines",
     ],
     options);
 
@@ -131,7 +142,8 @@ var router_select_cluster_type =
     auth: {
       username: mysqld.global.user,
       password: mysqld.global.password,
-    }
+    },
+    greeting: {server_version: mysqld.global.server_version}
   },
   stmts: function(stmt) {
     if (stmt === select_port.stmt) {
@@ -154,10 +166,12 @@ var router_select_cluster_type =
           message: "Syntax Error at: " + stmt
         }
       }
-    } else if (stmt === router_update_last_check_in_v2.stmt) {
+    } else if (stmt === router_update_last_check_in_v2_4.stmt) {
       mysqld.global.update_last_check_in_count++;
-      return router_update_last_check_in_v2;
-    } else if (stmt.match(router_update_attributes.stmt_regex)) {
+      return router_update_last_check_in_v2_4;
+    } else if (res = stmt.match(router_update_attributes.stmt_regex)) {
+      mysqld.global.upd_attr_config_json = res[7];
+
       mysqld.global.update_attributes_count++;
       return router_update_attributes;
     } else if (common_responses.hasOwnProperty(stmt)) {

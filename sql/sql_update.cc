@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,6 +27,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -37,7 +39,6 @@
 #include "mem_root_deque.h"  // mem_root_deque
 #include "my_alloc.h"
 #include "my_base.h"
-#include "my_bit.h"  // my_count_bits
 #include "my_bitmap.h"
 #include "my_dbug.h"
 #include "my_inttypes.h"
@@ -69,6 +70,7 @@
 #include "sql/join_optimizer/access_path.h"
 #include "sql/join_optimizer/bit_utils.h"
 #include "sql/join_optimizer/walk_access_paths.h"
+#include "sql/json_duality_view/dml.h"
 #include "sql/key.h"  // is_key_used
 #include "sql/key_spec.h"
 #include "sql/locked_tables_list.h"
@@ -97,10 +99,11 @@
 #include "sql/sql_delete.h"
 #include "sql/sql_error.h"
 #include "sql/sql_executor.h"
+#include "sql/sql_foreign_key_constraint.h"
 #include "sql/sql_lex.h"
 #include "sql/sql_list.h"
 #include "sql/sql_opt_exec_shared.h"
-#include "sql/sql_optimizer.h"  // build_equal_items, substitute_gc
+#include "sql/sql_optimizer.h"  // substitute_gc
 #include "sql/sql_partition.h"  // partition_key_modified
 #include "sql/sql_resolver.h"   // setup_order
 #include "sql/sql_select.h"
@@ -118,7 +121,7 @@
 #include "template_utils.h"
 #include "thr_lock.h"
 
-class COND_EQUAL;
+struct COND_EQUAL;
 
 static bool prepare_partial_update(Opt_trace_context *trace,
                                    const mem_root_deque<Item *> &fields,
@@ -144,7 +147,7 @@ bool Sql_cmd_update::precheck(THD *thd) {
       if (tr->is_derived() || tr->uses_materialization())
         tr->grant.privilege = SELECT_ACL;
       else {
-        auto chk = [&](long want_access) {
+        auto chk = [&](Access_bitmask want_access) {
           const bool ignore_errors = (want_access == UPDATE_ACL);
           return check_access(thd, want_access, tr->db, &tr->grant.privilege,
                               &tr->grant.m_internal, false, ignore_errors) ||
@@ -378,10 +381,18 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
   Query_block *const query_block = lex->query_block;
   Query_expression *const unit = lex->unit;
   Table_ref *const table_list = query_block->get_table_list();
+
   Table_ref *const update_table_ref = table_list->updatable_base_table();
   TABLE *const table = update_table_ref->table;
 
-  assert(table->pos_in_table_list == update_table_ref);
+  // When an UPDATE operation on a JSON duality view is part of a Stored Program
+  // or a Prepared Statement, the view query is re-parsed during the execution
+  // of the SP or PS for syntax and semantics validation. The following
+  // condition for update_table_ref, which is obtained from the JSON duality
+  // view Content-tree, will no longer be valid. Hence, skipping assert()
+  // check for JSON duality view.
+  assert(table->pos_in_table_list == update_table_ref ||
+         table_list->is_json_duality_view());
 
   const bool transactional_table = table->file->has_transactions();
 
@@ -419,9 +430,11 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
 
   assert(!(table->all_partitions_pruned_away || m_empty_query));
 
-  Item *conds = nullptr;
+  Item **conds = thd->mem_root->ArrayAlloc<Item *>(1);
+  if (conds == nullptr) return true;
+  *conds = nullptr;
   ORDER *order = query_block->order_list.first;
-  if (!no_rows && query_block->get_optimizable_conditions(thd, &conds, nullptr))
+  if (!no_rows && query_block->get_optimizable_conditions(thd, conds, nullptr))
     return true; /* purecov: inspected */
 
   /*
@@ -432,10 +445,10 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
     it here for now, to keep it consistent with how multi-table
     updates are optimized in JOIN::optimize().
   */
-  if (conds || order)
-    static_cast<void>(substitute_gc(thd, query_block, conds, nullptr, order));
+  if (*conds != nullptr || order != nullptr)
+    static_cast<void>(substitute_gc(thd, query_block, *conds, nullptr, order));
 
-  if (conds != nullptr) {
+  if (*conds != nullptr) {
     if (table_list->check_option) {
       // See the explanation in multi-table UPDATE code path
       // (Query_result_update::prepare).
@@ -444,7 +457,7 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
     }
     COND_EQUAL *cond_equal = nullptr;
     Item::cond_result result;
-    if (optimize_cond(thd, &conds, &cond_equal,
+    if (optimize_cond(thd, conds, &cond_equal,
                       query_block->m_current_table_nest, &result))
       return true;
 
@@ -458,11 +471,12 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
         return err;
       }
     }
-    if (conds != nullptr) {
-      conds = substitute_for_best_equal_field(thd, conds, cond_equal, nullptr);
-      if (conds == nullptr) return true;
+    if (*conds != nullptr) {
+      *conds =
+          substitute_for_best_equal_field(thd, *conds, cond_equal, nullptr);
+      if (*conds == nullptr) return true;
 
-      conds->update_used_tables();
+      (*conds)->update_used_tables();
     }
   }
 
@@ -471,7 +485,7 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
     stored programs can be evaluated.
   */
   if (table->part_info && !no_rows) {
-    if (prune_partitions(thd, table, query_block, conds))
+    if (prune_partitions(thd, table, query_block, *conds))
       return true; /* purecov: inspected */
     if (table->all_partitions_pruned_away) {
       no_rows = true;
@@ -501,30 +515,30 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
   join_type type = JT_UNKNOWN;
 
   auto cleanup = create_scope_guard([&range_scan, table] {
-    destroy(range_scan);
+    if (range_scan != nullptr) ::destroy_at(range_scan);
     table->set_keyread(false);
     table->file->ha_index_or_rnd_end();
     free_io_cache(table);
     filesort_free_buffers(table, true);
   });
 
-  if (conds &&
+  if (*conds != nullptr &&
       thd->optimizer_switch_flag(OPTIMIZER_SWITCH_ENGINE_CONDITION_PUSHDOWN)) {
-    table->file->cond_push(conds);
+    table->file->cond_push(*conds);
   }
 
   {  // Enter scope for optimizer trace wrapper
     Opt_trace_object wrapper(&thd->opt_trace);
     wrapper.add_utf8_table(update_table_ref);
 
-    if (!no_rows && conds != nullptr) {
+    if (!no_rows && *conds != nullptr) {
       Key_map keys_to_use(Key_map::ALL_BITS), needed_reg_dummy;
       MEM_ROOT temp_mem_root(key_memory_test_quick_select_exec,
                              thd->variables.range_alloc_block_size);
       no_rows = test_quick_select(
                     thd, thd->mem_root, &temp_mem_root, keys_to_use, 0, 0,
                     limit, safe_update, ORDER_NOT_RELEVANT, table,
-                    /*skip_records_in_range=*/false, conds, &needed_reg_dummy,
+                    /*skip_records_in_range=*/false, *conds, &needed_reg_dummy,
                     table->force_index, query_block, &range_scan) < 0;
       if (thd->is_error()) return true;
     }
@@ -568,9 +582,9 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
   if (query_block->has_ft_funcs() && init_ftfuncs(thd, query_block))
     return true; /* purecov: inspected */
 
-  if (conds != nullptr) table->update_const_key_parts(conds);
+  if (*conds != nullptr) table->update_const_key_parts(*conds);
 
-  order = simple_remove_const(order, conds);
+  order = simple_remove_const(order, *conds);
   bool need_sort;
   bool reverse = false;
   bool used_key_is_modified = false;
@@ -608,13 +622,15 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
 
   table->mark_columns_per_binlog_row_image(thd);
 
-  if (prepare_partial_update(trace, query_block->fields, *update_value_list))
+  if (!table_list->is_json_duality_view() &&
+      prepare_partial_update(trace, query_block->fields, *update_value_list))
     return true; /* purecov: inspected */
 
   if (table->setup_partial_update()) return true; /* purecov: inspected */
 
   ha_rows updated_rows = 0;
   ha_rows found_rows = 0;
+  ulonglong jdv_affected_rows = 0;
 
   unique_ptr_destroy_only<Filesort> fsort;
   unique_ptr_destroy_only<RowIterator> iterator;
@@ -623,14 +639,14 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
     ha_rows rows;
     if (range_scan)
       rows = range_scan->num_output_rows();
-    else if (!conds && !need_sort && limit != HA_POS_ERROR)
+    else if (*conds == nullptr && !need_sort && limit != HA_POS_ERROR)
       rows = limit;
     else {
       update_table_ref->fetch_number_of_rows();
       rows = table->file->stats.records;
     }
     DEBUG_SYNC(thd, "before_single_update");
-    Modification_plan plan(thd, MT_UPDATE, table, type, range_scan, conds,
+    Modification_plan plan(thd, MT_UPDATE, table, type, range_scan, *conds,
                            used_index, limit,
                            (!using_filesort && (used_key_is_modified || order)),
                            using_filesort, used_key_is_modified, rows);
@@ -661,8 +677,8 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
             thd, table, range_scan, /*table_ref=*/nullptr,
             /*position=*/nullptr, /*count_examined_rows=*/true);
 
-        if (conds != nullptr) {
-          path = NewFilterAccessPath(thd, path, conds);
+        if (*conds != nullptr) {
+          path = NewFilterAccessPath(thd, path, *conds);
         }
 
         // Force filesort to sort by position.
@@ -685,9 +701,11 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
           Filesort has already found and selected the rows we want to update,
           so we don't need the where clause
         */
-        destroy(range_scan);
-        range_scan = nullptr;
-        conds = nullptr;
+        if (range_scan != nullptr) {
+          ::destroy_at(range_scan);
+          range_scan = nullptr;
+        }
+        *conds = nullptr;
       } else {
         /*
           We are doing a search on a key that is updated. In this case
@@ -760,8 +778,8 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
           assert(!thd->is_error());
           thd->inc_examined_row_count(1);
 
-          if (conds != nullptr) {
-            const bool skip_record = conds->val_int() == 0;
+          if (*conds != nullptr) {
+            const bool skip_record = (*conds)->val_int() == 0;
             if (thd->is_error()) {
               error = 1;
               /*
@@ -793,7 +811,7 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
         if (thd->killed && !error)  // Aborted
           error = 1;                /* purecov: inspected */
         limit = tmp_limit;
-        end_semi_consistent_read.rollback();
+        end_semi_consistent_read.reset();
         if (used_index < MAX_KEY && covering_keys_for_cond.is_set(used_index))
           table->set_keyread(false);
         table->file->ha_index_or_rnd_end();
@@ -815,9 +833,11 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
             /*examined_rows=*/nullptr);
         if (iterator->Init()) return true;
 
-        destroy(range_scan);
-        range_scan = nullptr;
-        conds = nullptr;
+        if (range_scan != nullptr) {
+          ::destroy_at(range_scan);
+          range_scan = nullptr;
+        }
+        *conds = nullptr;
       }
     } else {
       // No ORDER BY or updated key underway, so we can use a regular read.
@@ -869,7 +889,7 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
     uint dup_key_found;
 
     error = table->file->ha_fast_update(thd, query_block->fields,
-                                        *update_value_list, conds);
+                                        *update_value_list, *conds);
     if (error == 0)
       error = -1;  // error < 0 means really no error at all (see below)
     else if (error != ENOTSUP) {
@@ -880,8 +900,8 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
         error = iterator->Read();
         if (error || thd->killed) break;
         thd->inc_examined_row_count(1);
-        if (conds != nullptr) {
-          const bool skip_record = conds->val_int() == 0;
+        if (*conds != nullptr) {
+          const bool skip_record = (*conds)->val_int() == 0;
           if (thd->is_error()) {
             error = 1;
             break;
@@ -915,6 +935,26 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
         table->clear_partial_update_diffs();
 
         store_record(table, record[1]);
+
+        if (table_list->is_json_duality_view()) {
+          if (found_rows != 0) {
+            my_error(ER_JDV_OPERATION_NOT_SUPPORTED, MYF(0),
+                     "Multiple object update");
+            error = 1;
+            break;
+          }
+
+          found_rows++;
+
+          if (jdv::jdv_update(thd, table_list, &query_block->fields,
+                              update_value_list, &jdv_affected_rows)) {
+            assert(thd->is_error());
+            error = 1;
+            break;
+          }
+          continue;
+        }
+
         bool is_row_changed = false;
         if (fill_record_n_invoke_before_triggers(
                 thd, &update, query_block->fields, *update_value_list, table,
@@ -966,6 +1006,19 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
             continue;
           }
 
+          if (use_sql_fk_checks_for_table(thd, table)) {
+            if (check_all_child_fk_ref(thd, table,
+                                       enum_fk_dml_type::FK_UPDATE) ||
+                check_all_parent_fk_ref(thd, table,
+                                        enum_fk_dml_type::FK_UPDATE)) {
+              if (thd->is_error()) {
+                error = 1;
+                break;
+              }
+              // continue when IGNORE clause is used.
+              continue;
+            }
+          }
           if (will_batch) {
             /*
               Typically a batched handler can execute the batched jobs when:
@@ -1080,7 +1133,7 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
         }
       }
     }
-    end_semi_consistent_read.rollback();
+    end_semi_consistent_read.reset();
 
     dup_key_found = 0;
     /*
@@ -1133,6 +1186,19 @@ bool Sql_cmd_update::update_single_table(THD *thd) {
         Transaction_ctx::STMT);
 
   iterator.reset();
+
+  if (table_list->is_json_duality_view()) {
+    if (error < 0) {
+      char buff[MYSQL_ERRMSG_SIZE];
+      snprintf(buff, sizeof(buff), ER_THD(thd, ER_JDV_DML_INFO),
+               static_cast<long>(jdv_affected_rows),
+               (long)thd->get_stmt_da()->current_statement_cond_count());
+      my_ok(thd, jdv_affected_rows, 0, buff);
+      DBUG_PRINT("info", ("%ld records affected",
+                          static_cast<long>(jdv_affected_rows)));
+    }
+    return error >= 0 || thd->is_error();
+  }
 
   /*
     error < 0 means really no error at all: we processed all rows until the
@@ -1214,7 +1280,7 @@ static TABLE *GetOutermostTable(const JOIN *join) {
   // The old optimizer can usually find it in the access path too, except if the
   // outermost table is a const table, since const tables may not be visible in
   // the access path tree.
-  if (!join->thd->lex->using_hypergraph_optimizer) {
+  if (!join->thd->lex->using_hypergraph_optimizer()) {
     assert(join->qep_tab != nullptr);
     return join->qep_tab[0].table();
   }
@@ -1490,6 +1556,7 @@ bool Sql_cmd_update::prepare_inner(THD *thd) {
   const bool using_lock_tables = thd->locked_tables_mode != LTM_NONE;
   const bool is_single_table_syntax = !multitable;
 
+  bool is_jdv = table_list->is_json_duality_view();
   assert(select->fields.size() == select->num_visible_fields());
   assert(select->num_visible_fields() == update_value_list->size());
 
@@ -1544,31 +1611,40 @@ bool Sql_cmd_update::prepare_inner(THD *thd) {
     - Target table must not be same as one selected from
                                           (checked in unique_table)
   */
-
-  if (!multitable) {
-    // Single-table UPDATE, the table must be updatable:
-    if (!table_list->is_updatable()) {
-      my_error(ER_NON_UPDATABLE_TABLE, MYF(0), table_list->alias, "UPDATE");
+  if (is_jdv) {
+    if (jdv::jdv_prepare_update(thd, table_list, is_single_table_plan())) {
       return true;
     }
-    // Perform multi-table operation if table to be updated is multi-table view
-    if (table_list->is_multiple_tables()) multitable = true;
   }
 
-  // The hypergraph optimizer has a unified execution path for single-table and
-  // multi-table UPDATE, and does not need to distinguish between the two. This
-  // enables it to perform optimizations like sort avoidance and semi-join
-  // flattening even if features specific to single-table UPDATE (that is, ORDER
-  // BY and LIMIT) are used.
-  if (lex->using_hypergraph_optimizer) {
-    multitable = true;
-  }
+  // FIXME.dtjeldvo: This breaks with JDVs
+  if (!is_jdv) {
+    if (!multitable) {
+      // Single-table UPDATE, the table must be updatable:
+      if (!table_list->is_updatable()) {
+        my_error(ER_NON_UPDATABLE_TABLE, MYF(0), table_list->alias, "UPDATE");
+        return true;
+      }
+      // Perform multi-table operation if table to be updated is multi-table
+      // view
+      if (table_list->is_multiple_tables()) multitable = true;
+    }
 
-  if (!multitable && select->first_inner_query_expression() != nullptr &&
-      should_switch_to_multi_table_if_subqueries(thd, select, table_list))
-    multitable = true;
+    // The hypergraph optimizer has a unified execution path for single-table
+    // and multi-table UPDATE, and does not need to distinguish between the two.
+    // This enables it to perform optimizations like sort avoidance and
+    // semi-join flattening even if features specific to single-table UPDATE
+    // (that is, ORDER BY and LIMIT) are used.
+    if (lex->using_hypergraph_optimizer()) {
+      multitable = true;
+    }
 
-  if (multitable) select->set_sj_candidates(&sj_candidates_local);
+    if (!multitable && select->first_inner_query_expression() != nullptr &&
+        should_switch_to_multi_table_if_subqueries(thd, select, table_list))
+      multitable = true;
+
+    if (multitable) select->set_sj_candidates(&sj_candidates_local);
+  }  // if (!is_jdv)
 
   if (select->leaf_table_count >= 2 &&
       setup_natural_join_row_types(thd, select->m_current_table_nest,
@@ -1605,11 +1681,27 @@ bool Sql_cmd_update::prepare_inner(THD *thd) {
 
   if (select->setup_base_ref_items(thd)) return true; /* purecov: inspected */
 
+  // FIXME.dtjeldvo: Need this for the select of previous values for JDV to work
   if (setup_fields(thd, /*want_privilege=*/UPDATE_ACL,
                    /*allow_sum_func=*/false, /*split_sum_funcs=*/false,
-                   /*column_update=*/true, /*typed_items=*/nullptr,
+                   /*column_update=*/(!is_jdv), /*typed_items=*/nullptr,
                    &select->fields, Ref_item_array()))
     return true;
+
+  // FIXME.dtjeldvo: Bailing here since jdv.data is not updatable, but we need
+  // second call to setup_fields() to make things like JSON_REPLACE(data,...)
+  // as the new json value work.
+  if (is_jdv) {
+    bool ret_val =
+        setup_fields(thd, /*want_privilege=*/SELECT_ACL,
+                     /*allow_sum_func=*/false, /*split_sum_funcs=*/false,
+                     /*column_update=*/false, &select->fields,
+                     update_value_list, Ref_item_array());
+    if (!ret_val) {
+      select->master_query_expression()->set_prepared();
+    }
+    return ret_val;
+  }
 
   if (make_base_table_fields(thd, &select->fields))
     return true; /* purecov: inspected */
@@ -1620,7 +1712,7 @@ bool Sql_cmd_update::prepare_inner(THD *thd) {
   */
   thd->table_map_for_update = tables_for_update = get_table_map(select->fields);
 
-  uint update_table_count_local = my_count_bits(tables_for_update);
+  const int update_table_count_local = std::popcount(tables_for_update);
 
   assert(update_table_count_local > 0);
 
@@ -1632,7 +1724,7 @@ bool Sql_cmd_update::prepare_inner(THD *thd) {
     if (tr->map() & tables_for_update) tr->set_updated();
     tr->updating = tr->is_updated();
   }
-
+  // FIXME.dtjeldvo: Don't we need this also for JDVs?
   if (setup_fields(thd, /*want_privilege=*/SELECT_ACL,
                    /*allow_sum_func=*/false, /*split_sum_funcs=*/false,
                    /*column_update=*/false, &select->fields, update_value_list,
@@ -1796,6 +1888,7 @@ bool Sql_cmd_update::prepare_inner(THD *thd) {
   Opt_trace_array trace_steps(trace, "steps");
   opt_trace_print_expanded_query(thd, select, &trace_wrapper);
 
+  select->original_tables_map = select->all_tables_map();
   if (select->has_sj_candidates() && select->flatten_subqueries(thd))
     return true; /* purecov: inspected */
 
@@ -1928,7 +2021,7 @@ bool Query_result_update::prepare(THD *thd, const mem_root_deque<Item *> &,
     Item_field *const field = down_cast<Item_field *>(*field_it++);
     Item *const value = *value_it++;
     assert(!field->hidden && !value->hidden);
-    uint offset = field->table_ref->shared;
+    uint offset = field->m_table_ref->shared;
     fields_for_table[offset]->push_back(field);
     values_for_table[offset]->push_back(value);
   }
@@ -2005,9 +2098,9 @@ static void CollectColumnsReferencedInJoinConditions(
       read a row from main_table and:
       - init ref access (construct_lookup_ref() in RefIterator):
         copy referenced value from main_table into 2nd table's ref buffer
-      - look up a first row in 2nd table (RefIterator::Read())
+      - look up a first row in 2nd table (RefIterator::DoRead())
         - if it joins, update row of main_table on the fly
-      - look up a second row in 2nd table (again RefIterator::Read()).
+      - look up a second row in 2nd table (again RefIterator::DoRead()).
       Because construct_lookup_ref() is not called again, the
       before-update value of the row of main_table is still in the 2nd
       table's ref buffer. So the lookup is not influenced by the just-done
@@ -2264,7 +2357,7 @@ bool Query_result_update::optimize() {
    For a regular multi-update it refers to some updated table.
   */
   Table_ref *first_table_for_update =
-      down_cast<Item_field *>(*VisibleFields(*fields).begin())->table_ref;
+      down_cast<Item_field *>(*VisibleFields(*fields).begin())->m_table_ref;
 
   /* Create a temporary table for keys to all tables, except main table */
   for (Table_ref *table_ref = update_tables; table_ref != nullptr;
@@ -2497,6 +2590,19 @@ bool UpdateRowsIterator::DoImmediateUpdatesAndBufferRowIds(
           if (thd()->is_error()) return true;
           // continue when IGNORE clause is used.
           continue;
+        }
+
+        if (use_sql_fk_checks_for_table(thd(), table)) {
+          if (check_all_child_fk_ref(thd(), table,
+                                     enum_fk_dml_type::FK_UPDATE) ||
+              check_all_parent_fk_ref(thd(), table,
+                                      enum_fk_dml_type::FK_UPDATE)) {
+            if (thd()->is_error()) {
+              return true;
+            }
+            // continue when IGNORE clause is used.
+            continue;
+          }
         }
 
         if (m_updated_rows == 0) {
@@ -2796,6 +2902,17 @@ bool UpdateRowsIterator::DoDelayedUpdates(bool *trans_safe,
           continue;
         }
 
+        if (use_sql_fk_checks_for_table(thd(), table)) {
+          if (check_all_child_fk_ref(thd(), table,
+                                     enum_fk_dml_type::FK_UPDATE) ||
+              check_all_parent_fk_ref(thd(), table,
+                                      enum_fk_dml_type::FK_UPDATE)) {
+            if (thd()->is_error()) goto err;
+            // continue when IGNORE clause is used.
+            continue;
+          }
+        }
+
         local_error =
             table->file->ha_update_row(table->record[1], table->record[0]);
         if (!local_error)
@@ -2852,7 +2969,7 @@ err:
   return true;
 }
 
-bool UpdateRowsIterator::Init() {
+bool UpdateRowsIterator::DoInit() {
   if (m_source->Init()) return true;
 
   if (m_outermost_table != nullptr &&
@@ -2873,7 +2990,7 @@ UpdateRowsIterator::~UpdateRowsIterator() {
   }
 }
 
-int UpdateRowsIterator::Read() {
+int UpdateRowsIterator::DoRead() {
   bool local_error = false;
   bool trans_safe = true;
   bool transactional_tables = false;
@@ -3014,7 +3131,7 @@ table_map GetImmediateUpdateTable(const JOIN *join, bool single_target) {
 
   // The hypergraph optimizer determines the immediate update tables during
   // planning, not after planning.
-  assert(!join->thd->lex->using_hypergraph_optimizer);
+  assert(!join->thd->lex->using_hypergraph_optimizer());
 
   // In some cases, rows may be updated immediately as they are read from the
   // outermost table in the join.
@@ -3087,7 +3204,7 @@ unique_ptr_destroy_only<RowIterator> Query_result_update::create_iterator(
       update_tables, tmp_tables, copy_field, unupdated_check_opt_tables,
       update_operations, fields_for_table, values_for_table,
       // The old optimizer does not use hash join in UPDATE statements.
-      thd->lex->using_hypergraph_optimizer
+      thd->lex->using_hypergraph_optimizer()
           ? GetHashJoinTables(unit->root_access_path())
           : 0);
 }

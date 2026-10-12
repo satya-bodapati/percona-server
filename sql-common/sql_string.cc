@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,8 +24,8 @@
 #include "sql_string.h"
 #include "sql/sql_const.h"
 
-#include <assert.h>
 #include <algorithm>
+#include <cassert>
 #include <limits>
 
 #include "dig_vec.h"
@@ -448,7 +449,7 @@ bool String::append(const char *s, size_t arg_length) {
   }
 
   /*
-    For an ASCII compatinble string we can just append.
+    For an ASCII compatible string we can just append.
   */
   if (mem_realloc_exp(m_length + arg_length)) return true;
   memcpy(m_ptr + m_length, s, arg_length);
@@ -604,8 +605,8 @@ String String::substr(int offset, int count) const {
   }
   const size_t bytes_offset = this->charpos(offset);
 
-  return String(this->m_ptr + bytes_offset,
-                this->charpos(offset + count) - bytes_offset, this->m_charset);
+  return {this->m_ptr + bytes_offset,
+          this->charpos(offset + count) - bytes_offset, this->m_charset};
 }
 
 /*
@@ -1112,8 +1113,7 @@ size_t bin_to_hex_str(char *to, size_t to_len, const char *from,
                                 prefix for a character, i.e. the byte length
                                 of that invalid character is undefined.
 
-  @retval true if the whole input byte sequence is a valid character string.
-               The length_error output parameter is undefined.
+  @retval true if the input is invalid.
 
   @return
     if the whole input byte sequence is a valid character string
@@ -1145,13 +1145,14 @@ bool validate_string(const CHARSET_INFO *cs, const char *str, size_t length,
   */
   *length_error = false;
 
-  const uchar *from = reinterpret_cast<const uchar *>(str);
+  const auto *from = reinterpret_cast<const uchar *>(str);
   const uchar *from_end = from + length;
   my_charset_conv_mb_wc mb_wc = cs->cset->mb_wc;
 
   while (from < from_end) {
     my_wc_t wc;
-    int cnvres = (*mb_wc)(cs, &wc, pointer_cast<const uchar *>(from), from_end);
+    int const cnvres =
+        (*mb_wc)(cs, &wc, pointer_cast<const uchar *>(from), from_end);
     if (cnvres <= 0) {
       *valid_length = from - reinterpret_cast<const uchar *>(str);
       return true;

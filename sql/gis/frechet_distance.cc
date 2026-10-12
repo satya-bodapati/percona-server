@@ -1,15 +1,16 @@
-// Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+// Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License, version 2.0,
 // as published by the Free Software Foundation.
 //
-// This program is also distributed with certain software (including
+// This program is designed to work with certain software (including
 // but not limited to OpenSSL) that is licensed under separate terms,
 // as designated in a particular file or component or in included license
 // documentation.  The authors of MySQL hereby grant you an additional
 // permission to link the program and your derivative works with the
-// separately licensed software that they have included with MySQL.
+// separately licensed software that they have either included with
+// the program or referenced in the documentation.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -84,8 +85,8 @@ bool frechet_distance(const dd::Spatial_reference_system *srs,
 
     if ((*is_null = (g1->is_empty() || g2->is_empty()))) return false;
 
-    Frechet_distance fd(srs ? srs->semi_major_axis() : 0.0,
-                        srs ? srs->semi_minor_axis() : 0.0);
+    Frechet_distance const fd(srs ? srs->semi_major_axis() : 0.0,
+                              srs ? srs->semi_minor_axis() : 0.0);
     *frechet_distance = fd(g1, g2);
   } catch (...) {
     handle_gis_exception(func_name);

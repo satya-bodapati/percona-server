@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -48,14 +49,14 @@ struct THR_LOCK;
 struct st_row_applier_filters {
   /* The name of the channel */
   char channel_name[CHANNEL_NAME_LENGTH];
-  uint channel_name_length;
+  uint channel_name_length{0};
   /*
     REPLICATE_DO_DB, REPLICATE_IGNORE_DB, REPLICATE_DO_TABLE,
     REPLICATE_IGNORE_TABLE, REPLICATE_WILD_DO_TABLE,
     REPLICATE_WILD_IGNORE_TABLE, REPLICATE_REWRITE_DB.
   */
   char filter_name[NAME_LEN];
-  uint filter_name_length;
+  uint filter_name_length{0};
   /*
     The replication filter configured by startup options: --replicate-*,
     CHANGE REPLICATION FILTER, or DEFAULT_FILTER (every channel copyies
@@ -76,10 +77,10 @@ struct st_row_applier_filters {
   enum_configured_by configured_by;
 
   /* Timestamp of when the configuration took place */
-  ulonglong active_since;
+  ulonglong active_since{0};
 
   /* The hit counter of the filter since last configuration. */
-  ulonglong counter;
+  ulonglong counter{0};
 };
 
 /** Table PERFORMANCE_SCHEMA.replication_applier_filters */

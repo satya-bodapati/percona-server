@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1994, 2023, Oracle and/or its affiliates.
+Copyright (c) 1994, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -40,6 +41,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "fts0fts.h"
 #endif /* !UNIV_HOTBACKUP */
 #include "gis0geo.h"
+#include "lob0lob.h"
 #include "mach0data.h"
 #include "mtr0log.h"
 #include "mtr0mtr.h"
@@ -265,7 +267,7 @@ bool is_store_version(const dict_index_t *index, size_t n_tuple_fields) {
 @return number of nullable fileds in the physical record. */
 static size_t get_nullable_fields_for_rec(const dict_index_t *index,
                                           const size_t n_fields,
-                                          uint8_t &rec_version) {
+                                          row_version_t &rec_version) {
   const bool is_valid_version = is_valid_row_version(rec_version);
   size_t nullable_fields = 0;
 
@@ -308,7 +310,7 @@ static size_t get_nullable_fields_for_rec(const dict_index_t *index,
 [[nodiscard]] static inline ulint rec_get_converted_size_comp_prefix_low(
     const dict_index_t *index, const dfield_t *fields, ulint n_fields,
     const dtuple_t *v_entry, ulint *extra, ulint *status, bool temp,
-    uint8_t rec_version) {
+    row_version_t rec_version) {
   ut_ad(n_fields <= dict_index_get_n_fields(index));
   ut_ad(!temp || extra);
 
@@ -746,7 +748,7 @@ size_t get_extra_bytes_for_temp_redundant(const dict_index_t *index,
 static inline Rec_instant_state rec_convert_dtuple_to_rec_comp(
     rec_t *rec, const dict_index_t *index, const dfield_t *fields,
     ulint n_fields, const dtuple_t *v_entry, ulint status, bool temp,
-    uint8_t rec_version) {
+    row_version_t rec_version) {
   ut_ad(temp || dict_table_is_comp(index->table));
 
   ulint num_v = v_entry ? dtuple_get_n_v_fields(v_entry) : 0;
@@ -824,9 +826,7 @@ static inline Rec_instant_state rec_convert_dtuple_to_rec_comp(
         }
         break;
       case REC_STATUS_NODE_PTR:
-        ut_ad(n_fields ==
-              static_cast<ulint>(
-                  dict_index_get_n_unique_in_tree_nonleaf(index) + 1));
+        ut_ad(n_fields == dict_index_get_n_unique_in_tree_nonleaf(index) + 1U);
         n_node_ptr_field = n_fields - 1;
         n_null = index->get_nullable_before_instant_add_drop();
         break;
@@ -1165,7 +1165,7 @@ rec_t *rec_convert_dtuple_to_rec(
  @return total size */
 ulint rec_get_serialize_size(const dict_index_t *index, const dfield_t *fields,
                              ulint n_fields, const dtuple_t *v_entry,
-                             ulint *extra, uint8_t rec_version) {
+                             ulint *extra, row_version_t rec_version) {
   return rec_get_converted_size_comp_prefix_low(
       index, fields, n_fields, v_entry, extra, nullptr, true, rec_version);
 }
@@ -1191,7 +1191,7 @@ void rec_deserialize_init_offsets(
 @see rec_deserialize_init_offsets() */
 void rec_serialize_dtuple(rec_t *rec, const dict_index_t *index,
                           const dfield_t *fields, ulint n_fields,
-                          const dtuple_t *v_entry, uint8_t rec_version) {
+                          const dtuple_t *v_entry, row_version_t rec_version) {
   rec_convert_dtuple_to_rec_comp(rec, index, fields, n_fields, v_entry,
                                  REC_STATUS_ORDINARY, true, rec_version);
 }
@@ -1324,7 +1324,7 @@ rec_t *rec_copy_prefix_to_buf(const rec_t *rec, const dict_index_t *index,
 
   {
     uint16_t ndf = 0;
-    uint8_t row_version = UINT8_UNDEFINED;
+    row_version_t row_version = INVALID_ROW_VERSION;
     ut_d(enum REC_INSERT_STATE rec_ins_state =) rec_init_null_and_len_comp(
         rec, index, &nulls, &lens, &n_null, ndf, row_version);
     ut_ad(rec_ins_state != NONE);

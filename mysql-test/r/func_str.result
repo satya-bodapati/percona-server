@@ -267,18 +267,9 @@ NULL
 select null sounds like null;
 null sounds like null
 NULL
-select md5('hello');
-md5('hello')
-5d41402abc4b2a76b9719d911017c592
 select crc32("123");
 crc32("123")
 2286445522
-select sha('abc');
-sha('abc')
-a9993e364706816aba3e25717850c26c9cd0d89d
-select sha1('abc');
-sha1('abc')
-a9993e364706816aba3e25717850c26c9cd0d89d
 select aes_decrypt(aes_encrypt('abc','1'),'1');
 aes_decrypt(aes_encrypt('abc','1'),'1')
 abc
@@ -359,9 +350,6 @@ foobar	1234567890ABCDEF	4Vx	NULL
 select hex(unhex("1")), hex(unhex("12")), hex(unhex("123")), hex(unhex("1234")), hex(unhex("12345")), hex(unhex("123456"));
 hex(unhex("1"))	hex(unhex("12"))	hex(unhex("123"))	hex(unhex("1234"))	hex(unhex("12345"))	hex(unhex("123456"))
 01	12	0123	1234	012345	123456
-select length(unhex(md5("abrakadabra")));
-length(unhex(md5("abrakadabra")))
-16
 select concat('a', quote(NULL));
 concat('a', quote(NULL))
 aNULL
@@ -449,6 +437,107 @@ QUOTE('A')
 'A'
 'A'
 DROP TABLE t1;
+SELECT '1' COLLATE latin1_swedish_ci = '1' COLLATE latin1_swedish_ci;
+'1' COLLATE latin1_swedish_ci = '1' COLLATE latin1_swedish_ci
+1
+SELECT CONCAT('1' COLLATE latin1_swedish_ci, '2' COLLATE latin1_swedish_ci);
+CONCAT('1' COLLATE latin1_swedish_ci, '2' COLLATE latin1_swedish_ci)
+12
+SELECT '1' COLLATE latin1_swedish_ci = '1' COLLATE latin1_general_ci;
+ERROR HY000: Illegal mix of collations (latin1_swedish_ci,EXPLICIT) and (latin1_general_ci,EXPLICIT) for operation '='
+SELECT CONCAT('1' COLLATE latin1_swedish_ci, '2' COLLATE latin1_general_ci);
+ERROR HY000: Illegal mix of collations (latin1_swedish_ci,EXPLICIT) and (latin1_general_ci,EXPLICIT) for operation 'concat'
+SELECT '1' COLLATE latin1_swedish_ci = '1';
+'1' COLLATE latin1_swedish_ci = '1'
+1
+SELECT CONCAT('1' COLLATE latin1_swedish_ci, '2');
+CONCAT('1' COLLATE latin1_swedish_ci, '2')
+12
+CREATE TABLE t1(
+b0 VARBINARY(10),
+c0 VARCHAR(10) COLLATE utf8mb4_bin,
+c1 VARCHAR(10) COLLATE utf8mb4_0900_ai_ci,
+c2 VARCHAR(10) COLLATE utf8mb4_0900_as_cs,
+c3 VARCHAR(10) COLLATE utf8mb3_general_ci,
+c4 VARCHAR(10) COLLATE utf16_general_ci,
+c5 VARCHAR(10) COLLATE utf32_unicode_ci,
+c6 VARCHAR(10) COLLATE ascii_general_ci,
+c7 VARCHAR(10) COLLATE latin1_swedish_ci,
+c8 VARCHAR(10) COLLATE latin2_general_ci
+);
+Warnings:
+Warning	3778	'utf8mb3_general_ci' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
+INSERT INTO t1 VALUES
+(x'e6f8e5', 'abc', 'abc', 'ABC', 'æøå', 'abc', 'abc', 'abc', 'æøå', 'abc');
+SELECT c1 = b0 FROM t1;
+c1 = b0
+0
+SELECT CONCAT(c1, b0) FROM t1;
+CONCAT(c1, b0)
+abc���
+SELECT c1 = c0 FROM t1;
+c1 = c0
+1
+SELECT CONCAT(c1, c0) FROM t1;
+CONCAT(c1, c0)
+abcabc
+SELECT c1 = c2 FROM t1;
+ERROR HY000: Illegal mix of collations (utf8mb4_0900_ai_ci,IMPLICIT) and (utf8mb4_0900_as_cs,IMPLICIT) for operation '='
+SELECT CONCAT(c1, c2) FROM t1;
+CONCAT(c1, c2)
+abcABC
+SELECT c1 = c3 FROM t1;
+c1 = c3
+0
+SELECT CONCAT(c1, c3) FROM t1;
+CONCAT(c1, c3)
+abcæøå
+SELECT c1 = c4 FROM t1;
+c1 = c4
+1
+SELECT CONCAT(c1, c4) FROM t1;
+CONCAT(c1, c4)
+abcabc
+SELECT c1 = c5 FROM t1;
+c1 = c5
+1
+SELECT CONCAT(c1, c5) FROM t1;
+CONCAT(c1, c5)
+abcabc
+SELECT c1 = c6 FROM t1;
+c1 = c6
+1
+SELECT CONCAT(c1, c6) FROM t1;
+CONCAT(c1, c6)
+abcabc
+SELECT c1 = c7 FROM t1;
+c1 = c7
+0
+SELECT CONCAT(c1, c7) FROM t1;
+CONCAT(c1, c7)
+abcæøå
+SELECT c1 = c8 FROM t1;
+c1 = c8
+1
+SELECT CONCAT(c1, c8) FROM t1;
+CONCAT(c1, c8)
+abcabc
+SELECT c7 = c8 FROM t1;
+ERROR HY000: Illegal mix of collations (latin1_swedish_ci,IMPLICIT) and (latin2_general_ci,IMPLICIT) for operation '='
+SELECT CONCAT(c7, c8) FROM t1;
+ERROR HY000: Illegal mix of collations (latin1_swedish_ci,IMPLICIT) and (latin2_general_ci,IMPLICIT) for operation 'concat'
+SELECT DATABASE() = _utf8mb4'æøå';
+DATABASE() = _utf8mb4'æøå'
+0
+SELECT CONCAT(DATABASE(), _utf8mb4'æøå');
+CONCAT(DATABASE(), _utf8mb4'æøå')
+test���
+SELECT DATABASE() = _utf8mb4'āđē';
+DATABASE() = _utf8mb4'āđē'
+0
+SELECT CONCAT(DATABASE(), _utf8mb4'āđē');
+CONCAT(DATABASE(), _utf8mb4'āđē')
+test???
 select 1=_latin1'1';
 1=_latin1'1'
 1
@@ -485,6 +574,33 @@ select concat(_latin1'a',_latin2'a',_latin5'a',_latin7'a');
 ERROR HY000: Illegal mix of collations for operation 'concat'
 select concat_ws(_latin1'a',_latin2'a');
 ERROR HY000: Illegal mix of collations (latin1_swedish_ci,COERCIBLE) and (latin2_general_ci,COERCIBLE) for operation 'concat_ws'
+SELECT CONCAT(_utf8mb4'æøå', 1);
+CONCAT(_utf8mb4'æøå', 1)
+���1
+SELECT CONCAT(_utf8mb4'āđē', 1);
+CONCAT(_utf8mb4'āđē', 1)
+???1
+SELECT _utf8mb4'æøå' = NULL;
+_utf8mb4'æøå' = NULL
+NULL
+SELECT CONCAT(_utf8mb4'æøå', NULL);
+CONCAT(_utf8mb4'æøå', NULL)
+NULL
+SELECT c3 = CONCAT(c1, c2) FROM t1;
+c3 = CONCAT(c1, c2)
+0
+SELECT GREATEST(c3, CONCAT(c1, c2)) FROM t1;
+GREATEST(c3, CONCAT(c1, c2))
+æøå
+SELECT COERCIBILITY(CONCAT(c1, c2)) FROM t1;
+COERCIBILITY(CONCAT(c1, c2))
+7
+SELECT CONCAT(c1, c2) = CONCAT(c1, c2) FROM t1;
+ERROR HY000: Illegal mix of collations (utf8mb4_bin,NONE) and (utf8mb4_bin,NONE) for operation '='
+SELECT CONCAT(CONCAT(c1, c2), CONCAT(c1, c2)) FROM t1;
+CONCAT(CONCAT(c1, c2), CONCAT(c1, c2))
+abcABCabcABC
+DROP TABLE t1;
 select FIELD('b','A','B');
 FIELD('b','A','B')
 2
@@ -761,19 +877,19 @@ CREATE TABLE t2 (a int, b int);
 INSERT INTO t1 VALUES (1,1),(2,2);
 INSERT INTO t2 VALUES (2,2),(3,3);
 select t1.*,t2.* from t1 left join t2 on (t1.b=t2.b)
-where collation(t2.a) = _utf8'binary' order by t1.a,t2.a;
+where collation(t2.a) = _utf8mb3'binary' order by t1.a,t2.a;
 a	b	a	b
 1	1	NULL	NULL
 2	2	2	2
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 select t1.*,t2.* from t1 left join t2 on (t1.b=t2.b)
-where charset(t2.a) = _utf8'binary' order by t1.a,t2.a;
+where charset(t2.a) = _utf8mb3'binary' order by t1.a,t2.a;
 a	b	a	b
 1	1	NULL	NULL
 2	2	2	2
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 select t1.*,t2.* from t1 left join t2 on (t1.b=t2.b)
 where coercibility(t2.a) = 5 order by t1.a,t2.a;
 a	b	a	b
@@ -809,21 +925,6 @@ drop table t7;
 select substring_index("1abcd;2abcd;3abcd;4abcd", ';', 2),substring_index("1abcd;2abcd;3abcd;4abcd", ';', -2);
 substring_index("1abcd;2abcd;3abcd;4abcd", ';', 2)	substring_index("1abcd;2abcd;3abcd;4abcd", ';', -2)
 1abcd;2abcd	3abcd;4abcd
-explain select md5('hello');
-id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	No tables used
-Warnings:
-Note	1003	/* select#1 */ select md5('hello') AS `md5('hello')`
-explain select sha('abc');
-id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	No tables used
-Warnings:
-Note	1003	/* select#1 */ select sha('abc') AS `sha('abc')`
-explain select sha1('abc');
-id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	SIMPLE	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	No tables used
-Warnings:
-Note	1003	/* select#1 */ select sha('abc') AS `sha1('abc')`
 explain select soundex('');
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	No tables used
@@ -1039,15 +1140,15 @@ conv(71, 10, 36)	conv('1Z', 36, 10)
 SELECT conv(71, 10, 37), conv('1Z', 37, 10), conv(0,1,10),conv(0,0,10), conv(0,-1,10);
 conv(71, 10, 37)	conv('1Z', 37, 10)	conv(0,1,10)	conv(0,0,10)	conv(0,-1,10)
 NULL	NULL	NULL	NULL	NULL
-create table t1 (id int(1), str varchar(10)) DEFAULT CHARSET=utf8;
+create table t1 (id int(1), str varchar(10)) DEFAULT CHARSET=utf8mb3;
 Warnings:
 Warning	1681	Integer display width is deprecated and will be removed in a future release.
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 insert into t1 values (1,'aaaaaaaaaa'), (2,'bbbbbbbbbb');
-create table t2 (id int(1), str varchar(10)) DEFAULT CHARSET=utf8;
+create table t2 (id int(1), str varchar(10)) DEFAULT CHARSET=utf8mb3;
 Warnings:
 Warning	1681	Integer display width is deprecated and will be removed in a future release.
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 insert into t2 values (1,'cccccccccc'), (2,'dddddddddd');
 select substring(concat(t1.str, t2.str), 1, 15) "name" from t1, t2 
 where t2.id=t1.id order by name;
@@ -1260,21 +1361,6 @@ NULL
 select ifnull(load_file("lkjlkj"),"it is null");
 ifnull(load_file("lkjlkj"),"it is null")
 it is null
-create table t1 (f1 varchar(4), f2 varchar(64), unique key k1 (f1,f2));
-insert into t1 values ( 'test',md5('test')), ('test', sha('test'));
-select * from t1 where f1='test' and (f2= md5("test") or f2= md5("TEST"));
-f1	f2
-test	098f6bcd4621d373cade4e832627b4f6
-select * from t1 where f1='test' and (f2= md5("TEST") or f2= md5("test"));
-f1	f2
-test	098f6bcd4621d373cade4e832627b4f6
-select * from t1 where f1='test' and (f2= sha("test") or f2= sha("TEST"));
-f1	f2
-test	a94a8fe5ccb19ba61c4c0873d391e987982fbbd3
-select * from t1 where f1='test' and (f2= sha("TEST") or f2= sha("test"));
-f1	f2
-test	a94a8fe5ccb19ba61c4c0873d391e987982fbbd3
-drop table t1;
 CREATE TABLE t1 (a varchar(10));
 INSERT INTO t1 VALUES ('abc'), ('xyz');
 SELECT a, CONCAT(a,' ',a) AS c FROM t1
@@ -2189,17 +2275,17 @@ Warning	1292	Truncated incorrect DECIMAL value: '18446744073709551617'
 Warning	1301	Result of lpad() was larger than max_allowed_packet (67108864) - truncated
 SET @orig_sql_mode = @@SQL_MODE;
 SET SQL_MODE=traditional;
-SELECT CHAR(0xff,0x8f USING utf8);
-CHAR(0xff,0x8f USING utf8)
+SELECT CHAR(0xff,0x8f USING utf8mb3);
+CHAR(0xff,0x8f USING utf8mb3)
 NULL
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 Warning	1300	Invalid utf8mb3 character string: 'FF8F'
-SELECT CHAR(0xff,0x8f USING utf8) IS NULL;
-CHAR(0xff,0x8f USING utf8) IS NULL
+SELECT CHAR(0xff,0x8f USING utf8mb3) IS NULL;
+CHAR(0xff,0x8f USING utf8mb3) IS NULL
 1
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 Warning	1300	Invalid utf8mb3 character string: 'FF8F'
 SET SQL_MODE=@orig_sql_mode;
 select substring('abc', cast(2 as unsigned int));
@@ -2813,7 +2899,7 @@ ST_linefromwkb('2147483648',
 bit_count('')
 ) ),
 ( lpad( ( elt('01','}:K5')),
-sha1('P'),
+sha2('P',256),
 ( ( select '-9223372036854775808.1' > all (select '')))
 )
 )
@@ -4163,7 +4249,7 @@ CREATE TABLE t1 charset utf8mb4 AS SELECT TO_BASE64(REPEAT('a',0)) AS to_base64;
 SHOW CREATE TABLE t1;
 Table	Create Table
 t1	CREATE TABLE `t1` (
-  `to_base64` char(0) CHARACTER SET latin1 DEFAULT NULL
+  `to_base64` varchar(0) CHARACTER SET latin1 DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 SELECT to_base64, LENGTH(to_base64) FROM t1;
 to_base64	LENGTH(to_base64)
@@ -4172,7 +4258,7 @@ CREATE TABLE t2 charset utf8mb4 AS SELECT from_base64(to_base64) AS from_base64 
 SHOW CREATE TABLE t2;
 Table	Create Table
 t2	CREATE TABLE `t2` (
-  `from_base64` binary(0) DEFAULT NULL
+  `from_base64` varbinary(0) DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 SELECT from_base64, LENGTH(from_base64) FROM t2;
 from_base64	LENGTH(from_base64)
@@ -4415,12 +4501,10 @@ DROP TABLE t;
 #
 # Bug#13812875 ILLEGAL MIX OF COLLATIONS WITH FUNCTIONS THAT USED TO WORK
 #
-SET NAMES utf8;
+SET NAMES utf8mb3;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 CREATE TABLE t1 (a varchar(1));
-SELECT * FROM t1 WHERE a=md5('a');
-a
 SELECT * FROM t1 WHERE a=hex('a');
 a
 SELECT * FROM t1 WHERE a=to_base64('a');
@@ -4527,36 +4611,36 @@ Warning	1287	'ucs2' is deprecated and will be removed in a future release. Pleas
 Warning	1292	Incorrect time value: 'a' for column 'a' at row 1
 DROP TABLE t1;
 #
-# Bug#21317406 TRUNCATED DATA WITH SUBQUERY & UTF8
+# Bug#21317406 TRUNCATED DATA WITH SUBQUERY & utf8mb3
 #
-SELECT length(rpad(_utf8 0xD0B1, 65536, _utf8 0xD0B2)) AS data;
+SELECT length(rpad(_utf8mb3 0xD0B1, 65536, _utf8mb3 0xD0B2)) AS data;
 data
 131072
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 SELECT length(data) AS len FROM (
-SELECT rpad(_utf8 0xD0B1, 65536, _utf8 0xD0B2) AS data
+SELECT rpad(_utf8mb3 0xD0B1, 65536, _utf8mb3 0xD0B2) AS data
 ) AS sub;
 len
 131072
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
-SELECT length(rpad(_utf8 0xD0B1, 65535, _utf8 0xD0B2)) AS data;
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+SELECT length(rpad(_utf8mb3 0xD0B1, 65535, _utf8mb3 0xD0B2)) AS data;
 data
 131070
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 SELECT length(data) AS len FROM (
-SELECT rpad(_utf8 0xD0B1, 65535, _utf8 0xD0B2) AS data
+SELECT rpad(_utf8mb3 0xD0B1, 65535, _utf8mb3 0xD0B2) AS data
 ) AS sub;
 len
 131070
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 SELECT length(repeat(_utf8mb4 0xE29883, 21844)) AS data;
 data
 65532
@@ -4574,9 +4658,9 @@ len
 #
 # Bug #22884187 RTRIM GETS EXPONENTIALLY SLOWER ON LARGE STRINGS
 #
-set names utf8;
+set names utf8mb3;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 SELECT TRIM(BOTH 'å' FROM 'aæaå');
 TRIM(BOTH 'å' FROM 'aæaå')
 aæa
@@ -4743,9 +4827,9 @@ xyz
 SELECT SUBSTRING_INDEX( 'xyz', 'abc', 18446744073709551615 );
 SUBSTRING_INDEX( 'xyz', 'abc', 18446744073709551615 )
 xyz
-set names utf8;
+set names utf8mb3;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 SELECT SUBSTRING_INDEX( 'xyz', 'abc', 9223372036854775807 );
 SUBSTRING_INDEX( 'xyz', 'abc', 9223372036854775807 )
 xyz
@@ -4824,9 +4908,9 @@ Warnings:
 Warning	1292	Truncated incorrect BINARY value: 'x'5d44f4d736397d92c8267c12''
 Warning	3237	AES key size should be 16 bytes length or secure KDF methods hkdf or pbkdf2_hmac should be used, please provide exact AES key size or use KDF methods for better security.
 do from_base64(cast(right(11,1)as binary(24)));
-do convert(inet_aton(cast(left(-1,1)as binary(30))) using utf8);
+do convert(inet_aton(cast(left(-1,1)as binary(30))) using utf8mb3);
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 Warning	1411	Incorrect string value: 'cast(left(-(1),1) as char(30) charset binary)' for function inet_aton
 do from_base64(cast((left(collation(4097),((repeat('1',32))or((-18772)))))
 as binary(40)));
@@ -4839,11 +4923,11 @@ Warnings:
 Warning	1411	Incorrect string value: 'aes_encrypt(left((@`e`),1),5)' for function inet_aton
 #
 # Bug#23194118 WEIGHT_STRING: ASSERTION FAILED:
-#              SRC, FILE .\STRINGS\CTYPE-UTF8.CC, LINE 8686
+#              SRC, FILE .\STRINGS\CTYPE-utf8mb3.CC, LINE 8686
 #
-SET NAMES utf8;
+SET NAMES utf8mb3;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 CREATE TABLE t(a INT) engine=innodb;
 INSERT INTO t VALUES(1);
 SELECT 1 FROM t WHERE WEIGHT_STRING(CONCAT_WS('1',''));
@@ -4855,31 +4939,31 @@ DROP TABLE t;
 #
 # Bug#24376444 USING COLLATE IN WHERE CLAUSE PREVENTS OPTIMIZER FROM
 #              CONSIDERING INDEXES
-CREATE TABLE dd_table (name VARCHAR(64) COLLATE utf8_tolower_ci, UNIQUE KEY(name));
+CREATE TABLE dd_table (name VARCHAR(64) COLLATE utf8mb3_tolower_ci, UNIQUE KEY(name));
 Warnings:
 Warning	3778	'utf8mb3_tolower_ci' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
 INSERT INTO dd_table VALUES('t1'), ('t2');
 CREATE VIEW view1 AS SELECT name AS table_name FROM dd_table;
-CREATE VIEW view2 AS SELECT name COLLATE utf8_tolower_ci AS table_name FROM dd_table;
-CREATE PROCEDURE sub1(id CHAR(10) CHARACTER SET utf8)
+CREATE VIEW view2 AS SELECT name COLLATE utf8mb3_tolower_ci AS table_name FROM dd_table;
+CREATE PROCEDURE sub1(id CHAR(10) CHARACTER SET utf8mb3)
 BEGIN
-SELECT * FROM view1 WHERE table_name=id COLLATE utf8_tolower_ci;
-EXPLAIN SELECT * FROM view1 WHERE table_name=id COLLATE utf8_tolower_ci;
+SELECT * FROM view1 WHERE table_name=id COLLATE utf8mb3_tolower_ci;
+EXPLAIN SELECT * FROM view1 WHERE table_name=id COLLATE utf8mb3_tolower_ci;
 SELECT * FROM view2 WHERE table_name=id;
 EXPLAIN SELECT * FROM view2 WHERE table_name=id;
-SELECT * FROM dd_table WHERE name COLLATE utf8_tolower_ci = id;
-EXPLAIN SELECT * FROM dd_table WHERE name COLLATE utf8_tolower_ci = id;
-SELECT * FROM view1 WHERE id COLLATE utf8_tolower_ci=table_name;
-EXPLAIN SELECT * FROM view1 WHERE id COLLATE utf8_tolower_ci=table_name;
+SELECT * FROM dd_table WHERE name COLLATE utf8mb3_tolower_ci = id;
+EXPLAIN SELECT * FROM dd_table WHERE name COLLATE utf8mb3_tolower_ci = id;
+SELECT * FROM view1 WHERE id COLLATE utf8mb3_tolower_ci=table_name;
+EXPLAIN SELECT * FROM view1 WHERE id COLLATE utf8mb3_tolower_ci=table_name;
 SELECT * FROM view2 WHERE id=table_name;
 EXPLAIN SELECT * FROM view2 WHERE id=table_name;
-SELECT * FROM dd_table WHERE id = name COLLATE utf8_tolower_ci;
-EXPLAIN SELECT * FROM dd_table WHERE id = name COLLATE utf8_tolower_ci;
-SELECT * FROM view1 WHERE table_name COLLATE utf8_tolower_ci = id;
-EXPLAIN SELECT * FROM view1 WHERE table_name COLLATE utf8_tolower_ci = id;
+SELECT * FROM dd_table WHERE id = name COLLATE utf8mb3_tolower_ci;
+EXPLAIN SELECT * FROM dd_table WHERE id = name COLLATE utf8mb3_tolower_ci;
+SELECT * FROM view1 WHERE table_name COLLATE utf8mb3_tolower_ci = id;
+EXPLAIN SELECT * FROM view1 WHERE table_name COLLATE utf8mb3_tolower_ci = id;
 END |
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 CALL sub1('t1');
 table_name
 t1
@@ -4910,7 +4994,7 @@ t1
 id	select_type	table	partitions	type	possible_keys	key	key_len	ref	rows	filtered	Extra
 1	SIMPLE	dd_table	NULL	index	NULL	name	195	NULL	2	100.00	Using where; Using index
 Warnings:
-Note	1003	/* select#1 */ select `test`.`dd_table`.`name` AS `table_name` from `test`.`dd_table` where ((`test`.`dd_table`.`name` collate utf8_tolower_ci) = <cache>(id@0))
+Note	1003	/* select#1 */ select `test`.`dd_table`.`name` AS `table_name` from `test`.`dd_table` where ((`test`.`dd_table`.`name` collate utf8mb3_tolower_ci) = <cache>(id@0))
 DROP PROCEDURE sub1;
 DROP VIEW view1;
 DROP VIEW view2;
@@ -5012,9 +5096,9 @@ Table	Create Table
 t1	CREATE TABLE `t1` (
   `quote('a')` varchar(4) CHARACTER SET latin1 DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
-SET NAMES utf8;
+SET NAMES utf8mb3;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 CREATE TABLE t2 AS SELECT quote('a');
 SHOW CREATE TABLE t2;
 Table	Create Table
@@ -5039,14 +5123,14 @@ BEGIN
 DECLARE i INT DEFAULT ofs;
 WHILE i < count DO
 SELECT i AS i;
-IF LOWER(CHAR(i USING utf8)) <> LOWER(CHAR(i USING utf8mb4)) THEN
+IF LOWER(CHAR(i USING utf8mb3)) <> LOWER(CHAR(i USING utf8mb4)) THEN
 SELECT i AS 'found funny character';
 END IF;
 SET i = i + 1;
 END WHILE;
 END|
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 CALL proc(51390, 51394);
 i
 51390
@@ -5181,9 +5265,9 @@ SELECT HEX(LPAD('', 42, SUBSTRING_INDEX(COMPRESS(42),c1,1))) FROM t1;
 ERROR HY000: Cannot convert string '\x02\x00\x00\x00x\x9C...' from binary to utf8mb4
 SELECT LPAD('', 42, REPLACE(AES_ENCRYPT(c1, 'key'),c1,'')) FROM t1;
 ERROR HY000: Cannot convert string 'F[\xC6F>B...' from binary to utf8mb4
-SELECT LPAD('', 42, REPLACE(MD5(c1),c1,'')) FROM t1;
-LPAD('', 42, REPLACE(MD5(c1),c1,''))
-e15997c74a71c5d9263df6f7a21bc191e15997c74a
+SELECT LPAD('', 42, REPLACE(SHA2(c1, 0),c1,'')) FROM t1;
+LPAD('', 42, REPLACE(SHA2(c1, 0),c1,''))
+c17ac113230f5f31c4a53f58d0f24e8199dce328ae
 SELECT HEX(LPAD('', 42, TRIM(BOTH c1 FROM x'ff'))) FROM t1;
 ERROR HY000: Cannot convert string '\xFF' from binary to utf8mb4
 SELECT HEX(LPAD('', 42, REPLACE(x'ffff',c1,''))) FROM t1;
@@ -5299,6 +5383,11 @@ is null
 DROP PROCEDURE p1;
 DROP TABLE t1;
 #
+# PS-9314: Signal 11 when using JSON_TABLE
+# (https://perconadev.atlassian.net/browse/PS-9314)
+SELECT ele AS domain FROM JSON_TABLE('["TEST' + (SELECT LOAD_FILE('test')) + '"]', "$[*]" COLUMNS (ele VARCHAR(70) PATH "$" )) AS json_elements;
+ERROR HY000: Incorrect arguments to JSON_TABLE
+#
 # Bug #32163391 ASSERTION `CRC32_Z(CRC, POS, LENGTH)
 #               < STD::NUMERIC_LIMITS<HA_CHECKSUM>::MAX()' FAILED.
 do crc32(char(1.134475e+308));
@@ -5312,7 +5401,7 @@ Catalog	Database	Table	Table_alias	Column	Column_alias	Type	Length	Max length	Is
 def					UNHEX(x)	251	2147483648	0	Y	128	31	63
 UNHEX(x)
 DROP TABLE t;
-Bug#32501472: Concatenation may create invalid UTF8 strings
+Bug#32501472: Concatenation may create invalid utf8mb3 strings
 CREATE TABLE t1(a CHAR(1) CHARACTER SET utf8mb4);
 INSERT INTO t1 VALUES('a');
 SELECT CONCAT(a, x'ff') FROM t1;
@@ -5384,8 +5473,8 @@ Warning	1301	Result of repeat() was larger than max_allowed_packet (67108864) - 
 DO REPEAT(LAST_INSERT_ID(''), 0x96e4ed7e70a7fec7f11572c8980a);
 Warnings:
 Warning	1292	Truncated incorrect BINARY value: 'x'96e4ed7e70a7fec7f11572c8980a''
-Warning	1292	Truncated incorrect BINARY value: 'x'96e4ed7e70a7fec7f11572c8980a''
 Warning	1292	Truncated incorrect INTEGER value: ''
+Warning	1292	Truncated incorrect BINARY value: 'x'96e4ed7e70a7fec7f11572c8980a''
 # Bug#33142010: Failure on complex const argument to string functions
 CREATE VIEW v AS SELECT LPAD('x', 1 NOT IN (0), 1) AS c;
 SHOW CREATE TABLE v;
@@ -5704,7 +5793,7 @@ Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Pl
 #              Item_str_func::push_packet_overflow_warning:
 #              Assertion `is_nullable()' failed.
 SET @@sql_mode='';
-DO SPACE(SHA(UUID_SHORT()));
+DO SPACE(SHA2(UUID_SHORT(),256));
 SET @@sql_mode = default;
 #
 # Bug#34961236 [rl]pad() + row_count():
@@ -5850,3 +5939,167 @@ SELECT QUOTE(x'80');
 ERROR HY000: Cannot convert string '\x80' from binary to utf8mb4
 SELECT QUOTE(_utf8mb4 x'80');
 ERROR HY000: Invalid utf8mb4 character string: '80'
+#
+# Bug#36812010 crash in Item_func_soundex::val_str
+#
+DO '' SOUNDS LIKE LEAD(DATABASE(), 1, x'cafe') OVER();
+ERROR HY000: Cannot convert string '\xCA\xFE' from binary to utf8mb3
+#
+# Bug#37086818 mysqld assertion failure `(slen % 4) == 0'
+#              in my_strnncollsp_utf32 at ../strings/ctype-ucs2.cc
+#
+CREATE TABLE t1 (f1 VARCHAR(10) COLLATE UTF32_GENERAL_CI);
+SELECT * FROM t1 WHERE LOCATE('Q',f1,1) BETWEEN 'a' AND 'b';
+f1
+DROP TABLE t1;
+#
+# Bug#37554688 Collation name aliases should not be case significant
+#
+SET NAMES UTF8;
+Warnings:
+Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+SELECT "hello" COLLATE UTF8_bin;
+"hello" COLLATE UTF8_bin
+hello
+SET NAMES default;
+#
+# Bug#37601389 Assertion `!thd->is_error()' failed|sql_resolver.cc
+#
+CREATE TABLE customer_demographics (
+cd_demo_sk int NOT NULL,
+cd_purchase_estimate int DEFAULT NULL,
+PRIMARY KEY (cd_demo_sk)
+);
+INSERT INTO customer_demographics VALUES (1,500) ;
+SELECT * FROM  customer_demographics
+WHERE CEILING( customer_demographics.cd_purchase_estimate )
+BETWEEN '2037' AND ( -71 * ( -1552207807 * 440370369 ) )
+COLLATE utf8mb4_et_0900_as_cs;
+ERROR 22003: BIGINT value is out of range in '(-(71) * (-(1552207807) * 440370369))'
+DROP TABLE customer_demographics;
+#
+# Bug#37285902: Illegal mix of collations NONE vs. COERCIBLE
+#
+CREATE TABLE t1(
+id DECIMAL(38,0)
+);
+CREATE TABLE t2(
+name VARCHAR(150) COLLATE utf8mb4_0900_as_cs
+);
+WITH cte0 AS
+(SELECT CAST(t1.id AS CHAR(38)) AS c2
+FROM t1
+),
+cte1 AS
+(SELECT t2.name AS c1
+FROM t2
+),
+cte2 AS
+(SELECT d3.c1 AS c1, d1.c2 AS c2
+FROM cte0 AS d1 LEFT JOIN cte1 AS d3 ON TRUE
+WHERE IFNULL(d3.c1, d1.c2) LIKE 'Vision Operations'
+ )
+SELECT * FROM cte2;
+c1	c2
+SELECT IFNULL(name, CAST(t1.id AS CHAR(38))) LIKE 'Vision Operations'
+FROM t1 LEFT JOIN t2 ON TRUE;
+IFNULL(name, CAST(t1.id AS CHAR(38))) LIKE 'Vision Operations'
+DROP TABLE t1, t2;
+#
+# Bug37815490 - vector_to_string returns data in non-standard collation
+#
+select CHARSET(vector_to_string(string_to_vector('[1,2]')));
+CHARSET(vector_to_string(string_to_vector('[1,2]')))
+utf8mb4
+select COLLATION(vector_to_string(string_to_vector('[1,2]')));
+COLLATION(vector_to_string(string_to_vector('[1,2]')))
+utf8mb4_0900_ai_ci
+select JSON_OBJECT('a', vector_to_string(string_to_vector('[1,2]')));
+JSON_OBJECT('a', vector_to_string(string_to_vector('[1,2]')))
+{"a": "[1.00000e+00,2.00000e+00]"}
+#
+# Bug#39053808: failing in Item_func_conv::val_str
+#
+SELECT SUBSTRING(BIN(EXP(UUID_SHORT())), 13, 3);
+ERROR 22003: DOUBLE value is out of range in 'exp(uuid_short())'
+SELECT UNCOMPRESS(BIN(POW(-9223372036854775807, 0xa5)));
+ERROR 22003: DOUBLE value is out of range in 'pow(-(9223372036854775807),0xa5)'
+SELECT JSON_TYPE(BIN(EXP(0x5f022b6c81)));
+ERROR 22003: DOUBLE value is out of range in 'exp(0x5f022b6c81)'
+SELECT BIN(EXP(55415508248253877499791772201022128128.000000));
+ERROR 22003: DOUBLE value is out of range in 'exp(55415508248253877499791772201022128128.000000)'
+#
+# Bug#39053812: failing in Item_func_soundex::val_str
+#
+SELECT ST_X(35) SOUNDS LIKE 0x35;
+ERROR 22023: Invalid GIS data provided to function st_x.
+#
+# Bug#39083924: failure in function left()
+#
+SELECT LEFT((9223372036854775807 * 10129) - SYSDATE(1), 97);
+ERROR 22003: BIGINT value is out of range in '(9223372036854775807 * 10129)'
+SELECT RIGHT((9223372036854775807 * 10129) - SYSDATE(1), 97);
+ERROR 22003: BIGINT value is out of range in '(9223372036854775807 * 10129)'
+SELECT REPEAT((9223372036854775807 * 10129) - SYSDATE(1), 10);
+ERROR 22003: BIGINT value is out of range in '(9223372036854775807 * 10129)'
+#
+# Bug#39083976: failing in remove_leading_zeroes
+#
+SELECT ST_INTERSECTION(MBRDISJOINT(1, POINT(8156,-19591)),
+(SELECT INTERVAL((-28347), (SELECT 1)))
+);
+ERROR 22023: Invalid GIS data provided to function mbrdisjoint.
+SELECT INTERVAL(BIT_XOR(ST_NUMPOINTS(ST_GEOMCOLLFROMWKB(ST_ASWKB(POINT(186,57)),
+0))) OVER(), NOW(2), DENSE_RANK() OVER());
+ERROR 22S01: WKB value is a geometry of unexpected type POINT in st_geomcollfromwkb.
+#
+# Bug#39083984: soundex fails in Item_func_soundex::val_str
+#
+SELECT SOUNDEX(ABS(COALESCE(ST_DIMENSION(1), NULL, 18446744073709551616)));
+ERROR 22023: Invalid GIS data provided to function st_dimension.
+#
+# Bug#39084121: failing in Item_func_conv::val_str
+#
+SELECT BIN(IFNULL(JSON_LENGTH('ba' ,'{"aabbc":"abbab","bbccb":"a","cbacb":2}'),
+BIT_OR(ANY_VALUE(MINUTE('2537-01-12 00:52:47') AND TRUE))
+)
+);
+ERROR 22032: Invalid JSON text in argument 1 to function json_extract: "Invalid value." at position 0.
+SELECT BIN(IFNULL(JSON_LENGTH(5), RELEASE_ALL_LOCKS()));
+ERROR 22032: Invalid data type for JSON data in argument 1 to function json_length; a JSON string or JSON type is required.
+SELECT OCT(IFNULL(uuid_to_bin(sin(0x69)), (-23447) DIV 14115145681444956431));
+ERROR HY000: Incorrect string value: '-0.9705352835374847' for function uuid_to_bin
+#
+# Bug#39084126: failure in String::set_charset with substring_index()
+#
+SELECT SUBSTRING_INDEX(IFNULL(SIGN(0xab) AND
+JSON_QUOTE(ABS(9223372036854775806)), UUID_SHORT()),
+4595, 45);
+ERROR HY000: Incorrect type for argument 1 in function json_quote.
+#
+# Bug#39084205: failure in Item_func_str_to_temporal::resolve_type
+#
+SELECT CONVERT(STR_TO_DATE(CURRENT_TIMESTAMP,
+COALESCE(INET_ATON(32767), LOCATE(0xc4, 20, 27),
+JSON_STORAGE_SIZE('a'))) USING EUCKR);
+ERROR HY000: Cannot convert string '\xC4' from binary to utf8mb4
+#
+# Bug#39085310: failing in Item_func_aswkb::val_str
+#
+SELECT ST_POINTATDISTANCE(ST_GEOMCOLLFROMWKB(ST_ASWKB(POINT(4389, -24885)), 0,
+'axis-order=srid-defined'
+                                            ),
+ST_ASBINARY(- ROW_COUNT(), 'axis-order=srid-defined')
+);
+ERROR 22S01: WKB value is a geometry of unexpected type POINT in st_geomcollfromwkb.
+#
+# Bug39056621: Function find_in_set returns wrong result
+#
+SET collation_connection = 'utf8mb4_0900_ai_ci';
+SELECT FIND_IN_SET('ắ', 'a');
+FIND_IN_SET('ắ', 'a')
+1
+SELECT FIND_IN_SET('ắ', 'a,b,c');
+FIND_IN_SET('ắ', 'a,b,c')
+1
+SET collation_connection = default;

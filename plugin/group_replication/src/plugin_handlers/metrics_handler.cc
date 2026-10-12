@@ -1,15 +1,16 @@
-/* Copyright (c) 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,6 +30,7 @@
 #include "plugin/group_replication/include/plugin_messages/group_service_message.h"
 #include "plugin/group_replication/include/plugin_messages/group_validation_message.h"
 #include "plugin/group_replication/include/plugin_messages/recovery_message.h"
+#include "plugin/group_replication/include/plugin_messages/recovery_metadata_message.h"
 #include "plugin/group_replication/include/plugin_messages/single_primary_message.h"
 #include "plugin/group_replication/include/plugin_messages/sync_before_execution_message.h"
 #include "plugin/group_replication/include/plugin_messages/transaction_message.h"
@@ -51,6 +53,10 @@ void Metrics_handler::reset() {
   m_transactions_consistency_after_sync_time_sum.store(0);
   m_certification_garbage_collector_count.store(0);
   m_certification_garbage_collector_time_sum.store(0);
+  m_flow_control_count.store(0);
+  m_flow_control_throttle_active.store(0);
+  m_flow_control_throttle_time.store(0);
+  m_flow_control_throttle_last_throttle_timestamp.store(0);
 }
 
 uint64_t Metrics_handler::get_control_messages_sent_count() const {
@@ -114,6 +120,23 @@ uint64_t Metrics_handler::get_certification_garbage_collector_count() const {
 
 uint64_t Metrics_handler::get_certification_garbage_collector_time_sum() const {
   return m_certification_garbage_collector_time_sum.load();
+}
+
+uint64_t Metrics_handler::get_flow_control_throttle_count() const {
+  return m_flow_control_count.load();
+}
+
+uint64_t Metrics_handler::get_flow_control_throttle_active() const {
+  return m_flow_control_throttle_active.load();
+}
+
+uint64_t Metrics_handler::get_flow_control_throttle_time() const {
+  return m_flow_control_throttle_time.load();
+}
+
+uint64_t Metrics_handler::get_flow_control_throttle_last_throttle_timestamp()
+    const {
+  return m_flow_control_throttle_last_throttle_timestamp.load();
 }
 
 void Metrics_handler::add_message_sent(const Gcs_message &message) {
@@ -203,6 +226,12 @@ void Metrics_handler::add_message_sent(const Gcs_message &message) {
             message.get_message_data().get_payload_length());
         break;
 
+      case Plugin_gcs_message::CT_RECOVERY_METADATA_MESSAGE:
+        message_sent_timestamp = Recovery_metadata_message::get_sent_timestamp(
+            message.get_message_data().get_payload(),
+            message.get_message_data().get_payload_length());
+        break;
+
         /* purecov: begin inspected */
       default:
         assert(false);
@@ -288,4 +317,24 @@ void Metrics_handler::add_garbage_collection_run(const uint64_t begin_timestamp,
 
   m_certification_garbage_collector_count++;
   m_certification_garbage_collector_time_sum.fetch_add(time);
+}
+
+void Metrics_handler::add_flow_control_throttle_stats(
+    const uint64_t begin_timestamp, const uint64_t end_timestamp) {
+  assert(begin_timestamp > 0);
+  assert(end_timestamp > 0);
+  assert(end_timestamp >= begin_timestamp);
+
+  m_flow_control_count++;
+  m_flow_control_throttle_time += (end_timestamp - begin_timestamp);
+  m_flow_control_throttle_last_throttle_timestamp = my_micro_time();
+}
+
+void Metrics_handler::increment_flow_control_throttle() {
+  m_flow_control_throttle_active++;
+}
+
+void Metrics_handler::decrement_flow_control_throttle() {
+  assert(m_flow_control_throttle_active > 0);
+  m_flow_control_throttle_active--;
 }

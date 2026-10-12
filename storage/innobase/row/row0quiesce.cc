@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2012, 2023, Oracle and/or its affiliates.
+Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -36,7 +37,9 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "dd/cache/dictionary_client.h"
 #include "sql/dd/dictionary.h"
 #include "sql/dd/types/column_type_element.h"
+#include "sql/debug_sync.h"
 
+#include "clone0clone.h"
 #include "dict0dd.h"
 #include "fsp0sysspace.h"
 #include "ha_prototypes.h"
@@ -45,6 +48,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "row0quiesce.h"
 #include "srv0start.h"
 #include "trx0purge.h"
+#include "vec0aux.h"
 
 #include "my_dbug.h"
 
@@ -478,26 +482,26 @@ of dict_col_t default value part if exists.
     }
 
     /* Write column's INSTANT metadata */
-    uint32_t cfg_version = IB_EXPORT_CFG_VERSION_V7;
+    uint32_t cfg_version = IB_EXPORT_CFG_VERSION_V8;
     DBUG_EXECUTE_IF("ib_export_use_cfg_version_3",
                     cfg_version = IB_EXPORT_CFG_VERSION_V3;);
     DBUG_EXECUTE_IF("ib_export_use_cfg_version_99",
                     cfg_version = IB_EXPORT_CFG_VERSION_V99;);
-    if (cfg_version >= IB_EXPORT_CFG_VERSION_V7) {
-      byte row[2 + sizeof(uint32_t)];
+    if (cfg_version >= IB_EXPORT_CFG_VERSION_V8) {
+      byte row[2 * sizeof(row_version_t) + sizeof(uint32_t)];
       byte *ptr = row;
 
       /* version added */
-      byte value =
-          col->is_instant_added() ? col->get_version_added() : UINT8_UNDEFINED;
-      mach_write_to_1(ptr, value);
-      ptr++;
+      row_version_t value = col->is_instant_added() ? col->get_version_added()
+                                                    : INVALID_ROW_VERSION;
+      mach_write_to_2(ptr, value);
+      ptr += 2;
 
       /* version dropped */
       value = col->is_instant_dropped() ? col->get_version_dropped()
-                                        : UINT8_UNDEFINED;
-      mach_write_to_1(ptr, value);
-      ptr++;
+                                        : INVALID_ROW_VERSION;
+      mach_write_to_2(ptr, value);
+      ptr += 2;
 
       /* physical position */
       mach_write_to_4(ptr, col->get_phy_pos());
@@ -543,7 +547,7 @@ of dict_col_t default value part if exists.
   byte value[sizeof(uint32_t)];
 
   /* Write the current meta-data version number. */
-  uint32_t cfg_version = IB_EXPORT_CFG_VERSION_V7;
+  uint32_t cfg_version = IB_EXPORT_CFG_VERSION_V8;
   DBUG_EXECUTE_IF("ib_export_use_cfg_version_3",
                   cfg_version = IB_EXPORT_CFG_VERSION_V3;);
   DBUG_EXECUTE_IF("ib_export_use_cfg_version_99",
@@ -1026,6 +1030,7 @@ void row_quiesce_table_complete(dict_table_t *table, trx_t *trx) {
   }
 
   if (trx_purge_state() != PURGE_STATE_DISABLED) {
+    clone_sys->get_gtid_persistor().wait_flush(false, false, nullptr);
     trx_purge_run();
   }
 
@@ -1084,6 +1089,15 @@ dberr_t row_quiesce_set_state(
                 " created on a hidden column, the"
                 " auxiliary tables haven't been dropped as yet."
                 " FTS auxiliary tables will not be flushed.");
+  } else if (DICT_TF2_FLAG_IS_SET(table, DICT_TF2_HAS_VEC_AUX_COL)) {
+    /* Vector aux tables are independent dict_table_t/.ibd siblings of
+    the base table - FLUSH FOR EXPORT only quiesces the base, so any
+    HNSW persistence in the aux .ibd is not export-consistent. Mirror
+    the FTS warning above. */
+    ib_senderrf(trx->mysql_thd, IB_LOG_LEVEL_WARN, ER_NOT_SUPPORTED_YET,
+                "FLUSH TABLES on a table carrying vector index metadata."
+                " Vector auxiliary tables will not be flushed, and the"
+                " resulting export cannot be imported.");
   }
 
   if (srv_thread_is_active(srv_threads.m_trx_recovery_rollback)) {
@@ -1100,7 +1114,12 @@ dberr_t row_quiesce_set_state(
 
   dict_table_x_lock_indexes(table);
 
+  DEBUG_SYNC_C("before_purge_run");
+
   if (trx_purge_state() != PURGE_STATE_DISABLED) {
+    // Just do the purge run without GTIDs flush. In some rare cases waiting
+    // for GTIDs flush to complete when dict_sys->mutex is already acquired
+    // and DDL is running. See i.e. Bug #110485.
     trx_purge_run();
   }
 

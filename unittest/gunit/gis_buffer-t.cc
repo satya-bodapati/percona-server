@@ -1,15 +1,16 @@
-// Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+// Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 //
 //  This program is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License, version 2.0,
 //  as published by the Free Software Foundation.
 //
-//  This program is also distributed with certain software (including
+//  This program is designed to work with certain software (including
 //  but not limited to OpenSSL) that is licensed under separate terms,
 //  as designated in a particular file or component or in included license
 //  documentation.  The authors of MySQL hereby grant you an additional
 //  permission to link the program and your derivative works with the
-//  separately licensed software that they have included with MySQL.
+//  separately licensed software that they have either included with
+//  the program or referenced in the documentation.
 //
 //  This program is distributed in the hope that it will be useful,
 //  but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -51,7 +52,8 @@ void test_valid_input(const gis::Geometry &g,
           ? gis_srs::swapped_epsg4326()
           : nullptr;
   std::unique_ptr<gis::Geometry> result;
-  bool buffer_error = gis::buffer(m_srs.get(), g, strats, "unittest", &result);
+  bool const buffer_error =
+      gis::buffer(m_srs.get(), g, strats, "unittest", &result);
 
   // If true an exception has been thrown.
   ASSERT_FALSE(buffer_error);
@@ -93,7 +95,7 @@ class BufferTest : public ::testing::Test {
 // CARTESIAN GEOMETRIES (all)
 
 TEST_F(BufferTest, CartesianPoint) {
-  gis::Cartesian_point c_pt{0, 0};
+  gis::Cartesian_point const c_pt{0, 0};
   // Distance cannot be negative --> Only possible valid return type is Polygon
   strat.distance = 3;
   test_valid_input<gis::Cartesian_polygon>(c_pt, strat, expected_py, 1);
@@ -205,10 +207,10 @@ TEST_F(BufferTest, CartesianGeometrycollectionNeg) {
   gis::Cartesian_polygon py1;
   py1.push_back(linearringFromVector({0, 0, 4, 0, 4, 4, 0, 4, 0, 0}));
 
-  gis::Cartesian_polygon py2;
+  gis::Cartesian_polygon const py2;
   py1.push_back(linearringFromVector({8, 0, 9, 0, 9, 1, 8, 1, 8, 0}));
 
-  gis::Cartesian_polygon py3;
+  gis::Cartesian_polygon const py3;
   py1.push_back(
       linearringFromVector({10, 0, 10.5, 0, 10.5, 0.5, 10, 0.5, 10, 0}));
 
@@ -235,10 +237,10 @@ TEST_F(BufferTest, CartesianGeometrycollectionNeg) {
 // GEOGRAPHIC GEOMETRIES (only Point)
 
 TEST_F(BufferTest, GeographicPoint) {
-  gis::Geographic_polygon g_py;
+  gis::Geographic_polygon const g_py;
   strat.distance = 20000;
 
-  gis::Geographic_point g_pt{63.4451715, 10.9052167};
+  gis::Geographic_point const g_pt{63.4451715, 10.9052167};
 
   // Strategy options cannot be set.
   // Distance cannot be negative --> Only possible valid return type is polygon

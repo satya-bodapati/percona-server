@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,6 +30,7 @@
 
 #include "my_dbug.h"
 #include "my_inttypes.h"
+#include "sql/dd/impl/properties_impl.h"  // dd::Properties_impl
 #include "sql/dd/impl/raw/raw_record.h"
 #include "sql/dd/impl/types/entity_object_impl.h"  // dd::Entity_object_impl
 #include "sql/dd/impl/types/weak_object_impl.h"
@@ -257,6 +259,22 @@ class Routine_impl : public Entity_object_impl, virtual public Routine {
     return m_parameters;
   }
 
+  /////////////////////////////////////////////////////////////////////////
+  // options.
+  /////////////////////////////////////////////////////////////////////////
+
+  const Properties &options() const override { return m_options; }
+
+  Properties &options() override { return m_options; }
+
+  bool set_options(const Properties &options) override {
+    return m_options.insert_values(options);
+  }
+
+  bool set_options(const String_type &options_raw) override {
+    return m_options.insert_values(options_raw);
+  }
+
   // Fix "inherits ... via dominance" warnings
   Entity_object_impl *impl() override { return Entity_object_impl::impl(); }
   const Entity_object_impl *impl() const override {
@@ -291,6 +309,7 @@ class Routine_impl : public Entity_object_impl, virtual public Routine {
   String_type m_definer_host;
   String_type m_comment;
   String_type m_external_language;
+  Properties_impl m_options;
 
   // Collections.
 

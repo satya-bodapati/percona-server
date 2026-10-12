@@ -1,3 +1,4 @@
+include/rpl/set_gtid_mode_off.inc
 drop table if exists t1,t2;
 SET @default_table_open_cache = @@table_open_cache;
 set @my_log_error_verbosity       =@@global.log_error_verbosity;
@@ -334,7 +335,7 @@ range_alloc_block_size	4096
 transaction_alloc_block_size	8192
 transaction_prealloc_size	4096
 ==+ performance_schema data +==
-SELECT * FROM performance_schema.session_variables 
+SELECT * FROM performance_schema.session_variables
 WHERE variable_name IN ('range_alloc_block_size',
 'query_alloc_block_size', 'query_prealloc_size',
 'transaction_alloc_block_size', 'transaction_prealloc_size') ORDER BY 1;
@@ -408,7 +409,7 @@ range_alloc_block_size	16384
 transaction_alloc_block_size	19456
 transaction_prealloc_size	20480
 ==+ performance_schema data +==
-SELECT * FROM performance_schema.session_variables 
+SELECT * FROM performance_schema.session_variables
 WHERE variable_name IN ('range_alloc_block_size',
 'query_alloc_block_size', 'query_prealloc_size',
 'transaction_alloc_block_size', 'transaction_prealloc_size') ORDER BY 1;
@@ -1151,12 +1152,12 @@ ERROR HY000: Variable 'ft_stopword_file' is a read only variable
 #
 SHOW VARIABLES like 'back_log';
 Variable_name	Value
-back_log	151
+back_log	10000
 SELECT @@session.back_log;
 ERROR HY000: Variable 'back_log' is a GLOBAL variable
 SELECT @@global.back_log;
 @@global.back_log
-151
+10000
 SET @@session.back_log= 7;
 ERROR HY000: Variable 'back_log' is a read only variable
 SET @@global.back_log= 7;
@@ -1474,7 +1475,7 @@ DROP TABLE t1;
 # BUG#10206 -  Transaction requiring Max_BinLog_Cache_size > 4GB always rollsback
 #
 SET @old_max_binlog_cache_size = @@GLOBAL.max_binlog_cache_size;
-# Set the max_binlog_cache_size to size more than 4GB. 
+# Set the max_binlog_cache_size to size more than 4GB.
 SET GLOBAL max_binlog_cache_size = 5 * 1024 * 1024 * 1024;
 SELECT @@GLOBAL.max_binlog_cache_size;
 @@GLOBAL.max_binlog_cache_size
@@ -1762,8 +1763,8 @@ End of 5.5 tests
 # Bug#57035 'ulonglong sql_mode' stored into ulong, is risky and causes
 #           compiler warning
 #
-SET @@sql_mode= 8589934592;
-ERROR 42000: Variable 'sql_mode' can't be set to the value of '8589934592'
+SET @@sql_mode= cast(pow(2,34) as unsigned);
+ERROR 42000: Variable 'sql_mode' can't be set to the value of '17179869184'
 #
 # Bug #59860: log-slow-admin-statements and log-slow-replica-statements not displayed
 #
@@ -1898,21 +1899,6 @@ ERROR HY000: Variable 'log_bin_index' is a read only variable
 SET @@global.log_bin_index= 'x';
 ERROR HY000: Variable 'log_bin_index' is a read only variable
 #
-SHOW VARIABLES like 'relay_log_info_file';
-Variable_name	Value
-relay_log_info_file	relay-log.info
-SELECT @@session.relay_log_info_file;
-ERROR HY000: Variable 'relay_log_info_file' is a GLOBAL variable
-SELECT @@global.relay_log_info_file;
-@@global.relay_log_info_file
-relay-log.info
-Warnings:
-Warning	1287	'@@relay_log_info_file' is deprecated and will be removed in a future release.
-SET @@session.relay_log_info_file= 'x';
-ERROR HY000: Variable 'relay_log_info_file' is a read only variable
-SET @@global.relay_log_info_file= 'x';
-ERROR HY000: Variable 'relay_log_info_file' is a read only variable
-#
 SHOW VARIABLES like 'relay_log_space_limit';
 Variable_name	Value
 relay_log_space_limit	0
@@ -1952,7 +1938,7 @@ ERROR HY000: Variable 'replica_skip_errors' is a read only variable
 SET @@global.replica_skip_errors= 7;
 ERROR HY000: Variable 'replica_skip_errors' is a read only variable
 #
-# Bug #11766769 : 59959: SMALL VALUES OF --MAX-ALLOWED-PACKET 
+# Bug #11766769 : 59959: SMALL VALUES OF --MAX-ALLOWED-PACKET
 #   ARE NOT BEING HONORED
 #
 CREATE TABLE t1 (a MEDIUMTEXT);
@@ -2029,3 +2015,90 @@ SET @x = NULL;
 EXECUTE s USING @x;
 ERROR 42000: Variable 'character_set_client' can't be set to the value of 'NULL'
 DEALLOCATE PREPARE s;
+#
+# 36625773: Align implementation of repeated preparation and
+#           optimization for statement classes.
+#
+SET sql_log_off = 0;
+SELECT @@sql_log_off;
+@@sql_log_off
+0
+PREPARE ps from "SET sql_log_off = 1";
+EXECUTE ps;
+SELECT @@sql_log_off;
+@@sql_log_off
+1
+DEALLOCATE PREPARE ps;
+CREATE PROCEDURE sp()
+BEGIN
+SET sql_log_off = 1;
+SELECT @@sql_log_off;
+END
+//
+SET sql_log_off = 0;
+CALL sp;
+@@sql_log_off
+1
+DROP PROCEDURE sp;
+SET sql_log_off = DEFAULT;
+#
+# Bug#36322812 - RAPID global variables accept 'OF' as valid bool value
+# Bug#36924845 - RAPID session variables accept 'OF' as valid bool value
+#
+SET GLOBAL slow_query_log = 'O';
+ERROR 42000: Variable 'slow_query_log' can't be set to the value of 'O'
+SET GLOBAL slow_query_log = 'OX';
+ERROR 42000: Variable 'slow_query_log' can't be set to the value of 'OX'
+SET GLOBAL slow_query_log = 'ONX';
+ERROR 42000: Variable 'slow_query_log' can't be set to the value of 'ONX'
+SET GLOBAL slow_query_log = 'ONN';
+ERROR 42000: Variable 'slow_query_log' can't be set to the value of 'ONN'
+SET GLOBAL slow_query_log = 'OF';
+ERROR 42000: Variable 'slow_query_log' can't be set to the value of 'OF'
+SET GLOBAL slow_query_log = 'OFX';
+ERROR 42000: Variable 'slow_query_log' can't be set to the value of 'OFX'
+SET GLOBAL slow_query_log = 'OFFF';
+ERROR 42000: Variable 'slow_query_log' can't be set to the value of 'OFFF'
+SET GLOBAL slow_query_log = 'OFFX';
+ERROR 42000: Variable 'slow_query_log' can't be set to the value of 'OFFX'
+SET GLOBAL slow_query_log = 'ONF';
+ERROR 42000: Variable 'slow_query_log' can't be set to the value of 'ONF'
+SET GLOBAL slow_query_log = 'OFN';
+ERROR 42000: Variable 'slow_query_log' can't be set to the value of 'OFN'
+SET GLOBAL slow_query_log = '1';
+ERROR 42000: Variable 'slow_query_log' can't be set to the value of '1'
+SET GLOBAL slow_query_log = '0';
+ERROR 42000: Variable 'slow_query_log' can't be set to the value of '0'
+SET GLOBAL slow_query_log = 'true';
+ERROR 42000: Variable 'slow_query_log' can't be set to the value of 'true'
+SET GLOBAL slow_query_log = 'false';
+ERROR 42000: Variable 'slow_query_log' can't be set to the value of 'false'
+SET GLOBAL innodb_strict_mode = 'O';
+ERROR 42000: Variable 'innodb_strict_mode' can't be set to the value of 'O'
+SET GLOBAL innodb_strict_mode = 'OX';
+ERROR 42000: Variable 'innodb_strict_mode' can't be set to the value of 'OX'
+SET GLOBAL innodb_strict_mode = 'ONX';
+ERROR 42000: Variable 'innodb_strict_mode' can't be set to the value of 'ONX'
+SET GLOBAL innodb_strict_mode = 'ONN';
+ERROR 42000: Variable 'innodb_strict_mode' can't be set to the value of 'ONN'
+SET GLOBAL innodb_strict_mode = 'OF';
+ERROR 42000: Variable 'innodb_strict_mode' can't be set to the value of 'OF'
+SET GLOBAL innodb_strict_mode = 'OFX';
+ERROR 42000: Variable 'innodb_strict_mode' can't be set to the value of 'OFX'
+SET GLOBAL innodb_strict_mode = 'OFFF';
+ERROR 42000: Variable 'innodb_strict_mode' can't be set to the value of 'OFFF'
+SET GLOBAL innodb_strict_mode = 'OFFX';
+ERROR 42000: Variable 'innodb_strict_mode' can't be set to the value of 'OFFX'
+SET GLOBAL innodb_strict_mode = 'ONF';
+ERROR 42000: Variable 'innodb_strict_mode' can't be set to the value of 'ONF'
+SET GLOBAL innodb_strict_mode = 'OFN';
+ERROR 42000: Variable 'innodb_strict_mode' can't be set to the value of 'OFN'
+SET GLOBAL innodb_strict_mode = '1';
+ERROR 42000: Variable 'innodb_strict_mode' can't be set to the value of '1'
+SET GLOBAL innodb_strict_mode = '0';
+ERROR 42000: Variable 'innodb_strict_mode' can't be set to the value of '0'
+SET GLOBAL innodb_strict_mode = 'true';
+ERROR 42000: Variable 'innodb_strict_mode' can't be set to the value of 'true'
+SET GLOBAL innodb_strict_mode = 'false';
+ERROR 42000: Variable 'innodb_strict_mode' can't be set to the value of 'false'
+include/rpl/set_gtid_mode_on.inc

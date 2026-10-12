@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -29,20 +30,21 @@
   @file mysys/my_error.cc
 */
 
-#include <errno.h>
-#include <stdarg.h>
+#include <cerrno>  // IWYU pragma: keep errno
+#include <cstdarg>
 #ifdef __linux__
 #include <features.h>
 #endif
-#include <stdio.h>
-#include <string.h>
 #include <sys/types.h>
+#include <atomic>
+#include <cstdio>
+#include <cstring>
 
 #include "my_base.h"
 #include "my_dbug.h"
 #include "my_inttypes.h"
 #include "my_sys.h"
-#include "my_thread_local.h"
+#include "my_thread_local.h"  // IWYU pragma: keep
 #include "mysql/my_loglevel.h"
 #include "mysql/service_mysql_alloc.h"
 #include "mysql/strings/m_ctype.h"
@@ -237,8 +239,8 @@ void my_error(int nr, myf MyFlags, ...) {
   */
   for (char *ptr = ebuff, *end = ebuff + strlen(ebuff); ptr != end;) {
     my_wc_t ignored;
-    int len = my_mb_wc_utf8mb4(&ignored, pointer_cast<const uchar *>(ptr),
-                               pointer_cast<const uchar *>(end));
+    int const len = my_mb_wc_utf8mb4(&ignored, pointer_cast<const uchar *>(ptr),
+                                     pointer_cast<const uchar *>(end));
     if (len > 0) {
       ptr += len;
     } else {
@@ -407,7 +409,7 @@ bool my_error_unregister(int first, int last) {
     not released here as they may be static.
 */
 
-void my_error_unregister_all(void) {
+void my_error_unregister_all() {
   struct my_err_head *cursor, *saved_next;
 
   for (cursor = my_errmsgs_globerrs.meh_next; cursor != nullptr;
@@ -445,9 +447,10 @@ void my_message_local_stderr(enum loglevel ll, uint ecode, va_list args) {
   size_t len;
   DBUG_TRACE;
 
-  len = snprintf(
-      buff, sizeof(buff), "[%s] ",
-      (ll == ERROR_LEVEL ? "ERROR" : ll == WARNING_LEVEL ? "Warning" : "Note"));
+  len = snprintf(buff, sizeof(buff), "[%s] ",
+                 (ll == ERROR_LEVEL     ? "ERROR"
+                  : ll == WARNING_LEVEL ? "Warning"
+                                        : "Note"));
   vsnprintf(buff + len, sizeof(buff) - len, EE(ecode), args);
 
   my_message_stderr(0, buff, MYF(0));

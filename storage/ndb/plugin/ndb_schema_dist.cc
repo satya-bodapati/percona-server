@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -35,6 +36,7 @@
 #include "sql/sql_error.h"
 #include "sql/sql_thd_internal_api.h"
 #include "storage/ndb/plugin/ndb_anyvalue.h"
+#include "storage/ndb/plugin/ndb_applier.h"
 #include "storage/ndb/plugin/ndb_dist_priv_util.h"
 #include "storage/ndb/plugin/ndb_name_util.h"
 #include "storage/ndb/plugin/ndb_require.h"
@@ -117,17 +119,36 @@ Ndb_schema_dist_client::Ndb_schema_dist_client(THD *thd)
 bool Ndb_schema_dist_client::prepare(const char *db, const char *tabname) {
   DBUG_TRACE;
 
+  // Check local schema distribution state
+  if (!check_local_schema_dist_available()) {
+    push_warning(m_thd, Sql_condition::SL_WARNING, ER_GET_ERRMSG,
+                 "Schema distribution is not ready");
+    return false;
+  }
+
   // Acquire reference on mysql.ndb_schema
   m_share = NDB_SHARE::acquire_reference(
       Ndb_schema_dist_table::DB_NAME.c_str(),
       Ndb_schema_dist_table::TABLE_NAME.c_str(), m_share_reference.c_str());
 
-  if (m_share == nullptr || m_share->have_event_operation() == false ||
+  if (m_share == nullptr || !m_share->have_event_operation() ||
       DBUG_EVALUATE_IF("ndb_schema_dist_not_ready_early", true, false)) {
     // The NDB_SHARE for mysql.ndb_schema hasn't been created or not setup
     // yet -> schema distribution is not ready
     push_warning(m_thd, Sql_condition::SL_WARNING, ER_GET_ERRMSG,
                  "Schema distribution is not ready");
+    return false;
+  }
+
+  // Acquire reference also on mysql.ndb_schema_result
+  m_result_share = NDB_SHARE::acquire_reference(
+      Ndb_schema_result_table::DB_NAME.c_str(),
+      Ndb_schema_result_table::TABLE_NAME.c_str(), m_share_reference.c_str());
+  if (m_result_share == nullptr || !m_result_share->have_event_operation()) {
+    // The mysql.ndb_schema_result hasn't been created or not setup yet ->
+    // schema distribution is not ready
+    push_warning(m_thd, Sql_condition::SL_WARNING, ER_GET_ERRMSG,
+                 "Schema distribution is not ready (ndb_schema_result)");
     return false;
   }
 
@@ -195,9 +216,7 @@ bool Ndb_schema_dist_client::prepare_rename(const char *db, const char *tabname,
        as part of a statement "ALTER TABLE ... ENGINE=innodb" before schema
        distribution has started running.
     */
-    if (Ndb_dist_priv_util::is_privilege_table(db, tabname)) return true;
-
-    return false;
+    return Ndb_dist_priv_util::is_privilege_table(db, tabname);
   }
 
   // Allow additional keys for rename which will use the "old" name
@@ -278,6 +297,10 @@ Ndb_schema_dist_client::~Ndb_schema_dist_client() {
   if (m_share) {
     // Release the reference to mysql.ndb_schema table
     NDB_SHARE::release_reference(m_share, m_share_reference.c_str());
+  }
+  if (m_result_share) {
+    // Release the reference to mysql.ndb_schema_result table
+    NDB_SHARE::release_reference(m_result_share, m_share_reference.c_str());
   }
 
   if (m_thd_ndb) {
@@ -366,9 +389,9 @@ bool Ndb_schema_dist_client::log_schema_op(const char *query,
     return false;
   }
 
-  // Require that m_share has been initialized to reference the
-  // schema distribution table
+  // Require that references to schema distribution tables has been initialized
   ndbcluster::ndbrequire(m_share);
+  ndbcluster::ndbrequire(m_result_share);
 
   // Check that prepared keys match
   if (!m_prepared_keys.check_key(db, table_name)) {
@@ -388,7 +411,8 @@ bool Ndb_schema_dist_client::log_schema_op(const char *query,
     std::string invalid_identifier;
     if (!check_identifier_limits(invalid_identifier)) {
       m_thd_ndb->push_warning("INTERNAL ERROR: identifier limits exceeded");
-      assert(false);  // Catch in debug
+      // Catch in debug, but allow failure from opening ndb_schema table
+      assert(invalid_identifier == "<open failed>");
       return false;
     }
   }
@@ -610,7 +634,7 @@ bool Ndb_schema_dist_client::acl_notify(const char *database, const char *query,
   assert(m_holding_acl_mutex);
   auto key = m_prepared_keys.keys()[0];
   std::string new_query("use ");
-  if (database != nullptr && strcmp(database, "mysql")) {
+  if (database != nullptr && strcmp(database, "mysql") != 0) {
     new_query.append(database).append(";").append(query, query_length);
     query = new_query.c_str();
     query_length = new_query.size();
@@ -622,7 +646,7 @@ bool Ndb_schema_dist_client::acl_notify(const char *database, const char *query,
 }
 
 /* SNAPSHOT-style ACL change distribution */
-bool Ndb_schema_dist_client::acl_notify(std::string user_list) {
+bool Ndb_schema_dist_client::acl_notify(const std::string &user_list) {
   DBUG_TRACE;
   assert(m_holding_acl_mutex);
   auto key = m_prepared_keys.keys()[0];

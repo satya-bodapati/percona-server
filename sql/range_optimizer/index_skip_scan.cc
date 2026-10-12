@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -122,7 +123,7 @@ IndexSkipScanIterator::~IndexSkipScanIterator() {
   if (table()->file->inited) table()->file->ha_index_or_rnd_end();
 }
 
-bool IndexSkipScanIterator::Init(void) {
+bool IndexSkipScanIterator::DoInit() {
   DBUG_TRACE;
 
   if (distinct_prefix == nullptr) {
@@ -229,7 +230,7 @@ bool IndexSkipScanIterator::next_eq_prefix() {
   Get the next row for skip scan.
 
   SYNOPSIS
-    IndexSkipScanIterator::Read()
+    IndexSkipScanIterator::DoRead()
 
   DESCRIPTION
     Find the next record in the skip scan. The scan is broken into groups
@@ -258,7 +259,7 @@ bool IndexSkipScanIterator::next_eq_prefix() {
   RETURN
     See RowIterator::Read()
  */
-int IndexSkipScanIterator::Read() {
+int IndexSkipScanIterator::DoRead() {
   DBUG_TRACE;
   int result = HA_ERR_END_OF_FILE;
   int past_eq_prefix = 0;
@@ -296,8 +297,8 @@ int IndexSkipScanIterator::Read() {
                distinct_prefix_len);
 
       if (eq_prefix) {
-        past_eq_prefix =
-            key_cmp(index_info->key_part, eq_prefix, eq_prefix_len);
+        past_eq_prefix = key_cmp(index_info->key_part, eq_prefix, eq_prefix_len,
+                                 /*is_reverse_multi_valued_index_scan=*/false);
         assert(past_eq_prefix >= 0);
 
         // We are past the equality prefix, so get the next prefix.
@@ -330,9 +331,8 @@ int IndexSkipScanIterator::Read() {
         start_key.keypart_map = make_prev_keypart_map(used_key_parts);
         start_key.flag = (range_cond_flag & (EQ_RANGE | NULL_RANGE))
                              ? HA_READ_KEY_EXACT
-                             : (range_cond_flag & NEAR_MIN)
-                                   ? HA_READ_AFTER_KEY
-                                   : HA_READ_KEY_OR_NEXT;
+                         : (range_cond_flag & NEAR_MIN) ? HA_READ_AFTER_KEY
+                                                        : HA_READ_KEY_OR_NEXT;
       } else {
         // If there is no minimum key, just use the distinct prefix.
         start_key.key = distinct_prefix;

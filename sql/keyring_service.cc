@@ -1,15 +1,16 @@
-/*  Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/*  Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License, version 2.0,
     as published by the Free Software Foundation.
 
-    This program is also distributed with certain software (including
+    This program is designed to work with certain software (including
     but not limited to OpenSSL) that is licensed under separate terms,
     as designated in a particular file or component or in included license
     documentation.  The authors of MySQL hereby grant you an additional
     permission to link the program and your derivative works with the
-    separately licensed software that they have included with MySQL.
+    separately licensed software that they have either included with
+    the program or referenced in the documentation.
 
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,9 +21,10 @@
     along with this program; if not, write to the Free Software
     Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
-#include <stddef.h>
+#include <cstddef>
 
 #include <functional>
+#include <utility>
 #include "my_inttypes.h"
 #include "mysql/plugin.h"
 #include "mysql/plugin_keyring.h" /* keyring plugin */
@@ -47,7 +49,7 @@ class Callback {
     @param callback Lambda function that is called using the invoke method.
   */
   explicit Callback(std::function<bool(st_mysql_keyring *keyring)> callback)
-      : m_callback(callback), m_result(true) {}
+      : m_callback(std::move(callback)), m_result(true) {}
 
   /**
     Invoke the underlying callback using the specified parameter and store
@@ -62,7 +64,7 @@ class Callback {
 
     @return Result of the invoke operation.
   */
-  bool result() { return m_result; }
+  bool result() const { return m_result; }
 
  private:
   /**
@@ -87,7 +89,7 @@ class Callback {
 static bool key_plugin_cb_fn(THD *, plugin_ref plugin, void *arg) {
   plugin = my_plugin_lock(nullptr, &plugin);
   if (plugin) {
-    Callback *callback = reinterpret_cast<Callback *>(arg);
+    auto *callback = reinterpret_cast<Callback *>(arg);
     callback->invoke(
         reinterpret_cast<st_mysql_keyring *>(plugin_decl(plugin)->info));
   }
@@ -108,7 +110,7 @@ static bool key_plugin_cb_fn(THD *, plugin_ref plugin, void *arg) {
 */
 static bool iterate_plugins(std::function<bool(st_mysql_keyring *keyring)> fn,
                             bool check_access = true) {
-  Callback callback(fn);
+  Callback callback(std::move(fn));
   if (check_access && keyring_access_test()) return true;
   plugin_foreach(current_thd, key_plugin_cb_fn, MYSQL_KEYRING_PLUGIN,
                  &callback);

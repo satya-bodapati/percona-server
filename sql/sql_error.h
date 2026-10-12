@@ -1,15 +1,16 @@
-/* Copyright (c) 2005, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2005, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -33,9 +34,12 @@
 #include "my_compiler.h"
 
 #include "my_inttypes.h"
+#include "my_temporal.h"
+
+#include "mysql/components/services/bits/my_err_bits.h"
+#include "mysql/components/services/bits/sql_bits.h"
 #include "mysql/strings/int2str.h"
 #include "mysql/strings/m_ctype.h"
-#include "mysql_com.h" /* MYSQL_ERRMSG_SIZE */
 #include "sql/sql_list.h"
 #include "sql/sql_plist.h" /* I_P_List */
 #include "sql_string.h"    /* String */
@@ -149,7 +153,7 @@ class Sql_condition {
   /**
     Set the condition message test.
     @param message_text  Message text, expressed in the character set derived
-                         from the server --language option
+                         from the server --lc-messages option
   */
   void set_message_text(const char *message_text);
 
@@ -193,7 +197,7 @@ class Sql_condition {
   /** SQL CURSOR_NAME condition item. */
   String m_cursor_name;
 
-  /** Message text, expressed in the character set implied by --language. */
+  /** Message text, expressed in the character set implied by --lc-messages. */
   String m_message_text;
 
   /** MySQL extension, MYSQL_ERRNO condition item. */
@@ -252,6 +256,8 @@ class ErrConvString {
   ErrConvString(double nr);
   ErrConvString(const my_decimal *nr);
   ErrConvString(const MYSQL_TIME *ltime, uint dec);
+  ErrConvString(const Time_val time, uint dec);
+  ErrConvString(const Date_val date);
 
   const char *ptr() const { return err_buffer; }
   size_t length() const { return buf_length; }
@@ -375,6 +381,11 @@ class Diagnostics_area {
   const char *message_text() const {
     assert(m_status == DA_ERROR || m_status == DA_OK);
     return m_message_text;
+  }
+
+  uint message_text_length() const {
+    assert(m_status == DA_ERROR || m_status == DA_OK);
+    return m_message_text_length;
   }
 
   uint mysql_errno() const {
@@ -540,6 +551,18 @@ class Diagnostics_area {
 
  private:
   /**
+    In debug mode, assert that the status is not set, as required before setting
+    the status; unless the new status is DA_ERROR and m_overwrite_flag is set.
+    In case the assertion is raised, print an error message that includes the
+    previous status, the new status, the previous ER_* symbol (if any), and the
+    new ER_* symbol (if any).
+
+    @param new_status The new status we attempt to set.
+    @param new_errno The new mysql_errno we attempt to set, or 0 if not given.
+  */
+  void assert_not_set(enum_diagnostics_status new_status, int new_errno = 0);
+
+  /**
     Add a new SQL-condition to the current list and increment the respective
     counters.
 
@@ -623,6 +646,11 @@ class Diagnostics_area {
     If DA status is OK, it's the OK-message to be sent.
   */
   char m_message_text[MYSQL_ERRMSG_SIZE];
+
+  /**
+    Length, in bytes, of m_message_text.
+  */
+  uint m_message_text_length;
 
   /**
     SQL RETURNED_SQLSTATE condition item.
@@ -713,6 +741,13 @@ void push_warning(THD *thd, uint code);
 void push_warning_printf(THD *thd, Sql_condition::enum_severity_level severity,
                          uint code, const char *format, ...)
     MY_ATTRIBUTE((format(printf, 4, 5)));
+
+/*
+  @see push_warning_printf
+*/
+void push_warning_vprintf(THD *thd, Sql_condition::enum_severity_level severity,
+                          uint code, const char *format, va_list args)
+    MY_ATTRIBUTE((format(printf, 4, 0)));
 
 /**
   Generates a warning that a feature is deprecated.

@@ -1,18 +1,19 @@
 #ifndef ITEM_GEOFUNC_INCLUDED
 #define ITEM_GEOFUNC_INCLUDED
 
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -428,7 +429,9 @@ class Item_func_geomfromgeojson : public Item_geometry_func {
   static const char *CRS_NAME_MEMBER;
   static const char *NAMED_CRS;
   static const char *SHORT_EPSG_PREFIX;
+  static const char *SHORT_MYSQL_PREFIX;
   static const char *LONG_EPSG_PREFIX;
+  static const char *LONG_MYSQL_PREFIX;
   static const char *CRS84_URN;
   static const char *POINT_TYPE;
   static const char *MULTIPOINT_TYPE;
@@ -465,9 +468,6 @@ class Item_func_geomfromgeojson : public Item_geometry_func {
   /// True if we're currently parsing the top-level object.
   bool m_toplevel = true;
 };
-
-/// Max width of long CRS URN supported + max width of SRID + '\0'.
-static const int MAX_CRS_WIDTH = (22 + MAX_INT_WIDTH + 1);
 
 /**
   This class handles the following function:
@@ -711,6 +711,7 @@ class Item_func_centroid : public Item_geometry_func {
 
 class Item_func_convex_hull : public Item_geometry_func {
   BG_result_buf_mgr bg_resbuf_mgr;
+  String tmp_value;
 
   template <typename Coordsys>
   bool bg_convex_hull(const Geometry *geom, String *wkb);
@@ -1665,6 +1666,7 @@ class Item_func_distance : public Item_real_func {
   }
 
   double val_real() override;
+  enum Functype functype() const override { return SP_DISTANCE_FUNC; }
   const char *func_name() const override { return "st_distance"; }
 };
 

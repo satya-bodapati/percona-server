@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,6 +28,7 @@
 
 #include <google/protobuf/io/zero_copy_stream.h>
 #include <my_inttypes.h>
+#include <cstdint>
 #include <memory>
 
 #include "plugin/x/src/interface/vio.h"
@@ -34,9 +36,6 @@
 namespace xpl {
 
 class Vio_input_stream : public google::protobuf::io::ZeroCopyInputStream {
- public:
-  using gint64 = google::protobuf::int64;
-
  public:
   explicit Vio_input_stream(const std::shared_ptr<iface::Vio> &connection);
   ~Vio_input_stream() override;
@@ -57,7 +56,7 @@ class Vio_input_stream : public google::protobuf::io::ZeroCopyInputStream {
   bool Next(const void **data, int *size) override;
   void BackUp(int count) override;
   bool Skip(int count) override;
-  gint64 ByteCount() const override;
+  int64_t ByteCount() const override;
 
  private:
   bool read_more_data();

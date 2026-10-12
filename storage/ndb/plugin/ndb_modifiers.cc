@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,7 +25,7 @@
 
 #include "ndb_modifiers.h"
 
-#include <stdio.h>
+#include <cstdio>
 
 #include "m_string.h"
 #include "my_dbug.h"  // DBUG_PRINT
@@ -159,9 +160,8 @@ int NDB_Modifiers::parseModifierListString(const char *string) {
           if (pos && pos[0] == ',') pos++;
 
           break;
-        } else {
-          break;
         }
+        break;
       }
     }  // for (modifier_name)
 
@@ -180,9 +180,8 @@ int NDB_Modifiers::parseModifierListString(const char *string) {
 
   if (pos) {
     return pos - string;
-  } else {
-    return strlen(string);
   }
+  return strlen(string);
 }
 
 int NDB_Modifiers::loadComment(const char *str, size_t len) {
@@ -219,12 +218,11 @@ int NDB_Modifiers::loadComment(const char *str, size_t len) {
   if (mod_len > 0) {
     m_mod_len = mod_len + m_prefixLen;
     return 0;
-  } else {
-    DBUG_PRINT("info",
-               ("parseModifierListString (%s) returned %d", pos, mod_len));
-    /* Parse error */
-    return -1;
   }
+  DBUG_PRINT("info",
+             ("parseModifierListString (%s) returned %d", pos, mod_len));
+  /* Parse error */
+  return -1;
 }
 
 NDB_Modifier *NDB_Modifiers::find(const char *name) const {

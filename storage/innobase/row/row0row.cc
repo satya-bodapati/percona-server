@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -244,6 +245,12 @@ dtuple_t *row_build_index_entry_low(const dtuple_t *row, const row_ext_t *ext,
 
     dfield_copy(dfield, dfield2);
 
+    if (!index->is_clustered()) {
+      /* Fields based on virtual columns in secondary indexes are
+      not themselves virtual */
+      dfield->type.prtype &= ~DATA_VIRTUAL;
+    }
+
     if (dfield_is_null(dfield)) {
       continue;
     }
@@ -395,6 +402,7 @@ static inline dtuple_t *row_build_low(ulint type, const dict_index_t *index,
   if (n_ext_cols) {
     ext_cols = static_cast<ulint *>(
         mem_heap_alloc(heap, n_ext_cols * sizeof *ext_cols));
+    ut_ad(ext_cols != nullptr);
   }
 
   /* Avoid a debug assertion in rec_offs_validate(). */
@@ -477,6 +485,7 @@ static inline dtuple_t *row_build_low(ulint type, const dict_index_t *index,
 
       col = col_table->get_col(col_no);
 
+      ut_ad(n_ext_cols > 0);
       if (col->ord_part) {
         /* We will have to fetch prefixes of
         externally stored columns that are
@@ -589,11 +598,7 @@ dtuple_t *row_rec_to_index_entry_low(
 
   ut_ad(rec_len == dict_index_get_n_fields(index) ||
         /* non-leaf record which has keys and child page no as record data */
-        rec_len == dict_index_get_n_unique(index) + 1
-        /* a record for older SYS_INDEXES table
-        (missing merge_threshold column) is acceptable. */
-        || (index->table->id == DICT_INDEXES_ID &&
-            rec_len == dict_index_get_n_fields(index) - 1));
+        rec_len == dict_index_get_n_unique(index) + 1U);
 
   dict_index_copy_types(entry, index, rec_len);
 
@@ -610,6 +615,7 @@ dtuple_t *row_rec_to_index_entry_low(
   }
 
   ut_ad(dtuple_check_typed(entry));
+  ut_d(entry->validate_for_index(index));
 
   return (entry);
 }

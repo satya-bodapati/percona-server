@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,6 +24,7 @@
 #include "storage/ndb/plugin/ndb_dd_upgrade_table.h"
 
 #include <algorithm>
+#include <memory>
 #include <string>
 #include <unordered_set>
 
@@ -123,7 +125,7 @@ class Table_upgrade_guard {
 
     free_table_share(m_table->s);
 
-    destroy(m_handler);
+    if (m_handler != nullptr) ::destroy_at(m_handler);
   }
 };
 
@@ -321,12 +323,27 @@ bool migrate_table_to_dd(THD *thd, Ndb_dd_client *dd_client,
                                          schema_name.c_str(),
                                          table_name.c_str(), false);
   if (r != 0) {
-    thd_ndb->push_warning(ER_CANT_CREATE_TABLE_SHARE_FROM_FRM,
-                          "Error in creating TABLE_SHARE from %s.frm file",
-                          table_name.c_str());
-    if (r == -1)
-      ndb_log_error("Error in creating TABLE_SHARE from %s.frm file",
-                    table_name.c_str());
+    if (r == 10) {
+      /*
+       * Old unsupported temporal types in FRM file. Keeping old error message
+       * as done before after check_table_for_old_types call further below.
+       */
+      ndb_log_error(
+          "Table upgrade required. Please do \"REPAIR TABLE `%s`\" "
+          "or dump/reload to fix it",
+          table_name.c_str());
+      thd_ndb->push_warning(
+          ER_TABLE_UPGRADE_REQUIRED,
+          "Table definition contains obsolete data types such "
+          "as old temporal or decimal types");
+    } else {
+      thd_ndb->push_warning(ER_CANT_CREATE_TABLE_SHARE_FROM_FRM,
+                            "Error in creating TABLE_SHARE from %s.frm file",
+                            table_name.c_str());
+      if (r == -1)
+        ndb_log_error("Error in creating TABLE_SHARE from %s.frm file",
+                      table_name.c_str());
+    }
     // Delete frm file
     mysql_file_delete(key_file_frm, index_file, MYF(0));
     return false;
@@ -397,8 +414,7 @@ bool migrate_table_to_dd(THD *thd, Ndb_dd_client *dd_client,
 
   // Check presence of old data types, always check for "temporal upgrade"
   // since it's not possible to upgrade such tables
-  const bool check_temporal_upgrade = true;
-  const int error = check_table_for_old_types(&table, check_temporal_upgrade);
+  const int error = check_table_for_old_types(&table);
   if (error) {
     if (error == HA_ADMIN_NEEDS_DUMP_UPGRADE) {
       thd_ndb->push_warning(ER_TABLE_NEEDS_DUMP_UPGRADE,

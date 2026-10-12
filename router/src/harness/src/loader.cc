@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -31,8 +32,8 @@
 #include <atomic>
 #include <cassert>
 #include <cctype>
-#include <cstdarg>
-#include <cstring>
+#include <cstdarg>  // va_list
+#include <cstring>  // strlen
 #include <exception>
 #include <map>
 #include <mutex>
@@ -60,11 +61,14 @@
 #include "exception.h"
 #include "harness_assert.h"
 #include "my_thread.h"  // my_thread_self_setname
+#include "mysql/harness/dynamic_config.h"
 #include "mysql/harness/dynamic_loader.h"
 #include "mysql/harness/filesystem.h"
 #include "mysql/harness/logging/logging.h"
 #include "mysql/harness/logging/registry.h"
 #include "mysql/harness/plugin.h"
+#include "mysql/harness/plugin_state.h"
+#include "mysql/harness/plugin_state_observer.h"
 #include "mysql/harness/process_state_component.h"
 #include "mysql/harness/sd_notify.h"
 #include "mysql/harness/stdx/monitor.h"
@@ -100,6 +104,44 @@ static std::atomic<size_t> num_of_non_ready_services{0};
 ////////////////////////////////////////////////////////////////////////////////
 
 namespace mysql_harness {
+
+static std::string section_to_string(const ConfigSection *section) {
+  if (section->key.empty()) return section->name;
+
+  return section->name + ":" + section->key;
+}
+
+void on_service_ready(const std::string &name) {
+  PluginState::get_instance()->dispatch_startup(name);
+}
+
+void on_service_ready(PluginFuncEnv *plugin_env) {
+  on_service_ready(section_to_string(get_config_section(plugin_env)));
+}
+
+namespace observers {
+
+class DispatchSystemDaemonObserver : public PluginStateObserver {
+ public:
+  DispatchSystemDaemonObserver(Loader *loader) : loader_{loader} {}
+  void on_plugin_startup(const PluginState *,
+                         const std::string &name) override {
+    log_debug("  ready '%s'", name.c_str());
+    auto &waitable = loader_->waitable_services();
+    auto it = std::find(waitable.begin(), waitable.end(), name);
+
+    if (waitable.end() != it) {
+      if (--num_of_non_ready_services == 0) {
+        log_debug("Ready, signaling notify socket");
+        notify_ready();
+      }
+    }
+  }
+
+  Loader *loader_;
+};
+
+}  // namespace observers
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -312,6 +354,19 @@ void PluginThreads::wait_all_stopped(std::exception_ptr &first_exc) {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
+Loader::Loader(const std::string &program, LoaderConfig &config)
+    : config_(config), program_(program) {
+  auto plugin_state = PluginState::get_instance();
+  plugin_state->reset();
+
+  default_observers_.push_back(
+      std::make_shared<observers::DispatchSystemDaemonObserver>(this));
+
+  for (auto &ptr : default_observers_) {
+    plugin_state->push_back_observer(ptr);
+  }
+}
+
 Loader::~Loader() = default;
 
 Loader::PluginInfo::PluginInfo(const std::string &folder,
@@ -491,11 +546,11 @@ const Plugin *Loader::load(const std::string &plugin_name) {
   }
 
   if (!config_.has_any(plugin_name)) {
-    // if no section for the plugin exists, try to load it anyway with an empty
-    // key-less section
+    // if no section for the plugin exists, try to load it anyway with an
+    // empty key-less section
     //
-    // in case the plugin fails to load with bad_plugin, return bad_section to
-    // be consistent with existing behaviour
+    // in case the plugin fails to load with bad_plugin, return bad_section
+    // to be consistent with existing behaviour
     config_.add(plugin_name).add("library", plugin_name);
 
     try {
@@ -528,7 +583,7 @@ const Plugin *Loader::load(const std::string &plugin_name) {
 
 void Loader::start() {
   // unload plugins on exit
-  std::shared_ptr<void> exit_guard(nullptr, [this](void *) { unload_all(); });
+  Scope_guard exit_guard([this]() { unload_all(); });
 
   // check if there is anything to load; if not we currently treat is as an
   // error, not letting the user to run "idle" router that would close right
@@ -587,8 +642,8 @@ void Loader::load_all() {
 }
 
 void Loader::unload_all() {
-  // this stage has no implementation so far; however, we want to flag that we
-  // reached this stage
+  // this stage has no implementation so far; however, we want to flag that
+  // we reached this stage
   log_debug("Unloading all plugins.");
   // If that ever gets implemented make sure to not attempt unloading
   // built-in plugins
@@ -613,6 +668,16 @@ std::exception_ptr Loader::run() {
       check_config_options_supported();
     } catch (std::exception &) {
       first_eptr = std::current_exception();
+    }
+  }
+
+  if (!first_eptr) {
+    try {
+      expose_config_all(/*initial*/ true);
+    } catch (const std::exception &e) {
+      log_warning(
+          "Failed storing plugins initial configuration in DynamicConfig: %s",
+          e.what());
     }
   }
 
@@ -776,15 +841,12 @@ std::exception_ptr Loader::init_all() {
   return nullptr;
 }
 
-static std::string section_to_string(const ConfigSection *section) {
-  if (section->key.empty()) return section->name;
-
-  return section->name + ":" + section->key;
-}
+void register_plugin(const std::string &name);
 
 // forwards first exception triggered by start() to main_loop()
 void Loader::start_all() {
   std::vector<std::string> startable_sections;
+  auto plugin_state = PluginState::get_instance();
 
   for (const ConfigSection *section : config_.sections()) {
     const auto &plugin = plugins_.at(section->name);
@@ -800,6 +862,7 @@ void Loader::start_all() {
 
       if (declares_readiness) {
         waitable_services_.push_back(section_name);
+        plugin_state->dispatch_register_waitable(section_name);
       }
     }
   }
@@ -851,6 +914,9 @@ void Loader::start_all() {
         call_plugin_function(this_thread_env.get(), eptr, fptr, "start",
                              section->name.c_str(), section->key.c_str());
 
+        PluginState::get_instance()->dispatch_shutdown(
+            (section->name + ":" + section->key).c_str());
+
         // notify the signal-handler's cond-var about the plugin's exit-status
         ProcessStateComponent::get_instance()
             .shutdown_pending()
@@ -863,8 +929,8 @@ void Loader::start_all() {
       // we could combine the thread creation with emplace_back
       // but that sometimes leads to a crash on ASAN build (when the thread
       // limit is reached apparently sometimes half-baked thread object gets
-      // added to the vector and its destructor crashes later on when the vector
-      // gets destroyed)
+      // added to the vector and its destructor crashes later on when the
+      // vector gets destroyed)
       plugin_threads_.push_back(std::move(plugin_thread));
 
       // block until starter thread is started
@@ -905,12 +971,12 @@ std::exception_ptr Loader::main_loop() {
         // external shutdown
         if (pending.reason() == ShutdownPending::Reason::REQUESTED) return true;
 
-        // shutdown due to a fatal error originating from Loader and its callees
-        // (but NOT from plugins)
+        // shutdown due to a fatal error originating from Loader and its
+        // callees (but NOT from plugins)
         if (pending.reason() == ShutdownPending::Reason::FATAL_ERROR) {
           // there is a request to shut down due to a fatal error; generate an
-          // exception with requested message so that it bubbles up and ends up
-          // on the console as an error message
+          // exception with requested message so that it bubbles up and ends
+          // up on the console as an error message
           try {
             throw std::runtime_error(pending.message());
           } catch (const std::exception &) {
@@ -1167,16 +1233,20 @@ void Loader::check_default_config_options_supported() {
   }
 }
 
-void on_service_ready(const std::string &name) {
-  log_debug("  ready '%s'", name.c_str());
-  if (--num_of_non_ready_services == 0) {
-    log_debug("Ready, signaling notify socket");
-    notify_ready();
+void Loader::expose_config_all(const bool initial) {
+  // expose "common" application options
+  if (expose_app_config_clb_) {
+    expose_app_config_clb_(initial, config_.get_default_section());
   }
-}
 
-void on_service_ready(PluginFuncEnv *plugin_env) {
-  return on_service_ready(section_to_string(get_config_section(plugin_env)));
+  // let each plugin expose its options
+  PluginFuncEnv env(&appinfo_, nullptr);
+  for (const ConfigSection *section : config_.sections()) {
+    const auto &plugin = plugins_.at(section->name).plugin();
+    if (plugin->expose_configuration) {
+      plugin->expose_configuration(&env, section->key.c_str(), initial);
+    }
+  }
 }
 
 }  // namespace mysql_harness

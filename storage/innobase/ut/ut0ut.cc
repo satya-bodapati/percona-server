@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1994, 2023, Oracle and/or its affiliates.
+Copyright (c) 1994, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -41,10 +42,6 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #ifdef HAVE_SYS_TIME_H
 #include <sys/time.h>
 #endif
-
-#ifndef UNIV_HOTBACKUP
-#include <mysql_com.h>
-#endif /* !UNIV_HOTBACKUP */
 
 #include "my_compiler.h"
 #include "mysql_com.h"
@@ -304,6 +301,12 @@ const char *ut_strerr(dberr_t num) {
       return ("Operation interrupted");
     case DB_OUT_OF_MEMORY:
       return ("Cannot allocate memory");
+    case DB_VEC_OUT_OF_MEMORY:
+      return ("Vector index memory limit reached");
+    case DB_VEC_WRONG_DIMENSIONS:
+      return ("Vector has the wrong number of dimensions for its index");
+    case DB_VEC_MEMORY_LIMIT:
+      return ("Vector index build reached innodb_hnsw_max_memory");
     case DB_OUT_OF_FILE_SPACE:
     case DB_OUT_OF_DISK_SPACE:
       return ("Out of disk space");
@@ -487,6 +490,8 @@ const char *ut_strerr(dberr_t num) {
       return "Data is not sorted.";
     case DB_BULK_TOO_BIG_RECORD:
       return "Row is too big for LOAD BULK DATA operation.";
+    case DB_BULK_GCOL_INVALID_DATA:
+      return "Data for generated column is invalid";
     case DB_ERROR_UNSET:;
       /* Fall through. */
 

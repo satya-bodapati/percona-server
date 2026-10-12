@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2019, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -74,27 +75,27 @@ class Value_validator : public Base_type, public Default_visitor {
   void set_ctxt(void *ctxt) { m_ctxt = reinterpret_cast<Context *>(ctxt); }
 
  protected:
-  void visit_integer(const int64_t value) override {
+  void visit_integer(const int64_t /*value*/) override {
     assert(Argument_type::k_integer == Base_type::get_type() &&
            "Derived overwrote wrong type");
   }
 
-  void visit_bool(const bool value) override {
+  void visit_bool(const bool /*value*/) override {
     assert(Argument_type::k_bool == Base_type::get_type() &&
            "Derived overwrote wrong type");
   }
 
-  void visit_object(const Argument_object &value) override {
+  void visit_object(const Argument_object & /*value*/) override {
     assert(Argument_type::k_null == Base_type::get_type() &&
            "Derived overwrote wrong type");
   }
 
-  void visit_array(const Argument_array &value) override {
+  void visit_array(const Argument_array & /*value*/) override {
     assert(Argument_type::k_array == Base_type::get_type() &&
            "Derived overwrote wrong type");
   }
 
-  void visit_string(const std::string &value) override {
+  void visit_string(const std::string & /*value*/) override {
     assert(Argument_type::k_string == Base_type::get_type() &&
            "Derived overwrote wrong type");
   }

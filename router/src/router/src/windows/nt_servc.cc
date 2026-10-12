@@ -7,17 +7,19 @@
   Copyright Abandoned 1998 Irena Pancirov - Irnet Snc
   This file is public domain and comes with NO WARRANTY of any kind
 
-  Modifications Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+  Modifications Copyright (c) 2000, 2026, Oracle and/or its affiliates.
   All rights reserved.
 */
 #ifdef _WIN32
 
 #include "nt_servc.h"
 
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>  // strcmp, memset
+
 #include <VersionHelpers.h>  // IsWindowsXPOrGreater
 #include <process.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <windows.h>
 
 static NTService *pService;

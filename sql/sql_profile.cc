@@ -1,15 +1,16 @@
-/* Copyright (c) 2007, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2007, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -178,14 +179,13 @@ static unsigned jemalloc_profile_counter = 0;
   Wrapper over jemalloc mallctl
 
   @param  name      The period-separated name argument specifies a location in a
-  tree-structured namespace
+                    tree-structured namespace
   @param  oldp      To read a value, pass a pointer via oldp to adequate space
-  to contain the value, and a pointer to its length via oldlenp; otherwise pass
-  nullptr and nullptr.
-  @param  oldlenp
-  @param  newp      To write a value, pass a pointer to the value via newp, and
-  its length via newlen; otherwise pass nullptr and 0.
-  @param  newlen
+                    to contain the value; otherwise pass nullptr.
+  @param  oldlenp   A pointer to oldp allocated memory size or nullptr if empty.
+  @param  newp      To write a value, pass a pointer to the value via newp;
+                    otherwise pass nullptr.
+  @param  newlen    Size of the memory allocated to newp or 0.
 
   @return Result of mallctl, mallctl returns 0 on success, or 1 if mallctl is
   not available.
@@ -667,8 +667,6 @@ int PROFILING::print_current(IO_CACHE *log_file) const noexcept {
 
   my_b_printf(log_file, "# ");
 
-  ulonglong row_number = 0;
-
   QUERY_PROFILE *const query = current;
 
   void *entry_iterator;
@@ -677,7 +675,7 @@ int PROFILING::print_current(IO_CACHE *log_file) const noexcept {
   for (entry_iterator = query->entries.new_iterator();
        entry_iterator != nullptr;
        entry_iterator = query->entries.iterator_next(entry_iterator),
-      previous = entry, row_number++) {
+      previous = entry) {
     entry = query->entries.iterator_value(entry_iterator);
 
     /* Skip the first.  We count spans of fence, not fence-posts. */
@@ -728,7 +726,6 @@ int PROFILING::print_current(IO_CACHE *log_file) const noexcept {
 int PROFILING::fill_statistics_info(THD *thd_arg, Table_ref *tables) {
   DBUG_TRACE;
   TABLE *table = tables->table;
-  ulonglong row_number = 0;
 
   QUERY_PROFILE *query;
   /* Go through each query in this thread's stored history... */
@@ -750,7 +747,7 @@ int PROFILING::fill_statistics_info(THD *thd_arg, Table_ref *tables) {
     for (entry_iterator = query->entries.new_iterator();
          entry_iterator != nullptr;
          entry_iterator = query->entries.iterator_next(entry_iterator),
-        previous = entry, row_number++) {
+        previous = entry) {
       entry = query->entries.iterator_value(entry_iterator);
       seq = entry->m_seq;
 

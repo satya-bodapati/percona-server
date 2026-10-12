@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,9 +24,9 @@
 /* Remove all rows from a MyISAM table */
 /* This clears the status information and truncates files */
 
-#include <errno.h>
 #include <fcntl.h>
 #include <sys/types.h>
+#include <cerrno>
 
 #include "my_dbug.h"
 #include "my_inttypes.h"
@@ -71,7 +72,7 @@ int mi_delete_all_rows(MI_INFO *info) {
   return 0;
 
 err : {
-  int save_errno = my_errno();
+  int const save_errno = my_errno();
   (void)_mi_writeinfo(info, WRITEINFO_UPDATE_KEYFILE);
   info->update |= HA_STATE_WRITTEN; /* Buffer changed */
   set_my_errno(save_errno);

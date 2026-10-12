@@ -576,9 +576,7 @@ create table t1 (id int);
 --error ER_STMT_NOT_ALLOWED_IN_SF_OR_TRG
 create trigger t1_ai after insert on t1 for each row reset binary logs and gtids;
 --error ER_STMT_NOT_ALLOWED_IN_SF_OR_TRG
-create trigger t1_ai after insert on t1 for each row reset slave;
---error ER_STMT_NOT_ALLOWED_IN_SF_OR_TRG
-create trigger t1_ai after insert on t1 for each row flush hosts;
+create trigger t1_ai after insert on t1 for each row RESET REPLICA;
 --error ER_STMT_NOT_ALLOWED_IN_SF_OR_TRG
 create trigger t1_ai after insert on t1 for each row flush tables with read lock;
 --error ER_STMT_NOT_ALLOWED_IN_SF_OR_TRG
@@ -603,12 +601,7 @@ create procedure p1() reset binary logs and gtids;
 insert into t1 values (0);
 
 drop procedure p1;
-create procedure p1() reset slave;
---error ER_STMT_NOT_ALLOWED_IN_SF_OR_TRG
-insert into t1 values (0);
-
-drop procedure p1;
-create procedure p1() flush hosts;
+create procedure p1() RESET REPLICA;
 --error ER_STMT_NOT_ALLOWED_IN_SF_OR_TRG
 insert into t1 values (0);
 
@@ -2453,10 +2446,10 @@ DROP TEMPORARY TABLE t2;
 CREATE TABLE t1(a INT);
 
 --error ER_COMMIT_NOT_ALLOWED_IN_SF_OR_TRG
-CREATE TRIGGER t1_au AFTER UPDATE ON t1 FOR EACH ROW START SLAVE;
+CREATE TRIGGER t1_au AFTER UPDATE ON t1 FOR EACH ROW START REPLICA;
 
 --error ER_COMMIT_NOT_ALLOWED_IN_SF_OR_TRG
-CREATE TRIGGER t1_au AFTER UPDATE ON t1 FOR EACH ROW STOP SLAVE;
+CREATE TRIGGER t1_au AFTER UPDATE ON t1 FOR EACH ROW STOP REPLICA;
 
 --error ER_COMMIT_NOT_ALLOWED_IN_SF_OR_TRG
 CREATE TRIGGER t1_au AFTER UPDATE ON t1 FOR EACH ROW
@@ -3895,6 +3888,9 @@ UPDATE t1, t2 SET t1.b= t2.d;
 
 SELECT * FROM t1;
 --echo # Without the patch, x contained old timestamp
+# Depends on the query plan. With "UPDATE t2 STRAIGHT_JOIN t1 ..."
+# above, the old timestamp is seen with the old optimizer too.
+--skip_if_hypergraph  # Depends on query plan.
 SELECT @x;
 
 DROP TABLE t1, t2;
@@ -4075,7 +4071,7 @@ DROP TABLE t1;
 --echo #                Even trigger names are case and accent insensitive. Test case to
 --echo #                verify the same.
 --echo #
-SET NAMES utf8;
+SET NAMES utf8mb3;
 
 CREATE TABLE t1 (f1 INT, f2 INT);
 
@@ -4109,3 +4105,16 @@ DROP TRIGGER очень_очень_очень_очень_очень_очень_�
 
 DROP TABLE t1;
 SET NAMES default;
+
+--echo #
+--echo # Bug#37337527 >= 8.0.27 Error 1048 when updating row with empty_sql mode
+--echo #
+CREATE TABLE t1 (c1 INT, c2 INT NOT NULL);
+CREATE TRIGGER t_t1 BEFORE INSERT ON t1 FOR EACH ROW BEGIN END;
+
+SET SESSION sql_mode = '';
+INSERT INTO t1(c1) VALUES (1);
+SELECT * FROM t1;
+UPDATE t1 SET c2=3 WHERE c1=1;
+DROP TABLE t1;
+SET sql_mode=default;

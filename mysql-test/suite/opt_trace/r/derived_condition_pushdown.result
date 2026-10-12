@@ -167,8 +167,8 @@ trace
                         ],
                         "setup_range_conditions": [
                         ],
-                        "group_index_range": {
-                          "potential_group_range_indexes": [
+                        "group_index_skip_scan": {
+                          "potential_group_skip_scan_indexes": [
                             {
                               "index": "f1",
                               "usable": false,
@@ -334,7 +334,7 @@ trace
                     {
                       "creating_tmp_table": {
                         "tmp_table_info": {
-                          "table": "intermediate_tmp_table",
+                          "table": "window frame buffer",
                           "columns": 3,
                           "row_length": 13,
                           "key_length": 0,
@@ -761,7 +761,7 @@ trace
                                     },
                                     "setup_range_conditions": [
                                     ],
-                                    "group_index_range": {
+                                    "group_index_skip_scan": {
                                       "chosen": false,
                                       "cause": "not_group_by_or_distinct"
                                     },
@@ -1487,8 +1487,8 @@ trace
                           "cost": 0.550671,
                           "chosen": true
                         },
-                        "group_index_range": {
-                          "potential_group_range_indexes": [
+                        "group_index_skip_scan": {
+                          "potential_group_skip_scan_indexes": [
                             {
                               "index": "f1",
                               "covering": true,
@@ -1502,6 +1502,8 @@ trace
                               "cost": 0.85
                             }
                           ]
+                        },
+                        "make_group_skip_scan_path": {
                         },
                         "best_group_range_summary": {
                           "type": "index_group",
@@ -1608,7 +1610,7 @@ trace
                     {
                       "creating_tmp_table": {
                         "tmp_table_info": {
-                          "table": "intermediate_tmp_table",
+                          "table": "window frame buffer",
                           "columns": 2,
                           "row_length": 9,
                           "key_length": 0,
@@ -1705,7 +1707,7 @@ trace
                         },
                         "setup_range_conditions": [
                         ],
-                        "group_index_range": {
+                        "group_index_skip_scan": {
                           "chosen": false,
                           "cause": "not_group_by_or_distinct"
                         },

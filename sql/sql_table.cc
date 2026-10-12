@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -32,15 +33,20 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sstream>
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <ranges>
+#include <regex>
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 
 /* HAVE_PSI_*_INTERFACE */
 #include "my_psi_config.h"  // IWYU pragma: keep
@@ -49,6 +55,7 @@
 #include "mysql/psi/psi_table.h"  // IWYU pragma: keep
 
 /* PSI_TABLE_CALL() with WITH_LOCK_ORDER */
+#include "dd/object_id.h"
 #include "decimal.h"
 #include "field_types.h"  // enum_field_types
 #include "lex_string.h"
@@ -63,8 +70,6 @@
 #include "my_compiler.h"
 #include "my_dbug.h"
 #include "my_io.h"
-#include "my_md5.h"
-#include "my_md5_size.h"
 #include "my_psi_config.h"
 #include "my_sqlcommand.h"
 #include "my_sys.h"
@@ -91,6 +96,7 @@
 #include "pfs_table_provider.h"
 #include "prealloced_array.h"
 #include "scope_guard.h"
+#include "sql-common/json_dom.h"
 #include "sql-common/my_decimal.h"
 #include "sql/auth/auth_acls.h"
 #include "sql/auth/auth_common.h"  // check_fk_parent_table_access
@@ -124,6 +130,7 @@
 #include "sql/derror.h"          // ER_THD
 #include "sql/enum_query_type.h"
 #include "sql/error_handler.h"  // Drop_table_error_handler
+#include "sql/external_table_const.h"
 #include "sql/field.h"
 #include "sql/field_common_properties.h"
 #include "sql/filesort.h"  // Filesort
@@ -144,6 +151,8 @@
 #include "sql/mdl.h"
 #include "sql/mem_root_array.h"
 #include "sql/mysqld.h"  // lower_case_table_names
+#include "sql/mysqld_cs.h"
+#include "sql/parse_tree_nodes.h"
 #include "sql/partition_element.h"
 #include "sql/partition_info.h"                  // partition_info
 #include "sql/partitioning/partition_handler.h"  // Partition_handler
@@ -164,16 +173,19 @@
 #include "sql/sql_db.h"          // get_default_db_collation
 #include "sql/sql_error.h"
 #include "sql/sql_executor.h"  // unique_ptr_destroy_only<RowIterator>
+#include "sql/sql_foreign_key_constraint.h"
 #include "sql/sql_gipk.h"
 #include "sql/sql_handler.h"
 #include "sql/sql_lex.h"
 #include "sql/sql_list.h"
+#include "sql/sql_masking_policy.h"
 #include "sql/sql_parse.h"  // test_if_data_home_dir
 #include "sql/sql_partition.h"
 #include "sql/sql_plist.h"
 #include "sql/sql_plugin.h"
 #include "sql/sql_plugin_ref.h"
 #include "sql/sql_resolver.h"  // setup_order
+#include "sql/sql_rewrite.h"   // Consumer_type
 #include "sql/sql_show.h"
 #include "sql/sql_tablespace.h"  // validate_tablespace_name
 #include "sql/sql_time.h"        // make_truncated_value_warning
@@ -209,6 +221,12 @@ using std::max;
 using std::min;
 using std::string;
 using std::to_string;
+
+/** Count number of times foreign key is created on non standard index keys. */
+std::atomic_ulong deprecated_use_fk_on_non_standard_key_count = 0;
+
+/** Last time fk is created on non standard index key, as usec since epoch. */
+std::atomic_ullong deprecated_use_fk_on_non_standard_key_last_timestamp = 0;
 
 /** Don't pack string keys shorter than this (if PACK_KEYS=1 isn't used). */
 static constexpr const int KEY_DEFAULT_PACK_LENGTH{8};
@@ -440,10 +458,12 @@ static const dd::Index *find_fk_supporting_key(handlerton *hton,
                                                const dd::Table *table_def,
                                                const dd::Foreign_key *fk);
 
-static const dd::Index *find_fk_parent_key(handlerton *hton,
-                                           const dd::Index *supporting_key,
-                                           const dd::Table *parent_table_def,
-                                           const dd::Foreign_key *fk);
+namespace {
+const dd::Index *find_fk_parent_key(THD *thd, handlerton *hton,
+                                    const dd::Index *supporting_key,
+                                    const dd::Table *parent_table_def,
+                                    const dd::Foreign_key *fk);
+}  // namespace
 static int copy_data_between_tables(
     THD *thd, PSI_stage_progress *psi, TABLE *from, TABLE *to,
     List<Create_field> &create, ha_rows *copied, ha_rows *deleted,
@@ -1517,20 +1537,40 @@ bool rm_table_do_discovery_and_lock_fk_tables(THD *thd, Table_ref *tables) {
   return false;
 }
 
-void Foreign_key_parents_invalidator::add(const char *db_name,
-                                          const char *table_name,
-                                          handlerton *hton) {
+void Foreign_key_parents_invalidator::add(
+    const char *db_name, const char *table_name, handlerton *hton,
+    enum_invalidation_type invalidation_type) {
   m_parent_map.insert(typename Parent_map::value_type(
-      typename Parent_map::key_type(db_name, table_name), hton));
+      typename Parent_map::key_type(db_name, table_name),
+      typename Parent_map::mapped_type(hton, invalidation_type)));
+}
+
+void Foreign_key_parents_invalidator::mark_for_reopen_if_added(
+    const char *db_name, const char *table_name) {
+  auto parent_it =
+      m_parent_map.find(typename Parent_map::key_type(db_name, table_name));
+  if (parent_it != m_parent_map.end()) {
+    parent_it->second.second =
+        enum_invalidation_type::INVALIDATE_AND_MARK_FOR_REOPEN;
+  }
 }
 
 void Foreign_key_parents_invalidator::invalidate(THD *thd) {
   for (auto parent_it : m_parent_map) {
-    // Invalidate Table and Table Definition Caches too.
-    mysql_ha_flush_table(thd, parent_it.first.first.c_str(),
-                         parent_it.first.second.c_str());
-    close_all_tables_for_name(thd, parent_it.first.first.c_str(),
-                              parent_it.first.second.c_str(), false);
+    if (parent_it.second.second ==
+        enum_invalidation_type::INVALIDATE_AND_CLOSE_TABLE) {
+      // Invalidate Table and Table Definition Caches too.
+      mysql_ha_flush_table(thd, parent_it.first.first.c_str(),
+                           parent_it.first.second.c_str());
+      close_all_tables_for_name(thd, parent_it.first.first.c_str(),
+                                parent_it.first.second.c_str(), false);
+    } else {
+      assert(parent_it.second.second ==
+             enum_invalidation_type::INVALIDATE_AND_MARK_FOR_REOPEN);
+      tdc_remove_table(thd, TDC_RT_MARK_FOR_REOPEN_AND_INVALIDATE_SHARE,
+                       parent_it.first.first.c_str(),
+                       parent_it.first.second.c_str(), false);
+    }
 
     /*
       TODO: Should revisit the way we do invalidation to avoid
@@ -1700,9 +1740,9 @@ bool mysql_rm_table(THD *thd, Table_ref *tables, bool if_exists,
 
     /* mark for close and remove all cached entries */
     thd->push_internal_handler(&err_handler);
-    error = mysql_rm_table_no_locks(thd, tables, if_exists, drop_temporary,
-                                    false, &not_used, &post_ddl_htons,
-                                    &fk_invalidator, &safe_to_release_mdl);
+    error = mysql_rm_table_no_locks(
+        thd, tables, if_exists, drop_temporary, false, nullptr, false,
+        &not_used, &post_ddl_htons, &fk_invalidator, &safe_to_release_mdl);
     thd->pop_internal_handler();
   }
 
@@ -1764,7 +1804,9 @@ bool mysql_rm_table(THD *thd, Table_ref *tables, bool if_exists,
     write_bin_log(thd, true, thd->query().str, thd->query().length, true);
   }
 
-  my_ok(thd);
+  if (thd_sql_command(thd) != SQLCOM_LOAD) {
+    my_ok(thd);
+  }
   return false;
 }
 
@@ -1879,6 +1921,32 @@ class Drop_tables_ctx {
   bool has_gtid_single_table_group() const {
     return gtid_and_table_groups_state == GTID_SINGLE_TABLE_GROUP;
   }
+
+  bool drop_tmp_tables(THD *thd, bool trans_tables) {
+    const auto table_list =
+        trans_tables ? tmp_trans_tables : tmp_non_trans_tables;
+    for (auto *tr : table_list) {
+      auto *table = tr->table;
+      if (table->s->has_secondary_engine()) {
+        if (secondary_engine_unload_table_inner(
+                thd, table->s->db.str, table->s->path.str,
+                table->s->secondary_engine, false, false)) {
+          return true;
+        }
+      }
+
+      /*
+        Don't check THD::killed flag. We can't rollback deletion of
+        temporary table, so aborting on KILL will make DROP TABLES
+        less atomic.
+        OTOH it is unlikely that we have many temporary tables to drop
+        so being immune to KILL is not that horrible in most cases.
+      */
+      drop_temporary_table(thd, tr);
+    }
+    thd->get_transaction()->mark_dropped_temp_table(Transaction_ctx::STMT);
+    return false;
+  }
 };
 
 /**
@@ -1970,7 +2038,7 @@ class Drop_tables_query_builder {
   }
 
   bool write_bin_log() {
-    if (m_bin_log_is_open) {
+    if (m_bin_log_is_open && thd_sql_command(m_thd) != SQLCOM_LOAD) {
       /* Chop off the last comma */
       m_built_query.chop();
       m_built_query.append(" /* generated by server */");
@@ -2664,10 +2732,18 @@ static bool validate_secondary_engine_option(THD *thd,
   }
 
   // Secondary engine of a table must be set to NULL before it can be redefined.
+  // However, do not panic if same secondary engine is being set again
   if (create_info.secondary_engine.str != nullptr) {
-    my_error(ER_SECONDARY_ENGINE, MYF(0),
-             "Table already has a secondary engine defined");
-    return true;
+    if (my_strcasecmp(system_charset_info, table.s->secondary_engine.str,
+                      create_info.secondary_engine.str) == 0) {
+      push_warning_printf(
+          thd, Sql_condition::SL_WARNING, ER_SECONDARY_ENGINE_PLUGIN,
+          "Table already has the same secondary engine defined.");
+    } else {
+      my_error(ER_SECONDARY_ENGINE, MYF(0),
+               "Table already has a secondary engine defined");
+      return true;
+    }
   }
 
   // Check if this statement sets the primary engine. In this case we have to
@@ -2677,6 +2753,13 @@ static bool validate_secondary_engine_option(THD *thd,
     my_error(ER_SECONDARY_ENGINE, MYF(0),
              "Cannot change the primary engine of a table with a defined "
              "secondary engine");
+    return true;
+  }
+
+  if (table.s->tmp_table != NO_TMP_TABLE) {
+    my_printf_error(ER_SECONDARY_ENGINE,
+                    "Cannot alter temporary table with engine: %s", MYF(0),
+                    table.s->secondary_engine.str);
     return true;
   }
 
@@ -2700,7 +2783,8 @@ static bool validate_secondary_engine_option(THD *thd,
 static bool secondary_engine_load_table(THD *thd, const TABLE &table,
                                         bool *skip_metadata_update) {
   assert(thd->mdl_context.owns_equal_or_stronger_lock(
-      MDL_key::TABLE, table.s->db.str, table.s->table_name.str, MDL_EXCLUSIVE));
+      MDL_key::TABLE, table.s->db.str, table.s->table_name.str,
+      MDL_SHARED_NO_WRITE));
   assert(table.s->has_secondary_engine());
 
   // At least one column must be loaded into the secondary engine.
@@ -2775,9 +2859,37 @@ static bool secondary_engine_unload_table(THD *thd, const char *db_name,
   LEX_CSTRING secondary_engine;
   if (!table_def.options().exists("secondary_engine") ||
       table_def.options().get("secondary_engine", &secondary_engine,
-                              thd->mem_root))
+                              thd->mem_root)) {
     return false;
+  }
 
+  const bool is_partitioned = table_def.partition_type() != dd::Table::PT_NONE;
+  return secondary_engine_unload_table_inner(thd, db_name, table_name,
+                                             secondary_engine, is_partitioned,
+                                             error_if_not_loaded);
+}
+
+bool secondary_engine_unload_materialized_view(THD *thd, const Table_ref *view,
+                                               const dd::View *view_def) {
+  const dd::Properties &table_options = view_def->options();
+  if (table_options.exists("materialization_engine")) {
+    // If a materialization_engine exists for the view, unload it before the
+    // update.
+    LEX_CSTRING value{};
+    table_options.get("materialization_engine", &value, thd->mem_root);
+    if (secondary_engine_unload_table_inner(thd, view->db, view->table_name,
+                                            value, false, false)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool secondary_engine_unload_table_inner(THD *thd, const char *db_name,
+                                         const char *table_name,
+                                         LEX_CSTRING secondary_engine,
+                                         bool is_partitioned,
+                                         bool error_if_not_loaded) {
   // Get handlerton of secondary engine. It may happen that no handlerton is
   // found either if the defined secondary engine is invalid (if so, the table
   // was never loaded either) or if the secondary engine has been uninstalled
@@ -2793,24 +2905,33 @@ static bool secondary_engine_unload_table(THD *thd, const char *db_name,
     }
     return false;
   }
-  handlerton *hton = plugin_data<handlerton *>(plugin);
+  auto *hton = plugin_data<handlerton *>(plugin);
   if (hton == nullptr) {
-    if (error_if_not_loaded)
-      my_error(ER_SECONDARY_ENGINE, MYF(0),
-               "Table is not loaded on a secondary engine");
+    if (error_if_not_loaded) {
+      String err_msg;
+      err_msg.append("Table ");
+      err_msg.append(db_name);
+      err_msg.append(".");
+      err_msg.append(table_name);
+      err_msg.append(" is not loaded in secondary engine.");
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), err_msg.c_ptr());
+    }
     return error_if_not_loaded;
   }
 
   // The defined secondary engine is a valid storage engine. However, if the
   // engine is not a valid secondary engine, no tables have been loaded and
   // there is nothing to be done.
-  if (!(hton->flags & HTON_IS_SECONDARY_ENGINE)) return false;
+  if ((hton->flags & HTON_IS_SECONDARY_ENGINE) == 0U) {
+    return false;
+  }
 
   // Get handler for table in secondary engine.
-  const bool is_partitioned = table_def.partition_type() != dd::Table::PT_NONE;
   unique_ptr_destroy_only<handler> handler(
       get_new_handler(nullptr, is_partitioned, thd->mem_root, hton));
-  if (handler == nullptr) return true;
+  if (handler == nullptr) {
+    return true;
+  }
 
   // Unload table from secondary engine.
   return handler->ha_unload_table(db_name, table_name, error_if_not_loaded) > 0;
@@ -3146,6 +3267,10 @@ static bool drop_base_table(THD *thd, const Drop_tables_ctx &drop_ctx,
   @param  drop_temporary  Only drop temporary tables
   @param  drop_database   This is DROP DATABASE statement. Drop views
                           and handle binary logging in a special way.
+  @param  database_name     Name of the database. nullptr if drop_database is
+  false.
+  @param  should_drop_schema_ddl_log should we go ahead and call
+                                     "ha_log_ddl_drop_schema"?
   @param[out] dropped_non_atomic_flag Indicates whether we have dropped some
                                       tables in SEs which don't support atomic
                                       DDL.
@@ -3180,6 +3305,8 @@ static bool drop_base_table(THD *thd, const Drop_tables_ctx &drop_ctx,
 
 bool mysql_rm_table_no_locks(THD *thd, Table_ref *tables, bool if_exists,
                              bool drop_temporary, bool drop_database,
+                             const char *database_name,
+                             const bool should_drop_schema_ddl_log,
                              bool *dropped_non_atomic_flag,
                              std::set<handlerton *> *post_ddl_htons,
                              Foreign_key_parents_invalidator *fk_invalidator,
@@ -3195,6 +3322,13 @@ bool mysql_rm_table_no_locks(THD *thd, Table_ref *tables, bool if_exists,
   *dropped_non_atomic_flag = false;
 
   if (rm_table_sort_into_groups(thd, &drop_ctx, tables)) return true;
+
+  /*
+    Go ahead only when all tables are from transactional engines.
+  */
+  if (drop_ctx.drop_database && !drop_ctx.has_base_non_atomic_tables() &&
+      should_drop_schema_ddl_log && ha_log_ddl_drop_schema(database_name))
+    return true;
 
   /*
     Figure out in which situation we are regarding GTID and different
@@ -3411,6 +3545,14 @@ bool mysql_rm_table_no_locks(THD *thd, Table_ref *tables, bool if_exists,
                           &safe_to_release_mdl_atomic, &foreach_table_root)) {
         goto err_with_rollback;
       }
+
+      /*
+        If DROP SCHEMA crashes here, recovery should rollback the
+        transaction, and schema should return to its Pre-DROP state.
+      */
+      DBUG_EXECUTE_IF("MAKE_SERVER_ABORT_AFTER_DROPPING_ONE_TABLE",
+                      DBUG_SUICIDE(););
+
       foreach_table_root.ClearForReuse();
     }
 
@@ -3438,6 +3580,10 @@ bool mysql_rm_table_no_locks(THD *thd, Table_ref *tables, bool if_exists,
         - No need to log anything.
       */
       assert(drop_ctx.drop_database);
+
+      if (secondary_engine_unload_materialized_view(thd, table, view)) {
+        goto err_with_rollback;
+      }
 
       if (thd->dd_client()->drop(view) ||
           mark_referencing_views_invalid(thd, table, true, false,
@@ -3522,8 +3668,12 @@ bool mysql_rm_table_no_locks(THD *thd, Table_ref *tables, bool if_exists,
           This is fully atomic multi-table DROP TABLES.
           Commit changes to SEs, data-dictionary and binary log/or
           and mark GTID as executed/update slave info tables atomically.
+          If this is executed inside of the LOAD DATA query context we skip
+          the commit, we do it in the main query inside sql_load.
         */
-        error = (trans_commit_stmt(thd) || trans_commit_implicit(thd));
+        if (thd_sql_command(thd) != SQLCOM_LOAD) {
+          error = (trans_commit_stmt(thd) || trans_commit_implicit(thd));
+        }
       } else {
         /*
           We don't have GTID assigned and this is not fully-atomic DROP TABLES.
@@ -3632,17 +3782,9 @@ bool mysql_rm_table_no_locks(THD *thd, Table_ref *tables, bool if_exists,
     should be binlogged as part of transaction.
   */
   if (drop_ctx.has_tmp_non_trans_tables()) {
-    for (auto *table : drop_ctx.tmp_non_trans_tables) {
-      /*
-        Don't check THD::killed flag. We can't rollback deletion of
-        temporary table, so aborting on KILL will make DROP TABLES
-        less atomic.
-        OTOH it is unlikely that we have many temporary tables to drop
-        so being immune to KILL is not that horrible in most cases.
-      */
-      drop_temporary_table(thd, table);
+    if (drop_ctx.drop_tmp_tables(thd, false)) {
+      return true;
     }
-    thd->get_transaction()->mark_dropped_temp_table(Transaction_ctx::STMT);
   }
 
   if (drop_ctx.has_tmp_non_trans_tables_to_binlog()) {
@@ -3739,17 +3881,9 @@ bool mysql_rm_table_no_locks(THD *thd, Table_ref *tables, bool if_exists,
   }
 
   if (drop_ctx.has_tmp_trans_tables()) {
-    for (auto *table : drop_ctx.tmp_trans_tables) {
-      /*
-        Don't check THD::killed flag. We can't rollback deletion of
-        temporary table, so aborting on KILL will make DROP TABLES
-        less atomic.
-        OTOH it is unlikely that we have many temporary tables to drop
-        so being immune to KILL is not that horrible in most cases.
-      */
-      drop_temporary_table(thd, table);
+    if (drop_ctx.drop_tmp_tables(thd, true)) {
+      return true;
     }
-    thd->get_transaction()->mark_dropped_temp_table(Transaction_ctx::STMT);
   }
 
   if (drop_ctx.has_tmp_trans_tables_to_binlog() ||
@@ -3822,7 +3956,7 @@ bool mysql_rm_table_no_locks(THD *thd, Table_ref *tables, bool if_exists,
     }
   }
 
-  if (!drop_ctx.drop_database) {
+  if (!drop_ctx.drop_database && thd_sql_command(thd) != SQLCOM_LOAD) {
     for (handlerton *hton : *post_ddl_htons) hton->post_ddl(thd);
   }
 
@@ -3983,6 +4117,8 @@ namespace {
 
 struct sort_keys {
   bool operator()(const KEY &a, const KEY &b) const {
+    // std::sort may compare an element to itself:
+    if (&a == &b) return false;
     // Sort UNIQUE before not UNIQUE.
     if ((a.flags ^ b.flags) & HA_NOSAME) return a.flags & HA_NOSAME;
 
@@ -4093,6 +4229,7 @@ bool prepare_pack_create_field(THD *thd, Create_field *sql_field,
       }
       [[fallthrough]];
     case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_VECTOR:
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_TINY_BLOB:
     case MYSQL_TYPE_LONG_BLOB:
@@ -4263,6 +4400,12 @@ const CHARSET_INFO *get_sql_field_charset(const Create_field *sql_field,
     my_charset_bin to something else.
   */
   if (sql_field->is_array || cs == &my_charset_bin) return cs;
+
+  /*
+    Temporal types always use my_charset_numeric.
+    Ensure that it is not changed when altering table charset.
+  */
+  if (is_temporal_real_type(sql_field->sql_type)) return &my_charset_numeric;
 
   /*
     table_charset is set only in ALTER TABLE t1 CONVERT TO CHARACTER SET csname
@@ -4478,6 +4621,16 @@ static bool is_phony_blob(enum_field_types sql_type, uint decimals) {
          (((decimals << FIELDFLAG_DEC_SHIFT) & FIELDFLAG_BLOB) != 0);
 }
 
+/**
+  Helper function which checks if external table has primary key on JSON column
+*/
+static inline bool is_json_pk_on_external_table(
+    const uint32 flags, const keytype keytype,
+    const enum_field_types sql_type) {
+  return (Overlaps(flags, HTON_SUPPORTS_EXTERNAL_SOURCE) &&
+          keytype == KEYTYPE_PRIMARY && sql_type == MYSQL_TYPE_JSON);
+}
+
 static bool prepare_set_field(THD *thd, Create_field *sql_field) {
   DBUG_TRACE;
   assert(sql_field->sql_type == MYSQL_TYPE_SET);
@@ -4507,7 +4660,7 @@ static bool prepare_set_field(THD *thd, Create_field *sql_field) {
     if (sql_field->charset->coll->strstr(sql_field->charset,
                                          sql_field->interval->type_names[i],
                                          sql_field->interval->type_lengths[i],
-                                         comma_buf, comma_length, nullptr, 0)) {
+                                         comma_buf, comma_length, nullptr)) {
       const ErrConvString err(sql_field->interval->type_names[i],
                               sql_field->interval->type_lengths[i],
                               sql_field->charset);
@@ -4643,7 +4796,7 @@ bool prepare_create_field(THD *thd, const char *error_schema_name,
       stored procedure statement.
     */
     sql_field->constant_default =
-        sql_field->constant_default->safe_charset_converter(thd, save_cs);
+        sql_field->constant_default->convert_charset(thd, save_cs);
 
     if (sql_field->constant_default == nullptr) {
       /* Could not convert */
@@ -4673,7 +4826,7 @@ bool prepare_create_field(THD *thd, const char *error_schema_name,
 
   if (!(sql_field->flags & NOT_NULL_FLAG)) create_info->null_bits++;
 
-  if (check_column_name(sql_field->field_name)) {
+  if (check_column_name(to_lex_cstring(sql_field->field_name))) {
     my_error(ER_WRONG_COLUMN_NAME, MYF(0), sql_field->field_name);
     return true;
   }
@@ -4742,12 +4895,11 @@ bool prepare_create_field(THD *thd, const char *error_schema_name,
         // we don't bother checking those here.
         if ((is_field_for_functional_index(dup_field) !=
              is_field_for_functional_index(sql_field))) {
-          std::string error_description;
+          String error_description;
           error_description.append("The column name '");
           error_description.append(sql_field->field_name);
           error_description.append("' is already in use by a hidden column");
-
-          my_error(ER_INTERNAL_ERROR, MYF(0), error_description.c_str());
+          my_error(ER_INTERNAL_ERROR, MYF(0), error_description.c_ptr());
           return true;
         }
 
@@ -4800,6 +4952,7 @@ bool prepare_create_field(THD *thd, const char *error_schema_name,
         sql_field->interval = dup_field->interval;
         sql_field->gcol_info = dup_field->gcol_info;
         sql_field->m_default_val_expr = dup_field->m_default_val_expr;
+        sql_field->m_masking_policy_name = dup_field->m_masking_policy_name;
         sql_field->stored_in_db = dup_field->stored_in_db;
         sql_field->hidden = dup_field->hidden;
         it.remove();  // Remove first (create) definition
@@ -4970,6 +5123,12 @@ static bool prepare_key_column(THD *thd, HA_CREATE_INFO *create_info,
     return true;
   }
 
+  if (sql_field->m_masking_policy_name.length > 0) {
+    my_error(ER_MASKING_POLICY_INCOMPATIBLE_COLUMN_FEATURE, MYF(0),
+             sql_field->field_name, "have an index");
+    return true;
+  }
+
   Functional_index_error_handler functional_index_error_handler(
       sql_field, {key->name.str, key->name.length}, thd);
 
@@ -4991,6 +5150,10 @@ static bool prepare_key_column(THD *thd, HA_CREATE_INFO *create_info,
       errmsg = "Defining a virtual generated column as primary key";
       functional_index_error_handler.force_error_code(
           ER_FUNCTIONAL_INDEX_PRIMARY_KEY);
+    } else if (key->type == KEYTYPE_VECTOR) {
+      errmsg = "Vector index on virtual generated column";
+      functional_index_error_handler.force_error_code(
+          ER_INDEX_MUST_HAVE_COMPATIBLE_COLUMN);
     }
 
     if (errmsg) {
@@ -5007,9 +5170,18 @@ static bool prepare_key_column(THD *thd, HA_CREATE_INFO *create_info,
     key_info->flags |= HA_VIRTUAL_GEN_KEY;
   }
 
-  // JSON columns cannot be used as keys.
-  if (sql_field->sql_type == MYSQL_TYPE_JSON) {
+  // JSON columns cannot be used as keys, except for primary keys on external
+  // tables.
+  if (sql_field->sql_type == MYSQL_TYPE_JSON &&
+      !is_json_pk_on_external_table(file->ht->flags, key->type,
+                                    sql_field->sql_type)) {
     my_error(ER_JSON_USED_AS_KEY, MYF(0), column->get_field_name());
+    return true;
+  }
+
+  if (sql_field->sql_type == MYSQL_TYPE_VECTOR &&
+      ((key_info->flags & HA_VECTOR) == 0)) {
+    my_error(ER_NON_SCALAR_USED_AS_KEY, MYF(0), column->get_field_name());
     return true;
   }
 
@@ -5059,6 +5231,20 @@ static bool prepare_key_column(THD *thd, HA_CREATE_INFO *create_info,
       data prefix, ignoring column->length).
     */
     column_length = is_blob(sql_field->sql_type);
+  } else if (key->type == KEYTYPE_VECTOR) {
+    // VECTOR indexes are only allowed on VECTOR columns.
+    if (sql_field->sql_type != MYSQL_TYPE_VECTOR || sql_field->is_nullable) {
+      my_error(ER_INDEX_MUST_HAVE_COMPATIBLE_COLUMN, MYF(0), "VECTOR",
+               "VECTOR NOT NULL");
+      return true;
+    }
+    // Vector indexes do not support prefixes. Normal key length doesn't apply
+    // for them either.
+    // Ideally, we should use 0 both as key and key part length for such keys,
+    // but, unfortunately, this makes InnoDB unhappy.
+    // So we use dummy value of 1 instead, similarly to how it is done for
+    // FULLTEXT keys over BLOB columns.
+    column_length = 1;
   } else {
     switch (sql_field->sql_type) {
       case MYSQL_TYPE_GEOMETRY:
@@ -5265,6 +5451,7 @@ static bool prepare_key_column(THD *thd, HA_CREATE_INFO *create_info,
     }  // is_blob
     // Catch invalid use of partial keys
     else if (sql_field->sql_type != MYSQL_TYPE_GEOMETRY &&
+             key->type != KEYTYPE_VECTOR &&
              // is the key partial?
              column_length != key_part_length &&
              // is prefix length bigger than field length?
@@ -5301,7 +5488,7 @@ static bool prepare_key_column(THD *thd, HA_CREATE_INFO *create_info,
   }
 
   if (key_part_length > file->max_key_part_length(create_info) &&
-      key->type != KEYTYPE_FULLTEXT) {
+      key->type != KEYTYPE_FULLTEXT && key->type != KEYTYPE_VECTOR) {
     key_part_length = file->max_key_part_length(create_info);
     if (key->type & KEYTYPE_MULTIPLE) {
       /* not a critical problem */
@@ -5322,8 +5509,11 @@ static bool prepare_key_column(THD *thd, HA_CREATE_INFO *create_info,
                key_part_length);
       return true;
     } else {
-      my_error(ER_TOO_LONG_KEY, MYF(0), key_part_length);
-      if (thd->is_error()) return true;
+      if (!is_json_pk_on_external_table(file->ht->flags, key->type,
+                                        sql_field->sql_type)) {
+        my_error(ER_TOO_LONG_KEY, MYF(0), key_part_length);
+        if (thd->is_error()) return true;
+      }
     }
   }
   key_part_info->length = static_cast<uint16>(key_part_length);
@@ -5357,7 +5547,7 @@ static bool prepare_key_column(THD *thd, HA_CREATE_INFO *create_info,
     Check if the key segment is partial, set the key flag
     accordingly. Note that fulltext indexes ignores prefixes.
   */
-  if (key->type != KEYTYPE_FULLTEXT &&
+  if (key->type != KEYTYPE_FULLTEXT && key->type != KEYTYPE_VECTOR &&
       key_part_length != sql_field->key_length()) {
     key_info->flags |= HA_KEY_HAS_PART_KEY_SEG;
     key_part_info->key_part_flag |= HA_PART_KEY_SEG;
@@ -5564,6 +5754,68 @@ static bool fk_key_is_full_prefix_match(Alter_info *alter_info,
   return (match_count == fk_col_count);
 }
 
+namespace {
+/**
+  Check if candidate parent key contains exactly the same columns as the
+  foreign key in same order.
+
+  @param  alter_info      Alter_info object describing parent table.
+  @param  fk              FOREIGN_KEY object describing the foreign key.
+  @param  key             Pointer to KEY representing the parent index.
+
+  @retval True  - Key is proper parent key for the foreign key.
+  @retval False - Key can't be parent key for the foreign key.
+*/
+bool fk_is_key_exact_match_order(Alter_info *alter_info, FOREIGN_KEY *fk,
+                                 const KEY *key) {
+  if (fk->key_parts != key->user_defined_key_parts) return false;
+  uint matched_columns = 0;
+  for (uint col_idx = 0; col_idx < key->user_defined_key_parts; ++col_idx) {
+    // Prefix parts are considered non-matching.
+    if (key->key_part[col_idx].key_part_flag & HA_PART_KEY_SEG) break;
+    const Create_field *col =
+        get_field_by_index(alter_info, key->key_part[col_idx].fieldnr);
+
+    if (my_strcasecmp(system_charset_info, col->field_name,
+                      fk->fk_key_part[col_idx].str) == 0)
+      matched_columns++;
+  }
+  return (matched_columns == fk->key_parts);
+}
+
+/**
+  Report new error code ER_FK_NO_UNIQUE_INDEX_PARENT when session variable
+  restrict_fk_on_non_standard_key is ON and ER_FK_NO_INDEX_PARENT when it
+  if OFF.
+
+  @param  thd             Thread handle.
+  @param  fk_name         Name of the foreign key.
+  @param  table_name      Name of the referenced table name.
+*/
+void report_fk_index_error(THD *thd, const char *fk_name,
+                           const char *table_name) {
+  if (thd->variables.restrict_fk_on_non_standard_key)
+    my_error(ER_FK_NO_UNIQUE_INDEX_PARENT, MYF(0), fk_name, table_name);
+  else
+    my_error(ER_FK_NO_INDEX_PARENT, MYF(0), fk_name, table_name);
+}
+
+/**
+  Raise warning when foreign key is created on non-unique key or partial key,
+  increment the deprecated fk usage count, and last time stamp it occurred.
+
+  @param  thd             Thread handle.
+  @param  key_name        Name of the index key name.
+*/
+void warn_fk_on_non_standard_key(THD *thd, const char *key_name) {
+  deprecated_use_fk_on_non_standard_key_last_timestamp = my_micro_time();
+  deprecated_use_fk_on_non_standard_key_count++;
+  push_warning_printf(
+      thd, Sql_condition::SL_WARNING, ER_WARN_DEPRECATED_NON_STANDARD_KEY,
+      ER_THD(thd, ER_WARN_DEPRECATED_NON_STANDARD_KEY), key_name);
+}
+}  // namespace
+
 /**
   Check if parent key for self-referencing foreign key exists, set
   foreign key's unique constraint name accordingly. Emit error if
@@ -5576,6 +5828,7 @@ static bool fk_key_is_full_prefix_match(Alter_info *alter_info,
         index to maintain previous behavior for engines that require
         the two indexes to be different.
 
+  @param          thd             Thread handle.
   @param          hton            Handlerton for table's storage engine.
   @param          alter_info      Alter_info object describing parent table.
   @param          key_info_buffer Array describing keys in parent table.
@@ -5592,14 +5845,14 @@ static bool fk_key_is_full_prefix_match(Alter_info *alter_info,
   @retval Operation result. False if success.
 */
 static bool prepare_self_ref_fk_parent_key(
-    handlerton *hton, Alter_info *alter_info, const KEY *key_info_buffer,
-    const uint key_count, const KEY *supporting_key,
+    THD *thd, handlerton *hton, Alter_info *alter_info,
+    const KEY *key_info_buffer, const uint key_count, const KEY *supporting_key,
     const dd::Table *old_fk_table, FOREIGN_KEY *fk) {
   auto fk_columns_lambda = [fk](uint i) { return fk->fk_key_part[i].str; };
   for (const KEY *key = key_info_buffer; key < key_info_buffer + key_count;
        key++) {
     // We can't use FULLTEXT or SPATIAL indexes.
-    if (key->flags & (HA_FULLTEXT | HA_SPATIAL)) continue;
+    if (key->flags & (HA_FULLTEXT | HA_SPATIAL | HA_VECTOR)) continue;
 
     if (hton->foreign_keys_flags &
         HTON_FKS_NEED_DIFFERENT_PARENT_AND_SUPPORTING_KEYS) {
@@ -5648,19 +5901,30 @@ static bool prepare_self_ref_fk_parent_key(
           hidden_cols_key = key_info_buffer;
       }
 
-      if (fk_key_is_full_prefix_match(alter_info, fk->key_parts,
-                                      fk_columns_lambda, key,
-                                      hidden_cols_key)) {
-        /*
-          We only store names of PK or UNIQUE keys in UNIQUE_CONSTRAINT_NAME.
-          InnoDB allows non-unique indexes as parent keys for which NULL is
-          stored.
-        */
-        if (key->flags & HA_NOSAME)
+      bool is_standard_fk = (key->flags & HA_NOSAME) &&
+                            fk_is_key_exact_match_order(alter_info, fk, key);
+      if (thd->variables.restrict_fk_on_non_standard_key) {
+        if (is_standard_fk) {
           fk->unique_index_name = key->name;
-        else
-          fk->unique_index_name = nullptr;
-        return false;
+          return false;
+        }
+      } else {
+        if (fk_key_is_full_prefix_match(alter_info, fk->key_parts,
+                                        fk_columns_lambda, key,
+                                        hidden_cols_key)) {
+          if (!is_standard_fk && !thd->slave_thread)
+            warn_fk_on_non_standard_key(thd, key->name);
+          /*
+            We only store names of PK or UNIQUE keys in UNIQUE_CONSTRAINT_NAME.
+            InnoDB allows non-unique indexes as parent keys for which NULL is
+            stored.
+          */
+          if (key->flags & HA_NOSAME)
+            fk->unique_index_name = key->name;
+          else
+            fk->unique_index_name = nullptr;
+          return false;
+        }
       }
     } else {
       /*
@@ -5680,7 +5944,7 @@ static bool prepare_self_ref_fk_parent_key(
   //  No matching parent key!
   if (old_fk_table == nullptr) {
     // This is new foreign key for which parent key is missing.
-    my_error(ER_FK_NO_INDEX_PARENT, MYF(0), fk->name, fk->ref_table.str);
+    report_fk_index_error(thd, fk->name, fk->ref_table.str);
   } else {
     /*
       Old foreign key for which parent key or supporting key must have
@@ -5724,7 +5988,7 @@ static bool prepare_self_ref_fk_parent_key(
       const dd::Index *old_sk =
           find_fk_supporting_key(hton, old_fk_table, *old_fk);
       const dd::Index *old_pk =
-          find_fk_parent_key(hton, old_sk, old_fk_table, *old_fk);
+          find_fk_parent_key(thd, hton, old_sk, old_fk_table, *old_fk);
 
       if (old_sk != nullptr && old_pk != nullptr) {
         if (my_strcasecmp(system_charset_info, supporting_key->name,
@@ -5754,7 +6018,7 @@ static bool prepare_self_ref_fk_parent_key(
       }
     } else {
       const dd::Index *old_pk =
-          find_fk_parent_key(hton, nullptr, old_fk_table, *old_fk);
+          find_fk_parent_key(thd, hton, nullptr, old_fk_table, *old_fk);
       if (old_pk) dropped_key = old_pk->name().c_str();
     }
 
@@ -5791,7 +6055,7 @@ static const KEY *find_fk_supporting_key(handlerton *hton,
   for (const KEY *key = key_info_buffer; key < key_info_buffer + key_count;
        key++) {
     // We can't use FULLTEXT or SPATIAL indexes.
-    if (key->flags & (HA_FULLTEXT | HA_SPATIAL)) continue;
+    if (key->flags & (HA_FULLTEXT | HA_SPATIAL | HA_VECTOR)) continue;
 
     if (key->algorithm == HA_KEY_ALG_HASH) {
       if (hton->foreign_keys_flags & HTON_FKS_WITH_SUPPORTING_HASH_KEYS) {
@@ -6018,6 +6282,47 @@ static const char *generate_fk_name(const char *table_name, handlerton *hton,
   return sql_strdup(name);
 }
 
+namespace {
+/**
+  Check if candidate parent/supporting key contains exactly the same
+  columns as the foreign key in same order.
+
+  @tparam F               Function class which returns foreign key's
+                          referenced or referencing (depending on whether
+                          we check candidate parent or supporting key)
+                          column name by its index.
+  @param  fk_col_count    Number of columns in the foreign key.
+  @param  fk_columns      Object of F type bound to the specific foreign key
+                          for which parent/supporting key check is carried
+                          out.
+  @param  idx             dd::Index object describing candidate parent/
+                          supporting key.
+
+  @sa fk_is_key_exact_match(uint, F, KEY)
+
+  @retval True  - Key is proper parent/supporting key for the foreign key.
+  @retval False - Key can't be parent/supporting key for the foreign key.
+*/
+template <class F>
+bool fk_is_key_exact_match_order(uint fk_col_count, const F &fk_columns,
+                                 const dd::Index *idx) {
+  uint index_element_count = 0;
+  for (const dd::Index_element *idx_el : idx->elements()) {
+    if (!idx_el->is_hidden()) index_element_count++;
+  }
+  if (fk_col_count != index_element_count) return false;
+
+  uint matched_columns = 0;
+  for (const dd::Index_element *idx_el : idx->elements()) {
+    if (idx_el->is_hidden() || idx_el->is_prefix()) continue;
+    if (my_strcasecmp(system_charset_info, idx_el->column().name().c_str(),
+                      fk_columns(matched_columns)) == 0)
+      matched_columns++;
+  }
+  return (matched_columns == fk_col_count);
+}
+}  // namespace
+
 /**
   Check if candidate parent/supporting key contains exactly the same
   columns as the foreign key, possibly, in different order. Also check
@@ -6191,11 +6496,13 @@ static bool fk_key_is_full_prefix_match(uint fk_col_count, const F &fk_columns,
   return (match_count == fk_col_count);
 }
 
+namespace {
 /**
   Find parent key which matches the foreign key. Prefer unique key if possible.
 
   @tparam F                 Function class which returns foreign key's column
                             name by its index.
+  @param  thd               Thread handle.
   @param  hton              Handlerton for tables' storage engine. Used to
                             figure out what kind of parent keys are supported
                             by the storage engine..
@@ -6203,6 +6510,7 @@ static bool fk_key_is_full_prefix_match(uint fk_col_count, const F &fk_columns,
                             supporting keys as candidate parent keys for
                             self referencing FKs.
   @param  parent_table_def  dd::Table object describing the parent table.
+  @param  fk_name           Foreign key name.
   @param  fk_col_count      Number of columns in the foreign key.
   @param  fk_columns        Object of F type bound to the specific foreign key
                             for which parent key check is carried out.
@@ -6211,11 +6519,11 @@ static bool fk_key_is_full_prefix_match(uint fk_col_count, const F &fk_columns,
   @retval nullptr     - if no parent key were found.
 */
 template <class F>
-static const dd::Index *find_fk_parent_key(handlerton *hton,
-                                           const dd::Index *supporting_key,
-                                           const dd::Table *parent_table_def,
-                                           uint fk_col_count,
-                                           const F &fk_columns) {
+const dd::Index *find_fk_parent_key(THD *thd, handlerton *hton,
+                                    const dd::Index *supporting_key,
+                                    const dd::Table *parent_table_def,
+                                    const char *fk_name, uint fk_col_count,
+                                    const F &fk_columns) {
   bool use_hidden = false;
 
   if (hton->foreign_keys_flags & HTON_FKS_WITH_EXTENDED_PARENT_KEYS) {
@@ -6285,10 +6593,20 @@ static const dd::Index *find_fk_parent_key(handlerton *hton,
         So if there is suitable unique parent key we will always find
         it before any non-unique key.
       */
-
-      if (fk_key_is_full_prefix_match(fk_col_count, fk_columns, idx,
-                                      use_hidden))
-        return idx;
+      bool is_standard_fk =
+          (idx->type() == dd::Index::IT_PRIMARY ||
+           idx->type() == dd::Index::IT_UNIQUE) &&
+          fk_is_key_exact_match_order(fk_col_count, fk_columns, idx);
+      if (thd->variables.restrict_fk_on_non_standard_key) {
+        if (is_standard_fk) return idx;
+      } else {
+        if (fk_key_is_full_prefix_match(fk_col_count, fk_columns, idx,
+                                        use_hidden)) {
+          if (!is_standard_fk && !thd->slave_thread)
+            warn_fk_on_non_standard_key(thd, fk_name);
+          return idx;
+        }
+      }
     } else {
       /*
         Default case. Engine only supports unique parent keys which
@@ -6303,6 +6621,7 @@ static const dd::Index *find_fk_parent_key(handlerton *hton,
   }
   return nullptr;
 }
+}  // namespace
 
 /**
   Find supporting key for the foreign key.
@@ -6387,6 +6706,7 @@ static const dd::Index *find_fk_supporting_key(handlerton *hton,
   return best_match_idx;
 }
 
+namespace {
 /*
   Check if parent key for foreign key exists, set foreign key's unique
   constraint name accordingly. Emit error if no parent key found.
@@ -6397,9 +6717,10 @@ static const dd::Index *find_fk_supporting_key(handlerton *hton,
   @note CREATE TABLE and ALTER TABLE code use this function for
         non-self-referencing foreign keys.
 
-  @sa prepare_fk_parent_key(handlerton, dd::Table, dd::Table, dd::Table,
+  @sa prepare_fk_parent_key(thd, handlerton, dd::Table, dd::Table, dd::Table,
                             dd::Foreign_key)
 
+  @param  thd               Thread handle object of connection.
   @param  hton              Handlerton for tables' storage engine.
   @param  parent_table_def  dd::Table object describing parent table.
   @param  fk[in,out]        FOREIGN_KEY object describing the FK, its
@@ -6408,17 +6729,17 @@ static const dd::Index *find_fk_supporting_key(handlerton *hton,
 
   @retval Operation result. False if success.
 */
-static bool prepare_fk_parent_key(handlerton *hton,
-                                  const dd::Table *parent_table_def,
-                                  FOREIGN_KEY *fk) {
+bool prepare_fk_parent_key(THD *thd, handlerton *hton,
+                           const dd::Table *parent_table_def, FOREIGN_KEY *fk) {
   auto fk_columns_lambda = [fk](uint i) { return fk->fk_key_part[i].str; };
 
   /*
     Here, it is safe to pass nullptr as supporting key, since this
     function is not called for self referencing foreign keys.
   */
-  const dd::Index *parent_key = find_fk_parent_key(
-      hton, nullptr, parent_table_def, fk->key_parts, fk_columns_lambda);
+  const dd::Index *parent_key =
+      find_fk_parent_key(thd, hton, nullptr, parent_table_def, fk->name,
+                         fk->key_parts, fk_columns_lambda);
 
   if (parent_key != nullptr) {
     /*
@@ -6433,8 +6754,7 @@ static bool prepare_fk_parent_key(handlerton *hton,
     }
     return false;
   }
-
-  my_error(ER_FK_NO_INDEX_PARENT, MYF(0), fk->name, fk->ref_table.str);
+  report_fk_index_error(thd, fk->name, fk->ref_table.str);
   return true;
 }
 
@@ -6451,18 +6771,21 @@ static bool prepare_fk_parent_key(handlerton *hton,
   @retval non-nullptr - pointer to dd::Index object describing the parent key.
   @retval nullptr     - if no parent key were found.
 */
-static const dd::Index *find_fk_parent_key(handlerton *hton,
-                                           const dd::Index *supporting_key,
-                                           const dd::Table *parent_table_def,
-                                           const dd::Foreign_key *fk) {
+const dd::Index *find_fk_parent_key(THD *thd, handlerton *hton,
+                                    const dd::Index *supporting_key,
+                                    const dd::Table *parent_table_def,
+                                    const dd::Foreign_key *fk) {
   auto fk_columns_lambda = [fk](uint i) {
     return fk->elements()[i]->referenced_column_name().c_str();
   };
-  return find_fk_parent_key(hton, supporting_key, parent_table_def,
-                            fk->elements().size(), fk_columns_lambda);
+  return find_fk_parent_key(thd, hton, supporting_key, parent_table_def,
+                            fk->name().c_str(), fk->elements().size(),
+                            fk_columns_lambda);
 }
+}  // namespace
 
-bool prepare_fk_parent_key(handlerton *hton, const dd::Table *parent_table_def,
+bool prepare_fk_parent_key(THD *thd, handlerton *hton,
+                           const dd::Table *parent_table_def,
                            const dd::Table *old_parent_table_def,
                            const dd::Table *old_child_table_def,
                            bool is_self_referencing_fk, dd::Foreign_key *fk) {
@@ -6473,6 +6796,11 @@ bool prepare_fk_parent_key(handlerton *hton, const dd::Table *parent_table_def,
     key to make sure it is not considered as a candidate parent key,
     unless the SE supports this. This function will be called for self
     referencing foreign keys only during upgrade from 5.7.
+
+    Upgrade from 5.7 to 8.4 is blocked. Probably the following condition is
+    relavent if 5.7 is database is upgraded to older version before 8.4 and
+    then upgraded to 8.4+. There is scope to remove this part of code after
+    further analysis post WL#15924.
   */
   if (is_self_referencing_fk &&
       (hton->foreign_keys_flags &
@@ -6481,7 +6809,7 @@ bool prepare_fk_parent_key(handlerton *hton, const dd::Table *parent_table_def,
   }
 
   const dd::Index *parent_key =
-      find_fk_parent_key(hton, supporting_key, parent_table_def, fk);
+      find_fk_parent_key(thd, hton, supporting_key, parent_table_def, fk);
 
   if (parent_key == nullptr) {
     // No matching parent key in new table definition.
@@ -6490,8 +6818,8 @@ bool prepare_fk_parent_key(handlerton *hton, const dd::Table *parent_table_def,
         No old version of parent table definition. This must be CREATE
         TABLE or RENAME TABLE (or possibly ALTER TABLE RENAME).
       */
-      my_error(ER_FK_NO_INDEX_PARENT, MYF(0), fk->name().c_str(),
-               fk->referenced_table_name().c_str());
+      report_fk_index_error(thd, fk->name().c_str(),
+                            fk->referenced_table_name().c_str());
     } else {
       /*
         This is ALTER TABLE which dropped parent key.
@@ -6526,7 +6854,7 @@ bool prepare_fk_parent_key(handlerton *hton, const dd::Table *parent_table_def,
         engines for tables with foreign keys.
       */
       const dd::Index *old_pk =
-          find_fk_parent_key(hton, nullptr, old_parent_table_def, *old_fk);
+          find_fk_parent_key(thd, hton, nullptr, old_parent_table_def, *old_fk);
       my_error(ER_DROP_INDEX_FK, MYF(0),
                old_pk ? old_pk->name().c_str() : "<unknown key name>");
     }
@@ -6641,6 +6969,16 @@ static bool prepare_foreign_key(THD *thd, HA_CREATE_INFO *create_info,
     my_error(ER_FOREIGN_KEY_WITH_ATOMIC_CREATE_SELECT, MYF(0));
     return true;
   }
+
+  bool is_self_referencing_fk =
+      my_strcasecmp(table_alias_charset, fk_key->ref_db.str, db) == 0 &&
+      my_strcasecmp(table_alias_charset, fk_key->ref_table.str, table_name) ==
+          0;
+
+  if (fk_key->ref_columns.empty() &&
+      fk_key->set_ref_columns_for_implicit_pk(thd, is_self_referencing_fk,
+                                              alter_info->key_list))
+    return true;
 
   // Validate checks (among other things) that index prefixes are
   // not used and that generated columns are not used with
@@ -6830,9 +7168,7 @@ static bool prepare_foreign_key(THD *thd, HA_CREATE_INFO *create_info,
       return true;
     }
 
-    if (my_strcasecmp(table_alias_charset, fk_info->ref_db.str, db) == 0 &&
-        my_strcasecmp(table_alias_charset, fk_info->ref_table.str,
-                      table_name) == 0) {
+    if (is_self_referencing_fk) {
       // FK which references the same table on which it is defined.
       for (uint i = 0; i < fk_info->key_parts; i++) {
         List_iterator_fast<Create_field> field_it(alter_info->create_list);
@@ -6882,7 +7218,7 @@ static bool prepare_foreign_key(THD *thd, HA_CREATE_INFO *create_info,
         fk_info->fk_key_part[i].length = std::strlen(field->field_name);
       }
 
-      if (prepare_self_ref_fk_parent_key(create_info->db_type, alter_info,
+      if (prepare_self_ref_fk_parent_key(thd, create_info->db_type, alter_info,
                                          key_info_buffer, key_count,
                                          supporting_key, nullptr, fk_info))
         return true;
@@ -6983,7 +7319,7 @@ static bool prepare_foreign_key(THD *thd, HA_CREATE_INFO *create_info,
           fk_info->fk_key_part[i].length = (*ref_column)->name().length();
         }
 
-        if (prepare_fk_parent_key(create_info->db_type, parent_table_def,
+        if (prepare_fk_parent_key(thd, create_info->db_type, parent_table_def,
                                   fk_info))
           return true;
       }
@@ -7072,8 +7408,8 @@ static bool prepare_preexisting_self_ref_foreign_key(
     Check that foreign key still has matching parent key and adjust
     DD.UNIQUE_CONSTRAINT_NAME accordingly.
   */
-  if (prepare_self_ref_fk_parent_key(create_info->db_type, alter_info, key_info,
-                                     key_count, supporting_key,
+  if (prepare_self_ref_fk_parent_key(thd, create_info->db_type, alter_info,
+                                     key_info, key_count, supporting_key,
                                      existing_fks_table, fk))
     return true;
 
@@ -7330,7 +7666,7 @@ static bool prepare_key(
     return true;
   }
 
-  if (!key_info->name || check_column_name(key_info->name)) {
+  if (!key_info->name || check_column_name(to_lex_cstring(key_info->name))) {
     my_error(ER_WRONG_NAME_FOR_INDEX, MYF(0), key_info->name);
     return true;
   }
@@ -7356,6 +7692,13 @@ static bool prepare_key(
     return true;
   if (key_info->comment.length > 0) key_info->flags |= HA_USES_COMMENT;
 
+  if (key->type == KEYTYPE_VECTOR) {
+    assert(key->key_create_info.vector_index_type.str != nullptr);
+    key_info->vector_index_type = key->key_create_info.vector_index_type;
+    if (!key->key_create_info.vector_index_params.empty())
+      key_info->vector_index_params = key->key_create_info.vector_index_params;
+  }
+
   key_info->engine_attribute = key->key_create_info.m_engine_attribute;
   if (key_info->engine_attribute.length > 0)
     key_info->flags |= HA_INDEX_USES_ENGINE_ATTRIBUTE;
@@ -7368,6 +7711,26 @@ static bool prepare_key(
 #endif /* NDEBUG */
   switch (static_cast<int>(key->type)) {
     case KEYTYPE_MULTIPLE:
+      break;
+    case KEYTYPE_VECTOR:
+      if (!(file->ha_table_flags() & HA_CAN_VECTOR)) {
+        my_error(ER_TABLE_CANT_HANDLE_INDEX, MYF(0), "vector");
+        return true;
+      }
+      if (key->columns.size() != 1) {
+        my_error(ER_TOO_MANY_KEY_PARTS, MYF(0), 1);
+        return true;
+      }
+      if (!key->key_create_info.is_visible) {
+        my_error(ER_NOT_SUPPORTED_YET, MYF(0), "invisible vector indexes");
+        return true;
+      }
+      if (key->key_create_info.block_size != 0) {
+        my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+                 "KEY_BLOCK_SIZE for vector indexes");
+        return true;
+      }
+      key_info->flags |= HA_VECTOR;
       break;
     case KEYTYPE_FULLTEXT:
       if (!(file->ha_table_flags() & HA_CAN_FULLTEXT)) {
@@ -7396,51 +7759,6 @@ static bool prepare_key(
     case KEYTYPE_UNIQUE:
       key_info->flags |= HA_NOSAME;
       break;
-    case KEYTYPE_CLUSTERING | KEYTYPE_UNIQUE:
-    case KEYTYPE_CLUSTERING | KEYTYPE_MULTIPLE:
-      if (thd->work_part_info) {
-        partition_info *part_info = thd->work_part_info;
-        List_iterator<partition_element> part_it(part_info->partitions);
-        partition_element *part_elem;
-
-        while ((part_elem = part_it++)) {
-          if (part_elem->subpartitions.elements) {
-            List_iterator<partition_element> sub_it(part_elem->subpartitions);
-            partition_element *subpart_elem;
-            while ((subpart_elem = sub_it++)) {
-              if (unlikely(!ha_check_storage_engine_flag(
-                      subpart_elem->engine_type,
-                      HTON_SUPPORTS_CLUSTERED_KEYS))) {
-                my_error(
-                    ER_ILLEGAL_HA_CREATE_OPTION, MYF(0),
-                    ha_resolve_storage_engine_name(subpart_elem->engine_type),
-                    "CLUSTERING");
-                return true;
-              }
-            }
-          } else if (unlikely(!ha_check_storage_engine_flag(
-                         part_elem->engine_type,
-                         HTON_SUPPORTS_CLUSTERED_KEYS))) {
-            my_error(ER_ILLEGAL_HA_CREATE_OPTION, MYF(0),
-                     ha_resolve_storage_engine_name(part_elem->engine_type),
-                     "CLUSTERING");
-            return true;
-          }
-        }
-      } else if (unlikely(!ha_check_storage_engine_flag(
-                     file->ht, HTON_SUPPORTS_CLUSTERED_KEYS))) {
-        my_error(ER_ILLEGAL_HA_CREATE_OPTION, MYF(0),
-                 ha_resolve_storage_engine_name(file->ht), "CLUSTERING");
-        return true;
-      }
-      if (key->type & KEYTYPE_UNIQUE)
-        key_info->flags = HA_NOSAME;
-      else
-        key_info->flags = 0;
-      key_info->flags |= HA_CLUSTERING;
-      break;
-    case KEYTYPE_CLUSTERING:
-      assert(0);
     default:
       assert(false);
       return true;
@@ -7471,6 +7789,9 @@ static bool prepare_key(
   } else if (key_info->flags & HA_FULLTEXT) {
     assert(!key->key_create_info.is_algorithm_explicit);
     key_info->algorithm = HA_KEY_ALG_FULLTEXT;
+  } else if (key_info->flags & HA_VECTOR) {
+    assert(!key->key_create_info.is_algorithm_explicit);
+    key_info->algorithm = HA_KEY_ALG_VECTOR;
   } else {
     if (key->key_create_info.is_algorithm_explicit) {
       if (key->key_create_info.algorithm != HA_KEY_ALG_RTREE) {
@@ -7485,16 +7806,19 @@ static bool prepare_key(
         } else {
           /*
             If explicit algorithm is not supported by SE, replace it with
-            default one. Don't mark key algorithm as explicitly specified
-            in this case.
+            default one. In the case of the external engine an index is not
+            supported, therefore any index algorithm is ignored. Don't mark key
+            algorithm as explicitly specified in those cases.
           */
           key_info->algorithm = file->get_default_index_algorithm();
-
-          push_warning_printf(
-              thd, Sql_condition::SL_NOTE, ER_UNSUPPORTED_INDEX_ALGORITHM,
-              ER_THD(thd, ER_UNSUPPORTED_INDEX_ALGORITHM),
-              ((key->key_create_info.algorithm == HA_KEY_ALG_HASH) ? "HASH"
-                                                                   : "BTREE"));
+          if (!Overlaps(file->ht->flags, HTON_SUPPORTS_EXTERNAL_SOURCE)) {
+            push_warning_printf(
+                thd, Sql_condition::SL_NOTE, ER_UNSUPPORTED_INDEX_ALGORITHM,
+                ER_THD(thd, ER_UNSUPPORTED_INDEX_ALGORITHM),
+                ((key->key_create_info.algorithm == HA_KEY_ALG_HASH)
+                     ? "HASH"
+                     : "BTREE"));
+          }
         }
       }
     } else {
@@ -7659,6 +7983,10 @@ bool Item_field::replace_field_processor(uchar *arg) {
   if (create_field) {
     field = new (targ->thd()->mem_root) Create_field_wrapper(create_field);
     switch (create_field->sql_type) {
+      case MYSQL_TYPE_VECTOR:
+        my_error(ER_INCORRECT_TYPE, MYF(0), create_field->field_name,
+                 "GENERATED COLUMN");
+        return true;
       case MYSQL_TYPE_TINY_BLOB:
       case MYSQL_TYPE_MEDIUM_BLOB:
       case MYSQL_TYPE_LONG_BLOB:
@@ -7925,7 +8253,7 @@ static Create_field *add_functional_index_to_create_list(
 
   // First we need to resolve the expression in the functional index so that we
   // know the correct collation, data type, length etc...
-  const ulong saved_privilege = thd->want_privilege;
+  const Access_bitmask saved_privilege = thd->want_privilege;
   thd->want_privilege = SELECT_ACL;
 
   {
@@ -7936,6 +8264,8 @@ static Create_field *add_functional_index_to_create_list(
 
     const Functional_index_error_handler error_handler(
         {key_spec->name.str, key_spec->name.length}, thd);
+
+    const Prepared_stmt_arena_holder ps_arena_holder(thd);
 
     Item *expr = kp->get_expression();
     if (expr->type() == Item::FIELD_ITEM) {
@@ -7983,6 +8313,12 @@ static Create_field *add_functional_index_to_create_list(
 
   if (is_blob(cr->sql_type)) {
     my_error(ER_FUNCTIONAL_INDEX_ON_LOB, MYF(0));
+    return nullptr;
+  }
+
+  // Don't even bother trying to create a non-conformant table.
+  if (alter_info->create_list.is_empty()) {
+    my_error(ER_TABLE_MUST_HAVE_A_VISIBLE_COLUMN, MYF(0));
     return nullptr;
   }
 
@@ -8048,6 +8384,22 @@ static bool column_exists_in_create_list(const char *column_name,
     }
   }
   return false;
+}
+
+static bool is_candidate_key(const KEY *key) {
+  KEY_PART_INFO *key_part;
+  KEY_PART_INFO *key_part_end = key->key_part + key->user_defined_key_parts;
+
+  if (!(key->flags & HA_NOSAME) || (key->flags & HA_NULL_PART_KEY))
+    return false;
+
+  if (key->flags & HA_VIRTUAL_GEN_KEY) return false;
+
+  for (key_part = key->key_part; key_part < key_part_end; key_part++) {
+    if (key_part->key_part_flag & HA_PART_KEY_SEG) return false;
+  }
+
+  return true;
 }
 
 // Prepares the table and key structures for table creation.
@@ -8149,6 +8501,9 @@ bool mysql_prepare_create_table(
 
   if (create_info->row_type == ROW_TYPE_DYNAMIC)
     create_info->table_options |= HA_OPTION_PACK_RECORD;
+
+  if (create_info->options & HA_LEX_CREATE_EXTERNAL_TABLE)
+    create_info->table_options |= HA_OPTION_CREATE_EXTERNAL_TABLE;
 
   /*
     Prepare fields, which must be done before calling
@@ -8269,6 +8624,7 @@ bool mysql_prepare_create_table(
     switch (sql_field->sql_type) {
       case MYSQL_TYPE_GEOMETRY:
       case MYSQL_TYPE_BLOB:
+      case MYSQL_TYPE_VECTOR:
       case MYSQL_TYPE_MEDIUM_BLOB:
       case MYSQL_TYPE_TINY_BLOB:
       case MYSQL_TYPE_LONG_BLOB:
@@ -8337,6 +8693,7 @@ bool mysql_prepare_create_table(
 
   uint key_number = 0;
   bool primary_key = false;
+  uint vector_key_number = 0;
 
   // First prepare non-foreign keys so that they are ready when
   // we prepare foreign keys.
@@ -8351,6 +8708,15 @@ bool mysql_prepare_create_table(
         return true;
       }
       primary_key = true;
+    }
+
+    if (key->type == KEYTYPE_VECTOR) {
+      if (vector_key_number != 0U) {
+        my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+                 "multiple vector indexes on a single table");
+        return true;
+      }
+      ++vector_key_number;
     }
 
     if (key->type != KEYTYPE_FOREIGN) {
@@ -8370,18 +8736,6 @@ bool mysql_prepare_create_table(
       key_number++;
     }
   }
-  // If the table is created without PK, we must check if this has
-  // been disabled and return error. Limit the effect of sql_require_primary_key
-  // to only those SEs that can participate in replication.
-  if (!primary_key && !thd->is_dd_system_thread() &&
-      !thd->is_initialize_system_thread() &&
-      (file->ha_table_flags() &
-       (HA_BINLOG_ROW_CAPABLE | HA_BINLOG_STMT_CAPABLE)) != 0 &&
-      thd->variables.sql_require_primary_key &&
-      !(create_info->options & HA_LEX_CREATE_TMP_TABLE)) {
-    my_error(ER_TABLE_WITHOUT_PK, MYF(0));
-    return true;
-  }
 
   /*
     At this point all KEY objects are for indexes are fully constructed.
@@ -8394,6 +8748,25 @@ bool mysql_prepare_create_table(
                             *dup_check_key, *key_info_buffer, *key_count,
                             alter_info))
       return true;
+  }
+
+  // If the table is created without PK, we must check if this has
+  // been disabled and return error. Limit the effect of sql_require_primary_key
+  // to only those SEs that can participate in replication.
+  if (!primary_key && !thd->is_dd_system_thread() &&
+      !thd->is_initialize_system_thread() &&
+      thd->lex->get_not_supported_in_primary_reason() !=
+          TEMPORARY_TABLE_CREATION &&
+      (file->ha_table_flags() &
+       (HA_BINLOG_ROW_CAPABLE | HA_BINLOG_STMT_CAPABLE)) != 0 &&
+      thd->variables.sql_require_primary_key &&
+      !(create_info->options & HA_LEX_CREATE_TMP_TABLE)) {
+    // Check if there is a UNIQUE NOT NULL (cf. PKE), as PK fallback
+    if (std::none_of(keys_to_check.begin(), keys_to_check.end(),
+                     is_candidate_key)) {
+      my_error(ER_TABLE_WITHOUT_PK, MYF(0));
+      return true;
+    }
   }
 
   if (!primary_key && check_promoted_index(file, *key_info_buffer, *key_count))
@@ -8409,6 +8782,96 @@ bool mysql_prepare_create_table(
 
   /* Sort keys in optimized order */
   std::sort(*key_info_buffer, *key_info_buffer + *key_count, sort_keys());
+
+  // We allow VECTOR indexes only on tables with BIGINT UNSIGNED PKs.
+  // After sorting, key_info_buffer[0] is the PK or a promoted UNIQUE NOT
+  // NULL key. If neither exists, reject.
+  if (vector_key_number != 0) {
+    if (*key_count == 0 || !((*key_info_buffer)[0].flags & HA_NOSAME) ||
+        ((*key_info_buffer)[0].flags & HA_NULL_PART_KEY)) {
+      my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+               "vector indexes on tables lacking a BIGINT UNSIGNED single "
+               "column primary key");
+      return true;
+    }
+
+    /* No CASCADE referential action on a vector-indexed child table.
+
+    Cascaded DML runs inside the engine, through the row0ins FK cascade
+    nodes, and never reaches the handler hooks that maintain the vector
+    index. ON DELETE CASCADE happens to be harmless - a DELETE writes
+    nothing to the aux table by design, so a cascaded one lands in the
+    same state as an ordinary one. ON UPDATE CASCADE is not: when the
+    cascaded column is part of the child's primary key, the aux row's
+    base_pk still points at the old key and the row silently drops out
+    of ANN results. It cannot return a WRONG row - the label check
+    rejects any row that took over the old key - but it does go missing.
+
+    Refusing both is broader than the defect. Narrowing it to
+    ON UPDATE CASCADE where the foreign key overlaps the primary key
+    would be accurate, and is worth doing once cascades are supported
+    properly. Supporting them means what FTS does in
+    row_ins_foreign_check_on_constraint():
+    a per-foreign-key predicate, a hook in the ON UPDATE CASCADE branch,
+    and - the part that makes it engine work rather than a handler tweak
+    - deferring the aux write onto a queue drained at commit, because
+    the cascade has no access to the sub-transaction our aux writes
+    ride. */
+    bool any_cascading_fk = false;
+    for (size_t i = 0; i < alter_info->key_list.size() && !any_cascading_fk;
+         i++) {
+      const Key_spec *key = alter_info->key_list[i];
+      if (key->type != KEYTYPE_FOREIGN) continue;
+      const Foreign_key_spec *fk = down_cast<const Foreign_key_spec *>(key);
+      if (fk->delete_opt == FK_OPTION_CASCADE ||
+          fk->update_opt == FK_OPTION_CASCADE) {
+        any_cascading_fk = true;
+      }
+    }
+    for (uint i = 0; i < existing_fks_count && !any_cascading_fk; i++) {
+      if (existing_fks[i].delete_opt == FK_OPTION_CASCADE ||
+          existing_fks[i].update_opt == FK_OPTION_CASCADE) {
+        any_cascading_fk = true;
+      }
+    }
+    if (any_cascading_fk) {
+      my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+               "vector indexes on tables with a CASCADE foreign key");
+      return true;
+    }
+
+    const KEY &primary_info = (*key_info_buffer)[0];
+
+    if (primary_info.actual_key_parts > 1) {
+      my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+               "vector indexes on tables lacking a BIGINT UNSIGNED single "
+               "column primary key");
+      return true;
+    }
+
+    for (it.rewind(), field_no = 0; (sql_field = it++); field_no++) {
+      if (field_no >= primary_info.key_part[0].fieldnr) break;
+    }
+    assert(sql_field);
+    if (sql_field->sql_type != MYSQL_TYPE_LONGLONG || !sql_field->is_unsigned) {
+      my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+               "vector indexes on tables lacking a BIGINT UNSIGNED single "
+               "column primary key");
+      return true;
+    }
+
+    if (is_partitioned) {
+      my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+               "vector indexes on partitioned tables");
+      return true;
+    }
+
+    if (create_info->options & HA_LEX_CREATE_TMP_TABLE) {
+      my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+               "vector indexes on temporary tables");
+      return true;
+    }
+  }
 
   /*
     Normal keys are done, now prepare foreign keys.
@@ -8518,6 +8981,20 @@ bool mysql_prepare_create_table(
         return true;
       }
     }
+  }
+
+  // Check that we have at least one visible column.
+  bool has_visible_column = false;
+  it.rewind();
+  while ((sql_field = it++)) {
+    if (sql_field->hidden == dd::Column::enum_hidden_type::HT_VISIBLE) {
+      has_visible_column = true;
+      break;
+    }
+  }
+  if (!has_visible_column) {
+    my_error(ER_TABLE_MUST_HAVE_A_VISIBLE_COLUMN, MYF(0));
+    return true;
   }
 
   /* If fixed row records, we need one bit to check for deleted rows */
@@ -8824,6 +9301,539 @@ static Table_exists_result check_if_table_exists(
   return {false, false};
 }
 
+bool validate_secondary_engine_temporary_table(THD *thd,
+                                               HA_CREATE_INFO *create_info) {
+  /*
+    Secondary engine for temporary tables leads to materialized
+    temporary table creation.
+  */
+  assert(create_info != nullptr && create_info->db_type != nullptr);
+
+  if (is_temp_table(*create_info) &&
+      hton_is_secondary_engine(create_info->db_type)) {
+    if (!secondary_engine_supports_temporary_tables(create_info->db_type)) {
+      my_error(ER_SECONDARY_ENGINE, MYF(0),
+               "Temporary table creation with unsupported secondary engine");
+      return true;
+    } else {
+      LEX *const lex = thd->lex;
+      if (lex->query_block->field_list_is_empty()) {
+        // Temporary table with a secondary engine requires a select query.
+        my_error(ER_SECONDARY_ENGINE, MYF(0),
+                 "Temporary tables without a SELECT query are not supported");
+        return true;
+      }
+      lex->set_execute_only_in_secondary_engine(true, TEMPORARY_TABLE_CREATION);
+      const auto *pname = ha_resolve_storage_engine_name(create_info->db_type);
+      create_info->secondary_engine = {.str = pname, .length = strlen(pname)};
+      lex->create_info->secondary_engine = create_info->secondary_engine;
+    }
+  }
+
+  return false;
+}
+
+/**
+   If any table option for external tables have been specified,
+   return the text for one of them.
+
+   The text is for use in error messages.
+
+   @param  create_info          Create information
+   @param  dialect_options_only Only consider options that map to the dialect
+                                object.
+
+   @return The text for one of the specified table options
+*/
+static std::string find_one_external_table_option(HA_CREATE_INFO *create_info,
+                                                  bool dialect_options_only) {
+  if (create_info->file_format != nullptr) {
+    return "FILE_FORMAT";
+  }
+  if ((create_info->used_fields & HA_CREATE_USED_ALLOW_MISSING_FILES) != 0) {
+    return "ALLOW_MISSING_FILES";
+  }
+  if ((create_info->used_fields & HA_CREATE_USED_VERIFY_KEY_CONSTRAINTS) != 0) {
+    return "VERIFY_KEY_CONSTRAINTS";
+  }
+  if ((create_info->used_fields & HA_CREATE_USED_STRICT_LOAD) != 0) {
+    return "STRICT_LOAD";
+  }
+  if (!dialect_options_only) {
+    if (create_info->external_files != nullptr) {
+      return "FILES";
+    }
+    if ((create_info->used_fields & HA_CREATE_USED_AUTO_REFRESH) != 0) {
+      return "AUTO_REFRESH";
+    }
+    if (create_info->auto_refresh_event_source.length > 0) {
+      return "AUTO_REFRESH_SOURCE";
+    }
+  }
+  return {};
+}
+
+static void add_ternary_option(Json_object *obj, HA_CREATE_INFO *ci,
+                               uint64_t used_flag, uint64_t option_flag,
+                               uint64_t no_option_flag, std::string_view key) {
+  if ((ci->used_fields & used_flag) != 0) {
+    if ((ci->table_options & option_flag) != 0) {
+      Json_boolean bool_value(true);
+      obj->add_clone(key, &bool_value);
+    } else if ((ci->table_options & no_option_flag) != 0) {
+      Json_boolean bool_value(false);
+      obj->add_clone(key, &bool_value);
+    }
+    // Clear the options since they should not be persisted as is
+    ci->table_options &= ~(option_flag | no_option_flag);
+  }
+}
+
+/**
+   Create a JSON object from the FILE_FORMAT clause.
+
+   @param file_format The parse tree object for the FILE_FORMAT clause.
+
+   @param[out] file_format_obj A JSON object to fill with the
+                               specified file format. If the statement
+                               does not contain a FILE_FORMAT clause,
+                               the object will be unchanged.
+*/
+static void create_file_format_object(
+    PT_create_external_file_format *file_format, Json_object &file_format_obj) {
+  if (file_format == nullptr) {
+    return;
+  }
+
+  // General options
+  File_information *file_info = file_format->file_info;
+  if (file_info != nullptr) {
+    if (file_info->filetype_str != nullptr) {
+      // Format name should be lower case
+      const auto max_format_length = 20;
+      char format[max_format_length + 1];
+      assert(strlen(file_info->filetype_str) <= max_format_length);
+      my_stpncpy(format, file_info->filetype_str, max_format_length);
+      my_casedn_str(system_charset_info, format);
+
+      Json_string str_value(format);
+      file_format_obj.add_clone(external_table::kFormatParam, &str_value);
+    }
+
+    if (file_info->compression != nullptr) {
+      Json_string str_value(file_info->compression->ptr());
+      file_format_obj.add_clone(external_table::kCompressionParam, &str_value);
+    }
+
+    if (file_info->cs != nullptr) {
+      Json_string str_value(file_info->cs->csname);
+      file_format_obj.add_clone(external_table::kEncodingParam, &str_value);
+    }
+
+    switch (file_info->with_header) {
+      case enum_with_header::WITHOUT_HEADER: {
+        Json_boolean bool_value(false);
+        file_format_obj.add_clone(external_table::kHasHeaderParam, &bool_value);
+        break;
+      }
+      case enum_with_header::WITH_HEADER: {
+        Json_boolean bool_value(true);
+        file_format_obj.add_clone(external_table::kHasHeaderParam, &bool_value);
+        break;
+      }
+      case enum_with_header::DEFAULT_HEADER:
+        break;
+    }
+  }
+
+  // Field options
+  const Field_separators *field_term = file_format->field_term;
+  if (field_term != nullptr) {
+    // DATE format
+    if (field_term->date_format != nullptr) {
+      Json_string str_value(field_term->date_format->ptr());
+      file_format_obj.add_clone(external_table::kDateFormatParam, &str_value);
+    }
+    // TIME format
+    if (field_term->time_format != nullptr) {
+      Json_string str_value(field_term->time_format->ptr());
+      file_format_obj.add_clone(external_table::kTimeFormatParam, &str_value);
+    }
+    // DATETIME format
+    if (field_term->datetime_format != nullptr) {
+      Json_string str_value(field_term->datetime_format->ptr());
+      file_format_obj.add_clone(external_table::kDatetimeFormatParam,
+                                &str_value);
+    }
+
+    // NULL value
+    if (field_term->null_value != nullptr) {
+      Json_string str_value(field_term->null_value->ptr());
+      file_format_obj.add_clone(external_table::kNullValueParam, &str_value);
+    }
+    // EMPTY value
+    if (field_term->empty_value != nullptr) {
+      Json_string str_value(field_term->empty_value->ptr());
+      file_format_obj.add_clone(external_table::kEmptyValueParam, &str_value);
+    }
+    // TERMINATED BY
+    if (field_term->field_term != nullptr) {
+      Json_string str_value(field_term->field_term->ptr());
+      file_format_obj.add_clone(external_table::kFieldDelimiterParam,
+                                &str_value);
+    }
+    // [OPTIONALLY] ENCLOSED BY
+    if (field_term->enclosed != nullptr) {
+      Json_string str_value(field_term->enclosed->ptr());
+      file_format_obj.add_clone(external_table::kQuotationMarksParam,
+                                &str_value);
+    }
+    // NOT ENCLOSED is not supported
+    // ESCAPED BY
+    if (field_term->escaped != nullptr) {
+      Json_string str_value(field_term->escaped->ptr());
+      file_format_obj.add_clone(external_table::kEscapeCharacterParam,
+                                &str_value);
+    }
+  }
+  // LINES TERMINATED BY
+  const Line_separators *line_term = file_format->line_term;
+  if (line_term != nullptr && line_term->line_term != nullptr) {
+    Json_string str_value(line_term->line_term->ptr());
+    file_format_obj.add_clone(external_table::kRecordDelimiterParam,
+                              &str_value);
+  }
+  // STARTING BY is not supported
+  // IGNORE
+  ulong ignore_lines = file_format->ignore_lines;
+  if (ignore_lines > 0) {
+    Json_uint value(ignore_lines);
+    file_format_obj.add_clone(external_table::kSkipRowsParam, &value);
+  }
+}
+
+template <typename T>
+static void add_ternary_file_option(Json_object *obj, std::string_view key,
+                                    T option) {
+  if (option != Ternary_option::DEFAULT) {
+    Json_boolean bool_value(option == Ternary_option::ON);
+    obj->add_clone(key, &bool_value);
+  }
+}
+
+/**
+   Create a JSON array from the FILES clause.
+
+   @param files The parse tree object for the FILES clause.
+
+   @param[out] files_array A JSON array with the file
+                           specifications. If the statement does not
+                           contain a FILES clause, the array will be
+                           unchanged.
+*/
+static void create_files_array(PT_create_external_files *files,
+                               Json_array &files_array) {
+  if (files == nullptr) {
+    return;
+  }
+
+  for (auto *file : files->external_files->files) {
+    Json_object file_section;
+
+    // Check whether the uri/url contains the entire file spec
+    bool incomplete_uri = file->name != nullptr || file->pattern != nullptr ||
+                          file->prefix != nullptr;
+
+    if (file->uri != nullptr) {
+      Json_string str_value(file->uri->ptr());
+      // URI only supports complete file specs. If not, it must be a PAR.
+      if (incomplete_uri) {
+        file_section.add_clone(external_table::kParParam, &str_value);
+      } else {
+        file_section.add_clone(external_table::kUriParam, &str_value);
+      }
+    }
+
+    if (file->name != nullptr) {
+      Json_string str_value(file->name->ptr());
+      file_section.add_clone(external_table::kNameParam, &str_value);
+    }
+
+    if (file->pattern != nullptr) {
+      Json_string str_value(file->pattern->ptr());
+      file_section.add_clone(external_table::kPatternParam, &str_value);
+    }
+
+    if (file->prefix != nullptr) {
+      Json_string str_value(file->prefix->ptr());
+      file_section.add_clone(external_table::kPrefixParam, &str_value);
+    }
+
+    add_ternary_file_option(&file_section, external_table::kAllowMissingParam,
+                            file->allow_missing_files);
+    add_ternary_file_option(&file_section, external_table::kIsStrictModeParam,
+                            file->strict_load);
+
+    files_array.append_clone(&file_section);
+  }
+
+  return;
+}
+
+/**
+  Convert table options for external tables to settings in ENGINE_ATTRIBUTE
+
+  @param      thd                 Thread object
+  @param      create_info         Create information
+  @param[out] engine_attr_buffer  Buffer to store the ENINGE_ATTRIBUTE content
+
+  @return false on success, true, otherwise
+*/
+static bool convert_to_engine_attribute(THD *thd, HA_CREATE_INFO *create_info,
+                                        String &engine_attr_buffer) {
+  if (create_info->file_format != nullptr ||
+      create_info->external_files != nullptr ||
+      create_info->auto_refresh_event_source.length > 0 ||
+      (create_info->used_fields & HA_CREATE_USED_ALLOW_MISSING_FILES) != 0 ||
+      (create_info->used_fields & HA_CREATE_USED_VERIFY_KEY_CONSTRAINTS) != 0 ||
+      (create_info->used_fields & HA_CREATE_USED_STRICT_LOAD) != 0 ||
+      (create_info->used_fields & HA_CREATE_USED_AUTO_REFRESH) != 0) {
+    // Verify that storage engine supports external tables and engine attributes
+    if ((create_info->db_type->flags & HTON_SUPPORTS_EXTERNAL_SOURCE) == 0 ||
+        (create_info->db_type->flags & HTON_SUPPORTS_ENGINE_ATTRIBUTE) == 0) {
+      my_error(ER_ILLEGAL_HA_CREATE_OPTION, MYF(0),
+               ha_resolve_storage_engine_name(create_info->db_type),
+               find_one_external_table_option(create_info, false).c_str());
+      return true;
+    }
+
+    Json_object *file_format_obj = nullptr;
+
+    // Declared here to avoid that the result of the parsing is deallocated too
+    // early.
+    Json_dom_ptr parsed_engine_attr;
+    Json_object *engine_attr_obj = nullptr;
+    // If there is an existing ENGINE_ATTRIBUTE option, it could either have
+    // been specified in this statement, or if this is ALTER TABLE,
+    // it may be the existing ENGINE_ATTRIBUTE for this table.
+    if (create_info->engine_attribute.length > 0) {
+      // For ALTER TABLE, we want to know if the statement contains a
+      // replacement for ENGINE_ATTRIBUTE or this is the existing one.
+      bool new_engine_attribute =
+          (create_info->used_fields & HA_CREATE_USED_ENGINE_ATTRIBUTE) != 0;
+      parsed_engine_attr = Json_dom::parse(
+          create_info->engine_attribute.str,
+          create_info->engine_attribute.length, [](const char *, size_t) {},
+          JsonDepthErrorHandler);
+      if (parsed_engine_attr == nullptr ||
+          parsed_engine_attr->json_type() != enum_json_type::J_OBJECT) {
+        // This is not a valid ENGINE_ATTRIBUTE object, but we will ignore
+        // this error here.  It will fail later when validated by the engine.
+        // So we will just ignore any SQL options and return.
+        return false;
+      }
+      engine_attr_obj = down_cast<Json_object *>(parsed_engine_attr.get());
+      if (create_info->file_format != nullptr ||
+          (create_info->used_fields & HA_CREATE_USED_ALLOW_MISSING_FILES) !=
+              0 ||
+          (create_info->used_fields & HA_CREATE_USED_VERIFY_KEY_CONSTRAINTS) !=
+              0 ||
+          (create_info->used_fields & HA_CREATE_USED_STRICT_LOAD) != 0) {
+        // Check if engine attribute already contains a dialect object.
+        Json_dom *dialect_dom =
+            engine_attr_obj->get(external_table::kDialectParam);
+        if (dialect_dom != nullptr) {
+          if (!new_engine_attribute) {
+            // This is ALTER_TABLE. We will delete the existing parts,
+            // in order to replace it with a new one.
+            auto *dialect_obj = down_cast<Json_object *>(dialect_dom);
+
+            // We first need to record table options that are specified
+            // as stand-alone table options in SQL, and that are not
+            // redefined here. We do that by pretending they are set in
+            // this statement.
+            Json_wrapper dialect(dialect_dom, true);
+            if ((create_info->used_fields &
+                 HA_CREATE_USED_ALLOW_MISSING_FILES) == 0) {
+              Json_wrapper bool_value =
+                  dialect.lookup(external_table::kAllowMissingParam);
+              if (!bool_value.empty()) {
+                create_info->used_fields |= HA_CREATE_USED_ALLOW_MISSING_FILES;
+                if (bool_value.get_boolean()) {
+                  create_info->table_options |= HA_OPTION_ALLOW_MISSING_FILES;
+                } else {
+                  create_info->table_options |=
+                      HA_OPTION_NO_ALLOW_MISSING_FILES;
+                }
+              }
+            } else {  // Remove the existing setting since there is a new one
+              dialect_obj->remove(external_table::kAllowMissingParam);
+            }
+            if ((create_info->used_fields &
+                 HA_CREATE_USED_VERIFY_KEY_CONSTRAINTS) == 0) {
+              Json_wrapper bool_value =
+                  dialect.lookup(external_table::kConstraintCheckParam);
+              if (!bool_value.empty()) {
+                create_info->used_fields |=
+                    HA_CREATE_USED_VERIFY_KEY_CONSTRAINTS;
+                if (bool_value.get_boolean()) {
+                  create_info->table_options |=
+                      HA_OPTION_VERIFY_KEY_CONSTRAINTS;
+                } else {
+                  create_info->table_options |=
+                      HA_OPTION_NO_VERIFY_KEY_CONSTRAINTS;
+                }
+              }
+            } else {  // Remove the existing setting since there is a new one
+              dialect_obj->remove(external_table::kConstraintCheckParam);
+            }
+
+            if ((create_info->used_fields & HA_CREATE_USED_STRICT_LOAD) == 0) {
+              Json_wrapper bool_value =
+                  dialect.lookup(external_table::kIsStrictModeParam);
+              if (!bool_value.empty()) {
+                create_info->used_fields |= HA_CREATE_USED_STRICT_LOAD;
+                if (bool_value.get_boolean()) {
+                  create_info->table_options |= HA_OPTION_STRICT_LOAD;
+                } else {
+                  create_info->table_options |= HA_OPTION_NO_STRICT_LOAD;
+                }
+              }
+            } else {  // Remove the existing setting since there is a new one
+              dialect_obj->remove(external_table::kIsStrictModeParam);
+            }
+
+            if (create_info->file_format != nullptr ||
+                dialect_obj->cardinality() == 0) {
+              // If there is a FILE_FORMAT clause in the current ALTER
+              // statement, or the existing dialect object is empty, we can
+              // delete the existing one.
+              engine_attr_obj->remove(external_table::kDialectParam);
+            } else {
+              // There is no new FILE_FORMAT clause, use the existing dialect
+              // object.
+              file_format_obj = dialect_obj;
+            }
+          } else {
+            my_error(ER_ENGINE_ATTRIBUTE_CONFLICT, MYF(0), "table option",
+                     find_one_external_table_option(create_info, true).c_str());
+            return true;
+          }
+        }
+      }
+      if (create_info->external_files != nullptr) {
+        // Check if engine attribute already contains a file array.
+        if (engine_attr_obj->get(external_table::kFileParam) != nullptr) {
+          if (!new_engine_attribute) {
+            // This is ALTER_TABLE. We will delete the existing array,
+            // in order to replace it with a new one.
+            engine_attr_obj->remove(external_table::kFileParam);
+          } else {
+            my_error(ER_ENGINE_ATTRIBUTE_CONFLICT, MYF(0), "table option",
+                     "FILES");
+            return true;
+          }
+        }
+      }
+      if ((create_info->used_fields & HA_CREATE_USED_AUTO_REFRESH) != 0) {
+        // Check if engine attribute already contains this entry.
+        if (engine_attr_obj->get("auto_refresh") != nullptr) {
+          if (!new_engine_attribute) {
+            // This is ALTER_TABLE. We will delete the existing entry,
+            // in order to replace it with a new one.
+            engine_attr_obj->remove("auto_refresh");
+          } else {
+            my_error(ER_ENGINE_ATTRIBUTE_CONFLICT, MYF(0), "table option",
+                     "AUTO_REFRESH");
+            return true;
+          }
+        }
+      }
+      if (create_info->auto_refresh_event_source.length > 0) {
+        // Check if engine attribute already contains this entry.
+        if (engine_attr_obj->get("auto_refresh_event_source") != nullptr) {
+          if (!new_engine_attribute) {
+            // This is ALTER_TABLE. We will delete the existing entry,
+            // in order to replace it with a new one.
+            engine_attr_obj->remove("auto_refresh_event_source");
+          } else {
+            my_error(ER_ENGINE_ATTRIBUTE_CONFLICT, MYF(0), "table option",
+                     "AUTO_REFRESH_SOURCE");
+            return true;
+          }
+        }
+      }
+    }
+
+    Json_object dialect_obj;
+    create_file_format_object(create_info->file_format, dialect_obj);
+    if (file_format_obj == nullptr) {
+      file_format_obj = &dialect_obj;
+    }
+    // Add additional options to the file_format object
+    add_ternary_option(
+        file_format_obj, create_info, HA_CREATE_USED_ALLOW_MISSING_FILES,
+        HA_OPTION_ALLOW_MISSING_FILES, HA_OPTION_NO_ALLOW_MISSING_FILES,
+        external_table::kAllowMissingParam);
+    add_ternary_option(
+        file_format_obj, create_info, HA_CREATE_USED_VERIFY_KEY_CONSTRAINTS,
+        HA_OPTION_VERIFY_KEY_CONSTRAINTS, HA_OPTION_NO_VERIFY_KEY_CONSTRAINTS,
+        external_table::kConstraintCheckParam);
+    add_ternary_option(file_format_obj, create_info, HA_CREATE_USED_STRICT_LOAD,
+                       HA_OPTION_STRICT_LOAD, HA_OPTION_NO_STRICT_LOAD,
+                       external_table::kIsStrictModeParam);
+
+    Json_object engine_attr;
+    if (engine_attr_obj == nullptr) {
+      engine_attr_obj = &engine_attr;
+    }
+
+    if (file_format_obj->cardinality() > 0) {
+      engine_attr_obj->add_clone(external_table::kDialectParam,
+                                 file_format_obj);
+    }
+    if (create_info->external_files != nullptr) {
+      Json_array files_array;
+      create_files_array(create_info->external_files, files_array);
+      engine_attr_obj->add_clone(external_table::kFileParam, &files_array);
+    }
+    if ((create_info->used_fields & HA_CREATE_USED_AUTO_REFRESH) != 0) {
+      // TODO: See Bug#38068196
+      // WL#16513 will not support "auto_refresh" key.
+      // For now, we will just ignore this option.
+      // if ((create_info->table_options & HA_OPTION_AUTO_REFRESH) != 0) {
+      //   Json_boolean bool_value(true);
+      //   engine_attr_obj->add_clone("auto_refresh", &bool_value);
+      // } else if ((create_info->table_options & HA_OPTION_NO_AUTO_REFRESH) !=
+      //            0) {
+      //   Json_boolean bool_value(false);
+      //   engine_attr_obj->add_clone("auto_refresh", &bool_value);
+      // }
+      // Clear the options since they should not persisted separately
+      create_info->table_options &=
+          ~(HA_OPTION_AUTO_REFRESH | HA_OPTION_NO_AUTO_REFRESH);
+    }
+    if (create_info->auto_refresh_event_source.length > 0) {
+      Json_string str_value(create_info->auto_refresh_event_source.str,
+                            create_info->auto_refresh_event_source.length);
+      engine_attr_obj->add_clone("auto_refresh_event_source", &str_value);
+    }
+    // Convert JSON object to string
+    Json_wrapper wrapper(engine_attr_obj, true);
+    if (wrapper.to_string(&engine_attr_buffer, true, "create_table_impl()",
+                          JsonDepthErrorHandler)) {
+      return true;
+    }
+    // ENGINE_ATTRIBUTE should use system charset
+    LEX_STRING engine_attribute;
+    thd->convert_string(&engine_attribute, system_charset_info,
+                        engine_attr_buffer.ptr(), engine_attr_buffer.length(),
+                        thd->charset());
+    create_info->engine_attribute = to_lex_cstring(engine_attribute);
+  }
+  return false;
+}
+
 /**
   Create a table
 
@@ -8906,25 +9916,14 @@ static bool create_table_impl(
   DBUG_PRINT("enter", ("db: '%s'  table: '%s'  tmp: %d", db, table_name,
                        internal_tmp_table));
 
-  // Check that we have at least one visible column.
-  bool has_visible_column = false;
-  for (const Create_field &create_field : alter_info->create_list) {
-    if (create_field.hidden == dd::Column::enum_hidden_type::HT_VISIBLE) {
-      has_visible_column = true;
-      break;
-    }
-  }
-  if (!has_visible_column) {
-    my_error(ER_TABLE_MUST_HAVE_A_VISIBLE_COLUMN, MYF(0));
-    return true;
-  }
-
   if (check_engine(thd, db, table_name, create_info, alter_info)) return true;
 
-  // Secondary engine cannot be defined for temporary tables.
-  if (create_info->secondary_engine.str != nullptr &&
-      create_info->options & HA_LEX_CREATE_TMP_TABLE) {
-    my_error(ER_SECONDARY_ENGINE, MYF(0), "Temporary tables not supported");
+  if (is_temp_table(*create_info) &&
+      create_info->secondary_engine.str != nullptr &&
+      !hton_is_secondary_engine(create_info->db_type)) {
+    my_printf_error(ER_SECONDARY_ENGINE,
+                    "Secondary engine %s cannot be set for temporary table.",
+                    MYF(0), create_info->secondary_engine.str);
     return true;
   }
 
@@ -9169,6 +10168,11 @@ static bool create_table_impl(
   if (thd->variables.keep_files_on_create)
     create_info->options |= HA_CREATE_KEEP_FILES;
 
+  StringBuffer<STRING_BUFFER_USUAL_SIZE> engine_attr_buffer;
+  if (convert_to_engine_attribute(thd, create_info, engine_attr_buffer)) {
+    return true;
+  }
+
   /*
     Create table definitions.
     If "no_ha_table" is false also create table in storage engine.
@@ -9264,18 +10268,6 @@ static bool validate_table_encryption(THD *thd, HA_CREATE_INFO *create_info) {
   }
 
   return false;
-}
-
-static void warn_on_deprecated_float_auto_increment(
-    THD *thd, const Create_field &sql_field) {
-  if ((sql_field.flags & AUTO_INCREMENT_FLAG) &&
-      (sql_field.sql_type == MYSQL_TYPE_FLOAT ||
-       sql_field.sql_type == MYSQL_TYPE_DOUBLE)) {
-    push_warning_printf(thd, Sql_condition::SL_WARNING,
-                        ER_WARN_DEPRECATED_FLOAT_AUTO_INCREMENT,
-                        ER_THD(thd, ER_WARN_DEPRECATED_FLOAT_AUTO_INCREMENT),
-                        sql_field.field_name);
-  }
 }
 
 static void warn_on_deprecated_float_precision(THD *thd,
@@ -9418,10 +10410,6 @@ bool mysql_create_table_no_lock(THD *thd, const char *db,
         }
       }
     }
-  }
-
-  for (const Create_field &sql_field : alter_info->create_list) {
-    warn_on_deprecated_float_auto_increment(thd, sql_field);
   }
 
   // Only needed for CREATE TABLE LIKE / SELECT, as warnings for
@@ -9856,8 +10844,9 @@ static bool adjust_fk_child_after_parent_def_change(
                            fk->referenced_table_name().c_str(),
                            child_table_name));
 
-      if (prepare_fk_parent_key(hton, parent_table_def, old_parent_table_def,
-                                old_child_table_def, false, fk))
+      if (prepare_fk_parent_key(thd, hton, parent_table_def,
+                                old_parent_table_def, old_child_table_def,
+                                false, fk))
         return true;
     }
   }
@@ -10441,8 +11430,19 @@ bool mysql_create_table(THD *thd, Table_ref *create_table,
           }
         }
       } else {
-        result = write_bin_log(thd, true, thd->query().str, thd->query().length,
-                               is_trans);
+        const char *query_str = thd->query().str;
+        size_t query_length = thd->query().length;
+
+        // if CREATE EXTERNAL TABLE, then rewrite for binlog
+        if ((create_info->options & HA_LEX_CREATE_EXTERNAL_TABLE) != 0) {
+          mysql_rewrite_query_for_binlog(thd);
+          const String &rewritten_query = thd->rewritten_query();
+          if (rewritten_query.length() > 0) {
+            query_str = rewritten_query.ptr();
+            query_length = rewritten_query.length();
+          }
+        }
+        result = write_bin_log(thd, true, query_str, query_length, is_trans);
       }
     }
   }
@@ -10460,9 +11460,10 @@ bool mysql_create_table(THD *thd, Table_ref *create_table,
         else {
           assert(new_table != nullptr);
           // Check for usage of prefix key index in PARTITION BY KEY() function.
-          dd::warn_on_deprecated_prefix_key_partition(thd, create_table->db,
-                                                      create_table->table_name,
-                                                      new_table, false);
+          if (dd::prefix_key_partition_exists(
+                  create_table->db, create_table->table_name, new_table, false))
+            result = true;
+
           /*
             If we are to support FKs for storage engines which don't support
             atomic DDL we need to decide what to do for such SEs in case of
@@ -10567,16 +11568,18 @@ static bool check_if_keyname_exists(const char *name, KEY *start, KEY *end) {
 
 static const char *make_unique_key_name(const char *field_name, KEY *start,
                                         KEY *end) {
-  char buff[MAX_FIELD_NAME], *buff_end;
+  // NOTE: This may not handle multi-byte characters properly
+  char buff[NAME_CHAR_LEN + 1];
 
   if (!check_if_keyname_exists(field_name, start, end) &&
       my_strcasecmp(system_charset_info, field_name, primary_key_name))
     return field_name;  // Use fieldname
-  buff_end = strmake(buff, field_name, sizeof(buff) - 4);
 
+  // Reserve space for '_', two-digit sequence number and terminating null char:
+  char *buff_end = strmake(buff, field_name, sizeof(buff) - 4);
   /*
-    Only 3 chars + '\0' left, so need to limit to 2 digit
-    This is ok as we can't have more than 100 keys anyway
+    2 digits support up to 100 keys, which is more than the normal MAX_INDEXES
+    limit (64).
   */
   for (uint i = 2; i < 100; i++) {
     *buff_end = '_';
@@ -10950,7 +11953,7 @@ bool mysql_rename_table(THD *thd, handlerton *base, const char *old_db,
       my_error(ER_ERROR_ON_RENAME, MYF(0), from, to, error,
                my_strerror(errbuf, sizeof(errbuf), error));
     }
-    destroy(file);
+    ::destroy_at(file);
     return true;
   }
 
@@ -10995,10 +11998,10 @@ bool mysql_rename_table(THD *thd, handlerton *base, const char *old_db,
     if (!(flags & NO_DD_COMMIT))
       (void)file->ha_rename_table(to_base, from_base, to_table_def,
                                   const_cast<dd::Table *>(from_table_def));
-    destroy(file);
+    ::destroy_at(file);
     return true;
   }
-  destroy(file);
+  ::destroy_at(file);
 
 #ifdef HAVE_PSI_TABLE_INTERFACE
   /*
@@ -11030,7 +12033,8 @@ bool mysql_rename_table(THD *thd, handlerton *base, const char *old_db,
 */
 
 bool mysql_create_like_table(THD *thd, Table_ref *table, Table_ref *src_table,
-                             HA_CREATE_INFO *create_info) {
+                             HA_CREATE_INFO *create_info, uint open_flags,
+                             bool skip_post_ddl_operations) {
   Alter_info local_alter_info(thd->mem_root);
   Alter_table_ctx local_alter_ctx;  // Not used
   bool is_trans = false;
@@ -11055,7 +12059,7 @@ bool mysql_create_like_table(THD *thd, Table_ref *table, Table_ref *src_table,
     CREATE LIKE needs to have the logging format determined if in
     MIXED mode and creating LIKE a TEMP table.
   */
-  if (open_tables(thd, &thd->lex->query_tables, &not_used, 0) ||
+  if (open_tables(thd, &thd->lex->query_tables, &not_used, open_flags) ||
       thd->decide_logging_format(thd->lex->query_tables))
     return true;
   src_table->table->use_all_columns();
@@ -11086,6 +12090,9 @@ bool mysql_create_like_table(THD *thd, Table_ref *table, Table_ref *src_table,
                                 &local_create_info, &local_alter_info,
                                 &local_alter_ctx))
     return true;
+
+  /* reset secondary_load information copied from source table */
+  local_create_info.secondary_load = false;
 
   if (prepare_check_constraints_for_create_like_table(thd, src_table, table,
                                                       &local_alter_info))
@@ -11317,6 +12324,7 @@ bool mysql_create_like_table(THD *thd, Table_ref *table, Table_ref *src_table,
           */
           create_info->used_fields |= HA_CREATE_USED_ENGINE;
           create_info->used_fields |= HA_CREATE_USED_DEFAULT_CHARSET;
+          create_info->used_fields |= HA_CREATE_USED_EXPLICIT_ENGINE;
 
           const bool result [[maybe_unused]] = store_create_info(
               thd, table, &query, create_info, true /* show_database */,
@@ -11394,14 +12402,19 @@ bool mysql_create_like_table(THD *thd, Table_ref *table, Table_ref *src_table,
         goto err;
     }
 
-    if (trans_commit_stmt(thd) || trans_commit_implicit(thd)) goto err;
-
-    if (post_ddl_ht) post_ddl_ht->post_ddl(thd);
+    /* When this function is used in the bulk load statement context we commit
+     and rollback in the main statement in sql_load. Same goes for post_ddl,
+     skip it here. */
+    if (!skip_post_ddl_operations) {
+      if (trans_commit_stmt(thd) || trans_commit_implicit(thd)) goto err;
+      if (post_ddl_ht) post_ddl_ht->post_ddl(thd);
+    }
   }
   return false;
 
 err:
-  if (!(create_info->options & HA_LEX_CREATE_TMP_TABLE)) {
+  if (!(create_info->options & HA_LEX_CREATE_TMP_TABLE) &&
+      !skip_post_ddl_operations) {
     trans_rollback_stmt(thd);
     /*
       Full rollback in case we have THD::transaction_rollback_request
@@ -11673,7 +12686,13 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
   assert(m_alter_info->requested_algorithm ==
          Alter_info::ALTER_TABLE_ALGORITHM_DEFAULT);
 
-  table_list->mdl_request.set_type(MDL_EXCLUSIVE);
+  const bool is_load = m_alter_info->flags & Alter_info::ALTER_SECONDARY_LOAD;
+  // SECONDARY_LOAD operation requires SNW MDL for its initial phase, which is
+  // downgraded to SU lock (by RAPID SE) and eventually upgraded to X lock (by
+  // SQL-layer) before updating Table Definition Cache.
+  const enum_mdl_type mdl_type = is_load ? MDL_SHARED_NO_WRITE : MDL_EXCLUSIVE;
+
+  table_list->mdl_request.set_type(mdl_type);
 
   // Always use isolation level READ_COMMITTED to ensure consistent view of
   // table data during entire load operation. Higher isolation levels provide no
@@ -11685,9 +12704,41 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
   thd->tx_isolation = ISO_READ_COMMITTED;
 
   // Open base table.
+
+  auto before_lock_acquire = std::chrono::steady_clock::now();
   table_list->required_type = dd::enum_table_type::BASE_TABLE;
   if (open_and_lock_tables(thd, table_list, 0, &alter_prelocking_strategy))
     return true;
+  auto after_lock_acquire = std::chrono::steady_clock::now();
+
+  // SECONDARY_LOAD/SECONDARY_UNLOAD requires a secondary engine.
+  if (!table_list->table->s->has_secondary_engine()) {
+    my_error(ER_SECONDARY_ENGINE, MYF(0), "No secondary engine defined");
+    return true;
+  }
+  // SECONDARY_LOAD/SECONDARY_UNLOAD cannot be performed on temporary tables.
+  if (table_list->table->s->tmp_table != NO_TMP_TABLE) {
+    my_error(ER_SECONDARY_ENGINE, MYF(0),
+             "No explicit load/unload possible for temporary tables with "
+             "secondary engine");
+    return true;
+  }
+  if (!is_load && secondary_engine_lock_tables_mode(*thd)) {
+    if (thd->mdl_context.upgrade_shared_lock(table_list->table->mdl_ticket,
+                                             mdl_type,
+                                             thd->variables.lock_wait_timeout))
+      return true;
+  }
+  assert(thd->mdl_context.owns_equal_or_stronger_lock(
+      MDL_key::TABLE, table_list->db, table_list->table_name, mdl_type));
+  MDL_ticket *mdl_ticket = table_list->table->mdl_ticket;
+  auto downgrade_guard = create_scope_guard([mdl_ticket, thd] {
+    // Under LOCK TABLES, downgrade to MDL_SHARED_NO_READ_WRITE after all
+    // operations have completed.
+    if (secondary_engine_lock_tables_mode(*thd)) {
+      mdl_ticket->downgrade_lock(MDL_SHARED_NO_READ_WRITE);
+    }
+  });
 
   // Omit hidden generated columns and columns marked as NOT SECONDARY from
   // read_set. It is the responsibility of the secondary engine handler to load
@@ -11706,47 +12757,23 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
     table_list->table->mark_column_used(*field, MARK_COLUMNS_READ);
   }
 
-  // SECONDARY_LOAD/SECONDARY_UNLOAD requires a secondary engine.
-  if (!table_list->table->s->has_secondary_engine()) {
-    my_error(ER_SECONDARY_ENGINE, MYF(0), "No secondary engine defined");
-    return true;
-  }
-
-  // It should not have been possible to define a temporary table with a
-  // secondary engine.
-  assert(table_list->table->s->tmp_table == NO_TMP_TABLE);
-
   handlerton *hton = table_list->table->s->db_type();
   assert(hton->flags & HTON_SUPPORTS_ATOMIC_DDL &&
          hton->flags & HTON_SUPPORTS_SECONDARY_ENGINE &&
          hton->post_ddl != nullptr);
 
   // cache table name locally for future use
-  const size_t name_len = table_list->db_length +
-                          table_list->table_name_length +
-                          5;  // for backticks, dot `db`.`tab`
+  const size_t name_len =
+      table_list->db_length + table_list->table_name_length + 1;  // for the dot
   // allocated on thread, freed-up on thread exit
   char *full_tab_name = (char *)sql_calloc(name_len + 1);  // for \0 at the end
-  sprintf(full_tab_name, "`%s`.`%s`", table_list->db, table_list->table_name);
+  sprintf(full_tab_name, "%s.%s", table_list->db, table_list->table_name);
   full_tab_name[name_len] = '\0';  // may not needed, since inited with 0
 
   const dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
   dd::Table *table_def = nullptr;
   if (thd->dd_client()->acquire_for_modification(
           table_list->db, table_list->table_name, &table_def))
-    return true;
-
-  MDL_ticket *mdl_ticket = table_list->table->mdl_ticket;
-
-  auto downgrade_guard = create_scope_guard([mdl_ticket, thd] {
-    // Under LOCK TABLES, downgrade to MDL_SHARED_NO_READ_WRITE after all
-    // operations have completed.
-    if (secondary_engine_lock_tables_mode(*thd)) {
-      mdl_ticket->downgrade_lock(MDL_SHARED_NO_READ_WRITE);
-    }
-  });
-  if (thd->mdl_context.upgrade_shared_lock(mdl_ticket, MDL_EXCLUSIVE,
-                                           thd->variables.lock_wait_timeout))
     return true;
 
   // Cleanup that must be done regardless of commit or rollback.
@@ -11772,36 +12799,103 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
 
   // TODO: undo handling of secondary engine operation
 
-  // Load if SECONDARY_LOAD, unload if SECONDARY_UNLOAD
-  const bool is_load = m_alter_info->flags & Alter_info::ALTER_SECONDARY_LOAD;
-
   /* If set, secondary_load value will not be updated, and also no bin log
    * entries will be recorded. */
   bool skip_metadata_update = false;
+
+  /* If set, we don't update the secondary_load flag of the table in DD. Used in
+   * partition unload, where we may unload a few partitions but not the entire
+   * table */
+  bool skip_table_dd_update = false;
+
+  // Partitioned Load/Unload
+  table_list->partition_names = nullptr;
+  std::set<std::string_view> modified_parts;
+  std::stringstream modified_parts_ss;
+  if (table_list->table->part_info != nullptr) {
+    if (m_alter_info->partition_names.elements > 0 &&
+        !(m_alter_info->flags & Alter_info::ALTER_ALL_PARTITION)) {
+      table_list->partition_names = &m_alter_info->partition_names;
+      if (table_def->subpartition_type() ==
+          dd::Table::enum_subpartition_type::ST_NONE) {
+        for (auto pname : *table_list->partition_names) {
+          modified_parts_ss << pname.c_ptr() << " ";
+          modified_parts.emplace(pname.c_ptr());
+        }
+      } else {
+        /* In case of a sub-partitioned table, by requesting to load/unload a
+         * top-level partition, we should also mark as to-be-(un)loaded all of
+         * its subpartitions*/
+        for (auto pname : *table_list->partition_names) {
+          bool part_with_subpart = false;
+          modified_parts_ss << pname.c_ptr() << " ";
+          for (auto &part_obj : *table_def->partitions()) {
+            if (strcmp(part_obj->name().c_str(), pname.c_ptr()) == 0 &&
+                part_obj->parent_partition_id() == dd::INVALID_OBJECT_ID &&
+                !part_obj->subpartitions()->empty()) {
+              for (auto &sub_part_obj : *part_obj->subpartitions()) {
+                modified_parts.emplace(sub_part_obj->name());
+              }
+              part_with_subpart = true;
+              break;
+            }
+          }
+          if (!part_with_subpart) {
+            modified_parts.emplace(pname.c_ptr());
+          }
+        }
+      }
+    }
+  }
+
+  std::chrono::steady_clock::time_point se_operation_start;
+  std::chrono::steady_clock::time_point se_operation_end;
   // Initiate loading into or unloading from secondary engine.
   if (is_load) {
-    DEBUG_SYNC(thd, "before_secondary_engine_load_table");
-    if (DBUG_EVALUATE_IF("sim_secload_fail",
-                         (my_error(ER_SECONDARY_ENGINE, MYF(0),
-                                   "Simulated failure of secondary_load()"),
-                          true),
-                         false) ||
-        secondary_engine_load_table(thd, *table_list->table,
-                                    &skip_metadata_update))
-      return true;
-  } else {
-    if (DBUG_EVALUATE_IF("sim_secunload_fail",
-                         (my_error(ER_SECONDARY_ENGINE, MYF(0),
-                                   "Simulated failure of secondary_unload()"),
-                          true),
-                         false) ||
-        secondary_engine_unload_table(thd, table_list->db,
-                                      table_list->table_name, *table_def, true))
-      return true;
-  }
-  DBUG_PRINT("sec_load_unload", ("secondary engine %s succeeded for table %s",
-                                 (is_load ? "load" : "unload"), full_tab_name));
+    assert(m_alter_info->validation_only
+               ? m_alter_info->validate_num_rows > 0
+               : m_alter_info->validate_num_rows == 0);
 
+    DEBUG_SYNC(thd, "before_secondary_engine_load_table");
+    if (DBUG_EVALUATE_IF("sim_secload_fail", true, false)) {
+      my_error(ER_SECONDARY_ENGINE, MYF(0),
+               "Simulated failure of secondary_load()");
+      return true;
+    }
+    se_operation_start = std::chrono::steady_clock::now();
+    auto retval = secondary_engine_load_table(thd, *table_list->table,
+                                              &skip_metadata_update);
+    se_operation_end = std::chrono::steady_clock::now();
+    if (retval) return true;
+  } else {
+    if (table_list->partition_names != nullptr) {
+      // Find already loaded partitions and skip unsetting the table's
+      // secondary_load flag if not all partitions are unloaded
+      for (auto &part_obj : *table_def->leaf_partitions()) {
+        bool is_part_loaded = false;
+        assert(part_obj->options().exists("secondary_load"));
+        if (part_obj->options().get("secondary_load", &is_part_loaded)) {
+          LogErr(ERROR_LEVEL, ER_SECONDARY_ENGINE_DDL_FAILED, full_tab_name,
+                 "secondary_unload", "getting partition metadata failed");
+          return true;
+        }
+        if (is_part_loaded && !modified_parts.contains(part_obj->name())) {
+          skip_table_dd_update = true;
+          break;
+        }
+      }
+    }
+    if (DBUG_EVALUATE_IF("sim_secunload_fail", true, false)) {
+      my_error(ER_SECONDARY_ENGINE, MYF(0),
+               "Simulated failure of secondary_unload()");
+      return true;
+    }
+    se_operation_start = std::chrono::steady_clock::now();
+    auto retval = secondary_engine_unload_table(
+        thd, table_list->db, table_list->table_name, *table_def, true);
+    se_operation_end = std::chrono::steady_clock::now();
+    if (retval) return true;
+  }
   DBUG_EXECUTE_IF("sim_fail_before_metadata_update", {
     DBUG_PRINT("sec_load_unload", ("Force exit before metadata update"));
     my_error(
@@ -11810,19 +12904,48 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
     return true;
   });
 
+  auto before_metadata_update = std::chrono::steady_clock::now();
   if (skip_metadata_update) {
     DBUG_PRINT(
         "sec_load_unload",
         ("secondary_load flag update is skipped for table %s", full_tab_name));
   } else {
+    // Upgrade to XMDL in order to update DD
+    DEBUG_SYNC(thd, "secload_upgrade_mdl_x");
+    if (thd->mdl_context.upgrade_shared_lock(
+            mdl_ticket, MDL_EXCLUSIVE, thd->variables.lock_wait_timeout)) {
+      return true;
+    }
+
+    // update partitions' secondary load flag
+    for (auto &part_obj : *table_def->leaf_partitions()) {
+      if (table_list->partition_names == nullptr ||
+          modified_parts.contains(part_obj->name())) {
+        if (part_obj->options().set("secondary_load", is_load)) {
+          LogErr(ERROR_LEVEL, ER_SECONDARY_ENGINE_DDL_FAILED, full_tab_name,
+                 (is_load ? "secondary_load" : "secondary_unload"),
+                 "setting partition metadata failed for partitions ",
+                 modified_parts_ss.str().c_str());
+          return true;
+        }
+      }
+    }
+
+    auto update_dd = [&thd, &table_def, skip_table_dd_update, is_load]() {
+      auto update_tbl_secondary_flag =
+          skip_table_dd_update
+              ? false
+              : table_def->options().set("secondary_load", is_load);
+      return update_tbl_secondary_flag || thd->dd_client()->update(table_def);
+    };
+
     // Update the secondary_load flag based on the current operation.
     if (DBUG_EVALUATE_IF("sim_fail_metadata_update",
                          (my_error(ER_SECONDARY_ENGINE, MYF(0),
                                    "Simulated failure during metadata update"),
                           true),
                          false) ||
-        table_def->options().set("secondary_load", is_load) ||
-        thd->dd_client()->update(table_def)) {
+        update_dd()) {
       LogErr(ERROR_LEVEL, ER_SECONDARY_ENGINE_DDL_FAILED, full_tab_name,
              (is_load ? "secondary_load" : "secondary_unload"),
              "metadata update failed");
@@ -11866,8 +12989,14 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
     });
   }
 
+  modified_parts.clear();
+
   // Close primary table.
-  close_all_tables_for_name(thd, table_list->table->s, false, nullptr);
+  if (skip_metadata_update) {
+    close_thread_tables(thd);
+  } else {
+    close_all_tables_for_name(thd, table_list->table->s, false, nullptr);
+  }
   table_list->table = nullptr;
 
   // Commit transaction if no errors.
@@ -11889,37 +13018,36 @@ bool Sql_cmd_secondary_load_unload::mysql_secondary_load_or_unload(
     return true;
   }
 
-  DBUG_PRINT("sec_load_unload",
-             ("commit succeeded for alter table %s secondary_%s", full_tab_name,
-              (is_load ? "load" : "unload")));
+  auto after_commit = std::chrono::steady_clock::now();
+  std::stringstream progress_msg;
+  progress_msg << "Execution of ALTER TABLE " << full_tab_name << " ";
+  if (is_load) {
+    progress_msg << "SECONDARY_LOAD";
+  } else {
+    progress_msg << "SECONDARY_UNLOAD";
+  }
+  progress_msg << " finished. Spent "
+               << std::chrono::duration_cast<std::chrono::milliseconds>(
+                      after_lock_acquire - before_lock_acquire)
+                      .count()
+               << " msec for exclusive lock acquire; "
+               << std::chrono::duration_cast<std::chrono::milliseconds>(
+                      se_operation_end - se_operation_start)
+                      .count()
+               << " msec for secondary engine operation; "
+               << std::chrono::duration_cast<std::chrono::milliseconds>(
+                      after_commit - before_metadata_update)
+                      .count()
+               << " msec for metadata update and commit.";
+  LogErr(SYSTEM_LEVEL, ER_SECONDARY_ENGINE_DDL_TRACK_PROGRESS,
+         progress_msg.str().c_str());
   // Transaction committed successfully, no rollback will be necessary.
-  rollback_guard.commit();
+  rollback_guard.release();
 
   if (cleanup()) return true;
 
   my_ok(thd);
   return false;
-}
-
-/**
-  Check if key is a candidate key, i.e. a unique index with no index
-  fields partial, nullable or virtual generated.
-*/
-
-static bool is_candidate_key(KEY *key) {
-  KEY_PART_INFO *key_part;
-  KEY_PART_INFO *key_part_end = key->key_part + key->user_defined_key_parts;
-
-  if (!(key->flags & HA_NOSAME) || (key->flags & HA_NULL_PART_KEY))
-    return false;
-
-  if (key->flags & HA_VIRTUAL_GEN_KEY) return false;
-
-  for (key_part = key->key_part; key_part < key_part_end; key_part++) {
-    if (key_part->key_part_flag & HA_PART_KEY_SEG) return false;
-  }
-
-  return true;
 }
 
 /**
@@ -12217,6 +13345,9 @@ static bool fill_alter_inplace_info(THD *thd, TABLE *table,
   if (alter_info->flags & Alter_info::ALTER_COLUMN_VISIBILITY)
     ha_alter_info->handler_flags |= Alter_inplace_info::ALTER_COLUMN_VISIBILITY;
 
+  if (alter_info->flags & Alter_info::ALTER_COLUMN_MASKING)
+    ha_alter_info->handler_flags |= Alter_inplace_info::ALTER_COLUMN_MASKING;
+
   /*
     Go through fields in old version of table and detect changes to them.
     We don't want to rely solely on Alter_info flags for this since:
@@ -12229,6 +13360,7 @@ static bool fill_alter_inplace_info(THD *thd, TABLE *table,
        about nature of changes than those provided from parser.
   */
   uint old_field_index_without_vgc = 0;
+  uint old_field_index_vgc = 0;
   for (f_ptr = table->field; (field = *f_ptr); f_ptr++) {
     DBUG_PRINT("inplace", ("Existing field: %s", field->field_name));
 
@@ -12238,13 +13370,15 @@ static bool fill_alter_inplace_info(THD *thd, TABLE *table,
     field->clear_flag(FIELD_IS_DROPPED);
 
     /* Use transformed info to evaluate flags for storage engine. */
-    uint new_field_index = 0;
     uint new_field_index_without_vgc = 0;
+    uint new_field_index_vgc = 0;
     new_field_it.init(alter_info->create_list);
     while ((new_field = new_field_it++)) {
       if (new_field->field == field) break;
-      if (new_field->stored_in_db) new_field_index_without_vgc++;
-      new_field_index++;
+      if (new_field->stored_in_db)
+        new_field_index_without_vgc++;
+      else
+        new_field_index_vgc++;
     }
 
     if (new_field) {
@@ -12372,7 +13506,7 @@ static bool fill_alter_inplace_info(THD *thd, TABLE *table,
           ha_alter_info->handler_flags |=
               Alter_inplace_info::ALTER_STORED_COLUMN_ORDER;
       } else {
-        if (field->field_index() != new_field_index)
+        if (old_field_index_vgc != new_field_index_vgc)
           ha_alter_info->handler_flags |=
               Alter_inplace_info::ALTER_VIRTUAL_COLUMN_ORDER;
       }
@@ -12406,7 +13540,10 @@ static bool fill_alter_inplace_info(THD *thd, TABLE *table,
       field->set_flag(FIELD_IS_DROPPED);
       dropped_or_renamed_cols.push_back(field);
     }
-    if (field->stored_in_db) old_field_index_without_vgc++;
+    if (field->stored_in_db)
+      old_field_index_without_vgc++;
+    else
+      old_field_index_vgc++;
   }
 
   if (alter_info->flags & Alter_info::ALTER_ADD_COLUMN) {
@@ -13827,8 +14964,13 @@ static bool mysql_inplace_alter_table(
     close_all_tables_for_name(thd, table->s, false, nullptr);
     table_list->table = table = nullptr;
     reopen_tables = true;
+
+    DEBUG_SYNC(thd, "alter_before_close_temp_tables");
+
     close_temporary_table(thd, altered_table, true, false);
     rollback_needs_dict_cache_reset = true;
+
+    DEBUG_SYNC(thd, "alter_table_inplace_will_need_reset");
 
     /*
       Replace table definition in the data-dictionary.
@@ -14161,107 +15303,6 @@ static uint blob_length_by_type(enum_field_types type) {
       assert(0);  // we should never go here
       return 0;
   }
-}
-
-/**
-  Convert the old temporal data types to the new temporal
-  type format for ADD/CHANGE COLUMN, ADD INDEXES and ALTER
-  FORCE ALTER operation.
-
-  @param thd                Thread context.
-  @param alter_info         Alter info parameters.
-
-  @retval true              Error.
-  @retval false             Either the old temporal data types
-                            are not present or they are present
-                            and have been successfully upgraded.
-*/
-
-static bool upgrade_old_temporal_types(THD *thd, Alter_info *alter_info) {
-  bool old_temporal_type_present = false;
-
-  DBUG_TRACE;
-
-  if (!((alter_info->flags & Alter_info::ALTER_ADD_COLUMN) ||
-        (alter_info->flags & Alter_info::ALTER_ADD_INDEX) ||
-        (alter_info->flags & Alter_info::ALTER_CHANGE_COLUMN) ||
-        (alter_info->flags & Alter_info::ALTER_RECREATE)))
-    return false;
-
-  /*
-    Upgrade the old temporal types if any, for ADD/CHANGE COLUMN/
-    ADD INDEXES and FORCE ALTER operation.
-  */
-  Create_field *def;
-  List_iterator<Create_field> create_it(alter_info->create_list);
-
-  while ((def = create_it++)) {
-    // Check if any old temporal type is present.
-    if ((def->sql_type == MYSQL_TYPE_TIME) ||
-        (def->sql_type == MYSQL_TYPE_DATETIME) ||
-        (def->sql_type == MYSQL_TYPE_TIMESTAMP)) {
-      old_temporal_type_present = true;
-      break;
-    }
-  }
-
-  // Upgrade is not required since there are no old temporal types.
-  if (!old_temporal_type_present) return false;
-
-  // Upgrade old temporal types to the new temporal types.
-  create_it.rewind();
-  while ((def = create_it++)) {
-    enum enum_field_types sql_type;
-    Item *default_value = def->constant_default;
-    Item *update_value = nullptr;
-
-    /*
-       Set CURRENT_TIMESTAMP as default/update value based on
-       the auto_flags value.
-    */
-
-    if ((def->sql_type == MYSQL_TYPE_DATETIME ||
-         def->sql_type == MYSQL_TYPE_TIMESTAMP) &&
-        (def->auto_flags != Field::NONE)) {
-      Item_func_now_local *now = new (thd->mem_root) Item_func_now_local(0);
-      if (!now) return true;
-
-      if (def->auto_flags & Field::DEFAULT_NOW) default_value = now;
-      if (def->auto_flags & Field::ON_UPDATE_NOW) update_value = now;
-    }
-
-    switch (def->sql_type) {
-      case MYSQL_TYPE_TIME:
-        sql_type = MYSQL_TYPE_TIME2;
-        break;
-      case MYSQL_TYPE_DATETIME:
-        sql_type = MYSQL_TYPE_DATETIME2;
-        break;
-      case MYSQL_TYPE_TIMESTAMP:
-        sql_type = MYSQL_TYPE_TIMESTAMP2;
-        break;
-      default:
-        continue;
-    }
-
-    // Replace the old temporal field with the new temporal field.
-    Create_field *temporal_field = nullptr;
-    if (!(temporal_field = new (thd->mem_root) Create_field()) ||
-        temporal_field->init(thd, def->field_name, sql_type, nullptr, nullptr,
-                             (def->flags & NOT_NULL_FLAG), default_value,
-                             update_value, &def->comment, def->change, nullptr,
-                             nullptr, false, 0, &def->zip_dict_name, nullptr,
-                             nullptr, def->m_srid, def->hidden, def->is_array))
-      return true;
-
-    temporal_field->field = def->field;
-    create_it.replace(temporal_field);
-  }
-
-  // Report a NOTE informing about the upgrade.
-  push_warning(thd, Sql_condition::SL_NOTE, ER_OLD_TEMPORALS_UPGRADED,
-               ER_THD(thd, ER_OLD_TEMPORALS_UPGRADED));
-  return false;
 }
 
 static fk_option to_fk_option(dd::Foreign_key::enum_rule rule) {
@@ -14628,9 +15669,22 @@ static bool check_if_field_used_by_partitioning_func(
 }
 
 /**
-  Sets column default, drops default, renames or alters visibility.
+  Applies changes to column attributes for ALTER TABLE ... RENAME COLUMN or
+  ALTER TABLE ... ALTER COLUMN.
+
+  The following attributes may be changed by this function:
+
+  - The name of the column (RENAME COLUMN).
+  - The DEFAULT value or expression of the column (SET/DROP DEFAULT).
+  - The visibility of the column (SET VISIBLE/INVISIBLE).
+  - The masking policy of the column (SET/DROP MASKING POLICY).
+
+  Updates the supplied Create_field in-place and removes the processed
+  Alter_column entry from alter_list.
+
+  Returns true if an error was reported, otherwise false.
 */
-static bool alter_column_name_default_or_visibility(
+static bool apply_alter_column_attributes(
     const Alter_info *alter_info,
     Prealloced_array<const Alter_column *, 1> *alter_list, Create_field *def) {
   DBUG_TRACE;
@@ -14732,7 +15786,12 @@ static bool alter_column_name_default_or_visibility(
     case Alter_column::Type::SET_COLUMN_INVISIBLE:
       def->hidden = dd::Column::enum_hidden_type::HT_HIDDEN_USER;
       break;
-
+    case Alter_column::Type::SET_MASKING_POLICY:
+      def->m_masking_policy_name = alter->new_masking_policy_name();
+      break;
+    case Alter_column::Type::DROP_MASKING_POLICY:
+      def->m_masking_policy_name = EMPTY_CSTR;
+      break;
     default:
       assert(0);
       my_error(ER_UNKNOWN_ERROR, MYF(0));
@@ -14755,9 +15814,10 @@ static bool alter_column_name_default_or_visibility(
   @param alter_info   Alter_info describing which columns, defaults or
                       indexes are dropped or modified.
 
-  @return
+  @retval
     true     The field is used by generated column/default or functional
              index, error was reported.
+  @retval
     false    Otherwise.
 
 */
@@ -15046,8 +16106,9 @@ bool prepare_fields_and_keys(THD *thd, const dd::Table *src_table, TABLE *table,
         new_create_list.push_back(def);
       }
 
-      if (alter_column_name_default_or_visibility(alter_info, &alter_list, def))
+      if (apply_alter_column_attributes(alter_info, &alter_list, def)) {
         return true;
+      }
     }
   }
   def_it.rewind();
@@ -15058,8 +16119,6 @@ bool prepare_fields_and_keys(THD *thd, const dd::Table *src_table, TABLE *table,
                table->s->table_name.str);
       return true;
     }
-
-    warn_on_deprecated_float_auto_increment(thd, *def);
 
     /*
       If this ALTER TABLE doesn't have an AFTER clause for the modified
@@ -15205,12 +16264,18 @@ bool prepare_fields_and_keys(THD *thd, const dd::Table *src_table, TABLE *table,
       those keys which are a part of foreign key constraints. Currently we
       simply disable this optimization for all keys if there are any foreign
       key constraints in the table.
+    - there are no partitions involved in the operation
   */
 
   const dd::Table *obj =
       (table->s->tmp_table ? table->s->tmp_table_def : src_table);
-  bool skip_secondary = thd->variables.expand_fast_index_creation &&
-                        (obj == nullptr || obj->foreign_key_parents().empty());
+  const bool modifies_partitioning =
+      alter_info->flags &
+      (Alter_info::ALTER_PARTITION | Alter_info::ALTER_REMOVE_PARTITIONING);
+  bool skip_secondary =
+      thd->variables.expand_fast_index_creation &&
+      (obj == nullptr || obj->foreign_key_parents().empty()) &&
+      !modifies_partitioning;
 
   for (uint i = 0; i < table->s->keys; i++, key_info++) {
     const char *key_name = key_info->name;
@@ -15276,8 +16341,8 @@ bool prepare_fields_and_keys(THD *thd, const dd::Table *src_table, TABLE *table,
          */
         if (!Field::type_can_have_key_part(cfield->field->type()) ||
             !Field::type_can_have_key_part(cfield->sql_type) ||
-            /* spatial keys can't have sub-key length */
-            (key_info->flags & HA_SPATIAL) ||
+            /* spatial and vector keys can't have sub-key length */
+            (key_info->flags & (HA_SPATIAL | HA_VECTOR)) ||
             (cfield->field->field_length == key_part_length &&
              key_part->field->type() != MYSQL_TYPE_BLOB) ||
             (cfield->max_display_width_in_codepoints() &&
@@ -15374,6 +16439,11 @@ bool prepare_fields_and_keys(THD *thd, const dd::Table *src_table, TABLE *table,
       if (key_info->flags & HA_USES_COMMENT)
         key_create_info.comment = key_info->comment;
 
+      if (key_info->vector_index_type.str != nullptr)
+        key_create_info.vector_index_type = key_info->vector_index_type;
+      if (!key_info->vector_index_params.empty())
+        key_create_info.vector_index_params = key_info->vector_index_params;
+
       if (key_info->engine_attribute.str != nullptr)
         key_create_info.m_engine_attribute = key_info->engine_attribute;
 
@@ -15403,10 +16473,10 @@ bool prepare_fields_and_keys(THD *thd, const dd::Table *src_table, TABLE *table,
           key_type = KEYTYPE_UNIQUE;
       } else if (key_info->flags & HA_FULLTEXT)
         key_type = KEYTYPE_FULLTEXT;
+      else if (key_info->flags & HA_VECTOR)
+        key_type = KEYTYPE_VECTOR;
       else
         key_type = KEYTYPE_MULTIPLE;
-      if (key_info->flags & HA_CLUSTERING)
-        key_type = static_cast<enum keytype>(key_type | KEYTYPE_CLUSTERING);
 
       /*
         If we have dropped a column associated with an index,
@@ -15512,12 +16582,14 @@ bool prepare_fields_and_keys(THD *thd, const dd::Table *src_table, TABLE *table,
   }
 
   alter_info->create_list.swap(new_create_list);
-  alter_info->key_list.clear();
-  alter_info->key_list.resize(new_key_list.size());
-  std::copy(new_key_list.begin(), new_key_list.end(),
-            alter_info->key_list.begin());
+  if (alter_info->key_list.resize(new_key_list.size())) {
+    return true;
+  }
+  std::ranges::copy(new_key_list, alter_info->key_list.begin());
   alter_info->delayed_key_list.clear();
-  alter_info->delayed_key_list.resize(delayed_key_list.size());
+  if (alter_info->delayed_key_list.resize(delayed_key_list.size())) {
+    return true;
+  }
   std::copy(delayed_key_list.cbegin(), delayed_key_list.cend(),
             alter_info->delayed_key_list.begin());
 
@@ -15580,6 +16652,14 @@ bool mysql_prepare_alter_table(THD *thd, const dd::Table *src_table,
 
   // Prepare data in HA_CREATE_INFO shared by ALTER and upgrade code.
   create_info->init_create_options_from_share(table->s, used_fields);
+
+  if (((create_info->used_fields & HA_CREATE_USED_SECONDARY_ENGINE) != 0U) &&
+      create_info->secondary_engine.str == nullptr) {
+    /* when removing the secondary_engine, remove also part_info from
+     * HA_CREATE_INFO */
+    create_info->part_info = nullptr;
+    create_info->secondary_load = false;
+  }
 
   if (!(used_fields & HA_CREATE_USED_AUTO) && table->found_next_number_field) {
     /* Table has an autoincrement, copy value to new table */
@@ -15993,7 +17073,8 @@ bool adjust_adopted_self_ref_fk_for_simple_rename_table(
           return true;
       }
 
-      if (prepare_fk_parent_key(hton, table_def, nullptr, nullptr, true, fk))
+      if (prepare_fk_parent_key(thd, hton, table_def, nullptr, nullptr, true,
+                                fk))
         return true;
 
       has_adopted_fk = true;
@@ -16633,8 +17714,8 @@ static bool handle_drop_functional_index(THD *thd, Alter_info *alter_info,
   This function will check if we are renaming a functional index. In that case,
   the function will add a "change column" operation to the create list that
   renames any affected hidden generated column(s). The reason is that the hidden
-  generated column name is generated by MD5(key name + key part number), so a
-  change in the index name will change the name of the column.
+  generated column name is generated by make_functional_index_column_name(), so
+  a change in the index name will change the name of the column.
 
   @param thd thread handler
   @param alter_info the changes to be carried out.
@@ -17383,6 +18464,29 @@ bool mysql_alter_table(THD *thd, const char *new_db, const char *new_name,
     return true;
   }
 
+  if ((alter_info->flags & Alter_info::ALTER_DROP_PARTITION) != 0U) {
+    auto mdl_type = mdl_ticket->get_type();
+    auto downgrade_guard = create_scope_guard(
+        [mdl_ticket, mdl_type] { mdl_ticket->downgrade_lock(mdl_type); });
+
+    if (thd->mdl_context.upgrade_shared_lock(mdl_ticket, MDL_EXCLUSIVE,
+                                             thd->variables.lock_wait_timeout))
+      return true;
+
+    const dd::Table *table_def = nullptr;
+    if (thd->dd_client()->acquire(table_list->db, table_list->table_name,
+                                  &table_def))
+      return true;
+
+    const auto old_partition_names = std::exchange(
+        table_list->partition_names, &alter_info->partition_names);
+    auto unload_res = secondary_engine_unload_table(
+        thd, table_list->db, table_list->table_name, *table_def, false);
+    table_list->partition_names = old_partition_names;
+
+    if (unload_res) return true;
+  }
+
   /*
     Store all columns that are going to be dropped, since we need this list
     when removing column statistics later. The reason we need to store it here,
@@ -17512,20 +18616,6 @@ bool mysql_alter_table(THD *thd, const char *new_db, const char *new_name,
       return true;
     }
     alter_info->requested_algorithm = Alter_info::ALTER_TABLE_ALGORITHM_COPY;
-  }
-
-  /*
-    If 'avoid_temporal_upgrade' mode is not enabled, then the
-    pre MySQL 5.6.4 old temporal types if present is upgraded to the
-    current format.
-  */
-
-  mysql_mutex_lock(&LOCK_global_system_variables);
-  const bool check_temporal_upgrade = !avoid_temporal_upgrade;
-  mysql_mutex_unlock(&LOCK_global_system_variables);
-
-  if (check_temporal_upgrade) {
-    if (upgrade_old_temporal_types(thd, alter_info)) return true;
   }
 
   /*
@@ -17734,8 +18824,9 @@ bool mysql_alter_table(THD *thd, const char *new_db, const char *new_name,
 
   if (!is_tmp_table) {
     // Check for usage of prefix key index in PARTITION BY KEY() function.
-    dd::warn_on_deprecated_prefix_key_partition(
-        thd, alter_ctx.db, alter_ctx.table_name, table_def, false);
+    if (dd::prefix_key_partition_exists(alter_ctx.db, alter_ctx.table_name,
+                                        table_def, false))
+      goto err_new_table_cleanup;
   }
 
   if (remove_secondary_engine(thd, *table_list, *create_info, old_table_def))
@@ -19069,12 +20160,12 @@ static int copy_data_between_tables(
 
   if (!(gen_fields = thd->mem_root->ArrayAlloc<Field *>(
             to->s->gen_def_field_count + to->s->vfields))) {
-    destroy_array(copy, to->s->fields);
+    std::destroy_n(copy, to->s->fields);
     return -1;
   }
 
   if (to->file->ha_external_lock(thd, F_WRLCK)) {
-    destroy_array(copy, to->s->fields);
+    std::destroy_n(copy, to->s->fields);
     return -1;
   }
 
@@ -19277,6 +20368,12 @@ static int copy_data_between_tables(
     error = invoke_table_check_constraints(thd, to);
     if (error) break;
 
+    if (use_sql_fk_checks_for_table(thd, to) &&
+        check_all_parent_fk_ref(thd, to, enum_fk_dml_type::FK_INSERT)) {
+      error = 1;
+      break;
+    }
+
     error = to->file->ha_write_row(to->record[0]);
     to->autoinc_field_has_explicit_non_null_value = false;
     if (error) {
@@ -19341,7 +20438,7 @@ static int copy_data_between_tables(
     error = 1;
 
 err:
-  destroy_array(copy, to->s->fields);
+  std::destroy_n(copy, to->s->fields);
   thd->variables.sql_mode = save_sql_mode;
   free_io_cache(from);
   *copied = found_count;
@@ -19502,6 +20599,7 @@ bool mysql_checksum_table(THD *thd, Table_ref *tables,
               */
               switch (f->type()) {
                 case MYSQL_TYPE_BLOB:
+                case MYSQL_TYPE_VECTOR:
                 case MYSQL_TYPE_VARCHAR:
                 case MYSQL_TYPE_GEOMETRY:
                 case MYSQL_TYPE_JSON:
@@ -19635,7 +20733,8 @@ static bool check_engine(THD *thd, const char *db_name, const char *table_name,
 
   // The storage engine must support secondary engines.
   if (create_info->used_fields & HA_CREATE_USED_SECONDARY_ENGINE &&
-      !((*new_engine)->flags & HTON_SUPPORTS_SECONDARY_ENGINE)) {
+      !(((*new_engine)->flags & HTON_SUPPORTS_SECONDARY_ENGINE) ||
+        ((*new_engine)->flags & HTON_IS_SECONDARY_ENGINE))) {
     my_error(ER_CHECK_NOT_IMPLEMENTED, MYF(0), "SECONDARY_ENGINE");
     return true;
   }
@@ -19652,6 +20751,11 @@ static bool check_engine(THD *thd, const char *db_name, const char *table_name,
       my_error(ER_CHECK_NOT_IMPLEMENTED, MYF(0), "ENCRYPTION");
       return true;
     }
+  }
+
+  if (auto vea = (*new_engine)->validate_vector_index_params;
+      vea != nullptr && vea(thd, db_name, create_info, alter_info)) {
+    return true;
   }
 
   return false;
@@ -19761,7 +20865,8 @@ bool prepare_check_constraints_for_create(THD *thd, const char *db_name,
       return true;
   }
 
-  // Make sure fields used by the check constraint exists in the create list.
+  // Make sure fields used by the check constraint exists in the create list,
+  // and that they do not have a masking policy.
   mem_root_deque<Item_field *> fields(thd->mem_root);
   for (auto &cc_spec : alter_info->check_constraint_spec_list) {
     cc_spec->check_expr->walk(&Item::collect_item_field_processor,
@@ -19782,6 +20887,13 @@ bool prepare_check_constraints_for_create(THD *thd, const char *db_name,
       if (cur_fld == nullptr) {
         my_error(ER_CHECK_CONSTRAINT_REFERS_UNKNOWN_COLUMN, MYF(0),
                  cc_spec->name.str, cur_item_fld->field_name);
+        return true;
+      }
+
+      if (cur_fld->m_masking_policy_name.length > 0) {
+        my_error(ER_MASKING_POLICY_INCOMPATIBLE_COLUMN_FEATURE, MYF(0),
+                 cur_item_fld->field_name,
+                 "be referenced by a CHECK constraint");
         return true;
       }
     }
@@ -20264,10 +21376,12 @@ static bool prepare_check_constraints_for_alter(
     }
   }
 
-  alter_info->check_constraint_spec_list.clear();
-  alter_info->check_constraint_spec_list.resize(new_check_cons_list.size());
-  std::move(new_check_cons_list.begin(), new_check_cons_list.end(),
-            alter_info->check_constraint_spec_list.begin());
+  if (alter_info->check_constraint_spec_list.resize(
+          new_check_cons_list.size())) {
+    return true;
+  }
+  std::ranges::move(new_check_cons_list,
+                    alter_info->check_constraint_spec_list.begin());
 
   return false;
 }

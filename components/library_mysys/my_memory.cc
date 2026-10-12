@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,8 +22,8 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include "mysql/components/library_mysys/my_memory.h"
-#include <assert.h>
-#include <stdlib.h>
+#include <cassert>
+#include <cstdlib>
 #include "mysql/components/services/psi_memory.h"
 
 #ifdef HAVE_VALGRIND
@@ -89,4 +90,19 @@ extern "C" void my_free(void *ptr) {
   mh->m_magic = 0xDEAD;
   MEM_FREELIKE_BLOCK(ptr, 0);
   free(mh);
+}
+
+extern "C" void my_memset_s(void *dest, size_t dest_max, int c, size_t n) {
+#if defined(HAVE_MEMSET_S)
+  memset_s(dest, dest_max, c, n);
+#else
+#if defined(WIN32)
+  SecureZeroMemory(dest, n);
+#else
+  volatile unsigned char *p = static_cast<unsigned char *>(dest);
+  while (dest_max-- && n--) {
+    *p++ = c;
+  }
+#endif
+#endif
 }

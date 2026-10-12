@@ -1,15 +1,16 @@
-/* Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -19,6 +20,8 @@
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+
+#include "mysql/binlog/event/binlog_event.h"
 
 #include "mysql/binlog/event/byteorder.h"
 #include "mysql/binlog/event/statement_events.h"
@@ -54,9 +57,9 @@ static const std::unordered_map<Log_event_type, const std::string>
                             {XID_EVENT, "Xid"},
                             {FORMAT_DESCRIPTION_EVENT, "Format_desc"},
                             {TABLE_MAP_EVENT, "Table_map"},
-                            {WRITE_ROWS_EVENT_V1, "Write_rows_v1"},
-                            {UPDATE_ROWS_EVENT_V1, "Update_rows_v1"},
-                            {DELETE_ROWS_EVENT_V1, "Delete_rows_v1"},
+                            {OBSOLETE_WRITE_ROWS_EVENT_V1, "Write_rows_v1"},
+                            {OBSOLETE_UPDATE_ROWS_EVENT_V1, "Update_rows_v1"},
+                            {OBSOLETE_DELETE_ROWS_EVENT_V1, "Delete_rows_v1"},
                             {BEGIN_LOAD_QUERY_EVENT, "Begin_load_query"},
                             {EXECUTE_LOAD_QUERY_EVENT, "Execute_load_query"},
                             {INCIDENT_EVENT, "Incident"},
@@ -74,6 +77,7 @@ static const std::unordered_map<Log_event_type, const std::string>
                             {XA_PREPARE_LOG_EVENT, "XA_prepare"},
                             {PARTIAL_UPDATE_ROWS_EVENT, "Update_rows_partial"},
                             {TRANSACTION_PAYLOAD_EVENT, "Transaction_payload"},
+                            {GTID_TAGGED_LOG_EVENT, "Gtid_tagged_log_event"},
                             {UNKNOWN_EVENT, "Unknown"}};
 
 const std::string &get_event_type_as_string(Log_event_type type) {
@@ -277,6 +281,15 @@ Log_event_header::Log_event_header(Event_reader &reader)
                (type_code < ENUM_END_EVENT || flags & LOG_EVENT_IGNORABLE_F));
 
   BAPI_VOID_RETURN;
+}
+
+const Event_decoding_error &Log_event_header::get_decoding_error() const {
+  return m_decoding_error;
+}
+
+void Log_event_header::set_decoding_error(
+    const Event_decoding_error &decoding_error) {
+  m_decoding_error = decoding_error;
 }
 
 Binary_log_event::Binary_log_event(const char **buf,

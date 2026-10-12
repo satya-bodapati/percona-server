@@ -1,3 +1,4 @@
+include/rpl/set_gtid_mode_off.inc
 create table t1 (
 a int not null references t2,
 b int not null references t2 (c),
@@ -20,7 +21,7 @@ foreign key (a,b) references t3 (c,d) on update cascade,
 foreign key (a,b) references t3 (c,d) on delete set default,
 foreign key (a,b) references t3 (c,d) on update set null) engine=myisam;
 create index a on t1 (a);
-create unique index b on t1 (a,b);
+create unique index a_b on t1 (a,b);
 drop table t1;
 #
 # 5) Check how parent table in different storage engine is handled.
@@ -100,6 +101,9 @@ SET FOREIGN_KEY_CHECKS=1;
 # table to previously orphan foreign key by changing table storage
 # engine.
 SET FOREIGN_KEY_CHECKS=0;
+SET restrict_fk_on_non_standard_key = OFF;
+Warnings:
+Warning	4166	'restrict_fk_on_non_standard_key' is deprecated and will be removed in a future release. Foreign key referring to non-unique or partial keys is unsafe and may break replication.
 CREATE TABLE child (fk INT, FOREIGN KEY(fk) REFERENCES parent (pk)) ENGINE=InnoDB;
 CREATE TABLE parent (pk INT) ENGINE=MyISAM;
 ALTER TABLE parent ENGINE=InnoDB;
@@ -130,6 +134,9 @@ CREATE TABLE parent (pk INT) ENGINE=MyISAM;
 ALTER TABLE parent ENGINE=InnoDB, RENAME TO parent0;
 ERROR HY000: Failed to add the foreign key constraint. Missing index for constraint 'child_ibfk_1' in the referenced table 'parent'
 DROP TABLE parent;
+SET restrict_fk_on_non_standard_key = ON;
+Warnings:
+Warning	1681	'restrict_fk_on_non_standard_key' is deprecated and will be removed in a future release.
 #
 # Check that unique constraint name is correctly updated when parent
 # table is added to orphan foreign key by changing table SE.
@@ -174,6 +181,8 @@ ALTER TABLE parent ENGINE=InnoDB;
 ERROR HY000: Table 'child' was locked with a READ lock and can't be updated
 UNLOCK TABLES;
 LOCK TABLES child WRITE, parent WRITE;
+Warnings:
+Warning	6414	Combining the storage engines MyISAM and InnoDB is deprecated, but the statement or transaction updates both the MyISAM table test.parent and the InnoDB table test.child.
 ALTER TABLE parent ENGINE=InnoDB;
 UNLOCK TABLES;
 DROP TABLES child, parent;
@@ -192,3 +201,4 @@ CREATE TABLE myisam_table (fk INT) ENGINE=MyISAM;
 ALTER TABLE myisam_table DROP FOREIGN KEY no_such_fk;
 ALTER TABLE myisam_table DROP FOREIGN KEY c;
 DROP TABLES myisam_table, child, parent;
+include/rpl/set_gtid_mode_on.inc

@@ -1,15 +1,16 @@
-/*  Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/*  Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License, version 2.0,
     as published by the Free Software Foundation.
 
-    This program is also distributed with certain software (including
+    This program is designed to work with certain software (including
     but not limited to OpenSSL) that is licensed under separate terms,
     as designated in a particular file or component or in included license
     documentation.  The authors of MySQL hereby grant you an additional
     permission to link the program and your derivative works with the
-    separately licensed software that they have included with MySQL.
+    separately licensed software that they have either included with
+    the program or referenced in the documentation.
 
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,8 +21,8 @@
     along with this program; if not, write to the Free Software
     Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
-#include <assert.h>
-#include <stddef.h>
+#include <cassert>
+#include <cstddef>
 
 #include "lex_string.h"
 #include "m_string.h"
@@ -79,8 +80,7 @@ int my_validate_password_policy(const char *password,
   int res = 0;
 
   if (password) {
-    const String tmp_str(password, password_len, &my_charset_utf8mb3_bin);
-    password_str = tmp_str;
+    password_str.set(password, password_len, &my_charset_utf8mb3_bin);
   }
   if (!srv_registry->acquire("validate_password", &h_pv_svc)) {
     ret = reinterpret_cast<SERVICE_TYPE(validate_password) *>(h_pv_svc);
@@ -93,7 +93,7 @@ int my_validate_password_policy(const char *password,
     plugin = my_plugin_lock_by_name(nullptr, validate_password_plugin,
                                     MYSQL_VALIDATE_PASSWORD_PLUGIN);
     if (plugin) {
-      st_mysql_validate_password *password_validate =
+      auto *password_validate =
           (st_mysql_validate_password *)plugin_decl(plugin)->info;
 
       if (!password_validate->validate_password(&password_str)) {
@@ -150,7 +150,7 @@ int my_calculate_password_strength(const char *password,
     plugin_ref plugin = my_plugin_lock_by_name(
         nullptr, validate_password_plugin, MYSQL_VALIDATE_PASSWORD_PLUGIN);
     if (plugin) {
-      st_mysql_validate_password *password_strength =
+      auto *password_strength =
           (st_mysql_validate_password *)plugin_decl(plugin)->info;
 
       res = password_strength->get_password_strength(&password_str);

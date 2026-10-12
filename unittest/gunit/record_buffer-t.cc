@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -49,7 +50,7 @@ TEST_P(RecordBufferTestP, BasicTest) {
   const auto param = GetParam();
   const auto bufsize =
       Record_buffer::buffer_size(param.m_records, param.m_record_size);
-  std::unique_ptr<uchar[]> ptr(new uchar[bufsize]);
+  std::unique_ptr<uchar[]> const ptr(new uchar[bufsize]);
 
   Record_buffer buf(param.m_records, param.m_record_size, ptr.get());
   EXPECT_EQ(param.m_records, buf.max_records());
@@ -62,7 +63,7 @@ TEST_P(RecordBufferTestP, BasicTest) {
       Add a record and verify that the number of records has grown,
       whereas the maximum size and the record size stay the same.
     */
-    const auto rec = buf.add_record();
+    auto *const rec = buf.add_record();
     EXPECT_EQ(i + 1, buf.records());
     EXPECT_NE(nullptr, rec);
     EXPECT_EQ(rec, buf.record(i));

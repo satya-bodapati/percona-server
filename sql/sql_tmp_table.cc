@@ -1,15 +1,16 @@
-/* Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -32,6 +33,7 @@
 #include <stdio.h>
 #include <algorithm>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <utility>
 #include <vector>
@@ -245,13 +247,18 @@ static Field *create_tmp_field_from_item(Item *item, TABLE *table) {
       }
       break;
     case INT_RESULT:
+      if (item->data_type() == MYSQL_TYPE_BIT) {
+        // We want to preserve the BIT type so treat so treat it
+        // separately from other INT_RESULT items
+        new_field = item->tmp_table_field_from_field_type(table, true);
+      }
       /*
-        Select an integer type with the minimal fit precision.
-        MY_INT32_NUM_DECIMAL_DIGITS is sign inclusive, don't consider the sign.
-        Values with MY_INT32_NUM_DECIMAL_DIGITS digits may or may not fit into
-        Field_long : make them Field_longlong.
-      */
-      if (item->max_length >= (MY_INT32_NUM_DECIMAL_DIGITS - 1))
+       Select an integer type with the minimal fit precision.
+       MY_INT32_NUM_DECIMAL_DIGITS is sign inclusive, don't consider the sign.
+       Values with MY_INT32_NUM_DECIMAL_DIGITS digits may or may not fit into
+       Field_long : make them Field_longlong.
+       */
+      else if (item->max_length >= (MY_INT32_NUM_DECIMAL_DIGITS - 1))
         new_field = new (*THR_MALLOC)
             Field_longlong(item->max_length, maybe_null, item->item_name.ptr(),
                            item->unsigned_flag);
@@ -289,6 +296,18 @@ static Field *create_tmp_field_from_item(Item *item, TABLE *table) {
 
   new_field->init(table);
 
+  if (item->type() == Item::FIELD_ITEM) {
+    Item_field *item_field = down_cast<Item_field *>(item);
+    Table_ref *tr = item_field->m_table_ref;
+
+    // Set original db & table name, see Field::new_field()
+    if (new_field->orig_db_name == nullptr && tr != nullptr) {
+      new_field->orig_db_name = tr->db;
+    }
+    if (new_field->orig_table_name == nullptr && tr != nullptr) {
+      new_field->orig_table_name = tr->table_name;
+    }
+  }
   if (item->type() == Item::NULL_ITEM)
     new_field->is_created_from_null_item = true;
   return new_field;
@@ -345,9 +364,6 @@ static Field *create_tmp_field_for_schema(const Item *item, TABLE *table) {
                        the record in the original table.
                        If modify_item is 0 then fill_record() will update
                        the temporary table
-  @param table_cant_handle_bit_fields if table can't handle bit-fields and
-  bit-fields shall be converted to long @see
-  Temp_table_param::bit_fields_as_long
   @param make_copy_field if true, a pointer of the result field should be stored
   in from_field,  otherwise the item should be wrapped in Func_ptr and stored in
   copy_func
@@ -360,7 +376,6 @@ static Field *create_tmp_field_for_schema(const Item *item, TABLE *table) {
 Field *create_tmp_field(THD *thd, TABLE *table, Item *item, Item::Type type,
                         Func_ptr_array *copy_func, Field **from_field,
                         Field **default_field, bool group, bool modify_item,
-                        bool table_cant_handle_bit_fields,
                         bool make_copy_field) {
   DBUG_TRACE;
   Field *result = nullptr;
@@ -398,8 +413,7 @@ Field *create_tmp_field(THD *thd, TABLE *table, Item *item, Item::Type type,
           !(item_field->field->is_nullable() ||
             item_field->field->table->is_nullable())) {
         result = create_tmp_field_from_item(item_field, table);
-      } else if (table_cant_handle_bit_fields &&
-                 item_field->field->type() == MYSQL_TYPE_BIT) {
+      } else if (item_field->field->type() == MYSQL_TYPE_BIT) {
         result = create_tmp_field_from_item(item_field, table);
         /*
           If the item is a function, a pointer to the item is stored in
@@ -460,21 +474,20 @@ Field *create_tmp_field(THD *thd, TABLE *table, Item *item, Item::Type type,
 
       [[fallthrough]];
     case Item::COND_ITEM:
-    case Item::FIELD_AVG_ITEM:
-    case Item::FIELD_BIT_ITEM:
-    case Item::FIELD_STD_ITEM:
-    case Item::FIELD_VARIANCE_ITEM:
-    case Item::SUBSELECT_ITEM:
+    case Item::AGGR_FIELD_ITEM:
+    case Item::SUBQUERY_ITEM:
       /* The following can only happen with 'CREATE TABLE ... SELECT' */
-    case Item::PROC_ITEM:
     case Item::INT_ITEM:
     case Item::REAL_ITEM:
     case Item::DECIMAL_ITEM:
     case Item::STRING_ITEM:
+    case Item::JSON_ITEM:
     case Item::REF_ITEM:
     case Item::NULL_ITEM:
-    case Item::VARBIN_ITEM:
+    case Item::HEX_BIN_ITEM:
     case Item::PARAM_ITEM:
+    case Item::NAME_CONST_ITEM:
+    case Item::ROUTINE_FIELD_ITEM:
     case Item::SUM_FUNC_ITEM:
       if (type == Item::SUM_FUNC_ITEM && !is_wf) {
         Item_sum *item_sum = down_cast<Item_sum *>(item);
@@ -494,10 +507,17 @@ Field *create_tmp_field(THD *thd, TABLE *table, Item *item, Item::Type type,
         }
       }
       break;
-    case Item::TYPE_HOLDER:
-    case Item::VALUES_COLUMN_ITEM:
+    case Item::TYPE_HOLDER_ITEM:
       result = down_cast<Item_aggregate_type *>(item)->make_field_by_type(
           table, thd->is_strict_mode());
+      break;
+    case Item::VALUES_COLUMN_ITEM:
+      result = down_cast<Item_values_column *>(item)->make_field_by_type(
+          table, thd->is_strict_mode());
+      if (result == nullptr) return nullptr;
+      if (copy_func != nullptr && !make_copy_field) {
+        if (copy_func->emplace_back(item, result)) return nullptr;
+      }
       break;
     default:  // Doesn't have to be stored
       assert(false);
@@ -577,7 +597,7 @@ void Cache_temp_engine_properties::init(THD *thd) {
   HEAP_MAX_KEY_LENGTH = handler->max_key_length();
   HEAP_MAX_KEY_PART_LENGTH = handler->max_key_part_length(nullptr);
   HEAP_MAX_KEY_PARTS = handler->max_key_parts();
-  destroy(handler);
+  ::destroy_at(handler);
   plugin_unlock(nullptr, db_plugin);
   // Cache TempTable engine's
   db_plugin = ha_lock_engine(nullptr, temptable_hton);
@@ -586,7 +606,7 @@ void Cache_temp_engine_properties::init(THD *thd) {
   TEMPTABLE_MAX_KEY_LENGTH = handler->max_key_length();
   TEMPTABLE_MAX_KEY_PART_LENGTH = handler->max_key_part_length(nullptr);
   TEMPTABLE_MAX_KEY_PARTS = handler->max_key_parts();
-  destroy(handler);
+  ::destroy_at(handler);
   plugin_unlock(nullptr, db_plugin);
   // Cache INNODB engine's
   db_plugin = ha_lock_engine(nullptr, innodb_hton);
@@ -605,7 +625,7 @@ void Cache_temp_engine_properties::init(THD *thd) {
   */
   INNODB_MAX_KEY_PART_LENGTH = 3072;
   INNODB_MAX_KEY_PARTS = handler->max_key_parts();
-  destroy(handler);
+  ::destroy_at(handler);
   plugin_unlock(nullptr, db_plugin);
 }
 
@@ -894,14 +914,13 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
 
   if (group != nullptr) distinct = false;  // Can't use distinct
 
-  for (ORDER *tmp = group; tmp; tmp = tmp->next) {
+  if (!param->force_hash_field_for_unique) {
     /*
-      marker == MARKER_BIT means two things:
-      - store NULLs in the key, and
-      - convert BIT fields to 64-bit long, needed because MEMORY tables
-        can't index BIT fields.
+      marker == MARKER_GROUP_BY_BIT means:
+      - store NULLs in the key
     */
-    (*tmp->item)->marker = Item::MARKER_BIT;
+    for (ORDER *tmp = group; tmp; tmp = tmp->next)
+      (*tmp->item)->marker = Item::MARKER_GROUP_BY_BIT;
   }
 
   /**
@@ -913,6 +932,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
     (4) we have INTERSECT or EXCEPT, i.e. not UNION.
   */
   bool unique_constraint_via_hash_field =
+      param->force_hash_field_for_unique ||
       param->m_operation != Temp_table_param::TTP_UNION_OR_TABLE;
 
   /*
@@ -976,6 +996,9 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
     free_tmp_table(table);
   });
 
+  // All character set conversions into temporary tables are strict:
+  table->m_charset_conversion_is_strict = true;
+
   /*
     We will use TABLE_SHARE's MEM_ROOT for all allocations, so TABLE's
     MEM_ROOT remains uninitialized.
@@ -1034,7 +1057,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
     if (not_all_columns) {
       if (item->has_aggregation() && type != Item::SUM_FUNC_ITEM) {
         if (item->is_outer_reference()) item->update_used_tables();
-        if (type == Item::SUBSELECT_ITEM ||
+        if (type == Item::SUBQUERY_ITEM ||
             (item->used_tables() & ~OUTER_REF_TABLE_BIT)) {
           /*
             Mark that we have ignored an item that refers to a summary
@@ -1092,7 +1115,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
           Field *new_field = create_tmp_field(
               thd, table, arg, arg->type(), param->items_to_copy,
               &from_field[fieldnr], &default_field[fieldnr], /*group=*/false,
-              modify_items, false, false);
+              modify_items, false);
           from_item[fieldnr] = arg;
           if (new_field == nullptr) return nullptr;  // Should be OOM
           new_field->set_field_index(fieldnr);
@@ -1132,7 +1155,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
         new_field = create_tmp_field_for_schema(item, table);
       } else {
         /*
-          Parameters of create_tmp_field():
+          Parameter of create_tmp_field():
 
           (1) is a bit tricky:
           We need to set it to 0 in union, to get fill_record() to modify the
@@ -1141,19 +1164,12 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
           write rows to the temporary table.
           We here distinguish between UNION and multi-table-updates by the fact
           that in the later case group is set to the row pointer.
-          (2) If item->marker == MARKER_BIT then we force create_tmp_field
-          to create a 64-bit longs for BIT fields because HEAP
-          tables can't index BIT fields directly. We do the same
-          for distinct, as we want the distinct index to be
-          usable in this case too.
         */
         new_field = create_tmp_field(
             thd, table, item, type, param->items_to_copy, &from_field[fieldnr],
             &default_field[fieldnr],
             group != nullptr,  // (1)
             !param->force_copy_fields && (modify_items || group != nullptr),
-            item->marker == Item::MARKER_BIT ||
-                param->bit_fields_as_long,  //(2)
             param->force_copy_fields);
         from_item[fieldnr] = item;
       }
@@ -1189,7 +1205,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
           new_field->type() == MYSQL_TYPE_VARCHAR)
         table->s->db_create_options |= HA_OPTION_PACK_RECORD;
 
-      if (item->marker == Item::MARKER_BIT && item->is_nullable()) {
+      if (item->marker == Item::MARKER_GROUP_BY_BIT && item->is_nullable()) {
         group_null_items++;
         new_field->set_flag(GROUP_FLAG);
       }
@@ -1354,7 +1370,8 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
       for (unsigned i = param->hidden_field_count; i < share->fields;
            i++, key_part_info++) {
         key_part_info->init_from_field(table->field[i]);
-        if (key_part_info->store_length > max_key_part_length) {
+        if (key_part_info->store_length > max_key_part_length ||
+            table->field[i]->type() == MYSQL_TYPE_BIT) {
           unique_constraint_via_hash_field = true;
           break;
         }
@@ -1408,7 +1425,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
       table->set_set_op(set_counter,
                         param->m_operation == Temp_table_param::TTP_EXCEPT,
                         param->m_last_operation_is_distinct);
-      table->set_hashing(
+      table->set_use_hash_map(
           thd->optimizer_switch_flag(OPTIMIZER_SWITCH_HASH_SET_OPERATIONS));
     }
 
@@ -1484,6 +1501,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
         *pos++ = 0;  // Null is stored here
       }
     }
+    field->clear_flag(GROUP_FLAG);  // checked above, never needed again
     relocate_field(field, pos, table->record[0], &null_count);
     pos += field->pack_length();
     if (!--hidden_field_count)
@@ -1662,7 +1680,7 @@ TABLE *create_tmp_table(THD *thd, Temp_table_param *param,
 
   DEBUG_SYNC(thd, "tmp_table_created");
 
-  free_tmp_table_guard.commit();
+  free_tmp_table_guard.release();
 
   return table;
 }
@@ -2033,7 +2051,9 @@ TABLE *create_tmp_table_from_fields(THD *thd, List<Create_field> &field_list,
 
   return table;
 error:
-  for (reg_field = table->field; *reg_field; ++reg_field) destroy(*reg_field);
+  for (reg_field = table->field; *reg_field != nullptr; ++reg_field) {
+    ::destroy_at(*reg_field);
+  }
   return nullptr;
 }
 
@@ -2170,7 +2190,7 @@ bool setup_tmp_table_handler(THD *thd, TABLE *table, ulonglong select_options,
   table->file->change_table_ptr(table, share);
 
   if (table->file->set_ha_share_ref(&share->ha_share)) {
-    destroy(table->file);
+    ::destroy_at(table->file);
     return true;
   }
 
@@ -2307,6 +2327,13 @@ static bool create_tmp_table_with_fallback(THD *thd, TABLE *table) {
       table->file->create(share->table_name.str, table, &create_info, nullptr);
   if (error == HA_ERR_RECORD_FILE_FULL &&
       table->s->db_type() == temptable_hton) {
+    // Update share->db_plugin so db_type() reflects InnoDB instead of stale
+    // TempTable. Other clones share this TABLE_SHARE and depend on db_type()
+    // to determine the actual storage engine.
+    plugin_unlock(nullptr, share->db_plugin);
+    share->db_plugin = ha_lock_engine(nullptr, innodb_hton);
+    create_info.db_type = innodb_hton;
+    ::destroy_at(table->file);
     table->file = get_new_handler(
         table->s, false, share->alloc_for_tmp_file_handler, innodb_hton);
     error = table->file->create(share->table_name.str, table, &create_info,
@@ -2318,7 +2345,11 @@ static bool create_tmp_table_with_fallback(THD *thd, TABLE *table) {
     table->db_stat = 0;
     return true;
   } else {
-    if (table->s->db_type() != temptable_hton) {
+    // For non-fallback cases (TempTable succeeded, or initial InnoDB request):
+    // increment counter if table is on disk (not in-memory like
+    // TempTable/MEMORY).
+    if (table->s->db_type() != temptable_hton &&
+        table->s->db_type() != heap_hton) {
       thd->inc_status_created_tmp_disk_tables();
     }
     return false;
@@ -2380,7 +2411,7 @@ bool instantiate_tmp_table(THD *thd, TABLE *table) {
   table->in_use = thd;
 
   TABLE_SHARE *const share = table->s;
-  if (table->uses_hashing()) share->keys = 0;
+  if (table->uses_hash_map()) share->keys = 0;
 
 #ifndef NDEBUG
   for (uint i = 0; i < share->fields; i++)
@@ -2475,7 +2506,7 @@ void close_tmp_table(TABLE *table) {
     table->set_deleted();
   }
 
-  destroy(table->file);
+  ::destroy_at(table->file);
   table->file = nullptr;
 
   if (--share->tmp_handler_count == 0 && share->db_plugin != nullptr) {
@@ -2521,7 +2552,7 @@ void free_tmp_table(TABLE *table) {
   if (share->decrement_ref_count() == 0)  // no more TABLE objects
   {
     MEM_ROOT own_root = std::move(share->mem_root);
-    destroy(table);
+    ::destroy_at(table);
     own_root.Clear();
   }
 }
@@ -2823,7 +2854,7 @@ bool create_ondisk_from_heap(THD *thd, TABLE *wtable, int error,
       Replace the guts of the old table with the new one, although keeping
       most members.
     */
-    destroy(table->file);
+    ::destroy_at(table->file);
     table->s = new_table.s;
     table->file = new_table.file;
     table->db_stat = new_table.db_stat;
@@ -2891,7 +2922,7 @@ err_after_open:
 err_after_create:
   new_table.file->ha_delete_table(new_table.s->table_name.str, nullptr);
 err_after_alloc:
-  destroy(new_table.file);
+  ::destroy_at(new_table.file);
 err_after_proc_info:
   thd_proc_info(thd, save_proc_info);
   // New share took control of old share mem_root; regain control:
@@ -2974,9 +3005,10 @@ static int FindCopyBitmap(Item *item) {
   return bits;
 }
 
-Func_ptr::Func_ptr(Item *item, Field *result_field)
+Func_ptr::Func_ptr(Item *item, Field *result_field, Item *result_item)
     : m_func(item),
       m_result_field(result_field),
+      m_result_item(result_item),
       m_func_bits(FindCopyBitmap(item)) {}
 
 void Func_ptr::set_func(Item *func) {
@@ -2984,9 +3016,22 @@ void Func_ptr::set_func(Item *func) {
   m_func_bits = FindCopyBitmap(func);
 }
 
-Item_field *Func_ptr::result_item() const {
+Item *Func_ptr::result_item() const {
   if (m_result_item == nullptr) {
     m_result_item = new Item_field(m_result_field);
+    if (func()->type() == Item::FIELD_ITEM) {
+      // Improves explain and metadata precision
+      down_cast<Item_field *>(m_result_item)->table_name =
+          down_cast<Item_field *>(func())->table_name;
+      down_cast<Item_field *>(m_result_item)->db_name =
+          down_cast<Item_field *>(func())->db_name;
+      down_cast<Item_field *>(m_result_item)
+          ->set_original_table_name(
+              down_cast<Item_field *>(func())->original_table_name());
+      down_cast<Item_field *>(m_result_item)
+          ->set_orignal_db_name(
+              down_cast<Item_field *>(func())->original_db_name());
+    }
   }
   return m_result_item;
 }

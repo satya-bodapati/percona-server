@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -43,7 +44,6 @@ on 1/27/1998 */
 #include "dict0dict.h"
 #include "dict0mem.h"
 #include "eval0eval.h"
-#include "ha_prototypes.h"
 #include "lock0lock.h"
 #include "pars0grm.h"
 #include "pars0opt.h"
@@ -1058,12 +1058,13 @@ static void pars_process_assign_list(upd_node_t *node) /*!< in: update node */
 
     col_sym = assign_node->col;
 
-    upd_field_set_field_no(upd_field, clust_index->get_col_pos(col_sym->col_no),
+    const dict_col_t *const col = node->table->get_col(col_sym->col_no);
+    upd_field_set_field_no(upd_field, dict_col_get_clust_pos(col, clust_index),
                            clust_index);
     upd_field->exp = assign_node->val;
+    col->copy_type(dfield_get_type(&upd_field->new_val));
 
-    if (!clust_index->get_col(upd_field->field_no)
-             ->get_fixed_size(dict_table_is_comp(node->table))) {
+    if (!col->get_fixed_size(dict_table_is_comp(node->table))) {
       changes_field_size = 0;
     }
 

@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -220,6 +221,27 @@ convert_from_buffer_v2_t convert_from_buffer;
 /** @sa convert_to_buffer_v2_t */
 convert_to_buffer_v2_t convert_to_buffer;
 END_SERVICE_DEFINITION(mysql_string_charset_converter)
+
+BEGIN_SERVICE_DEFINITION(mysql_string_copy_converter)
+/**
+  Copies string stored in source charset in a buffer to a string object
+  with conversion to destination charset.
+
+  @param      dest_string   Handle for destination string object.
+  @param      src_buffer    Buffer with a source string
+  @param      src_length    Length of the source string (in bytes).
+  @param      src_charset   Handle for source charset.
+  @param      dest_charset  Handle for destination charset.
+  @param[out] errors        Number of conversion errors.
+
+  @retval False - Success.
+  @retval True  - Failure.
+*/
+DECLARE_BOOL_METHOD(copy_convert,
+                    (my_h_string dest_string, const char *src_buffer,
+                     uint64 src_length, CHARSET_INFO_h src_charset,
+                     CHARSET_INFO_h dest_charset, uint *errors));
+END_SERVICE_DEFINITION(mysql_string_copy_converter)
 
 /**
   @ingroup group_string_component_services_inventory

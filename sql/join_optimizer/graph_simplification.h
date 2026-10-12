@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -64,28 +65,37 @@
     Crossproducts and Non-Inner Joins”.
  */
 
+#include <assert.h>
 #include <stddef.h>
 
-#include <string>
+#include <limits>
 #include <vector>
 
 #include "my_compiler.h"
 #include "priority_queue.h"
 #include "sql/join_optimizer/hypergraph.h"
 #include "sql/join_optimizer/online_cycle_finder.h"
+#include "sql/mem_root_allocator.h"
 #include "sql/mem_root_array.h"
 #include "sql/sql_array.h"
 
 class THD;
 struct JoinHypergraph;
-struct MEM_ROOT;
-template <class T>
-class Mem_root_allocator;
+
+/**
+   An estimate of the output from table access or join.
+*/
+struct RelationMetrics final {
+  /// The number of outpur rows.
+  double rows;
+  /// The average row size.
+  double row_size;
+};
 
 // Exposed for unit testing.
 class GraphSimplifier {
  public:
-  GraphSimplifier(JoinHypergraph *graph, MEM_ROOT *mem_root);
+  GraphSimplifier(THD *thd, JoinHypergraph *graph);
 
   // Do a single simplification step. The return enum is mostly for unit tests;
   // general code only needs to care about whether it returned
@@ -200,6 +210,7 @@ class GraphSimplifier {
   SimplificationStep ConcretizeSimplificationStep(
       GraphSimplifier::ProposedSimplificationStep step);
 
+  THD *m_thd;
   // Steps that we have applied so far, in chronological order.
   // Used so that we can undo them easily on UndoSimplificationStep().
   Mem_root_array<SimplificationStep> m_done_steps;
@@ -210,20 +221,20 @@ class GraphSimplifier {
   // step if needed (and then move it to the end of done_steps again).
   Mem_root_array<SimplificationStep> m_undone_steps;
 
-  // Cache the cardinalities of (a join of) the nodes on each side of each
+  // Cache the metrics of (a join of) the nodes on each side of each
   // hyperedge, corresponding 1:1 index-wise to m_graph->edges. So if
   // e.g. m_graph->graph.edges[0].left contains {t1,t2,t4}, then
-  // m_edge_cardinalities[0].left will contain the cardinality of joining
+  // m_edge_metrics[0].left will contain the metrics of joining
   // t1, t2 and t4 together.
   //
   // This cache is so that we don't need to make repeated calls to
-  // GetCardinality(), which is fairly expensive. It is updated when we
+  // GetMetrics(), which is fairly expensive. It is updated when we
   // apply simplification steps (which change the hyperedges).
-  struct EdgeCardinalities {
-    double left;
-    double right;
+  struct EdgeMetrics {
+    RelationMetrics left;
+    RelationMetrics right;
   };
-  Bounds_checked_array<EdgeCardinalities> m_edge_cardinalities;
+  Bounds_checked_array<EdgeMetrics> m_edge_metrics;
 
   // The graph we are simplifying.
   JoinHypergraph *m_graph;
@@ -304,7 +315,6 @@ void SetNumberOfSimplifications(int num_simplifications,
 
 // See comment in .cc file.
 void SimplifyQueryGraph(THD *thd, int subgraph_pair_limit,
-                        JoinHypergraph *graph, GraphSimplifier *simplifier,
-                        std::string *trace);
+                        JoinHypergraph *graph, GraphSimplifier *simplifier);
 
 #endif  // SQL_JOIN_OPTIMIZER_GRAPH_SIMPLIFICATION_H_

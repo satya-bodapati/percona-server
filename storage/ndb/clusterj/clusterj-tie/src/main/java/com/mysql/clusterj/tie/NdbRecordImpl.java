@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2012, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -223,18 +224,13 @@ public class NdbRecordImpl {
         for (String projectedColumnName: storeTable.getProjectedColumnNames()) {
             this.projectedColumnSet.add(projectedColumnName);
         }
-        try {
-           this.autoIncrementColumn = storeTable.getAutoIncrementColumn();
-            if (this.autoIncrementColumn != null) {
-                chooseAutoIncrementValueSetter();
-            }
-            this.ndbRecord = createNdbRecord(storeTable, ndbDictionary);
-            if (logger.isDetailEnabled()) logger.detail(storeTable.getName() + " " + dumpDefinition());
-            initializeDefaultBuffer();
-        } finally {
-            // delete the RecordSpecificationArray since it is no longer needed
-            RecordSpecificationArray.delete(this.recordSpecificationArray);
+        this.autoIncrementColumn = storeTable.getAutoIncrementColumn();
+        if (this.autoIncrementColumn != null) {
+            chooseAutoIncrementValueSetter();
         }
+        this.ndbRecord = createNdbRecord(storeTable, ndbDictionary);
+        if (logger.isDetailEnabled()) logger.detail(storeTable.getName() + " " + dumpDefinition());
+        initializeDefaultBuffer();
     }
 
     /** Constructor for index operations. The NdbRecord has columns just for
@@ -261,7 +257,7 @@ public class NdbRecordImpl {
         for (String projectedColumnName: storeTable.getProjectedColumnNames()) {
             this.projectedColumnSet.add(projectedColumnName);
         }
-        this.recordSpecificationArray = RecordSpecificationArray.create(numberOfIndexColumns);
+        this.recordSpecificationArray = createRecordSpecificationArray(numberOfIndexColumns);
         try {
             this.ndbRecord = createNdbRecord(storeIndex, storeTable, ndbDictionary);
             if (logger.isDetailEnabled()) logger.detail(storeIndex.getInternalName() + " " + dumpDefinition());
@@ -318,12 +314,23 @@ public class NdbRecordImpl {
 
     /** Return the buffer to the buffer pool */
     protected void returnBuffer(ByteBuffer buffer) {
-        bufferPool.returnBuffer(buffer);
+        // bufferPool may be null after unloadSchema()
+        if (bufferPool != null)
+            bufferPool.returnBuffer(buffer);
     }
 
     /** Check the NdbRecord buffer guard */
     protected void checkGuard(ByteBuffer buffer, String where) {
         bufferPool.checkGuard(buffer, where);
+    }
+
+    RecordSpecificationArray createRecordSpecificationArray(int size) {
+        RecordSpecificationArray result = null;
+        int attempts = 0;
+        while (result == null && attempts++ < 10) {
+            result = RecordSpecificationArray.create(size);
+        }
+        return result;
     }
 
     /** Make a buffer ready for use and optionally initialize it with default values for all columns.
@@ -346,6 +353,11 @@ public class NdbRecordImpl {
      */
     protected void initializeBuffer(ByteBuffer buffer) {
         initializeBuffer(buffer, true);
+    }
+
+    public boolean isNullable(ByteBuffer buffer, Column storeColumn) {
+        int columnId = storeColumn.getColumnId();
+        return storeColumn.getNullable();
     }
 
     public int setNull(ByteBuffer buffer, Column storeColumn) {
@@ -789,7 +801,7 @@ public class NdbRecordImpl {
 
     protected NdbRecord createNdbRecord(Index storeIndex, Table storeTable, Dictionary ndbDictionary) {
         String[] columnNames = storeIndex.getColumnNames();
-        this.recordSpecificationArray = RecordSpecificationArray.create(columnNames.length);
+        this.recordSpecificationArray = createRecordSpecificationArray(columnNames.length);
         // analyze columns; sort into alignment buckets, allocate space in the buffer
         // and build the record specification array
         analyzeColumns(storeTable, columnNames);
@@ -812,7 +824,7 @@ public class NdbRecordImpl {
         // only allocate space in the NdbRecord for projected columns
         String[] columnNames = storeTable.getColumnNames();
         String[] projectedColumnNames = storeTable.getProjectedColumnNames();
-        this.recordSpecificationArray = RecordSpecificationArray.create(projectedColumnNames.length);
+        this.recordSpecificationArray = createRecordSpecificationArray(projectedColumnNames.length);
         // analyze columns; sort into alignment buckets, allocate space in the buffer,
         // and build the record specification array
         analyzeColumns(storeTable, columnNames);

@@ -1,4 +1,4 @@
-include/master-slave.inc
+include/rpl/init_source_replica.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
@@ -10,7 +10,7 @@ Note	####	Storing MySQL user name or password information in the connection meta
 CREATE TABLE t1 (no_srid POINT DEFAULT NULL,
 srid_0 POINT SRID 0 DEFAULT NULL,
 srid_4326 POINT SRID 4326 DEFAULT NULL);
-SELECT * FROM INFORMATION_SCHEMA.ST_GEOMETRY_COLUMNS;
+SELECT * FROM INFORMATION_SCHEMA.ST_GEOMETRY_COLUMNS ORDER BY column_name;
 TABLE_CATALOG	TABLE_SCHEMA	TABLE_NAME	COLUMN_NAME	SRS_NAME	SRS_ID	GEOMETRY_TYPE_NAME
 def	test	t1	no_srid	NULL	NULL	point
 def	test	t1	srid_0		0	point
@@ -24,10 +24,10 @@ INSERT INTO t1 (no_srid, srid_0, srid_4326)
 VALUES (ST_GeomFromText('POINT(1 1)', 4326),
 ST_GeomFromText('POINT(1 1)', 0),
 ST_GeomFromText('POINT(1 1)', 4326));
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 [Connection Slave]
 include/diff_tables.inc [master:t1, slave:t1]
-SELECT * FROM INFORMATION_SCHEMA.ST_GEOMETRY_COLUMNS;
+SELECT * FROM INFORMATION_SCHEMA.ST_GEOMETRY_COLUMNS ORDER BY column_name;
 TABLE_CATALOG	TABLE_SCHEMA	TABLE_NAME	COLUMN_NAME	SRS_NAME	SRS_ID	GEOMETRY_TYPE_NAME
 def	test	t1	no_srid	NULL	NULL	point
 def	test	t1	srid_0		0	point
@@ -46,7 +46,7 @@ TABLE_CATALOG	TABLE_SCHEMA	TABLE_NAME	COLUMN_NAME	SRS_NAME	SRS_ID	GEOMETRY_TYPE_
 def	test	t1	no_srid	NULL	NULL	point
 def	test	t1	no_srid_2	NULL	NULL	point
 def	test	t1	srid_0		0	point
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 [Connection Slave]
 include/diff_tables.inc [master:t1, slave:t1]
 SELECT * FROM INFORMATION_SCHEMA.ST_GEOMETRY_COLUMNS ORDER BY COLUMN_NAME;
@@ -62,7 +62,7 @@ no_srid	no_srid_2	srid_0
 4326	4326	0
 [Connection Master]
 DELETE FROM t1;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 [Connection Slave]
 include/diff_tables.inc [master:t1, slave:t1]
 [Connection Master]
@@ -80,7 +80,7 @@ INSERT INTO t1 (no_srid, no_srid_2, srid_4326)
 VALUES (ST_GeomFromText('POINT(1 1)', 4326),
 ST_GeomFromText('POINT(1 1)', 2000),
 ST_GeomFromText('POINT(1 1)', 4326));
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 [Connection Slave]
 include/diff_tables.inc [master:t1, slave:t1]
 SELECT * FROM INFORMATION_SCHEMA.ST_GEOMETRY_COLUMNS ORDER BY COLUMN_NAME;
@@ -97,21 +97,21 @@ no_srid	no_srid_2	srid_4326
 [Connection Master]
 # Cleanup
 DROP TABLE t1;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 # The SRID property on a generated column should work
 [Connection Master]
 CREATE TABLE t1 (col1 POINT SRID 4326,
 col2 POINT AS (ST_SRID(col1, 0)) SRID 0);
 INSERT INTO t1 (col1) VALUES (ST_GeomFromText('POINT(0 0)', 4326));
 INSERT INTO t1 (col1) VALUES (ST_GeomFromText('POINT(1 1)', 4326));
-SELECT * FROM INFORMATION_SCHEMA.ST_GEOMETRY_COLUMNS;
+SELECT * FROM INFORMATION_SCHEMA.ST_GEOMETRY_COLUMNS ORDER BY column_name;
 TABLE_CATALOG	TABLE_SCHEMA	TABLE_NAME	COLUMN_NAME	SRS_NAME	SRS_ID	GEOMETRY_TYPE_NAME
 def	test	t1	col1	WGS 84	4326	point
 def	test	t1	col2		0	point
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 [Connection Slave]
 include/diff_tables.inc [master:t1, slave:t1]
-SELECT * FROM INFORMATION_SCHEMA.ST_GEOMETRY_COLUMNS;
+SELECT * FROM INFORMATION_SCHEMA.ST_GEOMETRY_COLUMNS ORDER BY column_name;
 TABLE_CATALOG	TABLE_SCHEMA	TABLE_NAME	COLUMN_NAME	SRS_NAME	SRS_ID	GEOMETRY_TYPE_NAME
 def	test	t1	col1	WGS 84	4326	point
 def	test	t1	col2		0	point
@@ -125,14 +125,14 @@ ALTER TABLE t1 CHANGE COLUMN col1 col1 POINT SRID 2000;
 ALTER TABLE t1 CHANGE COLUMN col2 col2 POINT AS (ST_SRID(col1, 4326)) SRID 4326;
 INSERT INTO t1 (col1) VALUES (ST_GeomFromText('POINT(0 0)', 2000));
 INSERT INTO t1 (col1) VALUES (ST_GeomFromText('POINT(1 1)', 2000));
-SELECT * FROM INFORMATION_SCHEMA.ST_GEOMETRY_COLUMNS;
+SELECT * FROM INFORMATION_SCHEMA.ST_GEOMETRY_COLUMNS ORDER BY column_name;
 TABLE_CATALOG	TABLE_SCHEMA	TABLE_NAME	COLUMN_NAME	SRS_NAME	SRS_ID	GEOMETRY_TYPE_NAME
 def	test	t1	col1	Anguilla 1957 / British West Indies Grid	2000	point
 def	test	t1	col2	WGS 84	4326	point
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 [Connection Slave]
 include/diff_tables.inc [master:t1, slave:t1]
-SELECT * FROM INFORMATION_SCHEMA.ST_GEOMETRY_COLUMNS;
+SELECT * FROM INFORMATION_SCHEMA.ST_GEOMETRY_COLUMNS ORDER BY column_name;
 TABLE_CATALOG	TABLE_SCHEMA	TABLE_NAME	COLUMN_NAME	SRS_NAME	SRS_ID	GEOMETRY_TYPE_NAME
 def	test	t1	col1	Anguilla 1957 / British West Indies Grid	2000	point
 def	test	t1	col2	WGS 84	4326	point
@@ -143,5 +143,5 @@ srid_2000	srid_4326
 [Connection Master]
 # Cleanup
 DROP TABLE t1;
-include/sync_slave_sql_with_master.inc
-include/rpl_end.inc
+include/rpl/sync_to_replica.inc
+include/rpl/deinit.inc

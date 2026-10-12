@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -40,19 +41,20 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 #include "mysql/plugin.h" /* st_mysql_plugin, MYSQL_AUTHENTICATION_PLUGIN */
 #include "mysql/plugin_auth.h"      /* st_mysql_auth */
 #include "mysql/strings/m_ctype.h"  /* my_charset_* */
-#include "mysql_time.h"             /* MYSQL_TIME, MYSQL_TIMESTAMP_ERROR */
+#include "mysql_time.h"             /* MYSQL_TIMESTAMP_ERROR */
 #include "mysqld_error.h"           /* ER_* */
 #include "prealloced_array.h"       /* Prealloced_array */
 #include "sql/auth/auth_acls.h"     /* ACLs */
 #include "sql/auth/auth_common.h"   /* User_table_schema, ... */
 #include "sql/auth/auth_internal.h" /* acl_print_ha_error */
+#include "sql/auth/auth_plugin_shutdown.h"
 #include "sql/auth/partial_revokes.h"
 #include "sql/auth/sql_auth_cache.h"     /* global_acl_memory */
 #include "sql/auth/sql_authentication.h" /* Cached_authentication_plugins */
 #include "sql/auth/sql_user_table.h"     /* Acl_table_intact */
 #include "sql/auth/user_table.h"         /* replace_user_table */
 #include "sql/field.h"     /* Field, Field_json, Field_enum, TYPE_OK */
-#include "sql/handler.h"   /* handler, DB_TYPE_NDBCLUSTER, handlerton */
+#include "sql/handler.h"   /* handler, handlerton */
 #include "sql/item_func.h" /* mqh_used */
 #include "sql/iterators/row_iterator.h" /* RowIterator */
 #include "sql/key.h"                    /* key_copy, KEY */
@@ -132,7 +134,8 @@ static std::map<const User_attribute_type, const std::string>
 
 Acl_user_attributes::Acl_user_attributes(MEM_ROOT *mem_root,
                                          bool read_restrictions,
-                                         Auth_id &auth_id, ulong global_privs)
+                                         Auth_id &auth_id,
+                                         Access_bitmask global_privs)
     : m_mem_root(mem_root),
       m_read_restrictions(read_restrictions),
       m_auth_id(auth_id),
@@ -148,7 +151,7 @@ Acl_user_attributes::Acl_user_attributes(MEM_ROOT *mem_root,
                                          Auth_id &auth_id,
                                          Restrictions *restrictions,
                                          I_multi_factor_auth *mfa)
-    : Acl_user_attributes(mem_root, read_restrictions, auth_id, ~NO_ACCESS) {
+    : Acl_user_attributes(mem_root, read_restrictions, auth_id, ALL_ACCESS) {
   if (restrictions) m_restrictions = *restrictions;
   m_mfa = mfa;
 }
@@ -175,38 +178,41 @@ bool Acl_user_attributes::consume_user_attributes_json(Json_dom_ptr json) {
 }
 
 void Acl_user_attributes::report_and_remove_invalid_db_restrictions(
-    DB_restrictions &db_restrictions, ulong mask, enum loglevel level,
+    DB_restrictions &db_restrictions, Access_bitmask mask, enum loglevel level,
     ulonglong errcode) {
-  for (auto &itr : db_restrictions()) {
-    ulong privs = itr.second;
-    if (privs != (privs & mask)) {
-      std::string invalid_privs;
-      std::string separator(", ");
-      bool second = false;
-      ulong filtered_privs = privs & ~mask;
-      if (filtered_privs)
-        db_restrictions.remove(itr.first.c_str(), filtered_privs);
-      while (filtered_privs != 0) {
-        std::string one_priv = get_one_priv(filtered_privs);
-        if (one_priv.length()) {
-          if (second) invalid_privs.append(separator);
-          invalid_privs.append(one_priv);
-          if (!second) second = true;
+  if (!db_restrictions.is_empty()) {
+    for (auto &itr : db_restrictions()) {
+      Access_bitmask privs = itr.second;
+      if (privs != (privs & mask)) {
+        std::string invalid_privs;
+        std::string separator(", ");
+        bool second = false;
+        Access_bitmask filtered_privs = privs & ~mask;
+        if (filtered_privs)
+          db_restrictions.remove(itr.first.c_str(), filtered_privs);
+        while (filtered_privs != 0) {
+          std::string one_priv = get_one_priv(filtered_privs);
+          if (one_priv.length()) {
+            if (second) invalid_privs.append(separator);
+            invalid_privs.append(one_priv);
+            if (!second) second = true;
+          }
         }
-      }
-      if (!invalid_privs.length()) invalid_privs.append("<unknown_privileges>");
-      std::string auth_id;
-      m_auth_id.auth_str(&auth_id);
+        if (!invalid_privs.length())
+          invalid_privs.append("<unknown_privileges>");
+        std::string auth_id;
+        m_auth_id.auth_str(&auth_id);
 
-      LogErr(level, errcode, auth_id.c_str(), invalid_privs.c_str(),
-             itr.first.length() ? itr.first.c_str() : "<invalid_database>");
+        LogErr(level, errcode, auth_id.c_str(), invalid_privs.c_str(),
+               itr.first.length() ? itr.first.c_str() : "<invalid_database>");
+      }
     }
+    /*
+      Now, remove the databases with no restrictions without invalidating
+      the internal container of DB_restrictions
+    */
+    db_restrictions.remove(0);
   }
-  /*
-    Now, remove the databases with no restrictions without invalidating
-    the internal container of DB_restrictions
-  */
-  db_restrictions.remove(0);
 }
 
 bool Acl_user_attributes::deserialize_multi_factor(
@@ -326,7 +332,7 @@ bool Acl_user_attributes::serialize(Json_object &json_object) const {
         attribute_type_to_str[User_attribute_type::ADDITIONAL_PASSWORD]);
   }
 
-  if (m_restrictions.db().is_not_empty()) {
+  if (!m_restrictions.db().is_empty()) {
     Json_array restrictions_array;
     m_restrictions.db().get_as_json(restrictions_array);
     if (json_object.add_clone(
@@ -457,8 +463,9 @@ Acl_table_user_writer_status::Acl_table_user_writer_status()
   methods
 */
 Acl_table_user_writer::Acl_table_user_writer(
-    THD *thd, TABLE *table, LEX_USER *combo, ulong rights, bool revoke_grant,
-    bool can_create_user, Pod_user_what_to_update what_to_update,
+    THD *thd, TABLE *table, LEX_USER *combo, Access_bitmask rights,
+    bool revoke_grant, bool can_create_user,
+    Pod_user_what_to_update what_to_update,
     Restrictions *restrictions = nullptr, I_multi_factor_auth *mfa = nullptr)
     : Acl_table(thd, table, acl_table::Acl_table_operation::OP_INSERT),
       m_has_user_application_user_metadata(false),
@@ -596,10 +603,8 @@ bool Acl_table_user_writer::setup_table(int &error, bool &builtin_plugin) {
 
       error = m_table->file->ha_index_read_idx_map(
           m_table->record[0], 0, user_key, HA_WHOLE_KEY, HA_READ_KEY_EXACT);
-      assert(m_table->file->ht->db_type == DB_TYPE_NDBCLUSTER ||
-             error != HA_ERR_LOCK_DEADLOCK);
-      assert(m_table->file->ht->db_type == DB_TYPE_NDBCLUSTER ||
-             error != HA_ERR_LOCK_WAIT_TIMEOUT);
+      assert(error != HA_ERR_LOCK_DEADLOCK);
+      assert(error != HA_ERR_LOCK_WAIT_TIMEOUT);
       DBUG_EXECUTE_IF("wl7158_replace_user_table_1",
                       error = HA_ERR_LOCK_DEADLOCK;);
       if (error) {
@@ -724,10 +729,8 @@ Acl_table_op_status Acl_table_user_writer::finish_operation(
     case Acl_table_operation::OP_INSERT: {
       out_error = m_table->file->ha_write_row(m_table->record[0]);  // insert
       assert(out_error != HA_ERR_FOUND_DUPP_KEY);
-      assert(m_table->file->ht->db_type == DB_TYPE_NDBCLUSTER ||
-             out_error != HA_ERR_LOCK_DEADLOCK);
-      assert(m_table->file->ht->db_type == DB_TYPE_NDBCLUSTER ||
-             out_error != HA_ERR_LOCK_WAIT_TIMEOUT);
+      assert(out_error != HA_ERR_LOCK_DEADLOCK);
+      assert(out_error != HA_ERR_LOCK_WAIT_TIMEOUT);
       DBUG_EXECUTE_IF("wl7158_replace_user_table_3",
                       out_error = HA_ERR_LOCK_DEADLOCK;);
       if (out_error) {
@@ -748,10 +751,8 @@ Acl_table_op_status Acl_table_user_writer::finish_operation(
         out_error = m_table->file->ha_update_row(m_table->record[1],
                                                  m_table->record[0]);
         assert(out_error != HA_ERR_FOUND_DUPP_KEY);
-        assert(m_table->file->ht->db_type == DB_TYPE_NDBCLUSTER ||
-               out_error != HA_ERR_LOCK_DEADLOCK);
-        assert(m_table->file->ht->db_type == DB_TYPE_NDBCLUSTER ||
-               out_error != HA_ERR_LOCK_WAIT_TIMEOUT);
+        assert(out_error != HA_ERR_LOCK_DEADLOCK);
+        assert(out_error != HA_ERR_LOCK_WAIT_TIMEOUT);
         DBUG_EXECUTE_IF("wl7158_replace_user_table_2",
                         out_error = HA_ERR_LOCK_DEADLOCK;);
         if (out_error && out_error != HA_ERR_RECORD_IS_THE_SAME) {
@@ -854,7 +855,7 @@ bool Acl_table_user_writer::update_privileges(
     /* Update table columns with new privileges */
     const char what = m_revoke_grant ? 'N' : 'Y';
     Field **tmp_field;
-    ulong priv;
+    Access_bitmask priv;
     for (tmp_field = m_table->field + 2, priv = SELECT_ACL;
          *tmp_field && (*tmp_field)->real_type() == MYSQL_TYPE_ENUM &&
          ((Field_enum *)(*tmp_field))->typelib->count == 2;
@@ -881,8 +882,8 @@ bool Acl_table_user_writer::update_privileges(
   }
 
   return_value.updated_rights = get_user_privileges();
-  DBUG_PRINT("info",
-             ("Privileges on disk are now %lu", return_value.updated_rights));
+  DBUG_PRINT("info", ("Privileges on disk are now %" PRIu32,
+                      return_value.updated_rights));
   DBUG_PRINT("info", ("table fields: %d", m_table->s->fields));
 
   return false;
@@ -1296,10 +1297,10 @@ bool Acl_table_user_writer::write_user_attributes_column(
 
   @returns Bitmask representing global privileges granted to given account
 */
-ulong Acl_table_user_writer::get_user_privileges() {
+Access_bitmask Acl_table_user_writer::get_user_privileges() {
   uint next_field;
   char *priv_str;
-  ulong rights =
+  Access_bitmask rights =
       get_access(m_table, m_table_schema->select_priv_idx(), &next_field);
   if (m_table->s->fields > m_table_schema->drop_role_priv_idx()) {
     priv_str =
@@ -1609,70 +1610,24 @@ void Acl_table_user_reader::read_user_resources(ACL_USER &user) {
 /**
   Read plugin information
 
-  If it is old layout read accordingly. Also, validate authentication string
-  against expected format for the plugin.
+  Also, validate authentication string against expected format for the plugin.
 
   @param [out] user                           ACL_USER structure
   @param [out] super_users_with_empty_plugin  User has SUPER privilege or
   not
-  @param [in]  is_old_db_layout               We are reading from old table
 
   @returns status of reading plugin information
     @retval false Success
     @retval true  Error. Skip user.
 */
 bool Acl_table_user_reader::read_plugin_info(
-    ACL_USER &user, bool &super_users_with_empty_plugin,
-    bool &is_old_db_layout) {
+    ACL_USER &user, bool &super_users_with_empty_plugin) {
   if (m_table->s->fields >= m_table_schema->plugin_idx()) {
     /* We may have plugin & auth_String fields */
     const char *tmpstr =
         get_field(&m_mem_root, m_table->field[m_table_schema->plugin_idx()]);
     user.plugin.str = tmpstr ? tmpstr : "";
     user.plugin.length = strlen(user.plugin.str);
-
-    /*
-      In case we are working with 5.6 db layout we need to make server
-      aware of Password field and that the plugin column can be null.
-      In case when plugin column is null we use native password plugin
-      if we can.
-    */
-    if (is_old_db_layout && (user.plugin.length == 0 ||
-                             Cached_authentication_plugins::compare_plugin(
-                                 PLUGIN_MYSQL_NATIVE_PASSWORD, user.plugin))) {
-      char *password = get_field(
-          &m_mem_root, m_table->field[m_table_schema->password_idx()]);
-
-      // We do not support pre 4.1 hashes
-      plugin_ref native_plugin =
-          g_cached_authentication_plugins->get_cached_plugin_ref(
-              PLUGIN_MYSQL_NATIVE_PASSWORD);
-      if (native_plugin) {
-        const uint password_len = password ? strlen(password) : 0;
-        st_mysql_auth *auth = (st_mysql_auth *)plugin_decl(native_plugin)->info;
-        if (auth->validate_authentication_string(password, password_len) == 0) {
-          // auth_string takes precedence over password
-          if (user.credentials[PRIMARY_CRED].m_auth_string.length == 0) {
-            user.credentials[PRIMARY_CRED].m_auth_string.str = password;
-            user.credentials[PRIMARY_CRED].m_auth_string.length = password_len;
-          }
-          if (user.plugin.length == 0) {
-            user.plugin.str = Cached_authentication_plugins::get_plugin_name(
-                PLUGIN_MYSQL_NATIVE_PASSWORD);
-            user.plugin.length = strlen(user.plugin.str);
-          }
-        } else {
-          if ((user.access & SUPER_ACL) && !super_users_with_empty_plugin &&
-              (user.plugin.length == 0))
-            super_users_with_empty_plugin = true;
-
-          LogErr(WARNING_LEVEL, ER_AUTHCACHE_USER_IGNORED_DEPRECATED_PASSWORD,
-                 user.user ? user.user : "",
-                 user.host.get_host() ? user.host.get_host() : "");
-          return true;
-        }
-      }
-    }
 
     /*
       Check if the plugin string is blank or null.
@@ -1698,10 +1653,11 @@ bool Acl_table_user_reader::read_plugin_info(
       my_plugin_lock_by_name(nullptr, user.plugin, MYSQL_AUTHENTICATION_PLUGIN);
   if (plugin) {
     st_mysql_auth *auth = (st_mysql_auth *)plugin_decl(plugin)->info;
-    if (auth->validate_authentication_string(
-            const_cast<char *>(
-                user.credentials[PRIMARY_CRED].m_auth_string.str),
-            user.credentials[PRIMARY_CRED].m_auth_string.length)) {
+    Auth_plugin_operation_guard op_guard;
+    if (!op_guard || auth->validate_authentication_string(
+                         const_cast<char *>(
+                             user.credentials[PRIMARY_CRED].m_auth_string.str),
+                         user.credentials[PRIMARY_CRED].m_auth_string.length)) {
       LogErr(WARNING_LEVEL, ER_AUTHCACHE_USER_IGNORED_INVALID_PASSWORD,
              user.user ? user.user : "",
              user.host.get_host() ? user.host.get_host() : "");
@@ -1782,7 +1738,8 @@ void Acl_table_user_reader::read_password_last_changed(ACL_USER &user) {
       if (password_last_changed &&
           memcmp(password_last_changed, INVALID_DATE, sizeof(INVALID_DATE))) {
         String str(password_last_changed, &my_charset_bin);
-        str_to_time_with_warn(&str, &(user.password_last_changed));
+        str_to_datetime_with_warn(&str, &user.password_last_changed,
+                                  TIME_DATETIME_ONLY);
       }
     }
   }
@@ -1915,7 +1872,9 @@ bool Acl_table_user_reader::read_user_attributes(ACL_USER &user) {
       if (plugin) {
         st_mysql_auth *auth = (st_mysql_auth *)plugin_decl(plugin)->info;
 
-        if (auth->validate_authentication_string(
+        Auth_plugin_operation_guard op_guard;
+        if (!op_guard ||
+            auth->validate_authentication_string(
                 const_cast<char *>(
                     user.credentials[SECOND_CRED].m_auth_string.str),
                 user.credentials[SECOND_CRED].m_auth_string.length)) {
@@ -1994,8 +1953,6 @@ void Acl_table_user_reader::add_row_to_acl_users(ACL_USER &user) {
 /**
   Read a row from mysql.user table and add it to in-memory structure
 
-  @param [in] is_old_db_layout               mysql.user table is in old
-  format
   @param [in] super_users_with_empty_plugin  User has SUPER privilege
 
   @returns Status of reading a row
@@ -2003,8 +1960,7 @@ void Acl_table_user_reader::add_row_to_acl_users(ACL_USER &user) {
     @retval true  Error reading the row. Unless critical, keep reading
   further.
 */
-bool Acl_table_user_reader::read_row(bool &is_old_db_layout,
-                                     bool &super_users_with_empty_plugin) {
+bool Acl_table_user_reader::read_row(bool &super_users_with_empty_plugin) {
   bool password_expired = false;
   DBUG_TRACE;
   /* Reading record from mysql.user */
@@ -2015,8 +1971,7 @@ bool Acl_table_user_reader::read_row(bool &is_old_db_layout,
   read_privileges(user);
   read_ssl_fields(user);
   read_user_resources(user);
-  if (read_plugin_info(user, super_users_with_empty_plugin, is_old_db_layout))
-    return false;
+  if (read_plugin_info(user, super_users_with_empty_plugin)) return false;
   read_password_expiry(user, password_expired);
   read_password_locked(user);
   read_password_last_changed(user);
@@ -2052,7 +2007,7 @@ bool Acl_table_user_reader::driver() {
   allow_all_hosts = false;
   int read_rec_errcode;
   while (!(read_rec_errcode = m_iterator->Read())) {
-    if (read_row(is_old_db_layout, super_users_with_empty_plugin)) return true;
+    if (read_row(super_users_with_empty_plugin)) return true;
   }
 
   m_iterator.reset();
@@ -2070,32 +2025,6 @@ bool Acl_table_user_reader::driver() {
 
 Password_lock::Password_lock()
     : password_lock_time_days(0), failed_login_attempts(0) {}
-
-Password_lock &Password_lock::operator=(const Password_lock &other) {
-  if (this != &other) {
-    password_lock_time_days = other.password_lock_time_days;
-    failed_login_attempts = other.failed_login_attempts;
-  }
-  return *this;
-}
-
-Password_lock &Password_lock::operator=(Password_lock &&other) {
-  if (this != &other) {
-    std::swap(password_lock_time_days, other.password_lock_time_days);
-    std::swap(failed_login_attempts, other.failed_login_attempts);
-  }
-  return *this;
-}
-
-Password_lock::Password_lock(const Password_lock &other) {
-  password_lock_time_days = other.password_lock_time_days;
-  failed_login_attempts = other.failed_login_attempts;
-}
-
-Password_lock::Password_lock(Password_lock &&other) {
-  std::swap(password_lock_time_days, other.password_lock_time_days);
-  std::swap(failed_login_attempts, other.failed_login_attempts);
-}
 
 }  // namespace acl_table
 
@@ -2121,8 +2050,9 @@ Password_lock::Password_lock(Password_lock &&other) {
                   processing subsequent user specified in the ACL statement.
 */
 
-int replace_user_table(THD *thd, TABLE *table, LEX_USER *combo, ulong rights,
-                       bool revoke_grant, bool can_create_user,
+int replace_user_table(THD *thd, TABLE *table, LEX_USER *combo,
+                       Access_bitmask rights, bool revoke_grant,
+                       bool can_create_user,
                        acl_table::Pod_user_what_to_update &what_to_update,
                        Restrictions *restrictions /*= nullptr*/,
                        I_multi_factor_auth *mfa /*= nullptr*/) {
@@ -2166,9 +2096,9 @@ int replace_user_table(THD *thd, TABLE *table, LEX_USER *combo, ulong rights,
 
     /*
       Convert the time when the password was changed from timeval
-      structure to MYSQL_TIME format, to store it in cache.
+      structure to datetime format, to store it in cache.
     */
-    MYSQL_TIME password_change_time;
+    Datetime_val password_change_time;
 
     if (builtin_plugin && (update_password || !old_row_exists))
       thd->variables.time_zone->gmt_sec_to_TIME(
@@ -2299,10 +2229,7 @@ static bool replace_user_metadata(const std::string &json_blob,
     }
     Json_object_ptr patch_obj(
         down_cast<Json_object *>(metadata_patch.release()));
-    if (metadata->cardinality() == 0)
-      metadata->consume(std::move(patch_obj));
-    else
-      metadata->merge_patch(std::move(patch_obj));
+    metadata->merge_patch(std::move(patch_obj));
   }
   Json_wrapper jw(json_dom.get(), true);  // alias == don't take ownership
   json_field->set_notnull();

@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,8 +29,8 @@
 #include <time.h>
 
 #include <algorithm>
+#include <bit>
 
-#include "my_bit.h"
 #include "my_byteorder.h"
 #include "my_dbug.h"
 #include "my_inttypes.h"
@@ -62,7 +63,7 @@ int mi_create(const char *name, uint keys, MI_KEYDEF *keydefs, uint columns,
       key_length, info_length, key_segs, options, min_key_length_skip, base_pos,
       long_varchar_count, varchar_length, max_key_block_length,
       unique_key_parts, fulltext_keys, offset;
-  uint aligned_key_start, block_length;
+  uint aligned_key_start;
   uint internal_table = flags & HA_CREATE_INTERNAL_TABLE;
   ulong reclength, real_reclength, min_pack_length;
   char filename[FN_REFLEN], linkname[FN_REFLEN], *linkname_ptr;
@@ -202,9 +203,9 @@ int mi_create(const char *name, uint keys, MI_KEYDEF *keydefs, uint columns,
     else
       ci->data_file_length = (ulonglong)ci->max_rows * pack_reclength;
   } else if (!ci->max_rows)
-    ci->max_rows = (ha_rows)(
-        ci->data_file_length /
-        (min_pack_length + ((options & HA_OPTION_PACK_RECORD) ? 3 : 0)));
+    ci->max_rows = (ha_rows)(ci->data_file_length /
+                             (min_pack_length +
+                              ((options & HA_OPTION_PACK_RECORD) ? 3 : 0)));
 
   if (options & (HA_OPTION_COMPRESS_RECORD | HA_OPTION_PACK_RECORD))
     pointer =
@@ -399,11 +400,10 @@ int mi_create(const char *name, uint keys, MI_KEYDEF *keydefs, uint columns,
       share.state.rec_per_key_part[key_segs - 1] = 1L;
     length += key_length;
     /* Get block length for key, if defined by user */
-    block_length =
-        (keydef->block_length ? my_round_up_to_next_power(keydef->block_length)
-                              : myisam_block_size);
-    block_length = std::max(block_length, MI_MIN_KEY_BLOCK_LENGTH);
-    block_length = std::min(block_length, MI_MAX_KEY_BLOCK_LENGTH);
+    uint block_length =
+        keydef->block_length != 0 ? keydef->block_length : myisam_block_size;
+    block_length = std::clamp(std::bit_ceil(block_length),
+                              MI_MIN_KEY_BLOCK_LENGTH, MI_MAX_KEY_BLOCK_LENGTH);
 
     keydef->block_length = (uint16)MI_BLOCK_SIZE(
         length - real_length_diff, pointer, MI_MAX_KEYPTR_SIZE, block_length);
@@ -499,8 +499,8 @@ int mi_create(const char *name, uint keys, MI_KEYDEF *keydefs, uint columns,
   mi_int2store(share.state.header.unique_key_parts, unique_key_parts);
 
   mi_set_all_keys_active(share.state.key_map, keys);
-  aligned_key_start = my_round_up_to_next_power(
-      max_key_block_length ? max_key_block_length : myisam_block_size);
+  aligned_key_start = std::bit_ceil(max_key_block_length ? max_key_block_length
+                                                         : myisam_block_size);
 
   share.base.keystart = share.state.state.key_file_length =
       MY_ALIGN(info_length, aligned_key_start);

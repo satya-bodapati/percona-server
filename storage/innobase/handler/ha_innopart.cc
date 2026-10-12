@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -62,6 +63,7 @@ Created Nov 22, 2013 Mattias Jonsson */
 #include "fsp0sysspace.h"
 #include "ha_innodb.h"
 #include "ha_innopart.h"
+#include "handler0alter.h"  //alter_stats_rebuild()
 #include "key.h"
 #include "lex_string.h"
 #include "lock0lock.h"
@@ -779,7 +781,9 @@ done:
 @param[in]      table_def       dd::Table describing table to be opened
 @retval 1 if error
 @retval 0 if success */
-int ha_innopart::open(const char *name, int, uint, const dd::Table *table_def) {
+int ha_innopart::open(const char *name, int mode [[maybe_unused]],
+                      uint test_if_locked [[maybe_unused]],
+                      const dd::Table *table_def) {
   dict_table_t *ib_table;
   char norm_name[FN_REFLEN];
   THD *thd;
@@ -1150,7 +1154,7 @@ int ha_innopart::open(const char *name, int, uint, const dd::Table *table_def) {
     return HA_ERR_OUT_OF_MEM;
   }
 
-  m_sql_stat_start_parts.init(m_bitset, UT_BITS_IN_BYTES(m_tot_parts));
+  m_sql_stat_start_parts = {m_bitset, UT_BITS_IN_BYTES(m_tot_parts)};
   m_reuse_mysql_template = false;
 
   info(HA_STATUS_NO_LOCK | HA_STATUS_VARIABLE | HA_STATUS_CONST);
@@ -1288,7 +1292,7 @@ void ha_innopart::set_partition(uint part_id) {
 
   if (part_id >= m_tot_parts) {
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
   }
   if (m_pcur_parts != nullptr) {
     m_prebuilt->pcur = &m_pcur_parts[m_pcur_map[part_id]];
@@ -1342,7 +1346,7 @@ void ha_innopart::update_partition(uint part_id) {
 
   if (part_id >= m_tot_parts) {
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
   }
 
   /* Update all m_parts[part_id] fields with corresponding m_prebuilt's fields,
@@ -1513,39 +1517,36 @@ int ha_innopart::index_init(uint keynr, bool sorted) {
   }
 
   error = ph_index_init_setup(keynr, sorted);
-  if (error != 0) {
-    return error;
-  }
 
-  if (sorted) {
+  if (!error && sorted) {
     error = init_record_priority_queue();
-    if (error != 0) {
-      /* Needs cleanup in case it returns error. */
-      destroy_record_priority_queue();
-      return error;
+  }
+
+  if (!error) {
+    /* Disable prefetch for ordered scans.
+    The prefetch buffer is not partitioning aware, so it may return rows from a
+    different partition. This is relevant only when we interleave reads across
+    partitions (sorted/ordered scan with priority queue). */
+    if (sorted) {
+      m_prebuilt->m_no_prefetch = true;
     }
-    /* Disable prefetch.
-    The prefetch buffer is not partitioning aware, so it may return
-    rows from a different partition if either the prefetch buffer is
-    full, or it is non-empty and the partition is exhausted. */
-    m_prebuilt->m_no_prefetch = true;
+
+    /* For scan across partitions, the keys needs to be materialized */
+    m_prebuilt->m_read_virtual_key = true;
+
+    error = change_active_index(part_id, keynr);
+
+    DBUG_EXECUTE_IF("partition_fail_index_init",
+                    { error = HA_ERR_NO_PARTITION_FOUND; });
   }
 
-  /* For scan across partitions, the keys needs to be materialized */
-  m_prebuilt->m_read_virtual_key = true;
-
-  error = change_active_index(part_id, keynr);
-  if (error != 0) {
+  if (error) {
     destroy_record_priority_queue();
-    return error;
+    m_prebuilt->m_no_prefetch = false;
+    m_prebuilt->m_read_virtual_key = false;
   }
 
-  DBUG_EXECUTE_IF("partition_fail_index_init", {
-    destroy_record_priority_queue();
-    return HA_ERR_NO_PARTITION_FOUND;
-  });
-
-  return 0;
+  return error;
 }
 
 /** End index cursor.
@@ -1554,17 +1555,17 @@ int ha_innopart::index_end() {
   uint part_id = m_part_info->get_first_used_partition();
   DBUG_TRACE;
 
-  if (part_id == MY_BIT_NONE) {
-    /* Never initialized any index. */
-    active_index = MAX_KEY;
-    return 0;
-  }
-  if (m_ordered) {
+  if (m_queue) {
     destroy_record_priority_queue();
     m_prebuilt->m_no_prefetch = false;
   }
   m_prebuilt->m_read_virtual_key = false;
 
+  if (part_id == MY_BIT_NONE) {
+    /* Never initialized any index. */
+    active_index = MAX_KEY;
+    return 0;
+  }
   return ha_innobase::index_end();
 }
 
@@ -1705,6 +1706,8 @@ inline dict_index_t *ha_innopart::innopart_get_index(uint part_id, uint keynr) {
   if (keynr != MAX_KEY && table->s->keys > 0) {
     key = table->key_info + keynr;
 
+    ut_ad(key != nullptr);
+
     index = m_part_share->get_index(part_id, keynr);
 
     if (index != nullptr) {
@@ -1715,8 +1718,8 @@ inline dict_index_t *ha_innopart::innopart_get_index(uint part_id, uint keynr) {
       table exists. */
 
       ib::warn(ER_IB_MSG_592)
-          << "InnoDB could not find index " << (key ? key->name : "NULL")
-          << " key no " << keynr << " for table " << m_prebuilt->table->name
+          << "InnoDB could not find index " << key->name << " key no " << keynr
+          << " for table " << m_prebuilt->table->name
           << " through its index translation table";
 
       index = dict_table_get_index_on_name(m_prebuilt->table, key->name);
@@ -2894,26 +2897,6 @@ int ha_innopart::discard_or_import_tablespace(bool discard,
   return error;
 }
 
-/** This function reads zip dict-related info from the base class.
-@param    thd          Thread handler
-@param    part_name    Must be always NULL.
-*/
-void ha_innopart::upgrade_update_field_with_zip_dict_info(
-    THD *thd, const char *part_name) {
-  DBUG_ENTER("ha_innopart::upgrade_update_field_with_zip_dict_info");
-  char partition_name[FN_REFLEN];
-  bool res = get_first_partition_name(
-      thd, this, table_share->normalized_path.str,
-      table_share->partition_info_str, table_share->partition_info_str_len,
-      partition_name);
-  if (res) {
-    ut_ad(0);
-    DBUG_VOID_RETURN;
-  }
-
-  ha_innobase::upgrade_update_field_with_zip_dict_info(thd, partition_name);
-  DBUG_VOID_RETURN;
-}
 
 /** Compare key and rowid.
 Helper function for sorting records in the priority queue.
@@ -2975,7 +2958,9 @@ int ha_innopart::extra(enum ha_extra_function operation) {
     for (uint i = m_part_info->get_first_used_partition(); i < m_tot_parts;
          i = m_part_info->get_next_used_partition(i)) {
       dict_table_t *table_part = m_part_share->get_table_part(i);
-
+      if (operation == HA_EXTRA_END_ALTER_COPY) {
+        alter_stats_rebuild(table_part, table_part->name.m_name, m_user_thd);
+      }
       table_part->skip_alter_undo = (operation == HA_EXTRA_BEGIN_ALTER_COPY);
     }
 
@@ -3234,10 +3219,9 @@ int ha_innopart::records(ha_rows *num_rows) {
 
   n_threads = Parallel_reader::available_threads(n_threads, false);
 
-  if (n_threads > 0 && trx->isolation_level > TRX_ISO_READ_UNCOMMITTED &&
+  if (n_threads > 1 && trx->isolation_level > TRX_ISO_READ_UNCOMMITTED &&
       m_prebuilt->select_lock_type == LOCK_NONE &&
-      trx->mysql_n_tables_locked == 0 && !m_prebuilt->ins_sel_stmt &&
-      n_threads > 1) {
+      trx->mysql_n_tables_locked == 0 && !m_prebuilt->ins_sel_stmt) {
     trx_start_if_not_started_xa(trx, false, UT_LOCATION_HERE);
     trx_assign_read_view(trx);
 
@@ -3252,8 +3236,19 @@ int ha_innopart::records(ha_rows *num_rows) {
       if (dict_table_is_discarded(m_prebuilt->table)) {
         ib_senderrf(ha_thd(), IB_LOG_LEVEL_ERROR, ER_TABLESPACE_DISCARDED,
                     m_prebuilt->table->name.m_name);
+
+        /* Restore the parallel read thread count if parallel read is not
+        executed */
+        Parallel_reader::release_threads(n_threads);
+
         *num_rows = HA_POS_ERROR;
         return (HA_ERR_NO_SUCH_TABLE);
+      }
+
+      m_prebuilt->index_usable = m_prebuilt->index->is_usable(trx);
+      if (!m_prebuilt->index_usable) {
+        *num_rows = HA_POS_ERROR;
+        return HA_ERR_TABLE_DEF_CHANGED;
       }
 
       build_template(true);
@@ -3263,6 +3258,8 @@ int ha_innopart::records(ha_rows *num_rows) {
 
     ulint n_rows{};
 
+    /* There is no need to restore the parallel read thread count after this
+    method call as it takes the ownership of n_threads. */
     auto err =
         row_mysql_parallel_select_count_star(trx, indexes, n_threads, &n_rows);
 
@@ -3281,6 +3278,10 @@ int ha_innopart::records(ha_rows *num_rows) {
     /* The index scan is probably so expensive, so the overhead
     of the rest of the function is neglectable for each partition.
     So no current reason for optimizing this further. */
+
+    /* Restore the parallel read thread count if parallel read is not
+    executed */
+    Parallel_reader::release_threads(n_threads);
 
     for (uint i = m_part_info->get_first_used_partition(); i < m_tot_parts;
          i = m_part_info->get_next_used_partition(i)) {
@@ -3458,7 +3459,7 @@ ha_rows ha_innopart::estimate_rows_upper_bound() {
     m_prebuilt->table = m_part_share->get_table_part(i);
     index = m_prebuilt->table->first_index();
 
-    stat_n_leaf_pages = index->stat_n_leaf_pages;
+    stat_n_leaf_pages = index->stats.n_leaf_pages;
 
     ut_ad(stat_n_leaf_pages > 0);
 
@@ -3528,10 +3529,17 @@ static int update_table_stats(dict_table_t *table, bool is_analyze) {
 Returns statistics information of the table to the MySQL interpreter,
 in various fields of the handle object.
 @param[in]      flag            Flags for what to update and return.
+                                HA_STATUS_NO_LOCK is supported only for:
+                                ha_statistics::delete_length
+                                it is not supported for others like:
+                                ha_statistics::records
+                                But it will not lock for the duration of stats
+                                calculation. Only during copy to make sure
+                                stats are consistent.
 @param[in]      is_analyze      True if called from "::analyze()".
 @return HA_ERR_* error code or 0. */
 int ha_innopart::info_low(uint flag, bool is_analyze) {
-  dict_table_t *ib_table;
+  dict_table_t *ib_table = nullptr;
   uint64_t max_rows = 0;
   uint biggest_partition = 0;
   int error = 0;
@@ -3608,24 +3616,19 @@ int ha_innopart::info_low(uint flag, bool is_analyze) {
     for (uint i = m_part_info->get_first_used_partition(); i < m_tot_parts;
          i = m_part_info->get_next_used_partition(i)) {
       ib_table = m_part_share->get_table_part(i);
-      if ((flag & HA_STATUS_NO_LOCK) == 0) {
-        dict_table_stats_lock(ib_table, RW_S_LATCH);
-      }
+      uint64_t stat_n_rows{0};
 
-      ut_ad(ib_table->stat_initialized);
+      dict_table_stats_lock(ib_table, RW_S_LATCH);
 
-      n_rows += ib_table->stat_n_rows;
-      if (ib_table->stat_n_rows > max_rows) {
-        max_rows = ib_table->stat_n_rows;
+      info_low_table_stats(ib_table, stat_clustered_index_size,
+                           stat_sum_of_other_index_sizes, stat_n_rows);
+
+      dict_table_stats_unlock(ib_table, RW_S_LATCH);
+
+      n_rows += stat_n_rows;
+      if (stat_n_rows > max_rows) {
+        max_rows = stat_n_rows;
         biggest_partition = i;
-      }
-
-      stat_clustered_index_size += ib_table->stat_clustered_index_size;
-
-      stat_sum_of_other_index_sizes += ib_table->stat_sum_of_other_index_sizes;
-
-      if ((flag & HA_STATUS_NO_LOCK) == 0) {
-        dict_table_stats_unlock(ib_table, RW_S_LATCH);
       }
 
       if ((flag & HA_STATUS_VARIABLE_EXTRA) != 0 &&
@@ -3720,7 +3723,13 @@ int ha_innopart::info_low(uint flag, bool is_analyze) {
     }
   }
 
-  if ((flag & HA_STATUS_CONST) != 0) {
+  bool proactively_update_const =
+      !is_analyze && (flag & HA_STATUS_CONST_WHEN_UPDATED);
+
+  /* Find which partition is the biggest. It is needed both for constant
+  statistics and for proactive check whether constant statistics where
+  updated. */
+  if ((flag & HA_STATUS_CONST) != 0 || proactively_update_const) {
     /* Find max rows and biggest partition. */
     for (uint i = 0; i < m_tot_parts; i++) {
       /* Skip partitions from above. */
@@ -3734,6 +3743,21 @@ int ha_innopart::info_low(uint flag, bool is_analyze) {
       }
     }
     ib_table = m_part_share->get_table_part(biggest_partition);
+  }
+
+  /* Piggyback fetching constant statistics when it has been updated and
+  up-to-date constant statistics where requested. */
+  if (proactively_update_const && ib_table != nullptr &&
+      ib_table->stats_updated.exchange(false)) {
+    flag |= HA_STATUS_CONST;
+  }
+
+  if ((flag & HA_STATUS_CONST) != 0) {
+    /* Constant statistics will be copied to the table. So subsequent calls
+    with HA_STATUS_CONST_WHEN_UPDATED do not have to repeat it unless
+    statistics were updated in the meantime. */
+    ib_table->stats_updated.store(false);
+
     /* Verify the number of index in InnoDB and MySQL
     matches up. If m_prebuilt->clust_index_was_generated
     holds, InnoDB defines GEN_CLUST_INDEX internally. */
@@ -3775,72 +3799,11 @@ int ha_innopart::info_low(uint flag, bool is_analyze) {
           << table->s->keys << " defined in the MySQL";
     }
 
-    if ((flag & HA_STATUS_NO_LOCK) == 0) {
-      dict_table_stats_lock(ib_table, RW_S_LATCH);
-    }
+    dict_table_stats_lock(ib_table, RW_S_LATCH);
 
-    ut_ad(ib_table->stat_initialized);
+    info_low_rec_per_key(ib_table, max_rows, biggest_partition);
 
-    for (ulong i = 0; i < table->s->keys; i++) {
-      ulong j;
-      /* We could get index quickly through internal
-      index mapping with the index translation table.
-      The identity of index (match up index name with
-      that of table->key_info[i]) is already verified in
-      innopart_get_index(). */
-      dict_index_t *index = innopart_get_index(biggest_partition, i);
-
-      if (index == nullptr) {
-        ib::error(ER_IB_MSG_596)
-            << "Table " << ib_table->name
-            << " contains fewer indexes than expected." << TROUBLESHOOTING_MSG;
-        break;
-      }
-
-      KEY *key = &table->key_info[i];
-      for (j = 0; j < key->actual_key_parts; j++) {
-        if ((key->flags & HA_FULLTEXT) != 0) {
-          /* The whole concept has no validity
-          for FTS indexes. */
-          key->set_records_per_key(j, 1.0f);
-          continue;
-        }
-
-        if ((j + 1) > index->n_uniq) {
-          ib::error(ER_IB_MSG_597)
-              << "Index " << index->name << " of " << ib_table->name << " has "
-              << index->n_uniq
-              << " columns unique inside"
-                 " InnoDB, but MySQL is"
-                 " asking statistics for "
-              << j + 1 << " columns." << TROUBLESHOOTING_MSG;
-          break;
-        }
-
-        /* innodb_rec_per_key() will use
-        index->stat_n_diff_key_vals[] and the value we
-        pass index->table->stat_n_rows. Both are
-        calculated by ANALYZE and by the background
-        stats gathering thread (which kicks in when too
-        much of the table has been changed). In
-        addition table->stat_n_rows is adjusted with
-        each DML (e.g. ++ on row insert). Those
-        adjustments are not MVCC'ed and not even
-        reversed on rollback. So,
-        index->stat_n_diff_key_vals[] and
-        index->table->stat_n_rows could have been
-        calculated at different time. This is
-        acceptable. */
-        const rec_per_key_t rec_per_key =
-            innodb_rec_per_key(index, j, max_rows);
-
-        key->set_records_per_key(j, rec_per_key);
-      }
-    }
-
-    if ((flag & HA_STATUS_NO_LOCK) == 0) {
-      dict_table_stats_unlock(ib_table, RW_S_LATCH);
-    }
+    dict_table_stats_unlock(ib_table, RW_S_LATCH);
   }
 
   if (srv_force_recovery >= SRV_FORCE_NO_IBUF_MERGE) {
@@ -3892,6 +3855,67 @@ func_exit:
   m_prebuilt->trx->op_info = (char *)"";
 
   return error;
+}
+
+void ha_innopart::info_low_rec_per_key(const dict_table_t *ib_table,
+                                       uint64_t max_rows,
+                                       uint biggest_partition) {
+  ut_ad(ib_table->stat_initialized);
+
+  for (ulong i = 0; i < table->s->keys; i++) {
+    /* We could get index quickly through internal index mapping with the index
+    translation table. The identity of index (match up index name with that of
+    table->key_info[i]) is already verified in innopart_get_index(). */
+    dict_index_t *index = innopart_get_index(biggest_partition, i);
+
+    if (index == nullptr) {
+      ib::error(ER_IB_MSG_596)
+          << "Table " << ib_table->name
+          << " contains fewer indexes than expected." << TROUBLESHOOTING_MSG;
+      break;
+    }
+
+    KEY *key = &table->key_info[i];
+    for (ulong j = 0; j < key->actual_key_parts; j++) {
+      if ((key->flags & HA_FULLTEXT) != 0) {
+        /* The whole concept has no validity for FTS indexes. */
+        key->set_records_per_key(j, 1.0f);
+        continue;
+      }
+
+      if ((j + 1) > index->n_uniq) {
+        ib::error(ER_IB_MSG_597) << "Index " << index->name << " of "
+                                 << ib_table->name << " has " << index->n_uniq
+                                 << " columns unique inside"
+                                    " InnoDB, but MySQL is"
+                                    " asking statistics for "
+                                 << j + 1 << " columns." << TROUBLESHOOTING_MSG;
+        break;
+      }
+
+      /* innodb_rec_per_key() will use index->stat_n_diff_key_vals[] and the
+      value we pass index->table->stat_n_rows. Both are calculated by ANALYZE
+      and by the background stats gathering thread (which kicks in when too
+      much of the table has been changed). In addition, table->stat_n_rows is
+      adjusted with each DML (e.g. ++ on row insert). Those adjustments are not
+      MVCC'ed and not even reversed on rollback. So,
+      index->stat_n_diff_key_vals[] and index->table->stat_n_rows could have
+      been calculated at different time. This is acceptable. */
+      const rec_per_key_t rec_per_key = innodb_rec_per_key(index, j, max_rows);
+      key->set_records_per_key(j, rec_per_key);
+    }
+  }
+}
+
+void ha_innopart::info_low_table_stats(const dict_table_t *ib_table,
+                                       ulint &stat_clustered_index_size,
+                                       ulint &stat_sum_of_other_index_sizes,
+                                       uint64_t &stat_n_rows) const {
+  ut_ad(ib_table->stat_initialized);
+
+  stat_n_rows = ib_table->stat_n_rows;
+  stat_clustered_index_size += ib_table->stat_clustered_index_size;
+  stat_sum_of_other_index_sizes += ib_table->stat_sum_of_other_index_sizes;
 }
 
 int ha_innopart::optimize(THD *, HA_CHECK_OPT *) {
@@ -3962,7 +3986,7 @@ int ha_innopart::repair(THD *thd, HA_CHECK_OPT *repair_opt) {
   push_warning_printf(thd, Sql_condition::SL_WARNING, ER_ILLEGAL_HA,
                       "Only moving rows from wrong partition to correct"
                       " partition is supported,"
-                      " repairing InnoDB indexes is not yet supported!");
+                      " repairing InnoDB indexes is not supported!");
 #endif
 
   /* Only repair partitions for MEDIUM or EXTENDED options. */
@@ -4154,7 +4178,7 @@ void ha_innopart::get_auto_increment(ulonglong, ulonglong increment,
     /* Only first key part allowed as autoinc for InnoDB tables! */
     *first_value = ULLONG_MAX;
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
   }
   get_auto_increment_first_field(increment, nb_desired_values, first_value,
                                  nb_reserved_values);

@@ -1,8 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; version 2 of the License.
+
+   This program is designed to work with certain software (including
+   but not limited to OpenSSL) that is licensed under separate terms,
+   as designated in a particular file or component or in included license
+   documentation.  The authors of MySQL hereby grant you an additional
+   permission to link the program and your derivative works with the
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -158,7 +166,7 @@ PSI_table_handle *Pfs_table_replication_group_configuration_version::open_table(
       struct Replication_group_configuration_version row;
 
       table->field[0]->val_str(&string);
-      row.name.assign(string.c_ptr_safe(), string.length());
+      row.name.assign(to_string_view(string));
 
       row.version = table->field[1]->val_int();
 

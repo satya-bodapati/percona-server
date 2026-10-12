@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,6 +25,7 @@
 #include <sstream>
 
 #include <mysql/components/services/log_builtins.h>
+#include <mysql/components/services/mysql_timestamp.h>
 #include <mysql/service_rpl_transaction_write_set.h>
 #include "mutex_lock.h"
 #include "my_dbug.h"
@@ -36,15 +38,21 @@
 #include "plugin/group_replication/include/observer_server_actions.h"
 #include "plugin/group_replication/include/observer_server_state.h"
 #include "plugin/group_replication/include/observer_trans.h"
+#include "plugin/group_replication/include/opt_tracker.h"
 #include "plugin/group_replication/include/perfschema/pfs.h"
 #include "plugin/group_replication/include/pipeline_stats.h"
 #include "plugin/group_replication/include/plugin.h"
 #include "plugin/group_replication/include/plugin_handlers/consensus_leaders_handler.h"
 #include "plugin/group_replication/include/plugin_handlers/member_actions_handler.h"
 #include "plugin/group_replication/include/plugin_handlers/metrics_handler.h"
+#include "plugin/group_replication/include/plugin_handlers/primary_election_most_uptodate.h"
+#include "plugin/group_replication/include/plugin_handlers/recovery_metadata.h"
+#include "plugin/group_replication/include/plugin_observers/recovery_metadata_observer.h"
 #include "plugin/group_replication/include/plugin_status_variables.h"
 #include "plugin/group_replication/include/plugin_variables.h"
 #include "plugin/group_replication/include/plugin_variables/recovery_endpoints.h"
+#include "plugin/group_replication/include/services/flow_control/get_metrics.h"
+#include "plugin/group_replication/include/services/management/management.h"
 #include "plugin/group_replication/include/services/message_service/message_service.h"
 #include "plugin/group_replication/include/services/status_service/status_service.h"
 #include "plugin/group_replication/include/sql_service/sql_service_interface.h"
@@ -90,6 +98,8 @@ SERVICE_TYPE(log_builtins_string) * log_bs;
 Applier_module *applier_module = nullptr;
 /** The plugin recovery module */
 Recovery_module *recovery_module = nullptr;
+/** The plugin recovery metadata module */
+Recovery_metadata_module *recovery_metadata_module = nullptr;
 /** The plugin group communication module */
 Gcs_operations *gcs_module = nullptr;
 /** The registry module */
@@ -156,7 +166,11 @@ Compatibility_module *compatibility_mgr = nullptr;
 SERVICE_TYPE_NO_CONST(mysql_runtime_error) *mysql_runtime_error_service =
     nullptr;
 
+/* Timestamp service */
+SERVICE_TYPE_NO_CONST(mysql_timestamp) *mysql_timestamp_service = nullptr;
+
 Consensus_leaders_handler *consensus_leaders_handler = nullptr;
+Recovery_metadata_observer *recovery_metadata_observer = nullptr;
 
 /* Performance schema module */
 static gr::perfschema::Perfschema_module *perfschema_module = nullptr;
@@ -213,38 +227,15 @@ int terminate_recovery_module();
 void terminate_asynchronous_channels_observer();
 void set_auto_increment_handler_values();
 
-static void option_deprecation_warning(MYSQL_THD thd, const char *old_name,
-                                       const char *new_name) {
-  push_deprecated_warn(thd, old_name, new_name);
-}
-
 static void check_deprecated_variables() {
   MYSQL_THD thd = lv.plugin_is_auto_starting_on_install ? nullptr : current_thd;
-  if (ov.ip_whitelist_var != nullptr &&
-      strcmp(ov.ip_whitelist_var, "AUTOMATIC")) {
-    option_deprecation_warning(thd, "group_replication_ip_whitelist",
-                               "group_replication_ip_allowlist");
-  }
-  if (ov.recovery_completion_policy_var != RECOVERY_POLICY_WAIT_EXECUTED) {
-    push_deprecated_warn_no_replacement(
-        thd, "group_replication_recovery_complete_at");
+  if (ov.view_change_uuid_var != nullptr &&
+      strcmp(ov.view_change_uuid_var, "AUTOMATIC")) {
+    push_deprecated_warn_no_replacement(thd,
+                                        "group_replication_view_change_uuid");
   }
 }
 
-static const char *get_ip_allowlist() {
-  std::string whitelist(ov.ip_whitelist_var);
-  std::string allowlist(ov.ip_allowlist_var);
-  std::transform(whitelist.begin(), whitelist.end(), whitelist.begin(),
-                 ::tolower);
-  std::transform(allowlist.begin(), allowlist.end(), allowlist.begin(),
-                 ::tolower);
-
-  return allowlist.compare("automatic")
-             ? ov.ip_allowlist_var  // ip_allowlist_var is set
-             : whitelist.compare("automatic")
-                   ? ov.ip_whitelist_var   // ip_whitelist_var is set
-                   : ov.ip_allowlist_var;  // both are not set
-}
 /*
   Auxiliary public functions.
 */
@@ -284,6 +275,37 @@ rpl_sidno get_group_sidno() {
 rpl_sidno get_view_change_sidno() {
   assert(lv.view_change_sidno > 0);
   return lv.view_change_sidno;
+}
+
+bool is_view_change_log_event_required() {
+  bool need_vcle{false};
+  Member_version version_removing_vcle(MEMBER_VERSION_REMOVING_VCLE);
+  Group_member_info_list *all_members_info{nullptr};
+
+  /*
+   This function can be called at start of group replication.
+   So basic structures may not be initialized.
+  */
+  if (group_member_mgr != nullptr) {
+    all_members_info = group_member_mgr->get_all_members();
+  } else {
+    /*
+      Since group member information is not available we cannot conclude VCLE is
+      needed.
+    */
+    return false;
+  }
+
+  /* Check if any member in the group  needs VCLE */
+  for (Group_member_info *member : *all_members_info) {
+    if (member->get_member_version() < version_removing_vcle) {
+      need_vcle = true;
+    }
+    delete member;
+  }
+  delete all_members_info;
+
+  return need_vcle;
 }
 
 bool get_plugin_is_stopping() { return lv.plugin_is_stopping; }
@@ -375,6 +397,10 @@ bool get_allow_single_leader() {
     return lv.allow_single_leader_latch.second;
   else
     return ov.allow_single_leader_var;
+}
+
+bool get_component_primary_election_enabled() {
+  return Primary_election_most_update::is_enabled();
 }
 
 uint get_auto_evict_timeout() { return ov.auto_evict_timeout; }
@@ -581,6 +607,13 @@ int plugin_group_replication_start(char **error_message) {
     goto err;
   }
 
+  /*
+    If VCLE is not required it is allowed to join the group with any value of
+    view-change-uuid.
+    However wrong value of view-change-uuid is still not allowed.
+    If old member is part of the group, wrong value of view-change-uuid can
+    cause major issues.
+  */
   if (check_view_change_uuid_string(ov.view_change_uuid_var)) {
     error = GROUP_REPLICATION_CONFIGURATION_ERROR;
     goto err;
@@ -677,6 +710,17 @@ int plugin_group_replication_start(char **error_message) {
   // Reset the coordinator in case there was a previous stop.
   group_action_coordinator->reset_coordinator_process();
 
+  /*
+    Reset start time before join the group to avoid that the
+    eviction service sees a old start time.
+  */
+  GR_start_time_maintain::reset_start_time();
+
+  /*
+    Reset most uptodate component variables when member join group.
+   */
+  Primary_election_most_update::update_status(0, 0);
+
   // GR delayed initialization.
   if (!server_engine_initialized()) {
     lv.wait_on_engine_initialization = true;
@@ -754,6 +798,12 @@ int initialize_plugin_and_join(
       goto err;
     }
 
+    /*
+     At this point it is not known if old member is part of the group or not.
+     So error out if invalid value are for option view-change-uuid.
+     If old member is part of the group, wrong value of view-change-uuid can
+     cause major issues.
+    */
     if (check_uuid_against_rpl_channel_settings(ov.view_change_uuid_var)) {
       LogPluginErr(
           ERROR_LEVEL,
@@ -776,7 +826,7 @@ int initialize_plugin_and_join(
    deadlock issues.
   */
   if (!lv.plugin_is_auto_starting_on_install) {
-    if (enable_server_read_mode()) {
+    if (enable_server_read_mode("(GR) start")) {
       /* purecov: begin inspected */
       error = 1;
       LogPluginErr(ERROR_LEVEL,
@@ -862,7 +912,20 @@ int initialize_plugin_and_join(
   lv.group_replication_running = true;
   lv.plugin_is_stopping = false;
   log_primary_member_details();
+  track_group_replication_enabled(true);
 
+  // When member join with option ON and group have option OFF throw an warning
+  // to alert DBA possible mismatch on configuration
+  if (local_member_info != nullptr) {
+    bool group_enabled =
+        group_member_mgr
+            ->is_group_replication_elect_prefers_most_updated_enabled();
+    if (local_member_info->get_component_primary_election_enabled() &&
+        group_enabled == false) {
+      LogPluginErr(WARNING_LEVEL,
+                   ER_GRP_PREFER_MOST_UPDATED_CONFIG_DIFFER_ON_FAILOVER);
+    }
+  }
 err:
 
   if (error) {
@@ -944,6 +1007,12 @@ int configure_group_member_manager() {
     return GROUP_REPLICATION_CONFIGURATION_ERROR;
   }
 
+  /*
+   At this point it is not known if old member is part of the group or not.
+   So error out if invalid value are provided for option view-change-uuid.
+   If old member is part of the group, wrong value of view-change-uuid can cause
+   major issues.
+  */
   if (!strcmp(uuid, ov.view_change_uuid_var)) {
     LogPluginErr(
         ERROR_LEVEL,
@@ -953,54 +1022,67 @@ int configure_group_member_manager() {
   }
   // Configure Group Member Manager
   lv.plugin_version = server_version;
+  Member_version local_member_plugin_version(lv.plugin_version);
 
-  uint32 local_version = lv.plugin_version;
   DBUG_EXECUTE_IF("group_replication_compatibility_higher_major_version",
-                  { local_version = lv.plugin_version + (0x010000); };);
+                  { local_member_plugin_version.increment_major_version(); };);
   DBUG_EXECUTE_IF("group_replication_compatibility_higher_minor_version",
-                  { local_version = lv.plugin_version + (0x000100); };);
+                  { local_member_plugin_version.increment_minor_version(); };);
   DBUG_EXECUTE_IF("group_replication_compatibility_higher_patch_version",
-                  { local_version = lv.plugin_version + (0x000001); };);
+                  { local_member_plugin_version.increment_patch_version(); };);
   DBUG_EXECUTE_IF("group_replication_compatibility_lower_major_version",
-                  { local_version = lv.plugin_version - (0x010000); };);
+                  { local_member_plugin_version.decrement_major_version(); };);
   DBUG_EXECUTE_IF("group_replication_compatibility_lower_minor_version",
-                  { local_version = lv.plugin_version - (0x000100); };);
+                  { local_member_plugin_version.decrement_minor_version(); };);
   DBUG_EXECUTE_IF("group_replication_compatibility_lower_patch_version",
-                  { local_version = lv.plugin_version - (0x000001); };);
-  DBUG_EXECUTE_IF("group_replication_compatibility_restore_version",
-                  { local_version = lv.plugin_version; };);
-  DBUG_EXECUTE_IF("group_replication_legacy_election_version",
-                  { local_version = 0x080012; };);
-  DBUG_EXECUTE_IF("group_replication_legacy_election_version2",
-                  { local_version = 0x080015; };);
+                  { local_member_plugin_version.decrement_patch_version(); };);
+  DBUG_EXECUTE_IF("group_replication_compatibility_restore_version", {
+    local_member_plugin_version = Member_version(lv.plugin_version);
+  };);
   DBUG_EXECUTE_IF("group_replication_version_8_0_28",
-                  { local_version = 0x080028; };);
-  Member_version local_member_plugin_version(local_version);
+                  { local_member_plugin_version = Member_version(0x080028); };);
+  DBUG_EXECUTE_IF("group_replication_version_with_vcle", {
+    local_member_plugin_version = Member_version(MEMBER_VERSION_REMOVING_VCLE);
+    local_member_plugin_version.decrement_minor_version();
+  };);
+  DBUG_EXECUTE_IF("group_replication_version_clone_not_supported", {
+    local_member_plugin_version = Member_version(CLONE_GR_SUPPORT_VERSION);
+    local_member_plugin_version.decrement_minor_version();
+  };);
   DBUG_EXECUTE_IF("group_replication_force_member_uuid", {
     uuid = const_cast<char *>("cccccccc-cccc-cccc-cccc-cccccccccccc");
+  };);
+
+  int write_set_extraction_algorithm =
+      Group_member_info::HASH_ALGORITHM_XXHASH64;
+  // Fake a old write set extraction algorithm.
+  DBUG_EXECUTE_IF("group_replication_write_set_extraction_algorithm_murmur32", {
+    write_set_extraction_algorithm = Group_member_info::HASH_ALGORITHM_MURMUR32;
   };);
 
   // Initialize or update local_member_info.
   if (local_member_info != nullptr) {
     local_member_info->update(
-        hostname, port, uuid, lv.write_set_extraction_algorithm,
+        hostname, port, uuid, write_set_extraction_algorithm,
         gcs_local_member_identifier, Group_member_info::MEMBER_OFFLINE,
         local_member_plugin_version, ov.gtid_assignment_block_size_var,
         Group_member_info::MEMBER_ROLE_SECONDARY, ov.single_primary_mode_var,
         ov.enforce_update_everywhere_checks_var, ov.member_weight_var,
         lv.gr_lower_case_table_names, lv.gr_default_table_encryption,
         ov.advertise_recovery_endpoints_var, ov.view_change_uuid_var,
-        get_allow_single_leader());
+        get_allow_single_leader(), ov.preemptive_garbage_collection_var,
+        get_component_primary_election_enabled());
   } else {
     local_member_info = new Group_member_info(
-        hostname, port, uuid, lv.write_set_extraction_algorithm,
+        hostname, port, uuid, write_set_extraction_algorithm,
         gcs_local_member_identifier, Group_member_info::MEMBER_OFFLINE,
         local_member_plugin_version, ov.gtid_assignment_block_size_var,
         Group_member_info::MEMBER_ROLE_SECONDARY, ov.single_primary_mode_var,
         ov.enforce_update_everywhere_checks_var, ov.member_weight_var,
         lv.gr_lower_case_table_names, lv.gr_default_table_encryption,
         ov.advertise_recovery_endpoints_var, ov.view_change_uuid_var,
-        get_allow_single_leader());
+        get_allow_single_leader(), ov.preemptive_garbage_collection_var,
+        get_component_primary_election_enabled());
   }
 
 #ifndef NDEBUG
@@ -1059,51 +1141,56 @@ int configure_compatibility_manager() {
    */
   DBUG_EXECUTE_IF("group_replication_compatibility_rule_error_higher", {
     // Mark this member as being another version
-    Member_version other_version = lv.plugin_version + (0x010000);
+    Member_version other_version(lv.plugin_version);
+    other_version.increment_major_version();
     Member_version local_member_version(lv.plugin_version);
     compatibility_mgr->add_incompatibility(local_member_version, other_version);
   };);
   DBUG_EXECUTE_IF("group_replication_compatibility_rule_error_lower", {
     // Mark this member as being another version
-    Member_version other_version = lv.plugin_version;
-    Member_version local_member_version = lv.plugin_version + (0x000001);
+    Member_version other_version(lv.plugin_version);
+    Member_version local_member_version(lv.plugin_version);
+    local_member_version.increment_patch_version();
     compatibility_mgr->add_incompatibility(local_member_version, other_version);
   };);
   DBUG_EXECUTE_IF("group_replication_compatibility_higher_major_version", {
-    Member_version other_version = lv.plugin_version + (0x010000);
+    Member_version other_version(lv.plugin_version);
+    other_version.increment_major_version();
     compatibility_mgr->set_local_version(other_version);
   };);
   DBUG_EXECUTE_IF("group_replication_compatibility_higher_minor_version", {
-    Member_version other_version = lv.plugin_version + (0x000100);
+    Member_version other_version(lv.plugin_version);
+    other_version.increment_minor_version();
     compatibility_mgr->set_local_version(other_version);
   };);
   DBUG_EXECUTE_IF("group_replication_compatibility_higher_patch_version", {
-    Member_version other_version = lv.plugin_version + (0x000001);
+    Member_version other_version(lv.plugin_version);
+    other_version.increment_patch_version();
     compatibility_mgr->set_local_version(other_version);
   };);
   DBUG_EXECUTE_IF("group_replication_compatibility_lower_major_version", {
-    Member_version other_version = lv.plugin_version - (0x010000);
+    Member_version other_version(lv.plugin_version);
+    other_version.decrement_major_version();
     compatibility_mgr->set_local_version(other_version);
   };);
   DBUG_EXECUTE_IF("group_replication_compatibility_lower_minor_version", {
-    Member_version other_version = lv.plugin_version - (0x000100);
+    Member_version other_version(lv.plugin_version);
+    other_version.decrement_minor_version();
     compatibility_mgr->set_local_version(other_version);
   };);
   DBUG_EXECUTE_IF("group_replication_compatibility_lower_patch_version", {
-    Member_version other_version = lv.plugin_version - (0x000001);
+    Member_version other_version(lv.plugin_version);
+    other_version.decrement_patch_version();
     compatibility_mgr->set_local_version(other_version);
   };);
   DBUG_EXECUTE_IF("group_replication_compatibility_restore_version", {
     Member_version current_version = lv.plugin_version;
     compatibility_mgr->set_local_version(current_version);
   };);
-  DBUG_EXECUTE_IF("group_replication_legacy_election_version", {
-    Member_version higher_version(0x080012);
-    compatibility_mgr->set_local_version(higher_version);
-  };);
-  DBUG_EXECUTE_IF("group_replication_legacy_election_version2", {
-    Member_version higher_version(0x080015);
-    compatibility_mgr->set_local_version(higher_version);
+  DBUG_EXECUTE_IF("group_replication_version_with_vcle", {
+    Member_version version(MEMBER_VERSION_REMOVING_VCLE);
+    version.decrement_minor_version();
+    compatibility_mgr->set_local_version(version);
   };);
 
   return 0;
@@ -1305,7 +1392,7 @@ int plugin_group_replication_stop(char **error_message) {
   // Enable super_read_only.
   if (!lv.server_shutdown_status && !lv.plugin_is_being_uninstalled &&
       server_engine_initialized()) {
-    if (enable_server_read_mode()) {
+    if (enable_server_read_mode("(GR) leave group")) {
       /* purecov: begin inspected */
       LogPluginErr(ERROR_LEVEL,
                    ER_GRP_RPL_FAILED_TO_ENABLE_READ_ONLY_MODE_ON_SHUTDOWN);
@@ -1336,6 +1423,7 @@ int plugin_group_replication_stop(char **error_message) {
   if (!error && lv.recovery_timeout_issue_on_stop)
     error = GROUP_REPLICATION_STOP_WITH_RECOVERY_TIMEOUT;
 
+  track_group_replication_enabled(false);
   LogPluginErr(SYSTEM_LEVEL, ER_GRP_RPL_IS_STOPPED);
   return error;
 }
@@ -1488,6 +1576,13 @@ int initialize_plugin_modules(gr_modules::mask modules_to_init) {
   */
   if (modules_to_init[gr_modules::METRICS_HANDLER]) {
     metrics_handler->reset();
+  }
+
+  /*
+    Recovery metadata module.
+  */
+  if (modules_to_init[gr_modules::RECOVERY_METADATA_MODULE]) {
+    recovery_metadata_module = new Recovery_metadata_module();
   }
 
   return ret;
@@ -1711,6 +1806,16 @@ int terminate_plugin_modules(gr_modules::mask modules_to_terminate,
     }
   }
 
+  /*
+    Recovery metadata module
+  */
+  if (modules_to_terminate[gr_modules::RECOVERY_METADATA_MODULE]) {
+    if (recovery_metadata_module != nullptr) {
+      delete recovery_metadata_module;
+      recovery_metadata_module = nullptr;
+    }
+  }
+
   return error;
 }
 
@@ -1811,6 +1916,17 @@ bool attempt_rejoin() {
     command.
   */
   if (initialize_plugin_modules(modules_mask)) goto end;
+
+  /*
+    Reset start time before join the group to avoid that the
+    eviction service sees a old start time.
+  */
+  GR_start_time_maintain::reset_start_time();
+
+  /*
+    Reset most uptodate component variables when member join group.
+   */
+  Primary_election_most_update::update_status(0, 0);
 
   /*
     Finally we attempt the join itself.
@@ -1986,6 +2102,14 @@ int plugin_group_replication_init(MYSQL_PLUGIN plugin_info) {
       reinterpret_cast<SERVICE_TYPE_NO_CONST(mysql_runtime_error) *>(
           h_mysql_runtime_error_service);
 
+  // Initialize timestamp service.
+  my_h_service h_mysql_timestamp_service = nullptr;
+  if (lv.reg_srv->acquire("mysql_timestamp", &h_mysql_timestamp_service))
+    return 1; /* purecov: inspected */
+  mysql_timestamp_service =
+      reinterpret_cast<SERVICE_TYPE_NO_CONST(mysql_timestamp) *>(
+          h_mysql_timestamp_service);
+
   /*
     Acquire required server services once at plugin install.
   */
@@ -2083,6 +2207,7 @@ int plugin_group_replication_init(MYSQL_PLUGIN plugin_info) {
   member_actions_handler = new Member_actions_handler();
   consensus_leaders_handler =
       new Consensus_leaders_handler{*group_events_observation_manager};
+  recovery_metadata_observer = new Recovery_metadata_observer();
 
   /*
     We do query super_read_only value while Group Replication is stopped,
@@ -2103,6 +2228,19 @@ int plugin_group_replication_init(MYSQL_PLUGIN plugin_info) {
     LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_ERROR_MSG,
                  "Failed to initialize Group Replication status (role and "
                  "mode) service.");
+    return 1;
+  }
+  if (register_group_replication_management_services()) {
+    LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_ERROR_MSG,
+                 "Failed to initialize Group Replication Management service");
+    return 1;
+  }
+
+  if (gr::flow_control_metrics_service::
+          register_gr_flow_control_metrics_service()) {
+    LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_ERROR_MSG,
+                 "Failed to initialize Group Replication flow control "
+                 "service.");
     return 1;
   }
 
@@ -2141,6 +2279,8 @@ int plugin_group_replication_init(MYSQL_PLUGIN plugin_info) {
   // Set the atomic var to the value of the base plugin variable
   ov.transaction_size_limit_var = ov.transaction_size_limit_base_var;
 
+  track_group_replication_available();
+
   if (ov.start_group_replication_at_boot_var &&
       plugin_group_replication_start()) {
     LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_FAILED_TO_START_ON_BOOT);
@@ -2164,9 +2304,15 @@ int plugin_group_replication_deinit(void *p) {
   finalize_perfschema_module();
 
   gr::status_service::unregister_gr_status_service();
+  unregister_group_replication_management_services();
+
+  gr::flow_control_metrics_service::
+      unregister_gr_flow_control_metrics_service();
 
   if (plugin_group_replication_stop())
     LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_FAILED_TO_STOP_ON_PLUGIN_UNINSTALL);
+
+  track_group_replication_unavailable();
 
   if (group_member_mgr != nullptr) {
     delete group_member_mgr;
@@ -2191,6 +2337,11 @@ int plugin_group_replication_deinit(void *p) {
   if (consensus_leaders_handler) {
     delete consensus_leaders_handler;
     consensus_leaders_handler = nullptr;
+  }
+
+  if (recovery_metadata_observer) {
+    delete recovery_metadata_observer;
+    recovery_metadata_observer = nullptr;
   }
 
   if (group_action_coordinator) {
@@ -2281,6 +2432,12 @@ int plugin_group_replication_deinit(void *p) {
 
   server_services_references_finalize();
 
+  // Deinitialize timestamp service.
+  my_h_service h_mysql_timestamp_service =
+      reinterpret_cast<my_h_service>(mysql_timestamp_service);
+  lv.reg_srv->release(h_mysql_timestamp_service);
+  mysql_timestamp_service = nullptr;
+
   // Deinitialize runtime error service.
   my_h_service h_mysql_runtime_error_service =
       reinterpret_cast<my_h_service>(mysql_runtime_error_service);
@@ -2312,6 +2469,15 @@ static int plugin_group_replication_check_uninstall(void *) {
     return 1;
   }
 
+  if (gr::flow_control_metrics_service::
+          unregister_gr_flow_control_metrics_service()) {
+    my_error(ER_PLUGIN_CANNOT_BE_UNINSTALLED, MYF(0), "group_replication",
+             "Please uninstall the component"
+             " 'component_group_replication_flow_control_stats'"
+             " and then UNINSTALL PLUGIN group_replication.");
+    return 1;
+  }
+
   finalize_perfschema_module();
 
   return 0;
@@ -2319,17 +2485,16 @@ static int plugin_group_replication_check_uninstall(void *) {
 
 static bool init_group_sidno() {
   DBUG_TRACE;
-  rpl_sid group_sid;
+  gr::Gtid_tsid group_tsid;
 
-  if (group_sid.parse(ov.group_name_var, strlen(ov.group_name_var)) !=
-      RETURN_STATUS_OK) {
+  if (group_tsid.from_cstring(ov.group_name_var) == 0) {
     /* purecov: begin inspected */
     LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_FAILED_TO_PARSE_THE_GRP_NAME);
     return true;
     /* purecov: end */
   }
 
-  lv.group_sidno = get_sidno_from_global_sid_map(group_sid);
+  lv.group_sidno = get_sidno_from_global_tsid_map(group_tsid);
   if (lv.group_sidno <= 0) {
     /* purecov: begin inspected */
     LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_FAILED_TO_GENERATE_SIDNO_FOR_GRP);
@@ -2338,11 +2503,9 @@ static bool init_group_sidno() {
   }
 
   if (strcmp(ov.view_change_uuid_var, "AUTOMATIC")) {
-    rpl_sid view_change_sid;
+    gr::Gtid_tsid view_change_tsid;
 
-    if (view_change_sid.parse(ov.view_change_uuid_var,
-                              strlen(ov.view_change_uuid_var)) !=
-        RETURN_STATUS_OK) {
+    if (view_change_tsid.from_cstring(ov.view_change_uuid_var) == 0) {
       /* purecov: begin inspected */
       LogPluginErr(ERROR_LEVEL,
                    ER_GRP_RPL_FAILED_TO_PARSE_THE_VIEW_CHANGE_UUID);
@@ -2350,7 +2513,7 @@ static bool init_group_sidno() {
       /* purecov: end */
     }
 
-    lv.view_change_sidno = get_sidno_from_global_sid_map(view_change_sid);
+    lv.view_change_sidno = get_sidno_from_global_tsid_map(view_change_tsid);
     if (lv.view_change_sidno <= 0) {
       /* purecov: begin inspected */
       LogPluginErr(ERROR_LEVEL,
@@ -2650,8 +2813,8 @@ int build_gcs_parameters(Gcs_interface_parameters &gcs_module_parameters) {
     LogPluginErr(INFORMATION_LEVEL, ER_GRP_RPL_SSL_DISABLED, ssl_mode.c_str());
   }
 
-  if (ov.ip_whitelist_var != nullptr || ov.ip_allowlist_var != nullptr) {
-    std::string v(get_ip_allowlist());
+  if (ov.ip_allowlist_var != nullptr) {
+    std::string v(ov.ip_allowlist_var);
     v.erase(std::remove(v.begin(), v.end(), ' '), v.end());
     std::transform(v.begin(), v.end(), v.begin(), ::tolower);
 
@@ -2660,7 +2823,7 @@ int build_gcs_parameters(Gcs_interface_parameters &gcs_module_parameters) {
     // do nothing and let GCS scan for the proper IPs
     if (v.find("automatic") == std::string::npos) {
       gcs_module_parameters.add_parameter("ip_allowlist",
-                                          std::string(get_ip_allowlist()));
+                                          std::string(ov.ip_allowlist_var));
     }
   }
 
@@ -2676,6 +2839,17 @@ int build_gcs_parameters(Gcs_interface_parameters &gcs_module_parameters) {
   */
   gcs_module_parameters.add_parameter("communication_debug_path",
                                       mysql_real_data_home);
+
+  /*
+    Maximum size, in bytes, of the GCS debug trace file before it is
+    automatically rotated. 0 disables size-based rotation. Read once here,
+    at Group Replication start -- like communication_debug_file/_path above.
+
+    @note changing this sysvar takes effect at the next Group Replication start
+  */
+  gcs_module_parameters.add_parameter(
+      "communication_debug_max_file_size",
+      std::to_string(ov.communication_debug_max_file_size_var));
 
   sv.deinit();
   return result;
@@ -2699,7 +2873,7 @@ int configure_group_communication() {
                ov.group_name_var, ov.local_address_var, ov.group_seeds_var,
                ov.bootstrap_group_var ? "true" : "false",
                ov.poll_spin_loops_var, ov.compression_threshold_var,
-               get_ip_allowlist(), ov.communication_debug_options_var,
+               ov.ip_allowlist_var, ov.communication_debug_options_var,
                ov.member_expel_timeout_var,
                ov.communication_max_message_size_var, ov.message_cache_size_var,
                ov.communication_stack_var);
@@ -2767,8 +2941,6 @@ int initialize_recovery_module() {
       ov.recovery_ssl_crl_var, ov.recovery_ssl_crlpath_var,
       ov.recovery_ssl_verify_server_cert_var, ov.recovery_tls_version_var,
       ov.recovery_tls_ciphersuites_var);
-  recovery_module->set_recovery_completion_policy(
-      (enum_recovery_completion_policies)ov.recovery_completion_policy_var);
   recovery_module->set_recovery_donor_retry_count(ov.recovery_retry_count_var);
   recovery_module->set_recovery_donor_reconnect_interval(
       ov.recovery_reconnect_interval_var);
@@ -2807,11 +2979,6 @@ bool server_engine_initialized() {
 
 void register_server_reset_master() { lv.known_server_reset = true; }
 
-bool get_allow_local_lower_version_join() {
-  DBUG_TRACE;
-  return ov.allow_local_lower_version_join_var;
-}
-
 ulong get_transaction_size_limit() {
   DBUG_TRACE;
   return ov.transaction_size_limit_var;
@@ -2829,6 +2996,8 @@ void set_enforce_update_everywhere_checks(bool option) {
 void set_single_primary_mode_var(bool option) {
   ov.single_primary_mode_var = option;
 }
+
+bool get_single_primary_mode_var() { return ov.single_primary_mode_var; }
 
 SERVICE_TYPE(registry) * get_plugin_registry() { return lv.reg_srv; }
 
@@ -2875,36 +3044,7 @@ static int check_if_server_properly_configured() {
     return 1;
   }
 
-  if (startup_pre_reqs.transaction_write_set_extraction == HASH_ALGORITHM_OFF) {
-    LogPluginErr(ERROR_LEVEL,
-                 ER_GRP_RPL_INVALID_TRANS_WRITE_SET_EXTRACTION_VALUE);
-    return 1;
-  } else {
-    lv.write_set_extraction_algorithm =
-        startup_pre_reqs.transaction_write_set_extraction;
-  }
-
-  if (startup_pre_reqs.mi_repository_type != 1)  // INFO_REPOSITORY_TABLE
-  {
-    LogPluginErr(ERROR_LEVEL,
-                 ER_GRP_RPL_CONNECTION_METADATA_REPO_MUST_BE_TABLE);
-    return 1;
-  }
-
-  if (startup_pre_reqs.rli_repository_type != 1)  // INFO_REPOSITORY_TABLE
-  {
-    LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_APPLIER_METADATA_REPO_MUST_BE_TABLE);
-    return 1;
-  }
-
   if (startup_pre_reqs.parallel_applier_workers > 0) {
-    if (startup_pre_reqs.parallel_applier_type !=
-        CHANNEL_MTS_PARALLEL_TYPE_LOGICAL_CLOCK) {
-      LogPluginErr(ERROR_LEVEL,
-                   ER_GRP_RPL_INCORRECT_TYPE_SET_FOR_PARALLEL_APPLIER);
-      return 1;
-    }
-
     if (!startup_pre_reqs.parallel_applier_preserve_commit_order) {
       LogPluginErr(WARNING_LEVEL,
                    ER_GRP_RPL_REPLICA_PRESERVE_COMMIT_ORDER_NOT_SET);
@@ -3021,6 +3161,13 @@ static int check_group_name_string(const char *str, bool is_var_update) {
     return 1;
   }
 
+  /*
+    This is valid value checking of view-change-uuid.
+    At this point it is not known if old member is part of the group or not.
+    So error out if invalid value is provided for option view-change-uuid.
+    Different value of view-change-uuid is fine if VCLE is not required,
+    but wrong value or corrupted UUID is not fine.
+  */
   if (strcmp(str, ov.view_change_uuid_var) == 0) {
     if (!is_var_update) {
       LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_GROUP_NAME_SAME_AS_VIEW_CHANGE_UUID,
@@ -3156,9 +3303,9 @@ static int check_flow_control_min_quota(MYSQL_THD, SYS_VAR *, void *save,
   if (check_flow_control_min_quota_long(in_val, true)) return 1;
 
   *(longlong *)save = (in_val < 0) ? 0
-                                   : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
-                                         ? in_val
-                                         : MAX_FLOW_CONTROL_THRESHOLD;
+                      : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
+                          ? in_val
+                          : MAX_FLOW_CONTROL_THRESHOLD;
 
   return 0;
 }
@@ -3174,9 +3321,9 @@ static int check_flow_control_min_recovery_quota(MYSQL_THD, SYS_VAR *,
   if (check_flow_control_min_recovery_quota_long(in_val, true)) return 1;
 
   *(longlong *)save = (in_val < 0) ? 0
-                                   : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
-                                         ? in_val
-                                         : MAX_FLOW_CONTROL_THRESHOLD;
+                      : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
+                          ? in_val
+                          : MAX_FLOW_CONTROL_THRESHOLD;
   return 0;
 }
 
@@ -3190,9 +3337,9 @@ static int check_flow_control_max_quota(MYSQL_THD, SYS_VAR *, void *save,
   if (check_flow_control_max_quota_long(in_val, true)) return 1;
 
   *(longlong *)save = (in_val < 0) ? 0
-                                   : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
-                                         ? in_val
-                                         : MAX_FLOW_CONTROL_THRESHOLD;
+                      : (in_val < MAX_FLOW_CONTROL_THRESHOLD)
+                          ? in_val
+                          : MAX_FLOW_CONTROL_THRESHOLD;
 
   return 0;
 }
@@ -3216,11 +3363,10 @@ static int check_sysvar_ulong_timeout(MYSQL_THD, SYS_VAR *var, void *save,
   longlong in_val;
   value->val_int(value, &in_val);
 
-  *(longlong *)save = (in_val < minimum)
-                          ? minimum
-                          : (static_cast<ulonglong>(in_val) < LONG_TIMEOUT)
-                                ? in_val
-                                : LONG_TIMEOUT;
+  *(longlong *)save = (in_val < minimum) ? minimum
+                      : (static_cast<ulonglong>(in_val) < LONG_TIMEOUT)
+                          ? in_val
+                          : LONG_TIMEOUT;
 
   return 0;
 }
@@ -3417,60 +3563,6 @@ static void update_ssl_server_cert_verification(MYSQL_THD, SYS_VAR *,
   }
 }
 
-// Recovery threshold update method
-static int check_recovery_completion_policy(MYSQL_THD thd, SYS_VAR *,
-                                            void *save,
-                                            struct st_mysql_value *value) {
-  DBUG_TRACE;
-
-  char buff[STRING_BUFFER_USUAL_SIZE];
-  const char *str;
-  TYPELIB *typelib = &ov.recovery_policies_typelib_t;
-  long long tmp;
-  long result;
-  int length;
-
-  push_deprecated_warn_no_replacement(thd,
-                                      "group_replication_recovery_complete_at");
-
-  Checkable_rwlock::Guard g(*lv.plugin_running_lock,
-                            Checkable_rwlock::TRY_READ_LOCK);
-  if (!plugin_running_lock_is_rdlocked(g)) return 1;
-
-  if (value->value_type(value) == MYSQL_VALUE_TYPE_STRING) {
-    length = sizeof(buff);
-    if (!(str = value->val_str(value, buff, &length))) goto err;
-    if ((result = (long)find_type(str, typelib, 0) - 1) < 0) goto err;
-  } else {
-    if (value->val_int(value, &tmp)) goto err;
-    if (tmp < 0 || tmp >= static_cast<long long>(typelib->count)) goto err;
-    result = (long)tmp;
-  }
-  *(long *)save = result;
-
-  return 0;
-
-err:
-  return 1;
-}
-
-static void update_recovery_completion_policy(MYSQL_THD, SYS_VAR *,
-                                              void *var_ptr, const void *save) {
-  DBUG_TRACE;
-
-  Checkable_rwlock::Guard g(*lv.plugin_running_lock,
-                            Checkable_rwlock::TRY_READ_LOCK);
-  if (!plugin_running_lock_is_rdlocked(g)) return;
-
-  ulong in_val = *static_cast<const ulong *>(save);
-  *static_cast<ulong *>(var_ptr) = in_val;
-
-  if (recovery_module != nullptr) {
-    recovery_module->set_recovery_completion_policy(
-        (enum_recovery_completion_policies)in_val);
-  }
-}
-
 // Component timeout update method
 
 static void update_component_timeout(MYSQL_THD, SYS_VAR *, void *var_ptr,
@@ -3546,10 +3638,6 @@ static int check_ip_allowlist_preconditions(MYSQL_THD thd, SYS_VAR *var,
   char buff[IP_ALLOWLIST_STR_BUFFER_LENGTH];
   const char *str;
   int length = sizeof(buff);
-  if (!strcmp(var->name, "group_replication_ip_whitelist")) {
-    option_deprecation_warning(thd, "group_replication_ip_whitelist",
-                               "group_replication_ip_allowlist");
-  }
 
   Checkable_rwlock::Guard g(*lv.plugin_running_lock,
                             Checkable_rwlock::TRY_READ_LOCK);
@@ -4016,10 +4104,9 @@ static int check_member_weight(MYSQL_THD, SYS_VAR *, void *save,
     }
   }
 
-  *(uint *)save =
-      (in_val < MIN_MEMBER_WEIGHT)
-          ? MIN_MEMBER_WEIGHT
-          : (in_val < MAX_MEMBER_WEIGHT) ? in_val : MAX_MEMBER_WEIGHT;
+  *(uint *)save = (in_val < MIN_MEMBER_WEIGHT)   ? MIN_MEMBER_WEIGHT
+                  : (in_val < MAX_MEMBER_WEIGHT) ? in_val
+                                                 : MAX_MEMBER_WEIGHT;
 
   return 0;
 }
@@ -4523,7 +4610,7 @@ static MYSQL_SYSVAR_BOOL(recovery_use_ssl,        /* name */
                          "Replication recovery process.",
                          check_sysvar_bool, /* check func*/
                          update_ssl_use,    /* update func*/
-                         0);                /* default*/
+                         1);                /* default*/
 
 static MYSQL_SYSVAR_STR(
     recovery_ssl_ca,        /* name */
@@ -4679,21 +4766,6 @@ static void initialize_ssl_option_map() {
       ov.RECOVERY_TLS_CIPHERSUITES_OPT;
 }
 
-// Recovery threshold options
-
-static MYSQL_SYSVAR_ENUM(recovery_complete_at,              /* name */
-                         ov.recovery_completion_policy_var, /* var */
-                         PLUGIN_VAR_OPCMDARG |
-                             PLUGIN_VAR_PERSIST_AS_READ_ONLY, /* optional var */
-                         "Recovery policies when handling cached transactions "
-                         "after state transfer."
-                         "possible values are TRANSACTIONS_CERTIFIED or "
-                         "TRANSACTION_APPLIED",             /* values */
-                         check_recovery_completion_policy,  /* check func. */
-                         update_recovery_completion_policy, /* update func. */
-                         RECOVERY_POLICY_WAIT_EXECUTED,     /* default */
-                         &ov.recovery_policies_typelib_t);  /* type lib */
-
 // Generic timeout setting
 
 static MYSQL_SYSVAR_ULONG(
@@ -4709,19 +4781,6 @@ static MYSQL_SYSVAR_ULONG(
     2,                          /* min */
     LONG_TIMEOUT,               /* max */
     0                           /* block */
-);
-
-// Allow member downgrade
-
-static MYSQL_SYSVAR_BOOL(allow_local_lower_version_join,        /* name */
-                         ov.allow_local_lower_version_join_var, /* var */
-                         PLUGIN_VAR_OPCMDARG |
-                             PLUGIN_VAR_PERSIST_AS_READ_ONLY, /* optional var */
-                         "Allow this server to join the group even if it has a "
-                         "lower plugin version than the group",
-                         nullptr, /* check func. */
-                         nullptr, /* update func*/
-                         0        /* default */
 );
 
 static MYSQL_SYSVAR_ULONG(
@@ -4853,33 +4912,12 @@ static MYSQL_SYSVAR_ENUM(
     ov.ssl_mode_var,                                       /* var */
     PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_PERSIST_AS_READ_ONLY, /* optional var */
     "Specifies the security state of the connection between Group "
-    "Replication members. Default: DISABLED",
+    "Replication members. Default: REQUIRED",
     nullptr,                      /* check func. */
     nullptr,                      /* update func. */
-    0,                            /* default */
+    1,                            /* default */
     &ov.ssl_mode_values_typelib_t /* type lib */
 );
-
-static MYSQL_SYSVAR_STR(
-    ip_whitelist,        /* name */
-    ov.ip_whitelist_var, /* var */
-    /* optional var | malloc string | no set default */
-    PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_MEMALLOC | PLUGIN_VAR_NODEFAULT |
-        PLUGIN_VAR_PERSIST_AS_READ_ONLY,
-    "This option can be used to specify which members "
-    "are allowed to connect to this member. The input "
-    "takes the form of a comma separated list of IPv4 "
-    "addresses or subnet CIDR notation. For example: "
-    "192.168.1.0/24,10.0.0.1. In addition, the user can "
-    "also set as input the value 'AUTOMATIC', in which case "
-    "active interfaces on the host will be scanned and "
-    "those with addresses on private subnetworks will be "
-    "automatically added to the IP allowlist. The address "
-    "127.0.0.1 is always added if not specified explicitly "
-    "in the allowlist. Default: 'AUTOMATIC'.",
-    check_ip_allowlist_preconditions, /* check func*/
-    nullptr,                          /* update func*/
-    "AUTOMATIC");                     /* default*/
 
 static MYSQL_SYSVAR_STR(
     ip_allowlist,        /* name */
@@ -4991,6 +5029,21 @@ static MYSQL_SYSVAR_STR(
     "GCS_DEBUG_NONE"                   /* default */
 );
 
+static MYSQL_SYSVAR_ULONG(
+    communication_debug_max_file_size,                     /* name */
+    ov.communication_debug_max_file_size_var,              /* var */
+    PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_PERSIST_AS_READ_ONLY, /* optional var */
+    "Maximum size, in bytes, of the GCS debug trace file (GCS_DEBUG_TRACE) "
+    "before it is automatically rotated. 0 disables size-based rotation. "
+    "Takes effect at the next Group Replication start.",
+    nullptr,                                   /* check func. */
+    nullptr,                                   /* update func. */
+    DEFAULT_COMMUNICATION_DEBUG_MAX_FILE_SIZE, /* default */
+    MIN_COMMUNICATION_DEBUG_MAX_FILE_SIZE,     /* min */
+    MAX_COMMUNICATION_DEBUG_MAX_FILE_SIZE,     /* max */
+    0                                          /* block */
+);
+
 static MYSQL_SYSVAR_ENUM(exit_state_action,        /* name */
                          ov.exit_state_action_var, /* var */
                          PLUGIN_VAR_OPCMDARG |
@@ -5001,7 +5054,7 @@ static MYSQL_SYSVAR_ENUM(exit_state_action,        /* name */
                          "ABORT_SERVER and OFFLINE_MODE.",  /* values */
                          nullptr,                           /* check func. */
                          nullptr,                           /* update func. */
-                         EXIT_STATE_ACTION_READ_ONLY,       /* default */
+                         EXIT_STATE_ACTION_OFFLINE_MODE,    /* default */
                          &ov.exit_state_actions_typelib_t); /* type lib */
 
 static MYSQL_SYSVAR_UINT(autorejoin_tries,        /* name */
@@ -5315,8 +5368,12 @@ static int check_view_change_uuid(MYSQL_THD thd, SYS_VAR *, void *save,
   char buff[NAME_CHAR_LEN];
   const char *str;
 
+  push_deprecated_warn_no_replacement(thd,
+                                      "group_replication_view_change_uuid");
+
   Checkable_rwlock::Guard g(*lv.plugin_running_lock,
                             Checkable_rwlock::TRY_READ_LOCK);
+
   if (!plugin_running_lock_is_rdlocked(g)) return 1;
 
   if (plugin_is_group_replication_running()) {
@@ -5375,6 +5432,66 @@ static MYSQL_SYSVAR_ENUM(
     &ov.communication_stack_values_typelib_t /* type lib */
 );
 
+bool get_preemptive_garbage_collection_var() {
+  return ov.preemptive_garbage_collection_var;
+}
+
+static int check_preemptive_garbage_collection(MYSQL_THD, SYS_VAR *, void *save,
+                                               struct st_mysql_value *value) {
+  DBUG_TRACE;
+  bool in_val;
+
+  if (!get_bool_value_using_type_lib(value, in_val)) return 1;
+
+  Checkable_rwlock::Guard g(*lv.plugin_running_lock,
+                            Checkable_rwlock::TRY_READ_LOCK);
+  if (!plugin_running_lock_is_rdlocked(g)) return 1;
+
+  if (plugin_is_group_replication_running()) {
+    my_message(ER_GROUP_REPLICATION_RUNNING,
+               "The group_replication_preemptive_garbage_collection cannot be "
+               "changed when Group Replication is running",
+               MYF(0));
+    return 1;
+  }
+
+  *(bool *)save = in_val;
+
+  return 0;
+}
+
+static MYSQL_SYSVAR_BOOL(
+    preemptive_garbage_collection,        /* name */
+    ov.preemptive_garbage_collection_var, /* var */
+    PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_NODEFAULT |
+        PLUGIN_VAR_PERSIST_AS_READ_ONLY, /* optional var | no set default */
+    "This option is only effective in single-primary mode. "
+    "In multi-primary mode, this option is ignored and the feature "
+    "is inactive, thus there is no preemptive garbage collection.",
+    check_preemptive_garbage_collection,  /* check func. */
+    nullptr,                              /* update func*/
+    PREEMPTIVE_GARBAGE_COLLECTION_DEFAULT /* default*/
+);
+
+uint get_preemptive_garbage_collection_rows_threshold_var() {
+  return ov.preemptive_garbage_collection_rows_threshold_var;
+}
+
+static MYSQL_SYSVAR_UINT(
+    preemptive_garbage_collection_rows_threshold,          /* name */
+    ov.preemptive_garbage_collection_rows_threshold_var,   /* var */
+    PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_PERSIST_AS_READ_ONLY, /* optional var */
+    "The number of validating rows that triggers a preemptive "
+    "garbage collection round when "
+    "group_replication_preemptive_garbage_collection is enabled.",
+    nullptr,                                              /* check func */
+    nullptr,                                              /* update func */
+    PREEMPTIVE_GARBAGE_COLLECTION_ROWS_THRESHOLD_DEFAULT, /* default */
+    PREEMPTIVE_GARBAGE_COLLECTION_ROWS_THRESHOLD_MIN,     /* min */
+    PREEMPTIVE_GARBAGE_COLLECTION_ROWS_THRESHOLD_MAX,     /* max */
+    0                                                     /* block */
+);
+
 static MYSQL_SYSVAR_UINT(auto_evict_timeout,    /* name */
                          ov.auto_evict_timeout, /* var */
                          PLUGIN_VAR_OPCMDARG |
@@ -5406,20 +5523,17 @@ static SYS_VAR *group_replication_system_vars[] = {
     MYSQL_SYSVAR(recovery_ssl_crl),
     MYSQL_SYSVAR(recovery_ssl_crlpath),
     MYSQL_SYSVAR(recovery_ssl_verify_server_cert),
-    MYSQL_SYSVAR(recovery_complete_at),
     MYSQL_SYSVAR(recovery_reconnect_interval),
     MYSQL_SYSVAR(recovery_public_key_path),
     MYSQL_SYSVAR(recovery_get_public_key),
     MYSQL_SYSVAR(recovery_compression_algorithms),
     MYSQL_SYSVAR(recovery_zstd_compression_level),
     MYSQL_SYSVAR(components_stop_timeout),
-    MYSQL_SYSVAR(allow_local_lower_version_join),
     MYSQL_SYSVAR(auto_increment_increment),
     MYSQL_SYSVAR(compression_threshold),
     MYSQL_SYSVAR(communication_max_message_size),
     MYSQL_SYSVAR(gtid_assignment_block_size),
     MYSQL_SYSVAR(ssl_mode),
-    MYSQL_SYSVAR(ip_whitelist),
     MYSQL_SYSVAR(ip_allowlist),
     MYSQL_SYSVAR(single_primary_mode),
     MYSQL_SYSVAR(enforce_update_everywhere_checks),
@@ -5428,6 +5542,7 @@ static SYS_VAR *group_replication_system_vars[] = {
     MYSQL_SYSVAR(flow_control_applier_threshold),
     MYSQL_SYSVAR(transaction_size_limit),
     MYSQL_SYSVAR(communication_debug_options),
+    MYSQL_SYSVAR(communication_debug_max_file_size),
     MYSQL_SYSVAR(exit_state_action),
     MYSQL_SYSVAR(autorejoin_tries),
     MYSQL_SYSVAR(unreachable_majority_timeout),
@@ -5449,6 +5564,8 @@ static SYS_VAR *group_replication_system_vars[] = {
     MYSQL_SYSVAR(view_change_uuid),
     MYSQL_SYSVAR(communication_stack),
     MYSQL_SYSVAR(paxos_single_leader),
+    MYSQL_SYSVAR(preemptive_garbage_collection),
+    MYSQL_SYSVAR(preemptive_garbage_collection_rows_threshold),
     MYSQL_SYSVAR(auto_evict_timeout),            /* Added by Percona */
     MYSQL_SYSVAR(certification_loop_sleep_time), /* Added by Percona */
     MYSQL_SYSVAR(certification_loop_chunk_size), /* Added by Percona */
@@ -5456,24 +5573,6 @@ static SYS_VAR *group_replication_system_vars[] = {
     MYSQL_SYSVAR(xcom_ssl_accept_retries),       /* Added by Percona */
     nullptr,
 };
-
-static int show_primary_member(MYSQL_THD, SHOW_VAR *var, char *buff) {
-  var->type = SHOW_CHAR;
-  var->value = nullptr;
-
-  if (group_member_mgr && ov.single_primary_mode_var &&
-      plugin_is_group_replication_running()) {
-    string primary_member_uuid;
-    group_member_mgr->get_primary_member_uuid(primary_member_uuid);
-
-    strncpy(buff, primary_member_uuid.c_str(), SHOW_VAR_FUNC_BUFF_SIZE);
-    buff[SHOW_VAR_FUNC_BUFF_SIZE - 1] = 0;
-
-    var->value = buff;
-  }
-
-  return 0;
-}
 
 #define DEF_GR_FC_STATUS_VAR_PTR(name, ptr, option) \
   { name, (char *)ptr, option, SHOW_SCOPE_GLOBAL }
@@ -5485,8 +5584,7 @@ static SHOW_VAR gr_flow_control_status_variables[] = {
     // end of the array marker
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};
 
-static void update_gr_flow_control_status_vars(THD *thd, SHOW_VAR *var,
-                                               char *buff) {
+static void update_gr_flow_control_status_vars(THD *, SHOW_VAR *, char *) {
   if (applier_module && plugin_is_group_replication_running()) {
     group_replication_fc_stats tmp;
     applier_module->get_flow_control_stats(tmp);
@@ -5505,8 +5603,6 @@ static void show_flow_control_status_vars(THD *thd, SHOW_VAR *var, char *buff) {
 }
 
 static SHOW_VAR group_replication_status_vars[] = {
-    {"group_replication_primary_member", (char *)&show_primary_member,
-     SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"group_replication_flow_control",
      reinterpret_cast<char *>(&show_flow_control_status_vars), SHOW_FUNC,
      SHOW_SCOPE_GLOBAL},
@@ -5586,6 +5682,10 @@ static SHOW_VAR group_replication_status_vars[] = {
     {"Gr_last_consensus_end_timestamp",
      (char *)&Plugin_status_variables::get_last_consensus_end_timestamp,
      SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"option_tracker_usage:Group Replication",
+     reinterpret_cast<char *>(
+         &opt_option_tracker_usage_group_replication_plugin),
+     SHOW_LONGLONG, SHOW_SCOPE_GLOBAL},
     {nullptr, nullptr, SHOW_LONG, SHOW_SCOPE_GLOBAL},
 };
 

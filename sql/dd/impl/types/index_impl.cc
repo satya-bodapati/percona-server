@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -51,6 +52,7 @@
 #include "sql/dd/types/index_element.h"
 #include "sql/dd/types/object_table.h"
 #include "sql/dd/types/weak_object.h"
+#include "sql/dd_table_share.h"  // dd::PERCONA_VECTOR_INDEX_TYPE_KEY
 #include "sql/field.h"
 #include "string_with_len.h"
 
@@ -64,8 +66,14 @@ class Sdi_wcontext;
 class Table;
 
 static const std::set<String_type> default_valid_option_keys = {
-    "block_size", "flags", "parser_name","gipk" /* generated implicit primary key */,
-    "clustering_key"};
+    "block_size",
+    "flags",
+    "parser_name",
+    "gipk", /* generated implicit primary key */
+    dd::PERCONA_VECTOR_INDEX_MARKER_KEY,
+    dd::PERCONA_VECTOR_INDEX_TYPE_KEY,
+    dd::PERCONA_VECTOR_INDEX_PARAMS_KEY,
+};
 
 ///////////////////////////////////////////////////////////////////////////
 // Index_impl implementation.
@@ -362,6 +370,9 @@ bool Index_impl::is_candidate_key() const {
     if (idx_elem_obj->column().is_virtual()) return false;
 
     if (idx_elem_obj->column().type() == enum_column_types::GEOMETRY)
+      return false;
+
+    if (idx_elem_obj->column().type() == enum_column_types::VECTOR)
       return false;
 
     /*

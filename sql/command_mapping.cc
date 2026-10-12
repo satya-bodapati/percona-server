@@ -1,15 +1,16 @@
-/* Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -41,7 +42,7 @@ class Command_maps final {
     return (it != server_command_map.end() ? it->second : COM_END);
   }
 
-  static const char *sql_commands[static_cast<unsigned int>(SQLCOM_END)];
+  static const char *sql_commands[];
 
  private:
   std::unordered_map<const char *, enum_server_command> server_command_map;
@@ -205,7 +206,26 @@ const char *Command_maps::sql_commands[] = {"select",
                                             "unlock_instance",
                                             "restart_server",
                                             "create_srs",
-                                            "drop_srs"};
+                                            "drop_srs",
+                                            "show_parse_tree",
+                                            "create_library",
+                                            "drop_library",
+                                            "show_create_library",
+                                            "alter_library",
+                                            "show_status_library",
+                                            "create_masking_policy",
+                                            "drop_masking_policy",
+                                            "show_create_masking_policy",
+                                            "show_user_stats",
+                                            "show_table_stats",
+                                            "show_index_stats",
+                                            "show_client_stats",
+                                            "show_thread_stats",
+                                            "lock_tables_for_backup",
+                                            "create_compression_dictionary",
+                                            "drop_compression_dictionary",
+                                            ""};
+// keep the empty string last and add new elements before it.
 
 Command_maps *g_command_maps{nullptr};
 }  // namespace
@@ -228,7 +248,19 @@ enum_server_command get_server_command(const char *server_command) {
 }
 
 const char *get_sql_command_string(enum_sql_command sql_command) {
-  static_assert(((size_t)(SQLCOM_END - SQLCOM_SELECT)) ==
+  static_assert(((size_t)(SQLCOM_END - SQLCOM_SELECT) + 1) ==
                 (sizeof(Command_maps::sql_commands) / sizeof(char *)));
-  return Command_maps::sql_commands[sql_command];
+  /* As this function is called with the 'sql_command' extracted from the
+     THD's 'lex' subobject ('thd->lex->sql_command'), in some cases (for
+     instance, when one of the group replication threads changes the value
+     of the 'read_only' / 'super_read_only' system variables) the THD object
+     associated with the current thread is not a real one fully initialized
+     by the connection handler and may have 'lex' subobject initialized with
+     default values where 'lex->sql_command' will be 'SQLCOM_END'. In other
+     words, 'SQLCOM_END' is a valid value for this function and we should
+     handle this case properly.
+  */
+  assert(sql_command <= SQLCOM_END);
+  return sql_command < SQLCOM_END ? Command_maps::sql_commands[sql_command]
+                                  : "<unknown>";
 }

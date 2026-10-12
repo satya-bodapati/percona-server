@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -71,7 +72,10 @@ PFS_engine_table *table_plugin_table::create(PFS_engine_table_share *share) {
 table_plugin_table::table_plugin_table(PFS_engine_table_share *share)
     : PFS_engine_table(share, nullptr),
       m_share(share),
-      m_table_lock(share->m_thr_lock_ptr) {
+      m_table_lock(share->m_thr_lock_ptr),
+      m_row_exists(false),
+      m_next_pos(nullptr),
+      m_opened_index(nullptr) {
   this->m_st_table = &share->m_st_table;
   this->plugin_table_handle = m_st_table->open_table(&m_pos);
   /* Setup the base class position pointer */
@@ -108,12 +112,9 @@ int table_plugin_table::rnd_pos(const void *pos) {
 }
 
 int table_plugin_table::index_init(uint idx, bool sorted) {
-  int ret = 0;
-  PFS_plugin_table_index *result = nullptr;
-
   /* Create an index instance for plugin table */
-  result = new PFS_plugin_table_index(m_st_table);
-  ret = result->init(plugin_table_handle, idx, sorted);
+  auto *result = new PFS_plugin_table_index(m_st_table);
+  const int ret = result->init(plugin_table_handle, idx, sorted);
 
   m_opened_index = result;
   m_index = result;
@@ -164,7 +165,6 @@ int table_plugin_table::delete_all_rows() {
 int table_plugin_table::update_row_values(TABLE *table, const unsigned char *,
                                           unsigned char *, Field **fields) {
   Field *f;
-  int result = 0;
 
   if (unlikely(m_st_table->update_column_value == nullptr)) {
     return HA_ERR_WRONG_COMMAND;
@@ -172,7 +172,7 @@ int table_plugin_table::update_row_values(TABLE *table, const unsigned char *,
 
   for (; (f = *fields); fields++) {
     if (bitmap_is_set(table->write_set, f->field_index())) {
-      result = m_st_table->update_column_value(
+      const int result = m_st_table->update_column_value(
           plugin_table_handle, (PSI_field *)f, f->field_index());
       if (result) {
         return result;

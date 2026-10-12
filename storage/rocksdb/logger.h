@@ -15,11 +15,23 @@
    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 #pragma once
 
-#include <sstream>
 #include <string>
+
+#include "rocksdb/env.h"
+
+#include "rdb_utils.h"  // LOG_COMPONENT_TAG for includes below
+
+#include "mysql/components/services/log_builtins.h"
+#include "mysql/components/services/log_shared.h"
+#include "mysql/my_loglevel.h"
+#include "mysqld_error.h"
 
 namespace myrocks {
 
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wmissing-format-attribute"
+#endif
 class Rdb_logger : public rocksdb::Logger {
  public:
   explicit Rdb_logger(const rocksdb::InfoLogLevel log_level =
@@ -80,5 +92,8 @@ class Rdb_logger : public rocksdb::Logger {
   std::shared_ptr<rocksdb::Logger> m_logger;
   rocksdb::InfoLogLevel m_mysql_log_level;
 };
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 }  // namespace myrocks

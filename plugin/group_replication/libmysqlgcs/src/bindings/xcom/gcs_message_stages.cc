@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,6 +28,7 @@
 #include <cstring>
 #include <iostream>
 #include <iterator>
+#include <ranges>
 #include <sstream>
 #include <tuple>
 #include <type_traits>
@@ -121,7 +123,7 @@ std::pair<bool, std::vector<Gcs_packet>> Gcs_message_pipeline::process_outgoing(
   Gcs_packet packet;
   uint64_t buffer_size = 0;
 
-  Gcs_protocol_version current_version =
+  Gcs_protocol_version const current_version =
       m_pipeline_version.load(std::memory_order_relaxed);
   Gcs_protocol_version pipeline_version = current_version;
   /*
@@ -262,7 +264,7 @@ std::pair<bool, Gcs_packet> Gcs_message_pipeline::create_packet(
 
   for (auto const &stage_code : stages_to_apply) {
     Gcs_message_stage &stage = *retrieve_stage(stage_code);
-    dynamic_headers.push_back(Gcs_dynamic_header(stage_code, 0));
+    dynamic_headers.emplace_back(stage_code, 0);
     stage_headers.push_back(stage.get_stage_header());
   }
 
@@ -341,8 +343,7 @@ Gcs_message_pipeline::process_incoming(Gcs_packet &&packet) const {
 
   /* Revert the stages from last to first. */
   auto const dynamic_headers = packet.get_dynamic_headers();
-  for (auto it = dynamic_headers.rbegin(); it != dynamic_headers.rend(); it++) {
-    Gcs_dynamic_header const &dynamic_header = *it;
+  for (auto dynamic_header : std::ranges::reverse_view(dynamic_headers)) {
     Gcs_pipeline_incoming_result error_code;
 
     std::tie(error_code, packet) =
@@ -389,7 +390,7 @@ end:
 
 void Gcs_message_pipeline::update_members_information(
     const Gcs_member_identifier &me, const Gcs_xcom_nodes &xcom_nodes) const {
-  for (auto &stage : m_handlers) {
+  for (const auto &stage : m_handlers) {
     stage.second->update_members_information(me, xcom_nodes);
   }
 }
@@ -397,7 +398,7 @@ void Gcs_message_pipeline::update_members_information(
 Gcs_xcom_synode_set Gcs_message_pipeline::get_snapshot() const {
   Gcs_xcom_synode_set synods;
 
-  for (auto &stage : m_handlers) {
+  for (const auto &stage : m_handlers) {
     Gcs_xcom_synode_set synods_per_stage = stage.second->get_snapshot();
     synods.insert(synods_per_stage.begin(), synods_per_stage.end());
   }

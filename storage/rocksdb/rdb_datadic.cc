@@ -15,6 +15,7 @@
    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
 
 #include <openssl/ssl.h>
+#include <cassert>
 #include "rdb_global.h"
 #ifdef USE_PRAGMA_IMPLEMENTATION
 #pragma implementation  // gcc: Class implementation
@@ -26,7 +27,10 @@
 /* C++ standard header files */
 #include <algorithm>
 #include <array>
+#include <cstdint>
+#ifndef NDEBUG
 #include <limits>
+#endif
 #include <map>
 #include <set>
 #include <string>
@@ -34,7 +38,6 @@
 #include <vector>
 
 /* MySQL header files */
-#include "my_bit.h"
 #include "my_bitmap.h"
 #include "my_compare.h"
 #include "my_stacktrace.h"
@@ -43,10 +46,10 @@
 #include "mysql/thread_pool_priv.h"
 #include "strings/m_ctype_internals.h"
 #include "sql/dd/cache/dictionary_client.h"  // dd::cache::Dictionary_client
-#include "sql/dd/upgrade_57/upgrade.h"       // dd::upgrade_57::in_progress
 #include "sql/field.h"
 #include "sql/key.h"
 #include "sql/mysqld.h"
+#include "sql/sql_class.h"
 #include "sql/sql_table.h"
 #include "sql/table.h"
 
@@ -54,12 +57,25 @@
 #include "./ha_rocksdb.h"
 #include "./ha_rocksdb_proto.h"
 #include "./rdb_cf_manager.h"
-#include "./rdb_psi.h"
 #include "./rdb_utils.h"
 
 extern CHARSET_INFO my_charset_utf16_bin;
 extern CHARSET_INFO my_charset_utf16le_bin;
 extern CHARSET_INFO my_charset_utf32_bin;
+
+namespace {
+/*
+  Find smallest X in 2^X >= value
+  This can be used to divide a number with value by doing a shift instead
+*/
+inline uint my_bit_log2(ulong value) {
+  uint bit;
+  for (bit = 0; value > 1; value >>= 1, bit++)
+    ;
+  return bit;
+}
+
+}  // namespace
 
 namespace myrocks {
 
@@ -156,8 +172,8 @@ int Rdb_convert_to_record_key_decoder::decode(
 */
 int Rdb_convert_to_record_key_decoder::skip(
     const Rdb_field_packing *fpi, const Field *field MY_ATTRIBUTE((__unused__)),
-    Rdb_string_reader *reader, Rdb_string_reader *unp_reader,
-    bool covered_bitmap_format_enabled) {
+    bool has_unpack_info, Rdb_string_reader *reader,
+    Rdb_string_reader *unp_reader, bool covered_bitmap_format_enabled) {
   /* It is impossible to unpack the column. Skip it. */
   if (fpi->m_field_is_nullable) {
     const char *nullp;
@@ -175,6 +191,23 @@ int Rdb_convert_to_record_key_decoder::skip(
   }
   if ((fpi->m_skip_func)(fpi, reader)) {
     return HA_ERR_ROCKSDB_CORRUPT_DATA;
+  }
+
+  const uint len_bytes = fpi->m_varlength_bytes;
+  if (fpi->m_unpack_func == &Rdb_key_def::unpack_unknown_varlength &&
+      unp_reader && has_unpack_info && len_bytes > 0) {
+    const uchar *ptr = (uchar *)unp_reader->read(len_bytes);
+    if (!ptr) return HA_ERR_ROCKSDB_CORRUPT_DATA;
+
+    uint len = 0;
+    if (fpi->m_field_real_type == MYSQL_TYPE_VARCHAR) {
+      len = len_bytes == 1 ? (uint)*ptr : uint2korr(ptr);
+    } else {
+      len = Field_blob::get_length(ptr, fpi->m_varlength_bytes);
+    }
+
+    ptr = (const uchar *)unp_reader->read(len);
+    if (!ptr) return HA_ERR_ROCKSDB_CORRUPT_DATA;
   }
 
   // If this is a space padded varchar, we need to skip the indicator
@@ -254,7 +287,7 @@ int Rdb_key_field_iterator::next() {
     } else {
       auto field = fpi->get_field_in_table(m_table);
       status = Rdb_convert_to_record_key_decoder::skip(
-          fpi, field, m_reader, m_unp_reader,
+          fpi, field, m_has_unpack_info, m_reader, m_unp_reader,
           this->m_key_def->use_covered_bitmap_format());
       if (status) {
         return status;
@@ -404,8 +437,12 @@ void Rdb_key_def::setup(const TABLE &tbl, const Rdb_tbl_def &tbl_def) {
       m_name = HIDDEN_PK_NAME;
     }
 
+    m_is_unique_sk = false;
+    m_user_defined_sk_parts = 0;
     if (secondary_key) {
       m_pk_key_parts = hidden_pk_exists ? 1 : pk_info->actual_key_parts;
+      m_is_unique_sk = key_info->flags & HA_NOSAME;
+      m_user_defined_sk_parts = key_info->user_defined_key_parts;
     } else {
       pk_info = nullptr;
       m_pk_key_parts = 0;
@@ -547,7 +584,7 @@ void Rdb_key_def::setup(const TABLE &tbl, const Rdb_tbl_def &tbl_def) {
           Check key part name here, if it matches the TTL column then we store
           the offset of the TTL key part here.
         */
-        if (!m_ttl_column.empty() &&
+        if (field && !m_ttl_column.empty() &&
             !my_strcasecmp(system_charset_info, field->field_name,
                            m_ttl_column.c_str())) {
           assert((field->real_type() == MYSQL_TYPE_LONGLONG &&
@@ -557,7 +594,7 @@ void Rdb_key_def::setup(const TABLE &tbl, const Rdb_tbl_def &tbl_def) {
           m_ttl_pk_key_part_offset = dst_i;
         }
 
-        key_part++;
+        if (key_part) key_part++;
         /*
           For "unique" secondary indexes, pretend they have
           "index extensions"
@@ -1029,15 +1066,12 @@ uint Rdb_key_def::get_primary_key_tuple(const Rdb_key_def &pk_descr,
     sk_buffer     OUT  Put here mem-comparable form of the Secondary Key.
     n_null_fields OUT  Put number of null fields contained within sk entry
 */
-uint Rdb_key_def::get_memcmp_sk_parts(const TABLE *table,
-                                      const rocksdb::Slice &key,
+uint Rdb_key_def::get_memcmp_sk_parts(const rocksdb::Slice &key,
                                       uchar *sk_buffer,
                                       uint *n_null_fields) const {
-  assert(table != nullptr);
   assert(sk_buffer != nullptr);
   assert(n_null_fields != nullptr);
-  assert(m_keyno != table->s->primary_key);
-  assert(!table_has_hidden_pk(*table));
+  assert(!is_primary_key());
 
   uchar *buf = sk_buffer;
 
@@ -1048,7 +1082,7 @@ uint Rdb_key_def::get_memcmp_sk_parts(const TABLE *table,
   // Skip the index number
   if ((!reader.read(INDEX_NUMBER_SIZE))) return RDB_INVALID_KEY_LEN;
 
-  for (uint i = 0; i < table->key_info[m_keyno].user_defined_key_parts; i++) {
+  for (uint i = 0; i < m_user_defined_sk_parts; i++) {
     if ((res = read_memcmp_key_part(&reader, i)) > 0) {
       return RDB_INVALID_KEY_LEN;
     } else if (res == -1) {
@@ -1085,7 +1119,7 @@ uint Rdb_key_def::pack_index_tuple(TABLE *const tbl, uchar *const pack_buffer,
   const uint key_len = calculate_key_len(tbl, m_keyno, keypart_map);
   key_restore(tbl->record[0], key_tuple, &tbl->key_info[m_keyno], key_len);
 
-  uint n_used_parts = my_count_bits(keypart_map);
+  uint n_used_parts = std::popcount(keypart_map);
   if (keypart_map == HA_WHOLE_KEY) n_used_parts = 0;  // Full key is used
 
   /* Then, convert the record into a mem-comparable form */
@@ -1334,6 +1368,8 @@ uint Rdb_key_def::pack_record(const TABLE *const tbl, uchar *const pack_buffer,
   assert_IMP(should_store_row_debug_checksums,
              (m_index_type == INDEX_TYPE_SECONDARY));
 
+  MEM_UNDEFINED(pack_buffer, max_storage_fmt_length());
+
   uchar *tuple = packed_tuple;
   size_t unpack_start_pos = size_t(-1);
   size_t unpack_len_pos = size_t(-1);
@@ -1485,6 +1521,8 @@ uint Rdb_key_def::pack_record(const TABLE *const tbl, uchar *const pack_buffer,
 
   assert(is_storage_available(tuple - packed_tuple, 0));
 
+  MEM_NOACCESS(pack_buffer, max_storage_fmt_length());
+
   return tuple - packed_tuple;
 }
 
@@ -1492,7 +1530,6 @@ uint Rdb_key_def::pack_record(const TABLE *const tbl, uchar *const pack_buffer,
   Pack the hidden primary key into mem-comparable form.
 
   @param
-    tbl                   Table we're working on
     hidden_pk_id     IN   New value to be packed into key
     packed_tuple     OUT  Key in the mem-comparable form
 
@@ -2208,7 +2245,8 @@ int Rdb_key_def::unpack_record(TABLE *const table, uchar *const buf,
     Check checksum values if present
   */
   const char *ptr;
-  if (unlikely((ptr = unp_reader.read(1)) && *ptr == RDB_CHECKSUM_DATA_TAG)) {
+  if (unlikely(unp_reader.remaining_bytes() == RDB_CHECKSUM_CHUNK_SIZE &&
+               (ptr = unp_reader.read(1)) && *ptr == RDB_CHECKSUM_DATA_TAG)) {
     if (verify_row_debug_checksums) {
       uint32_t stored_key_chksum = rdb_netbuf_to_uint32(
           (const uchar *)unp_reader.read(RDB_CHECKSUM_SIZE));
@@ -2260,7 +2298,7 @@ void Rdb_key_def::report_checksum_mismatch(const bool is_key,
                   "Checksum mismatch in %s of key-value pair for index 0x%x",
                   is_key ? "key" : "value", get_index_number());
 
-  const std::string buf = rdb_hexdump(data, data_size, RDB_MAX_HEXDUMP_LEN);
+  const auto buf = rdb_hexdump(data, data_size);
   LogPluginErrMsg(ERROR_LEVEL, 0,
                   "Data with incorrect checksum (%" PRIu64 " bytes): %s",
                   (uint64_t)data_size, buf.c_str());
@@ -3553,6 +3591,7 @@ int Rdb_key_def::unpack_unknown_varlength(Rdb_field_packing *const fpi,
 
   uchar *data_start = get_data_start_ptr(fpi, dst, ctx);
   uchar *data = data_start;
+  size_t data_len = fpi->m_max_field_bytes;
   const uint len_bytes = fpi->m_varlength_bytes;
   // We don't use anything from the key, so skip over it.
   if ((fpi->m_skip_func)(fpi, reader)) {
@@ -3570,6 +3609,8 @@ int Rdb_key_def::unpack_unknown_varlength(Rdb_field_packing *const fpi,
       len = Field_blob::get_length(ptr, fpi->m_varlength_bytes);
     }
     if ((ptr = (const uchar *)unp_reader->read(len))) {
+      if (len > data_len) return UNPACK_FAILURE;
+
       memcpy(data, ptr, len);
       store_field(data_start, len, dst, fpi, ctx);
       return UNPACK_SUCCESS;
@@ -3907,7 +3948,7 @@ static const Rdb_collation_codec *rdb_init_collation_mapping(
         uchar dst = p.first;
         for (uint idx = 0; idx < p.second.size(); idx++) {
           uchar src = p.second[idx];
-          uchar bits = my_bit_log2(my_round_up_to_next_power(p.second.size()));
+          uchar bits = my_bit_log2(std::bit_ceil(p.second.size()));
           cur->m_enc_idx[src] = idx;
           cur->m_enc_size[src] = bits;
           cur->m_dec_size[dst] = bits;
@@ -4438,6 +4479,8 @@ bool Rdb_tbl_def::put_dict(Rdb_dict_manager *const dict,
                            Rdb_cf_manager *cf_manager,
                            rocksdb::WriteBatch *const batch,
                            const rocksdb::Slice &key) {
+  assert(m_pk_index <= MAX_INDEXES);
+
   StringBuffer<8 * Rdb_key_def::PACKED_SIZE> indexes;
   indexes.alloc(Rdb_key_def::VERSION_SIZE +
                 m_key_count * Rdb_key_def::PACKED_SIZE * 2);
@@ -4585,6 +4628,8 @@ void Rdb_tbl_def::set_name(const std::string &name) {
 }
 
 GL_INDEX_ID Rdb_tbl_def::get_autoincr_gl_index_id() {
+  assert(m_pk_index <= MAX_INDEXES);
+
   for (uint i = 0; i < m_key_count; i++) {
     auto &k = m_key_descr_arr[i];
     if (k->m_index_type == Rdb_key_def::INDEX_TYPE_PRIMARY ||
@@ -4620,7 +4665,7 @@ void Rdb_ddl_manager::remove_uncommitted_keydefs(
   mysql_rwlock_unlock(&m_rwlock);
 }
 
-int Rdb_ddl_manager::find_in_uncommitted_keydef(const uint32_t cf_id) {
+int Rdb_ddl_manager::find_in_uncommitted_keydef(const uint32_t cf_id) const {
   mysql_rwlock_rdlock(&m_rwlock);
   for (const auto &pr : m_index_num_to_uncommitted_keydef) {
     const auto &kd = pr.second;
@@ -4734,7 +4779,7 @@ bool Rdb_validate_tbls::compare_to_mysql_dd_tables(bool *has_errors) {
   Validate that all the tables in the RocksDB database dictionary match the
   MySQL data dictionary
 */
-bool Rdb_ddl_manager::validate_schemas(void) {
+bool Rdb_ddl_manager::validate_schemas(void) const {
   bool has_errors = false;
   Rdb_validate_tbls table_list;
 
@@ -4769,7 +4814,7 @@ bool Rdb_ddl_manager::validate_schemas(void) {
   Validate that all auto increment values in the data dictionary are on a
   supported version.
 */
-bool Rdb_ddl_manager::validate_auto_incr() {
+bool Rdb_ddl_manager::validate_auto_incr() const {
   auto dict_user_table =
       m_dict->get_dict_manager_selector_const(false /*is_tmp_table*/);
   std::unique_ptr<rocksdb::Iterator> it(dict_user_table->new_iterator());
@@ -4989,33 +5034,6 @@ bool Rdb_ddl_manager::init(Rdb_dict_manager *const dict_arg,
     i++;
   }
 
-#if defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) && ROCKSDB_INCLUDE_VALIDATE_TABLES
-  /*
-    If validate_tables is greater than 0 run the validation.  Only fail the
-    initialzation if the setting is 1.  If the setting is 2 we continue.
-  */
-  if (validate_tables > 0 && !dd::upgrade_57::in_progress()) {
-    std::string msg;
-    if (!validate_schemas()) {
-      msg =
-          "RocksDB: Problems validating data dictionary "
-          "against DD tables, exiting";
-    } else if (!validate_auto_incr()) {
-      msg =
-          "RocksDB: Problems validating auto increment values in "
-          "data dictionary, exiting";
-    }
-    if (validate_tables == 1 && !msg.empty()) {
-      LogPluginErrMsg(
-          ERROR_LEVEL, 0,
-          "%s. Use \"rocksdb_validate_tables=2\" to ignore this error.",
-          msg.c_str());
-      return true;
-    }
-  }
-#endif  // defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) &&
-        // ROCKSDB_INCLUDE_VALIDATE_TABLES
-
   if (max_dd_index_id_in_dict < Rdb_key_def::END_DICT_INDEX_ID) {
     max_dd_index_id_in_dict = Rdb_key_def::END_DICT_INDEX_ID;
   }
@@ -5042,11 +5060,39 @@ bool Rdb_ddl_manager::init(Rdb_dict_manager *const dict_arg,
                   "Table_store: loaded DDL data for %d tables", i);
 
   initialized = true;
+
+#if defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) && ROCKSDB_INCLUDE_VALIDATE_TABLES
+  /*
+    If validate_tables is greater than 0 run the validation.  Only fail the
+    initialzation if the setting is 1.  If the setting is 2 we continue.
+  */
+  if (validate_tables > 0) {
+    std::string msg;
+    if (!validate_schemas()) {
+      msg =
+          "RocksDB: Problems validating data dictionary "
+          "against DD tables, exiting";
+    } else if (!validate_auto_incr()) {
+      msg =
+          "RocksDB: Problems validating auto increment values in "
+          "data dictionary, exiting";
+    }
+    if (validate_tables == 1 && !msg.empty()) {
+      LogPluginErrMsg(
+          ERROR_LEVEL, 0,
+          "%s. Use \"rocksdb_validate_tables=2\" to ignore this error.",
+          msg.c_str());
+      return true;
+    }
+  }
+#endif  // defined(ROCKSDB_INCLUDE_VALIDATE_TABLES) &&
+        // ROCKSDB_INCLUDE_VALIDATE_TABLES
+
   return false;
 }
 
 Rdb_tbl_def *Rdb_ddl_manager::find(const std::string &table_name,
-                                   const bool lock) {
+                                   bool lock) const {
   Rdb_tbl_def *rec = nullptr;
 
   if (lock) {
@@ -5066,7 +5112,7 @@ Rdb_tbl_def *Rdb_ddl_manager::find(const std::string &table_name,
 }
 
 int Rdb_ddl_manager::find_indexes(const std::string &table_name,
-                                  std::vector<GL_INDEX_ID> *indexes) {
+                                  std::vector<GL_INDEX_ID> *indexes) const {
   mysql_rwlock_rdlock(&m_rwlock);
 
   Rdb_tbl_def *tdef = nullptr;
@@ -5090,7 +5136,7 @@ int Rdb_ddl_manager::find_indexes(const std::string &table_name,
 }
 
 int Rdb_ddl_manager::find_table_stats(const std::string &table_name,
-                                      Rdb_table_stats *tbl_stats) {
+                                      Rdb_table_stats *tbl_stats) const {
   mysql_rwlock_rdlock(&m_rwlock);
 
   Rdb_tbl_def *tdef = nullptr;
@@ -5116,7 +5162,7 @@ int Rdb_ddl_manager::find_table_stats(const std::string &table_name,
 // are finding it.  Copying it into 'ret' increments the count making sure
 // that the object will not be discarded until we are finished with it.
 std::shared_ptr<const Rdb_key_def> Rdb_ddl_manager::safe_find(
-    GL_INDEX_ID gl_index_id) {
+    GL_INDEX_ID gl_index_id) const {
   std::shared_ptr<const Rdb_key_def> ret(nullptr);
 
   mysql_rwlock_rdlock(&m_rwlock);
@@ -5148,7 +5194,7 @@ std::shared_ptr<const Rdb_key_def> Rdb_ddl_manager::safe_find(
 
 // this method assumes at least read-only lock on m_rwlock
 const std::shared_ptr<Rdb_key_def> &Rdb_ddl_manager::find(
-    GL_INDEX_ID gl_index_id) {
+    GL_INDEX_ID gl_index_id) const {
   const auto it = m_index_num_to_keydef.find(gl_index_id);
   if (it != m_index_num_to_keydef.end()) {
     const auto table_def = find(it->second.first, false);
@@ -5173,7 +5219,7 @@ const std::shared_ptr<Rdb_key_def> &Rdb_ddl_manager::find(
 // this method returns the name of the table based on an index id. It acquires
 // a read lock on m_rwlock.
 const std::string Rdb_ddl_manager::safe_get_table_name(
-    const GL_INDEX_ID &gl_index_id) {
+    GL_INDEX_ID gl_index_id) const {
   std::string ret;
   mysql_rwlock_rdlock(&m_rwlock);
   auto it = m_index_num_to_keydef.find(gl_index_id);
@@ -5404,7 +5450,7 @@ bool Rdb_ddl_manager::rename(const std::string &from, const std::string &to,
   return res;
 }
 
-void Rdb_ddl_manager::cleanup() {
+void Rdb_ddl_manager::cleanup(bool destroy_rwlock) {
   if (!initialized) return;
 
   for (const auto &kv : m_ddl_map) {
@@ -5412,13 +5458,16 @@ void Rdb_ddl_manager::cleanup() {
   }
   m_ddl_map.clear();
 
-  mysql_rwlock_destroy(&m_rwlock);
+  if (destroy_rwlock) {
+    mysql_rwlock_destroy(&m_rwlock);
+  }
   m_dd_table_sequence.cleanup();
   m_user_table_sequence.cleanup();
   m_tmp_table_sequence.cleanup();
 }
 
-int Rdb_ddl_manager::scan_for_tables(Rdb_tables_scanner *const tables_scanner) {
+int Rdb_ddl_manager::scan_for_tables(
+    Rdb_tables_scanner *const tables_scanner) const {
   int ret;
 
   assert(tables_scanner != nullptr);
@@ -5719,13 +5768,14 @@ bool Rdb_dict_manager::get_index_info(
 
   if (error) {
     LogPluginErrMsg(ERROR_LEVEL, 0,
-                    "Found invalid key version number (%u, %u, %u, %llu) from "
-                    "data dictionary. This should never happen and it may be a "
-                    "bug.",
-                    index_info->m_index_dict_version, index_info->m_index_type,
-                    index_info->m_kv_version,
-                    (ulonglong)(index_info->m_ttl_duration));
-    abort();
+        "Found invalid key version number (%hu"
+        ", %hhu, %hu"
+        ", %" PRIu64
+        ") from data dictionary. This should never happen "
+        "and it may be a bug.",
+        index_info->m_index_dict_version, index_info->m_index_type,
+        index_info->m_kv_version, index_info->m_ttl_duration);
+     abort();
   }
 
   return found;
@@ -5891,7 +5941,7 @@ int Rdb_dict_manager::add_missing_cf_flags(
     std::shared_ptr<rocksdb::ColumnFamilyHandle> cfh =
         cf_manager->get_cf(cf_name);
 
-    if (cf_manager->create_cf_flags_if_needed(this, cfh->GetID(), cf_name)) {
+    if (cf_manager->create_cf_flags_if_needed(*this, cfh->GetID(), cf_name)) {
       return HA_EXIT_FAILURE;
     }
   }

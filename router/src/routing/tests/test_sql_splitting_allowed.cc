@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,6 +22,7 @@
   along with this program; if not, write to the Free Software
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
+#include "sql_parser_state.h"
 #include "sql_splitting_allowed.h"
 
 #include <gtest/gtest.h>
@@ -32,19 +34,8 @@
 using Allowed = SplittingAllowedParser::Allowed;
 
 static stdx::expected<SplittingAllowedParser::Allowed, std::string>
-splitting_allowed(std::string_view stmt) {
-  MEM_ROOT mem_root;
-  THD session;
-  session.mem_root = &mem_root;
-
-  {
-    Parser_state parser_state;
-    parser_state.init(&session, stmt.data(), stmt.size());
-    session.m_parser_state = &parser_state;
-    SqlLexer lexer{&session};
-
-    return SplittingAllowedParser(lexer.begin(), lexer.end()).parse();
-  }
+splitting_allowed(SqlLexer &&lexer) {
+  return SplittingAllowedParser(lexer.begin(), lexer.end()).parse();
 }
 
 struct SharingAllowedParam {
@@ -86,7 +77,13 @@ class SharingAllowedTest
       public ::testing::WithParamInterface<SharingAllowedParam> {};
 
 TEST_P(SharingAllowedTest, works) {
-  ASSERT_EQ(splitting_allowed(GetParam().stmt), GetParam().expected_result)
+  SqlParserState sql_parser_state;
+
+  // set the statement in the parser.
+  sql_parser_state.statement(GetParam().stmt);
+
+  ASSERT_EQ(splitting_allowed(sql_parser_state.lexer()),
+            GetParam().expected_result)
       << GetParam().stmt;
 }
 
@@ -207,7 +204,6 @@ INSTANTIATE_TEST_SUITE_P(Trx, SharingAllowedTest,
 
 const SharingAllowedParam replication_source[] = {
     {"purge binary logs", Allowed::Never},             // instance
-    {"reset master", Allowed::Never},                  // instance
     {"reset binary logs and gtids ", Allowed::Never},  // instance
                                                        //
     {"set sql_log_bin = 1", Allowed::Always},          // session
@@ -217,16 +213,12 @@ INSTANTIATE_TEST_SUITE_P(ReplicationSource, SharingAllowedTest,
                          ::testing::ValuesIn(replication_source));
 
 const SharingAllowedParam replication_replica[] = {
-    {"change master to", Allowed::Never},              // instance
     {"change replication filter", Allowed::Never},     // instance
     {"change replication source to", Allowed::Never},  // instance
     {"reset replica", Allowed::Never},                 // instance
-    {"reset slave", Allowed::Never},                   // instance
     {"start replica", Allowed::Never},                 // instance
-    {"start slave", Allowed::Never},                   // instance
     {"start group_replication", Allowed::Never},       // instance
     {"stop replica", Allowed::Never},                  // instance
-    {"stop slave", Allowed::Never},                    // instance
     {"stop group_replication", Allowed::Never},        // instance
 };
 
@@ -348,8 +340,6 @@ const SharingAllowedParam show_statements[] = {
     {"SHOW function status", Allowed::Always},              //
     {"SHOW grants for user", Allowed::Always},              //
     {"SHOW index from tbl", Allowed::Always},               //
-    {"SHOW master logs", Allowed::OnlyReadWrite},           //
-    {"SHOW master status", Allowed::OnlyReadWrite},         //
     {"SHOW binary log status", Allowed::OnlyReadWrite},     //
     {"SHOW open tables", Allowed::InTransaction},           //
     {"SHOW plugins", Allowed::Always},                      //
@@ -362,8 +352,6 @@ const SharingAllowedParam show_statements[] = {
     {"SHOW profiles", Allowed::InTransaction},              //
     {"SHOW relaylog", Allowed::OnlyReadOnly},               //
     {"SHOW replicas", Allowed::OnlyReadWrite},              //
-    {"SHOW slave hosts", Allowed::OnlyReadWrite},           //
-    {"SHOW slave status", Allowed::OnlyReadOnly},           //
     {"SHOW replica status", Allowed::OnlyReadOnly},         //
     {"SHOW global status", Allowed::InTransaction},         //
     {"SHOW session status", Allowed::Always},               //
@@ -417,6 +405,18 @@ const SharingAllowedParam utility_stmt[] = {
 INSTANTIATE_TEST_SUITE_P(Utility, SharingAllowedTest,
                          ::testing::ValuesIn(utility_stmt));
 
+const SharingAllowedParam empty_stmt[] = {
+    {"", Allowed::Always},         //
+    {"  ", Allowed::Always},       //
+    {"-- ", Allowed::Always},      //
+    {"/* */", Allowed::Always},    //
+    {" /* */ ", Allowed::Always},  //
+    {";", Allowed::Always},        //
+};
+
+INSTANTIATE_TEST_SUITE_P(Empty, SharingAllowedTest,
+                         ::testing::ValuesIn(empty_stmt));
+
 const SharingAllowedParam fail_stmts[] = {
     {"select '", Allowed::Always},   // SELECT, '
     {"select \"", Allowed::Always},  // SELECT, "
@@ -428,6 +428,8 @@ INSTANTIATE_TEST_SUITE_P(Fail, SharingAllowedTest,
 
 int main(int argc, char *argv[]) {
   TlsLibraryContext lib_ctx;
+
+  SqlLexer::init_library();
 
   ::testing::InitGoogleTest(&argc, argv);
 

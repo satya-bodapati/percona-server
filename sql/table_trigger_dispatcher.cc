@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,6 +27,7 @@
 #include <assert.h>
 #include <sys/types.h>
 
+#include <memory>
 #include <string>
 #include <utility>
 
@@ -100,13 +102,16 @@ Table_trigger_dispatcher::~Table_trigger_dispatcher() {
 
   if (m_record1_field) {
     for (Field **fld_ptr = m_record1_field; *fld_ptr; fld_ptr++)
-      destroy(*fld_ptr);
+      ::destroy_at(*fld_ptr);
   }
 
   // Destroy trigger chains.
 
-  for (int i = 0; i < (int)TRG_EVENT_MAX; ++i)
-    for (int j = 0; j < (int)TRG_ACTION_MAX; ++j) destroy(m_trigger_map[i][j]);
+  for (int i = 0; i < (int)TRG_EVENT_MAX; ++i) {
+    for (int j = 0; j < (int)TRG_ACTION_MAX; ++j) {
+      if (m_trigger_map[i][j] != nullptr) ::destroy_at(m_trigger_map[i][j]);
+    }
+  }
 }
 bool Table_trigger_dispatcher::create_trigger(
     THD *thd, String *binlog_create_trigger_stmt, bool if_not_exists,
@@ -241,7 +246,7 @@ bool Table_trigger_dispatcher::create_trigger(
       &m_subject_table->mem_root, t->get_event(), t->get_action_time());
 
   if (!tc) {
-    destroy(t);
+    ::destroy_at(t);
     return true;
   }
 
@@ -250,7 +255,7 @@ bool Table_trigger_dispatcher::create_trigger(
   if (tc->add_trigger(&m_subject_table->mem_root, t,
                       lex->sphead->m_trg_chistics.ordering_clause,
                       lex->sphead->m_trg_chistics.anchor_trigger_name)) {
-    destroy(t);
+    ::destroy_at(t);
     return true;
   }
 
@@ -490,7 +495,7 @@ void Table_trigger_dispatcher::parse_triggers(THD *thd, List<Trigger> *triggers,
       }
 
       if (fatal_parse_error) {
-        destroy(t);
+        ::destroy_at(t);
         it.remove();
       }
 
@@ -539,12 +544,20 @@ bool Table_trigger_dispatcher::process_triggers(
     m_new_field = m_record1_field;
     m_old_field = m_subject_table->field;
   }
+
   /*
-    This trigger must have been processed by the pre-locking
-    algorithm.
+    This trigger must have been processed by the pre-locking algorithm.
+    Note:
+    While validating FK constraints, another `TABLE` instance may be created
+    for a prelocked table. For example, executing cascade operations on a
+    self-referencing foreign key can open an additional handle. Such tables
+    are not added to the prelocked table list, so skip the following check in
+    this special case.
   */
-  assert(m_subject_table->pos_in_table_list->trg_event_map &
-         static_cast<uint>(1 << static_cast<int>(event)));
+  assert((m_subject_table->pos_in_table_list == nullptr &&
+          m_subject_table->open_for_fk_name != nullptr) ||
+         m_subject_table->pos_in_table_list->trg_event_map &
+             static_cast<uint>(1 << static_cast<int>(event)));
 
   const bool rc = tc->execute_triggers(thd);
 
@@ -625,6 +638,16 @@ void Table_trigger_dispatcher::disable_fields_temporary_nullability() {
 
   for (Field **next_field = m_subject_table->field; *next_field; ++next_field)
     (*next_field)->reset_tmp_nullable();
+}
+
+/**
+  Reset the temporary null values set to the field for triggers.
+ */
+void Table_trigger_dispatcher::reset_field_nulls() {
+  assert(m_subject_table);
+
+  for (Field **next_field = m_subject_table->field; *next_field; ++next_field)
+    (*next_field)->reset_tmp_null();
 }
 
 /**

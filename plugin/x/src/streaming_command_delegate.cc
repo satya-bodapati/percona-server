@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -34,6 +35,7 @@
 
 #include "decimal.h"  // NOLINT(build/include_subdir)
 #include "my_dbug.h"  // NOLINT(build/include_subdir)
+#include "sql/debug_sync.h"
 
 #include "plugin/x/protocol/encoders/encoding_xrow.h"
 #include "plugin/x/src/interface/client.h"
@@ -222,6 +224,7 @@ int Streaming_command_delegate::field_metadata(struct st_send_field *field,
 
     case MYSQL_TYPE_TINY_BLOB:
     case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_VECTOR:
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_LONG_BLOB:
     case MYSQL_TYPE_VARCHAR:
@@ -607,6 +610,12 @@ void Streaming_command_delegate::handle_out_param_in_handle_ok(
 bool Streaming_command_delegate::connection_alive() {
   log_debug("%u: connection_alive",
             static_cast<unsigned>(m_session->client().client_id_num()));
+
+  DBUG_EXECUTE_IF("xpl_connection_alive_once", {
+    DBUG_SET("-d,xpl_connection_alive_once");
+    CONDITIONAL_SYNC_POINT("xpl_connection_alive_wait");
+  });
+
   auto connection = m_proto->get_flusher()->get_connection();
 
   auto idle_processing = m_session->client().get_idle_processing();

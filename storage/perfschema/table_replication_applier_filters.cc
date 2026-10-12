@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -111,12 +112,12 @@ ha_rows table_replication_applier_filters::get_row_count() {
 
 int table_replication_applier_filters::rnd_next() {
   int res = HA_ERR_END_OF_FILE;
-  Rpl_pfs_filter *rpl_pfs_filter = nullptr;
 
   rpl_channel_filters.rdlock();
   for (m_pos.set_at(&m_next_pos); res != 0; m_pos.next()) {
     /* Get ith rpl_pfs_filter from rpl_channel_filters. */
-    rpl_pfs_filter = rpl_channel_filters.get_filter_at_pos(m_pos.m_index);
+    Rpl_pfs_filter *rpl_pfs_filter =
+        rpl_channel_filters.get_filter_at_pos(m_pos.m_index);
 
     if (rpl_pfs_filter == nullptr) {
       break;
@@ -131,14 +132,14 @@ int table_replication_applier_filters::rnd_next() {
 }
 
 int table_replication_applier_filters::rnd_pos(const void *pos) {
-  Rpl_pfs_filter *rpl_pfs_filter = nullptr;
   int ret = HA_ERR_RECORD_DELETED;
 
   set_position(pos);
 
   rpl_channel_filters.rdlock();
   /* Get ith rpl_pfs_filter from rpl_channel_filters. */
-  rpl_pfs_filter = rpl_channel_filters.get_filter_at_pos(m_pos.m_index - 1);
+  Rpl_pfs_filter *rpl_pfs_filter =
+      rpl_channel_filters.get_filter_at_pos(m_pos.m_index - 1);
   if (rpl_pfs_filter) {
     make_row(rpl_pfs_filter);
     ret = 0;

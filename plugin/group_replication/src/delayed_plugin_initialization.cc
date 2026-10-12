@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -69,7 +70,9 @@ void Delayed_initialization_thread::wait_for_thread_end() {
   while (delayed_thd_state.is_thread_alive()) {
     DBUG_PRINT("sleep",
                ("Waiting for the Delayed initialization thread to finish"));
-    mysql_cond_wait(&run_cond, &run_lock);
+    struct timespec abstime;
+    set_timespec(&abstime, 1);
+    mysql_cond_timedwait(&run_cond, &run_lock, &abstime);
   }
   mysql_mutex_unlock(&run_lock);
 
@@ -89,7 +92,9 @@ void Delayed_initialization_thread::wait_for_read_mode() {
   while (!is_super_read_only_set) {
     DBUG_PRINT("sleep", ("Waiting for the Delayed initialization thread to set "
                          "super_read_only"));
-    mysql_cond_wait(&run_cond, &run_lock);
+    struct timespec abstime;
+    set_timespec(&abstime, 1);
+    mysql_cond_timedwait(&run_cond, &run_lock, &abstime);
   }
   mysql_mutex_unlock(&run_lock);
 }
@@ -112,7 +117,9 @@ int Delayed_initialization_thread::launch_initialization_thread() {
   while (delayed_thd_state.is_alive_not_running()) {
     DBUG_PRINT("sleep",
                ("Waiting for the Delayed initialization thread to start"));
-    mysql_cond_wait(&run_cond, &run_lock);
+    struct timespec abstime;
+    set_timespec(&abstime, 1);
+    mysql_cond_timedwait(&run_cond, &run_lock, &abstime);
   }
   mysql_mutex_unlock(&run_lock);
 
@@ -138,7 +145,9 @@ int Delayed_initialization_thread::initialization_thread_handler() {
   mysql_mutex_lock(&server_ready_lock);
   while (!is_server_ready) {
     DBUG_PRINT("sleep", ("Waiting for server start signal"));
-    mysql_cond_wait(&server_ready_cond, &server_ready_lock);
+    struct timespec abstime;
+    set_timespec(&abstime, 1);
+    mysql_cond_timedwait(&server_ready_cond, &server_ready_lock, &abstime);
   }
   mysql_mutex_unlock(&server_ready_lock);
 

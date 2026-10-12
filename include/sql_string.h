@@ -1,18 +1,19 @@
 #ifndef SQL_STRING_INCLUDED
 #define SQL_STRING_INCLUDED
 
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -157,9 +158,11 @@ size_t bin_to_hex_str(char *to, size_t to_len, const char *from,
 
 /**
   Using this class is fraught with peril, and you need to be very careful
-  when doing so. In particular, copy construction and assignment does not
+  when doing so. In particular, copy construction does not
   do a deep _nor_ a shallow copy; instead, it makes a _reference_ to the
   original string that will be invalid as soon as that string goes out of scope.
+  Copy assignment has been disabled for this reason, use one of the set()
+  functions instead.
   (Move constructiong and assignment is safe, though.) In general, it is
   probably better not to use this class at all if you can avoid it.
 */
@@ -262,6 +265,28 @@ class String {
     if (m_ptr && m_length < m_alloced_length) m_ptr[m_length] = 0;
     return m_ptr;
   }
+
+  /**
+    Returns a pointer to a C-style null-terminated string. The function is
+    "safe" in the sense that the returned string is guaranteed to be
+    null-terminated (as opposed to c_ptr_quick()). However, in terms of memory
+    safety, this function might perform a heap allocation, so using it
+    necessitates manual cleanup.
+
+    @note One potential pitfall when using this function happens when calling
+    c_ptr_safe() on a String object from the parser. In this case the internal
+    m_ptr string is already allocated on a MEM_ROOT and is cleaned up as part of
+    the query lifecycle. This cleanup is performed by simply clearing the
+    MEM_ROOT (freeing its allocated memory) and does not involve destructing the
+    String object. So in the case when the parser works with (ptr, length)-style
+    strings that are placed in String objects and m_length = m_allocated_length
+    we get a heap allocation when calling c_ptr_safe(), even if just to read the
+    contents of the string, and this newly allocated memory is not on the same
+    MEM_ROOT as the original string, and thus we get a memory leak if we do not
+    make sure to free it.
+
+    @return Pointer to null-terminated string.
+  */
   char *c_ptr_safe() {
     if (m_ptr && m_length < m_alloced_length)
       m_ptr[m_length] = 0;
@@ -412,22 +437,7 @@ class String {
     }
   }
   bool is_alloced() const { return m_is_alloced; }
-  String &operator=(const String &s) {
-    if (&s != this) {
-      /*
-        It is forbidden to do assignments like
-        some_string = substring_of_that_string
-       */
-      assert(!s.uses_buffer_owned_by(this));
-      mem_free();
-      m_ptr = s.m_ptr;
-      m_length = s.m_length;
-      m_alloced_length = s.m_alloced_length;
-      m_charset = s.m_charset;
-      m_is_alloced = false;
-    }
-    return *this;
-  }
+  String &operator=(const String &s) = delete;
   String &operator=(String &&s) noexcept {
     if (&s != this) {
       /*
@@ -615,7 +625,7 @@ class String {
   @param arg_length     Length of string to copy.
   @param from_cs        Character set to copy from
   @param to_cs          Character set to copy to
-  @param *offset	Returns number of unaligned characters.
+  @param[out] offset	Returns number of unaligned characters.
 
   @returns true if conversion is required, false otherwise.
 
@@ -639,8 +649,12 @@ inline bool String::needs_conversion(size_t arg_length,
 
 static inline void swap(String &a, String &b) noexcept { a.swap(b); }
 
-static inline std::string to_string(const String &str) {
-  return std::string(str.ptr(), str.length());
+inline std::string_view to_string_view(const String &str) {
+  return {str.ptr(), str.length()};
+}
+
+inline std::string to_string(const String &str) {
+  return std::string{to_string_view(str)};
 }
 
 /**

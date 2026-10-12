@@ -1,18 +1,19 @@
 #ifndef MY_COMPILER_INCLUDED
 #define MY_COMPILER_INCLUDED
 
-/* Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -92,20 +93,6 @@ constexpr bool unlikely(bool expr) { return expr; }
 #define __func__ __FUNCTION__
 #endif
 
-#if defined(__cplusplus) && defined(__cpp_attributes) && \
-    defined(__has_cpp_attribute)
-#if __has_cpp_attribute(nodiscard)
-#define MY_NODISCARD [[nodiscard]]
-#elif __has_cpp_attribute(gnu::warn_unused_result)
-#define MY_NODISCARD [[gnu::warn_unused_result]]
-#endif /* __has_cpp_attribute(gnu::warn_unused_result) */
-#endif /* defined(__cplusplus) && defined(__cpp_attributes) && \
-          defined(__has_cpp_attribute) */
-
-#ifndef MY_NODISCARD
-#define MY_NODISCARD MY_ATTRIBUTE((warn_unused_result))
-#endif /* MY_NODISCARD */
-
 #if defined(_MSC_VER)
 #define ALWAYS_INLINE __forceinline
 #else
@@ -126,9 +113,6 @@ constexpr bool unlikely(bool expr) { return expr; }
 // clang -fsanitize=undefined
 #if defined(HAVE_UBSAN) && defined(__clang__)
 #define SUPPRESS_UBSAN MY_ATTRIBUTE((no_sanitize("undefined")))
-#if (__clang_major__ >= 10)
-#define SUPPRESS_UBSAN_CLANG10 MY_ATTRIBUTE((no_sanitize("undefined")))
-#endif
 // gcc -fsanitize=undefined
 #elif defined(HAVE_UBSAN) && __has_attribute(no_sanitize_undefined)
 #define SUPPRESS_UBSAN MY_ATTRIBUTE((no_sanitize_undefined))
@@ -136,11 +120,6 @@ constexpr bool unlikely(bool expr) { return expr; }
 #define SUPPRESS_UBSAN
 #endif
 #endif /* SUPPRESS_UBSAN */
-
-// TODO(tdidriks) Fix new 'applying offset to null pointer' warnings.
-#ifndef SUPPRESS_UBSAN_CLANG10
-#define SUPPRESS_UBSAN_CLANG10
-#endif
 
 #ifndef SUPPRESS_TSAN
 #if defined(HAVE_TSAN) && defined(__clang__)
@@ -368,5 +347,27 @@ constexpr bool unlikely(bool expr) { return expr; }
  */
 #define MY_COMPILER_CLANG_WORKAROUND_FALSE_POSITIVE_UNUSED_VARIABLE_WARNING() \
   MY_COMPILER_CLANG_DIAGNOSTIC_IGNORE("-Wunused-variable")
+
+/**
+ * ignore -Wsuggest-attribute=format compiler warnings for \@see \@ref
+ *
+ * @code
+ * MY_COMPILER_DIAGNOSTIC_PUSH()
+ * MY_COMPILER_GCC_WORKAROUND_FALSE_POSITIVE_SUGGEST_ATTRIBUTE_FORMAT()
+ * ...
+ * MY_COMPILER_DIAGNOSTIC_POP()
+ * @endcode
+ *
+ * allows to work around false positives -Wsuggest-attribute=format warnings
+ * like:
+ *
+ * - \@sa \@ref
+ * - \@see \@ref
+ * - \@return \@ref
+ *   https://gcc.gnu.org/bugzilla/show_bug.cgi?id=116954
+ *
+ */
+#define MY_COMPILER_GCC_WORKAROUND_FALSE_POSITIVE_SUGGEST_ATTRIBUTE_FORMAT() \
+  MY_COMPILER_GCC_DIAGNOSTIC_IGNORE("-Wsuggest-attribute=format")
 
 #endif /* MY_COMPILER_INCLUDED */

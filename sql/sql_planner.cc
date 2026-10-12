@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -40,9 +41,10 @@
 #include <string.h>
 #include <algorithm>
 #include <atomic>
+#include <bit>
+#include <limits>
 
 #include "my_base.h"  // key_part_map
-#include "my_bit.h"   // my_count_bits
 #include "my_bitmap.h"
 #include "my_compiler.h"
 #include "my_dbug.h"
@@ -78,9 +80,11 @@
 #include "sql/table.h"
 #include "sql/window.h"
 #include "sql_string.h"
+#include "vector-common/vector_constants.h"  // prohibitive_cost
 
 using std::max;
 using std::min;
+using std::popcount;
 
 /**
   Number of rows in a reference table when refereed through a not unique key.
@@ -148,7 +152,7 @@ double find_cost_for_ref(const THD *thd, TABLE *table, unsigned keyno,
     return worst_seeks;
   }
   if (table->covering_keys.is_set(keyno) ||
-             (table->file->index_flags(keyno, 0, 0) & HA_CLUSTERED_INDEX)) {
+      (table->file->index_flags(keyno, 0, 0) & HA_CLUSTERED_INDEX)) {
     // We can use only index tree
     const Cost_estimate index_read_cost =
         table->file->index_scan_cost(keyno, 1, num_rows);
@@ -225,7 +229,13 @@ Key_use *Optimize_table_order::find_best_ref(
   double best_ref_cost = DBL_MAX;
 
   // Index type, note that code below relies on this element definition order
-  enum idx_type { CLUSTERED_PK, UNIQUE, NOT_UNIQUE, FULLTEXT };
+  enum idx_type {
+    CLUSTERED_PK,
+    UNIQUE,
+    NOT_UNIQUE,
+    FULLTEXT,
+    VECTOR,
+  };
   enum idx_type best_found_keytype = NOT_UNIQUE;
 
   TABLE *const table = tab->table();
@@ -273,8 +283,13 @@ Key_use *Optimize_table_order::find_best_ref(
     DBUG_PRINT("info", ("Considering ref access on key %s", keyinfo->name));
     Opt_trace_object trace_access_idx(trace);
 
-    enum idx_type cur_keytype =
-        (keyuse->keypart == FT_KEYPART) ? FULLTEXT : NOT_UNIQUE;
+    enum idx_type cur_keytype;
+    if (keyuse->keypart == FT_KEYPART)
+      cur_keytype = FULLTEXT;
+    else if (keyuse->keypart == VECTOR_KEYPART)
+      cur_keytype = VECTOR;
+    else
+      cur_keytype = NOT_UNIQUE;
 
     // Calculate how many key segments of the current key we can use
     Key_use *const start_key = keyuse;
@@ -334,7 +349,7 @@ Key_use *Optimize_table_order::find_best_ref(
           const_part |= keyuse->keypart_map;
         }
         found_part |= keyuse->keypart_map;
-        if (keypart != FT_KEYPART) {
+        if (keypart != FT_KEYPART && keypart != VECTOR_KEYPART) {
           const bool keyinfo_maybe_null =
               keyinfo->key_part[keypart].field->is_nullable() ||
               tab->table()->is_nullable();
@@ -372,8 +387,8 @@ Key_use *Optimize_table_order::find_best_ref(
         distinct_keys_est = tab->records();
     }
 
-    // fulltext indexes require special treatment
-    if (cur_keytype != FULLTEXT) {
+    // fulltext and vector indexes require special treatment
+    if (cur_keytype != FULLTEXT && cur_keytype != VECTOR) {
       *found_condition |= (0 != found_part);
 
       const bool all_key_parts_covered =
@@ -666,6 +681,21 @@ Key_use *Optimize_table_order::find_best_ref(
         trace_access_idx.add("usable", false).add("chosen", false);
         continue;
       }
+    } else if (cur_keytype == VECTOR) {
+      // This is a vector index
+
+      trace_access_idx.add_alnum("access_type", "vector")
+          .add_utf8("index", keyinfo->name);
+
+      if (best_found_keytype < NOT_UNIQUE) {
+        trace_access_idx.add("chosen", false)
+            .add_alnum("cause", "heuristic_eqref_already_found");
+        // Ignore test_all_ref_keys, semijoin loosescan never uses vector
+        continue;
+      }
+
+      cur_read_cost = vector_constants::prohibitive_cost;
+      cur_fanout = vector_constants::prohibitive_cost;
     } else {
       // This is a full-text index
 
@@ -831,7 +861,7 @@ double Optimize_table_order::calculate_scan_cost(
       account here for range/index_merge access. Find out why this is so.
     */
     scan_and_filter_cost =
-        prefix_rowcount * (tab->range_scan()->cost +
+        prefix_rowcount * (tab->range_scan()->cost() +
                            cost_model->row_evaluate_cost(
                                tab->found_records - *rows_after_filtering));
   } else {
@@ -1102,8 +1132,9 @@ void Optimize_table_order::best_access_path(JOIN_TAB *tab,
         .add("rows", tab->found_records)
         .add("chosen", false)
         .add_alnum("cause", "cost");
-  } else if (tab->range_scan() && best_ref &&                            // (2)
-             used_index(tab->range_scan()) == best_ref->key &&           // (2)
+  } else if (tab->range_scan() && best_ref &&                   // (2)
+             used_index(tab->range_scan()) == best_ref->key &&  // (2)
+             best_ref->key != MAX_KEY &&
              used_key_parts >= table->quick_key_parts[best_ref->key] &&  // (2)
              tab->range_scan()->type != AccessPath::GROUP_INDEX_SKIP_SCAN &&
              tab->range_scan()->type != AccessPath::INDEX_SKIP_SCAN)  // (2)
@@ -1116,8 +1147,8 @@ void Optimize_table_order::best_access_path(JOIN_TAB *tab,
              !table->covering_keys.is_clear_all() && best_ref &&          //(3)
              (!tab->range_scan() ||                                       //(3)
               (tab->range_scan()->type ==
-                   AccessPath::ROWID_INTERSECTION &&             //(3)
-               best_ref->read_cost < tab->range_scan()->cost)))  //(3)
+                   AccessPath::ROWID_INTERSECTION &&               //(3)
+               best_ref->read_cost < tab->range_scan()->cost())))  //(3)
   {
     if (tab->range_scan()) {
       trace_access_scan.add_alnum("access_type", "range");
@@ -1341,7 +1372,8 @@ float calculate_condition_filter(const JOIN_TAB *const tab,
   if (keyuse) {
     const KEY *key = table->key_info + keyuse->key;
 
-    if (keyuse[0].keypart == FT_KEYPART) {
+    if (keyuse[0].keypart == FT_KEYPART ||
+        keyuse[0].keypart == VECTOR_KEYPART) {
       /*
         Fulltext indexes are special because keyuse->keypart does not
         contain the keypart number but a constant (FT_KEYPART)
@@ -1559,14 +1591,14 @@ static ulonglong get_bound_sj_equalities(const JOIN_TAB *tab,
       item = inner;
     else
       continue;
-    Item_field *const item_field = static_cast<Item_field *>(item);
-    Item_equal *item_equal = item_field->item_equal;
-    if (!item_equal) {
-      Table_ref *const nest = item_field->table_ref->outer_join_nest();
-      item_equal = item_field->find_item_equal(nest ? nest->cond_equal
-                                                    : tab->join()->cond_equal);
+    Item_field *const item_field = down_cast<Item_field *>(item);
+    Item_multi_eq *item_equal = item_field->multi_equality();
+    if (item_equal == nullptr) {
+      Table_ref *const nest = item_field->m_table_ref->outer_join_nest();
+      item_equal = item_field->find_multi_equality(
+          (nest != nullptr) ? nest->cond_equal : tab->join()->cond_equal);
     }
-    if (item_equal) {
+    if (item_equal != nullptr) {
       /*
         If the multiple equality {[optional_constant,] col1, col2...} contains
         (1) a constant
@@ -1679,7 +1711,7 @@ bool Optimize_table_order::semijoin_loosescan_fill_driving_table_position(
         if ((keyuse->sj_pred_no == UINT_MAX) ||
             (excluded_tables & keyuse->used_tables) ||
             !(remaining_tables & keyuse->used_tables) ||
-            (keypart == FT_KEYPART) ||
+            (keypart == FT_KEYPART) || (keypart == VECTOR_KEYPART) ||
             (table->key_info[key].key_part[keypart].key_part_flag &
              HA_PART_KEY_SEG))
           continue;
@@ -1826,11 +1858,11 @@ bool Optimize_table_order::semijoin_loosescan_fill_driving_table_position(
 
   if (quick_uses_applicable_index && idx == join->const_tables) {
     Opt_trace_object trace_range(trace, "range_scan");
-    trace_range.add("cost", tab->range_scan()->cost);
+    trace_range.add("cost", tab->range_scan()->cost());
     // @TODO: this the right part restriction:
-    if (tab->range_scan()->cost < pos->read_cost) {
+    if (tab->range_scan()->cost() < pos->read_cost) {
       pos->loosescan_key = used_index(tab->range_scan());
-      pos->read_cost = tab->range_scan()->cost;
+      pos->read_cost = tab->range_scan()->cost();
       // this is ok because idx == join->const_tables
       pos->rows_fetched = tab->range_scan()->num_output_rows();
       pos->loosescan_parts = quick_max_keypart + 1;
@@ -2227,7 +2259,7 @@ static int semijoin_order_allows_materialization(const JOIN *join,
     Walk back and check if all immediately preceding tables are from
     this semi-join.
   */
-  const uint n_tables = my_count_bits(emb_sj_nest->sj_inner_tables);
+  const uint n_tables = popcount(emb_sj_nest->sj_inner_tables);
   for (uint i = 1; i < n_tables; i++) {
     if (join->positions[idx - i].table->emb_sj_nest != emb_sj_nest)
       return SJ_OPT_NONE;
@@ -2334,7 +2366,7 @@ bool Optimize_table_order::greedy_search(table_map remaining_tables) {
   DBUG_TRACE;
 
   /* Number of tables that we are optimizing */
-  const uint n_tables = my_count_bits(remaining_tables);
+  const uint n_tables = popcount(remaining_tables);
 
   /* Number of tables remaining to be optimized */
   uint size_remain = n_tables;
@@ -2356,8 +2388,16 @@ bool Optimize_table_order::greedy_search(table_map remaining_tables) {
     /*
       'best_read < DBL_MAX' means that optimizer managed to find
       some plan and updated 'best_positions' array accordingly.
+      If this is not the case, we throw an error in release builds
+      to guard against a potential server exit. In debug builds,
+      we assert.
     */
-    assert(join->best_read < DBL_MAX);
+    if (join->best_read >= DBL_MAX) {
+      assert(false);
+      my_error(ER_INTERNAL_ERROR, MYF(0),
+               "Optimizer failed to find a plan to execute the query.");
+      return true;
+    }
 
     if (size_remain <= search_depth || use_best_so_far) {
       /*
@@ -3382,7 +3422,7 @@ bool Optimize_table_order::fix_semijoin_strategies() {
     uint first = 0;
     if (pos->sj_strategy == SJ_OPT_MATERIALIZE_LOOKUP) {
       Table_ref *const sjm_nest = pos->table->emb_sj_nest;
-      const uint table_count = my_count_bits(sjm_nest->sj_inner_tables);
+      const uint table_count = popcount(sjm_nest->sj_inner_tables);
       /*
         This memcpy() copies a partial QEP produced by
         optimize_semijoin_nests_for_materialization() (source) into the final
@@ -3413,7 +3453,7 @@ bool Optimize_table_order::fix_semijoin_strategies() {
       const uint last_inner = pos->sjm_scan_last_inner;
       Table_ref *const sjm_nest =
           (join->best_positions + last_inner)->table->emb_sj_nest;
-      const uint table_count = my_count_bits(sjm_nest->sj_inner_tables);
+      const uint table_count = popcount(sjm_nest->sj_inner_tables);
       first = last_inner - table_count + 1;
       assert((join->best_positions + first)->table->emb_sj_nest == sjm_nest);
       memcpy(static_cast<void *>(join->best_positions +
@@ -3467,7 +3507,7 @@ bool Optimize_table_order::fix_semijoin_strategies() {
       POSITION *const first_pos = join->best_positions + first;
       first_pos->sj_strategy = SJ_OPT_LOOSE_SCAN;
       first_pos->n_sj_tables =
-          my_count_bits(first_pos->table->emb_sj_nest->sj_inner_tables);
+          popcount(first_pos->table->emb_sj_nest->sj_inner_tables);
     } else if (pos->sj_strategy == SJ_OPT_DUPS_WEEDOUT) {
       /*
         Duplicate Weedout starting at pos->first_dupsweedout_table, ending at
@@ -3835,7 +3875,7 @@ void Optimize_table_order::semijoin_mat_scan_access_paths(
 
   POSITION *const positions =
       got_final_plan ? join->best_positions : join->positions;
-  const uint inner_count = my_count_bits(sjm_nest->sj_inner_tables);
+  const uint inner_count = popcount(sjm_nest->sj_inner_tables);
 
   // Get the prefix cost.
   const uint first_inner = last_inner_tab + 1 - inner_count;
@@ -3909,7 +3949,7 @@ void Optimize_table_order::semijoin_mat_lookup_access_paths(uint last_inner,
                                                             double *newcost) {
   DBUG_TRACE;
 
-  const uint inner_count = my_count_bits(sjm_nest->sj_inner_tables);
+  const uint inner_count = popcount(sjm_nest->sj_inner_tables);
   double rowcount, cost;
 
   const uint first_inner = last_inner + 1 - inner_count;

@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -53,11 +54,6 @@
  *      real "as it actually is" version of topology.
  *
  * MDC = MD Cache, this plugin (the code that you're reading now).
- *
- * MM = multi-primary, a replication mode in which all GR members are RW.
- *
- * SM = single-primary, a replication mode in which only one GR member is RW,
- *      rest are RO.
  *
  * ATTOW = contraction for "at the time of writing".
  *
@@ -210,27 +206,18 @@
  *
  * #### Stage 2.2: Extract GR status
  *
- * Implemented in: `fetch_group_replication_members()` and
- *                   `find_group_replication_primary_member()`
+ * Implemented in: `fetch_group_replication_members()`
  *
- * Two SQL queries are ran and combined to produce a status report of all nodes
- * seen by this node (which would be the entire cluster if it was in perfect
- * health, or its subset if some nodes became unavailable or the cluster was
- * experiencing a split-brain scenario):
+ * Single SQL query is ran to produce a status report of all nodes seen by this
+ * node (which would be the entire cluster if it was in perfect health, or its
+ * subset if some nodes became unavailable or the cluster was experiencing a
+ * split-brain scenario):
  *
- *   1. determine the PRIMARY member of the cluster (if there is more than
- *      one, such as in MM setups, the first one is returned and the rest are
- *      ignored)
- *
- *   2. get the membership and health status of all GR nodes, as seen by this
+ *   1. get the membership, health  and role of all GR nodes, as seen by this
  *      node
  *
  * If either SQL query fails to execute, Stage 2 iterates to next GR node.
  *
- * @note
- * ATTOW, 1st query is always ran, regardless of whether we're in MM mode or
- * not. As all nodes are PRIMARY in MM setups, we could optimise this query away
- * in MM setups.
  *
  *
  *
@@ -282,7 +269,7 @@
  * availability/quorum calculations will be skewed. We run checks to detect such
  * situation, and log a warning like so:
  *
- *     log_error("Member %s:%d (%s) found in Group Replication, yet is not
+ *     log_error("Member %s (%s) found in Group Replication, yet is not
  * defined in metadata!"
  *
  * but beyond that we just act defensively by having our quorum calculation be
@@ -435,18 +422,16 @@ std::string get_ignored_info(const metadata_cache::ManagedInstance &instance) {
 }  // namespace
 
 bool GRMetadataCache::refresh(bool needs_writable_node) {
-  bool changed{false};
+  bool topology_changed{false};
   uint64_t view_id{0};
   size_t metadata_server_id{0};
-  changed = false;
   std::size_t instance_id;
-
-  const bool whole_topology = fetch_whole_topology();
 
   // Fetch the metadata and store it in a temporary variable.
   const auto res = meta_data_->fetch_cluster_topology(
       terminated_, target_cluster_, router_id_, metadata_servers_,
-      needs_writable_node, clusterset_id_, whole_topology, instance_id);
+      needs_writable_node, clusterset_id_, instance_id,
+      current_routing_guidelines_doc_);
 
   if (!res) {
     const bool md_servers_reachable =
@@ -455,7 +440,7 @@ bool GRMetadataCache::refresh(bool needs_writable_node) {
         res.error() !=
             metadata_cache::metadata_errc::no_metadata_read_successful;
 
-    on_refresh_failed(terminated_, md_servers_reachable);
+    on_refresh_failed(md_servers_reachable);
     return false;
   }
 
@@ -467,20 +452,20 @@ bool GRMetadataCache::refresh(bool needs_writable_node) {
     std::lock_guard<std::mutex> lock(cache_refreshing_mutex_);
     if (cluster_topology_ != cluster_topology) {
       cluster_topology_ = cluster_topology;
-      changed = true;
+      topology_changed = true;
     } else {
       cluster_topology_.writable_server = cluster_topology.writable_server;
     }
   }
 
-  on_md_refresh(changed, cluster_topology_);
+  on_md_refresh(topology_changed, current_routing_guidelines_doc_);
 
   // we want to trigger those actions not only if the metadata has really
   // changed but also when something external (like unsuccessful client
   // connection) triggered the refresh so that we verified if this wasn't
   // false alarm and turn it off if it was
   view_id = cluster_topology_.view_id;
-  if (changed) {
+  if (topology_changed) {
     log_info(
         "Potential changes detected in cluster after metadata refresh "
         "(view_id=%" PRIu64 ")",
@@ -496,16 +481,16 @@ bool GRMetadataCache::refresh(bool needs_writable_node) {
             cluster.name.c_str(), cluster.members.size(),
             cluster.single_primary_mode ? "single-primary" : "multi-primary");
         for (const auto &mi : cluster.members) {
-          log_info(
-              "    %s:%i / %i - mode=%s%s%s%s", mi.host.c_str(), mi.port,
-              mi.xport, to_string(mi.mode).c_str(), get_hidden_info(mi).c_str(),
-              get_read_replica_info(mi).c_str(), get_ignored_info(mi).c_str());
+          log_info("    %s / %i - mode=%s%s%s%s",
+                   mi.classic_destination().str().c_str(), mi.xport,
+                   to_string(mi.mode).c_str(), get_hidden_info(mi).c_str(),
+                   get_read_replica_info(mi).c_str(),
+                   get_ignored_info(mi).c_str());
         }
       }
     }
 
-    on_instances_changed(/*md_servers_reachable=*/true, cluster_topology,
-                         view_id);
+    on_instances_changed(/*md_servers_reachable=*/true, view_id);
     // never let the list that we iterate over become empty as we would
     // not recover from that
     if (!cluster_topology.metadata_servers.empty()) {

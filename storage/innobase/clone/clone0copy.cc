@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -375,13 +376,13 @@ int Clone_Snapshot::update_binlog_position() {
   all transaction up to the updated binary log position are committed. */
 
   /* 1. Read binary log position from innodb. */
-  LOG_INFO log_info1;
+  Log_info log_info1;
   char file_name[TRX_SYS_MYSQL_LOG_NAME_LEN + 1];
   uint64_t file_pos;
   trx_sys_read_binlog_position(&file_name[0], file_pos);
 
   /* 2. Get current binary log position. */
-  LOG_INFO log_info;
+  Log_info log_info;
   mysql_bin_log.get_current_log(&log_info);
 
   /* 3. Check and write binary log position in Innodb. */

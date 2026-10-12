@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -56,6 +57,7 @@
 #include "sql/join_optimizer/access_path.h"
 #include "sql/join_optimizer/bit_utils.h"
 #include "sql/join_optimizer/walk_access_paths.h"
+#include "sql/json_duality_view/dml.h"  // jdv_delete
 #include "sql/key_spec.h"
 #include "sql/mem_root_array.h"
 #include "sql/mysqld.h"       // stage_...
@@ -74,6 +76,7 @@
 #include "sql/sql_const.h"
 #include "sql/sql_error.h"
 #include "sql/sql_executor.h"
+#include "sql/sql_foreign_key_constraint.h"
 #include "sql/sql_lex.h"
 #include "sql/sql_list.h"
 #include "sql/sql_opt_exec_shared.h"
@@ -90,7 +93,7 @@
 #include "sql/trigger_def.h"
 #include "sql/uniques.h"  // Unique
 
-class COND_EQUAL;
+struct COND_EQUAL;
 class Item_exists_subselect;
 class Opt_trace_context;
 class Select_lex_visitor;
@@ -119,6 +122,12 @@ bool DeleteCurrentRowAndProcessTriggers(THD *thd, TABLE *table,
                                           TRG_ACTION_BEFORE,
                                           /*old_row_is_record1=*/false)) {
       return true;
+    }
+  }
+
+  if (use_sql_fk_checks_for_table(thd, table)) {
+    if (check_all_child_fk_ref(thd, table, enum_fk_dml_type::FK_DELETE)) {
+      return thd->is_error();
     }
   }
 
@@ -246,11 +255,13 @@ bool Sql_cmd_delete::delete_from_single_table(THD *thd) {
       table->triggers->has_triggers(TRG_EVENT_DELETE, TRG_ACTION_AFTER);
   unit->set_limit(thd, query_block);
 
+  ulonglong jdv_affected_rows = 0;
+
   AccessPath *range_scan = nullptr;
   join_type type = JT_UNKNOWN;
 
   auto cleanup = create_scope_guard([&range_scan, table] {
-    destroy(range_scan);
+    if (range_scan != nullptr) ::destroy_at(range_scan);
     table->set_keyread(false);
     table->file->ha_index_or_rnd_end();
     free_io_cache(table);
@@ -274,8 +285,10 @@ bool Sql_cmd_delete::delete_from_single_table(THD *thd) {
   bool no_rows =
       limit == 0 || is_empty_query() || table->all_partitions_pruned_away;
 
-  Item *conds = nullptr;
-  if (!no_rows && query_block->get_optimizable_conditions(thd, &conds, nullptr))
+  Item **conds = thd->mem_root->ArrayAlloc<Item *>(1);
+  if (conds == nullptr) return true;
+  *conds = nullptr;
+  if (!no_rows && query_block->get_optimizable_conditions(thd, conds, nullptr))
     return true; /* purecov: inspected */
 
   /*
@@ -286,11 +299,12 @@ bool Sql_cmd_delete::delete_from_single_table(THD *thd) {
     it here for now, to keep it consistent with how multi-table
     deletes are optimized in JOIN::optimize().
   */
-  if (conds || order)
-    static_cast<void>(substitute_gc(thd, query_block, conds, nullptr, order));
-
-  const bool const_cond = conds == nullptr || conds->const_item();
-  const bool const_cond_result = const_cond && (!conds || conds->val_int());
+  if (*conds != nullptr || order != nullptr) {
+    static_cast<void>(substitute_gc(thd, query_block, *conds, nullptr, order));
+  }
+  const bool const_cond = *conds == nullptr || (*conds)->const_item();
+  const bool const_cond_result =
+      const_cond && (*conds == nullptr || (*conds)->val_int());
   if (thd->is_error())  // Error during val_int()
     return true;        /* purecov: inspected */
   /*
@@ -298,7 +312,7 @@ bool Sql_cmd_delete::delete_from_single_table(THD *thd) {
     IGNORE keyword within federated storage engine. If federated engine is
     removed in the future, use of HA_EXTRA_IGNORE_DUP_KEY and
     HA_EXTRA_NO_IGNORE_DUP_KEY flag should be removed from
-    delete_from_single_table(), DeleteRowsIterator::Init() and
+    delete_from_single_table(), DeleteRowsIterator::DoInit() and
     handler::ha_reset().
   */
   if (lex->is_ignore()) table->file->ha_extra(HA_EXTRA_IGNORE_DUP_KEY);
@@ -362,11 +376,11 @@ bool Sql_cmd_delete::delete_from_single_table(THD *thd) {
     /* Handler didn't support fast delete; Delete rows one by one */
   }
 
-  if (conds != nullptr) {
+  if (*conds != nullptr) {
     COND_EQUAL *cond_equal = nullptr;
     Item::cond_result result;
 
-    if (optimize_cond(thd, &conds, &cond_equal,
+    if (optimize_cond(thd, conds, &cond_equal,
                       query_block->m_current_table_nest, &result))
       return true;
     if (result == Item::COND_FALSE)  // Impossible where
@@ -381,17 +395,18 @@ bool Sql_cmd_delete::delete_from_single_table(THD *thd) {
         return err;
       }
     }
-    if (conds) {
-      conds = substitute_for_best_equal_field(thd, conds, cond_equal, nullptr);
-      if (conds == nullptr) return true;
+    if (*conds != nullptr) {
+      *conds =
+          substitute_for_best_equal_field(thd, *conds, cond_equal, nullptr);
+      if (*conds == nullptr) return true;
 
-      conds->update_used_tables();
+      (*conds)->update_used_tables();
     }
   }
 
   /* Prune a second time to be able to prune on subqueries in WHERE clause. */
   if (table->part_info && !no_rows) {
-    if (prune_partitions(thd, table, query_block, conds)) return true;
+    if (prune_partitions(thd, table, query_block, *conds)) return true;
     if (table->all_partitions_pruned_away) {
       no_rows = true;
       if (lex->is_explain()) {
@@ -415,16 +430,16 @@ bool Sql_cmd_delete::delete_from_single_table(THD *thd) {
 
   table->covering_keys.clear_all();
 
-  if (conds &&
+  if (*conds != nullptr &&
       thd->optimizer_switch_flag(OPTIMIZER_SWITCH_ENGINE_CONDITION_PUSHDOWN)) {
-    table->file->cond_push(conds);
+    table->file->cond_push(*conds);
   }
 
   {  // Enter scope for optimizer trace wrapper
     Opt_trace_object wrapper(&thd->opt_trace);
     wrapper.add_utf8_table(delete_table_ref);
 
-    if (!no_rows && conds != nullptr) {
+    if (!no_rows && *conds != nullptr) {
       const Key_map keys_to_use(Key_map::ALL_BITS);
       Key_map needed_reg_dummy;
       MEM_ROOT temp_mem_root(key_memory_test_quick_select_exec,
@@ -432,7 +447,7 @@ bool Sql_cmd_delete::delete_from_single_table(THD *thd) {
       no_rows = test_quick_select(
                     thd, thd->mem_root, &temp_mem_root, keys_to_use, 0, 0,
                     limit, safe_update, ORDER_NOT_RELEVANT, table,
-                    /*skip_records_in_range=*/false, conds, &needed_reg_dummy,
+                    /*skip_records_in_range=*/false, *conds, &needed_reg_dummy,
                     table->force_index, query_block, &range_scan) < 0;
     }
     if (thd->is_error())  // test_quick_select() has improper error propagation
@@ -471,9 +486,9 @@ bool Sql_cmd_delete::delete_from_single_table(THD *thd) {
     }
   }
 
-  if (order) {
-    if (conds != nullptr) table->update_const_key_parts(conds);
-    order = simple_remove_const(order, conds);
+  if (order != nullptr) {
+    if (*conds != nullptr) table->update_const_key_parts(*conds);
+    order = simple_remove_const(order, *conds);
     ORDER_with_src order_src(order, ESC_ORDER_BY, /*const_optimized=*/true);
     usable_index = get_index_for_order(&order_src, table, limit, range_scan,
                                        &need_sort, &reverse);
@@ -490,15 +505,15 @@ bool Sql_cmd_delete::delete_from_single_table(THD *thd) {
     ha_rows rows;
     if (range_scan)
       rows = range_scan->num_output_rows();
-    else if (!conds && !need_sort && limit != HA_POS_ERROR)
+    else if (*conds == nullptr && !need_sort && limit != HA_POS_ERROR)
       rows = limit;
     else {
       delete_table_ref->fetch_number_of_rows();
       rows = table->file->stats.records;
     }
-    const Modification_plan plan(thd, MT_DELETE, table, type, range_scan, conds,
-                                 usable_index, limit, false, need_sort, false,
-                                 rows);
+    const Modification_plan plan(thd, MT_DELETE, table, type, range_scan,
+                                 *conds, usable_index, limit, false, need_sort,
+                                 false, rows);
     DEBUG_SYNC(thd, "planned_single_delete");
 
     if (lex->is_explain()) {
@@ -529,8 +544,8 @@ bool Sql_cmd_delete::delete_from_single_table(THD *thd) {
     if (need_sort) {
       assert(usable_index == MAX_KEY);
 
-      if (conds != nullptr) {
-        path = NewFilterAccessPath(thd, path, conds);
+      if (*conds != nullptr) {
+        path = NewFilterAccessPath(thd, path, *conds);
       }
 
       fsort.reset(new (thd->mem_root) Filesort(
@@ -551,7 +566,7 @@ bool Sql_cmd_delete::delete_from_single_table(THD *thd) {
         Filesort has already found and selected the rows we want to delete,
         so we don't need the where clause
       */
-      conds = nullptr;
+      *conds = nullptr;
     } else {
       iterator = CreateIteratorFromAccessPath(thd, path, &join,
                                               /*eligible_for_batch_mode=*/true);
@@ -594,8 +609,8 @@ bool Sql_cmd_delete::delete_from_single_table(THD *thd) {
       assert(!thd->is_error());
       thd->inc_examined_row_count(1);
 
-      if (conds != nullptr) {
-        const bool skip_record = conds->val_int() == 0;
+      if (*conds != nullptr) {
+        const bool skip_record = (*conds)->val_int() == 0;
         if (thd->is_error()) {
           error = 1;
           break;
@@ -609,13 +624,34 @@ bool Sql_cmd_delete::delete_from_single_table(THD *thd) {
 
       assert(!thd->is_error());
 
-      if (DeleteCurrentRowAndProcessTriggers(thd, table, has_before_triggers,
-                                             has_after_triggers,
-                                             &deleted_rows)) {
-        error = 1;
-        break;
-      }
+      if (table_list->is_json_duality_view()) {
+        if (deleted_rows != 0 ||
+            table_list->field_translation->item == nullptr) {
+          my_error(ER_JDV_OPERATION_NOT_SUPPORTED, MYF(0),
+                   "Multiple object delete");
+          error = 1;
+          break;
+        }
 
+        DBUG_LOG("jdv_dml", "DML-DELETE: "
+                                << " table_list->field_translation->name: "
+                                << table_list->field_translation->name
+                                << " ->type():"
+                                << table_list->field_translation->item->type());
+        if (jdv::jdv_delete(thd, table_list, &jdv_affected_rows)) {
+          assert(thd->is_error());
+          error = 1;
+          break;
+        }
+        deleted_rows++;
+      } else {
+        if (DeleteCurrentRowAndProcessTriggers(thd, table, has_before_triggers,
+                                               has_after_triggers,
+                                               &deleted_rows)) {
+          error = 1;
+          break;
+        }
+      }
       if (!--limit && using_limit) {
         error = -1;
         break;
@@ -647,6 +683,14 @@ bool Sql_cmd_delete::delete_from_single_table(THD *thd) {
 
 cleanup:
   assert(!lex->is_explain());
+
+  if (table_list->is_json_duality_view()) {
+    if (error < 0) {
+      my_ok(thd, jdv_affected_rows);
+    }
+    // For JSON duality view, event is already written to binlog.
+    return error > 0;
+  }
 
   if (!transactional_table && deleted_rows > 0)
     thd->get_transaction()->mark_modified_non_trans_table(
@@ -714,7 +758,7 @@ bool Sql_cmd_delete::prepare_inner(THD *thd) {
   if (select->setup_tables(thd, table_list, false))
     return true; /* purecov: inspected */
 
-  const ulong want_privilege_saved = thd->want_privilege;
+  const Access_bitmask want_privilege_saved = thd->want_privilege;
   thd->want_privilege = SELECT_ACL;
   const enum enum_mark_columns mark_used_columns_saved = thd->mark_used_columns;
   thd->mark_used_columns = MARK_COLUMNS_READ;
@@ -723,6 +767,11 @@ bool Sql_cmd_delete::prepare_inner(THD *thd) {
     if (select->resolve_placeholder_tables(thd, apply_semijoin)) return true;
 
     if (select->check_view_privileges(thd, DELETE_ACL, SELECT_ACL)) return true;
+  }
+
+  if (table_list->is_json_duality_view() &&
+      jdv::jdv_prepare_delete(thd, table_list, is_single_table_plan())) {
+    return true;
   }
 
   /*
@@ -781,7 +830,13 @@ bool Sql_cmd_delete::prepare_inner(THD *thd) {
   // enables it to perform optimizations like sort avoidance and semi-join
   // flattening even if features specific to single-table DELETE (that is, ORDER
   // BY and LIMIT) are used.
-  if (lex->using_hypergraph_optimizer) {
+  if (lex->using_hypergraph_optimizer()) {
+    if (!multitable) {
+      Table_ref *const delete_table_ref = table_list->updatable_base_table();
+      TABLE *const table = delete_table_ref->table;
+      if (select->active_options() & OPTION_QUICK)
+        (void)table->file->ha_extra(HA_EXTRA_QUICK);
+    }
     multitable = true;
   }
 
@@ -877,6 +932,7 @@ bool Sql_cmd_delete::prepare_inner(THD *thd) {
 
   opt_trace_print_expanded_query(thd, select, &trace_wrapper);
 
+  select->original_tables_map = select->all_tables_map();
   if (select->has_sj_candidates() && select->flatten_subqueries(thd))
     return true;
 
@@ -907,8 +963,10 @@ bool Sql_cmd_delete::execute_inner(THD *thd) {
     my_ok(thd);
     return false;
   }
-  return multitable ? Sql_cmd_dml::execute_inner(thd)
-                    : delete_from_single_table(thd);
+  return (multitable &&
+          !lex->query_block->get_table_list()->is_json_duality_view())
+             ? Sql_cmd_dml::execute_inner(thd)
+             : delete_from_single_table(thd);
 }
 
 /***************************************************************************
@@ -930,7 +988,7 @@ DeleteRowsIterator::DeleteRowsIterator(
       m_tables_to_delete_from(tables_to_delete_from),
       m_immediate_tables(immediate_tables),
       // The old optimizer does not use hash join in DELETE statements.
-      m_hash_join_tables(thd->lex->using_hypergraph_optimizer
+      m_hash_join_tables(thd->lex->using_hypergraph_optimizer()
                              ? GetHashJoinTables(join->root_access_path())
                              : 0),
       m_tempfiles(thd->mem_root),
@@ -1055,7 +1113,7 @@ bool CheckSqlSafeUpdate(THD *thd, const JOIN *join) {
   return false;
 }
 
-bool DeleteRowsIterator::Init() {
+bool DeleteRowsIterator::DoInit() {
   if (CheckSqlSafeUpdate(thd(), m_join)) {
     return true;
   }
@@ -1243,7 +1301,7 @@ bool DeleteRowsIterator::DoDelayedDeletesFromTable(TABLE *table) {
   return local_error;
 }
 
-int DeleteRowsIterator::Read() {
+int DeleteRowsIterator::DoRead() {
   bool local_error = false;
 
   // First process all the rows returned by the join. Delete immediately from
@@ -1325,7 +1383,7 @@ table_map GetImmediateDeleteTables(const JOIN *join, table_map delete_tables) {
   // using the hypergraph optimizer is when there is an impossible WHERE clause,
   // in which case join order optimization is short-circuited. See
   // JOIN::create_access_paths_for_zero_rows().
-  if (join->thd->lex->using_hypergraph_optimizer) {
+  if (join->thd->lex->using_hypergraph_optimizer()) {
     assert(join->zero_result_cause != nullptr);
     return 0;
   }

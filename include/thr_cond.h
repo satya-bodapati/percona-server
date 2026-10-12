@@ -1,18 +1,19 @@
 #ifndef THR_COND_INCLUDED
 #define THR_COND_INCLUDED
 
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -40,17 +41,15 @@
        See include/mysql/psi/mysql_thread.h
 */
 
-#include <stddef.h>
 #include <sys/types.h>
 #ifdef _WIN32
 #include <time.h>
+#include "my_inttypes.h"
 #include "my_systime.h"
 #endif
 
-#include "my_macros.h"
-#include "my_thread.h"
 #include "mysql/components/services/bits/thr_cond_bits.h"
-#include "thr_mutex.h"
+#include "mysql/components/services/bits/thr_mutex_bits.h"
 
 #ifdef _WIN32
 /**
@@ -128,6 +127,7 @@ static inline int native_cond_broadcast(native_cond_t *cond) {
 }
 
 #ifdef SAFE_MUTEX
+struct safe_mutex_t;
 int safe_cond_wait(native_cond_t *cond, safe_mutex_t *mp, const char *file,
                    uint line);
 int safe_cond_timedwait(native_cond_t *cond, safe_mutex_t *mp,

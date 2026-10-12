@@ -1,15 +1,16 @@
-/* Copyright (c) 2012, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -276,10 +277,10 @@ typedef struct task_queue task_queue;
 #define TASK_ALLOC(pool, type) (task_allocate(pool, (unsigned int)sizeof(type)))
 
 #if 0
-#define TASK_DEBUG(x)                                            \
-  if (stack->debug) {                                            \
-    IFDBG(D_NONE, FN; STRLIT(x " task "); PTREXP((void *)stack); \
-          STRLIT(stack->name); NDBG(stack->sp->state, d));       \
+#define TASK_DEBUG(x)                                                 \
+  if (stack->debug) {                                                 \
+    XCOM_IFDBG(D_NONE, FN; STRLIT(x " task "); PTREXP((void *)stack); \
+               STRLIT(stack->name); NDBG(stack->sp->state, d));       \
   }
 #else
 #define TASK_DEBUG(x)
@@ -346,11 +347,11 @@ typedef struct task_queue task_queue;
     goto task_cleanup; \
   }
 
-#define TASK_DUMP_ERR                                          \
-  if (errno || SOCK_ERRNO || task_errno) {                     \
-    IFDBG(D_NONE, FN; NDBG(errno, d); STREXP(strerror(errno)); \
-          NDBG(SOCK_ERRNO, d); STREXP(strerror(SOCK_ERRNO));   \
-          NDBG(task_errno, d); STREXP(strerror(task_errno)));  \
+#define TASK_DUMP_ERR                                               \
+  if (errno || SOCK_ERRNO || task_errno) {                          \
+    XCOM_IFDBG(D_NONE, FN; NDBG(errno, d); STREXP(strerror(errno)); \
+               NDBG(SOCK_ERRNO, d); STREXP(strerror(SOCK_ERRNO));   \
+               NDBG(task_errno, d); STREXP(strerror(task_errno)));  \
   }
 
 /* Assign -1 as exit code, execute cleanup code, and exit this stack frame */
@@ -358,7 +359,7 @@ typedef struct task_queue task_queue;
   {                                                                        \
     *ret = (-1);                                                           \
     TASK_DUMP_ERR;                                                         \
-    IFDBG(D_NONE, FN; STRLIT("TASK_FAIL"));                                \
+    XCOM_IFDBG(D_NONE, FN; STRLIT("TASK_FAIL"));                           \
     ADD_DBG(D_TASK, add_event(EVENT_DUMP_PAD, string_arg("task failed"))); \
     goto task_cleanup;                                                     \
   }
@@ -439,14 +440,14 @@ void channel_put_front(channel *c,
                        linkage *data); /* Insert in front of queue */
 
 /* Wait until there is data in the channel, then extract and cast to type */
-#define CHANNEL_GET(channel, ptr, type)                            \
-  {                                                                \
-    while (link_empty(&(channel)->data)) {                         \
-      TASK_WAIT(&(channel)->queue);                                \
-    }                                                              \
-    *(ptr) = (type *)link_extract_first(&(channel)->data);         \
-    IFDBG(D_TRANSPORT, FN; STRLIT("CHANNEL_GET "); PTREXP(*(ptr)); \
-          PTREXP(&((channel)->data)));                             \
+#define CHANNEL_GET(channel, ptr, type)                                 \
+  {                                                                     \
+    while (link_empty(&(channel)->data)) {                              \
+      TASK_WAIT(&(channel)->queue);                                     \
+    }                                                                   \
+    *(ptr) = (type *)link_extract_first(&(channel)->data);              \
+    XCOM_IFDBG(D_TRANSPORT, FN; STRLIT("CHANNEL_GET "); PTREXP(*(ptr)); \
+               PTREXP(&((channel)->data)));                             \
   }
 
 #define CHANNEL_PEEK(channel, ptr, type)           \

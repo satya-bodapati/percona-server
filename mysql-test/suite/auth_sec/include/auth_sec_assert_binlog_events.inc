@@ -5,6 +5,7 @@
 # This file always sets $dont_print_pattern to 1
 
 --let $gtid_event= Gtid
+--let $gtid_mode_on = `SELECT @@global.gtid_mode = "ON"`
 if (!$gtid_mode_on)
 {
   --let $gtid_event= Anonymous_Gtid
@@ -23,4 +24,4 @@ if ($invert == 1)
 
 --let $dont_print_pattern= 1
 --let $event_sequence= $gtid_event # $event
---source include/assert_binlog_events.inc
+--source include/rpl/assert_binlog_events.inc

@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -31,6 +32,7 @@
 
 #include <gtest/gtest.h>
 
+#include "buf0flu.h"
 #include "clone0api.h" /* clone_init(), clone_free() */
 #include "fil0fil.h"
 #include "log0buf.h"
@@ -59,9 +61,7 @@ static std::map<std::string, std::vector<std::string>> log_sync_points = {
       "log_wfs_after_reserving_before_buf_size_2",
       "log_wait_for_space_in_buf_middle"}},
 
-    {"log_buffer_reserve",
-     {"log_buffer_reserve_before_buf_limit_sn",
-      "log_buffer_reserve_before_confirmation"}},
+    {"log_buffer_reserve", {"log_buffer_reserve_before_buf_limit_sn"}},
 
     {"log_buffer_write",
      {"log_buffer_write_before_memcpy",
@@ -78,9 +78,6 @@ static std::map<std::string, std::vector<std::string>> log_sync_points = {
       "log_writer_before_write_ahead", "log_writer_after_checkpoint_check",
       "log_writer_after_archiver_check", "log_writer_before_lsn_update",
       "log_writer_before_buf_limit_update", "log_writer_write_end"}},
-
-    {"log_closer",
-     {"log_advance_dpa_before_reclaim", "log_advance_dpa_before_update"}},
 
     {"log_checkpointer",
      {"log_get_available_for_chkp_lsn_before_buf_pool",
@@ -132,7 +129,7 @@ static bool log_test_general_init() {
   srv_log_write_events = 64;
   srv_log_flush_events = 64;
   srv_log_recent_written_size = 4 * 4096;
-  srv_log_recent_closed_size = 4 * 4096;
+  srv_buf_flush_list_added_size = 4 * 4096;
   srv_log_writer_threads = true;
   srv_log_wait_for_write_spin_delay = 0;
   srv_log_wait_for_flush_timeout = 100000;
@@ -202,6 +199,7 @@ static bool log_test_init() {
 
   fil_open_system_tablespace_files();
 
+  buf_flush_list_added = Buf_flush_list_added_lsns::create();
   err = log_start(log, flushed_lsn, flushed_lsn);
   ut_a(err == DB_SUCCESS);
 
@@ -229,6 +227,16 @@ static bool log_test_recovery() {
   ut_a(log_sys != nullptr);
   log_t &log = *log_sys;
 
+  std::atomic<bool> stop_flushing = false;
+
+  std::thread flush_thread([&stop_flushing] {
+    while (!stop_flushing) {
+      os_event_wait(recv_sys->flush_start);
+      os_event_reset(recv_sys->flush_start);
+      os_event_set(recv_sys->flush_end);
+    }
+  });
+
   err = recv_recovery_from_checkpoint_start(log, LOG_START_LSN);
 
   srv_is_being_started = false;
@@ -240,6 +248,10 @@ static bool log_test_recovery() {
   } else {
     srv_shutdown_state.store(SRV_SHUTDOWN_FLUSH_PHASE);
   }
+
+  stop_flushing = true;
+  os_event_set(recv_sys->flush_start);
+  flush_thread.join();
 
   recv_sys_close();
 
@@ -259,7 +271,7 @@ static void run_threads(TFunctor f, size_t n_threads) {
         [&f, &ready, &started](size_t thread_no) {
           ++ready;
           while (!started) {
-            std::this_thread::sleep_for(std::chrono::seconds(0));
+            std::this_thread::yield();
           }
           f(thread_no);
         },
@@ -267,7 +279,7 @@ static void run_threads(TFunctor f, size_t n_threads) {
   }
 
   while (ready < n_threads) {
-    std::this_thread::sleep_for(std::chrono::seconds(0));
+    std::this_thread::yield();
   }
   started = true;
 
@@ -303,9 +315,9 @@ static lsn_t write_single_mlog_test(Log_test::Key key) {
     log_buffer_set_first_record_group(log, end_lsn);
   }
 
-  log_buffer_write_completed(log, handle.start_lsn, end_lsn);
+  log_buffer_write_completed(log, handle.start_lsn, end_lsn, true);
 
-  log_wait_for_space_in_log_recent_closed(log, handle.start_lsn);
+  buf_flush_list_added->wait_to_add(handle.start_lsn);
 
   Log_test::Page page;
   page.key = key;
@@ -314,8 +326,8 @@ static lsn_t write_single_mlog_test(Log_test::Key key) {
   page.newest_modification = handle.end_lsn;
 
   log_test->add_dirty_page(page);
-
-  log_buffer_close(log, handle);
+  buf_flush_list_added->report_added(page.oldest_modification,
+                                     page.newest_modification);
 
   return end_lsn;
 }
@@ -329,6 +341,7 @@ static lsn_t write_multi_mlog_tests(Log_test::Key key, size_t n) {
   std::queue<uchar *> record_end;
   Log_test::Value value_left = 0;
   log_t &log = *log_sys;
+  bool is_last_block{false};
 
   /* We need to prepare all log records first, because we need to know
   how much space we have to reserve in redo log. */
@@ -397,12 +410,15 @@ static lsn_t write_multi_mlog_tests(Log_test::Key key, size_t n) {
     ptr = end;
     ut_a(ptr <= buf + MLOG_TEST_MAX_GROUP_LEN);
 
-    if (left_to_write == 0 && group_start_lsn / OS_FILE_LOG_BLOCK_SIZE !=
-                                  end_lsn / OS_FILE_LOG_BLOCK_SIZE) {
-      log_buffer_set_first_record_group(log, end_lsn);
+    if (left_to_write == 0) {
+      is_last_block = true;
+      if (group_start_lsn / OS_FILE_LOG_BLOCK_SIZE !=
+          end_lsn / OS_FILE_LOG_BLOCK_SIZE) {
+        log_buffer_set_first_record_group(log, end_lsn);
+      }
     }
 
-    log_buffer_write_completed(log, start_lsn, end_lsn);
+    log_buffer_write_completed(log, start_lsn, end_lsn, is_last_block);
 
     start_lsn = end_lsn;
   }
@@ -410,7 +426,7 @@ static lsn_t write_multi_mlog_tests(Log_test::Key key, size_t n) {
   ut_a(group_end_lsn == end_lsn);
   ut_a(left_to_write == 0);
 
-  log_wait_for_space_in_log_recent_closed(log, handle.start_lsn);
+  buf_flush_list_added->wait_to_add(handle.start_lsn);
 
   Log_test::Page page;
   page.key = key;
@@ -420,8 +436,8 @@ static lsn_t write_multi_mlog_tests(Log_test::Key key, size_t n) {
 
   log_test->add_dirty_page(page);
 
-  log_buffer_close(log, handle);
-
+  buf_flush_list_added->report_added(page.oldest_modification,
+                                     page.newest_modification);
   return group_end_lsn;
 }
 
@@ -553,6 +569,8 @@ static void log_test_close() {
   log_sys_close();
 
   log_test_general_close();
+
+  buf_flush_list_added.reset(nullptr);
 
   ASSERT_FALSE(found_missing);
 }
@@ -738,7 +756,5 @@ TEST(log0log, log_write_notifier) { test_single("log_write_notifier"); }
 TEST(log0log, log_flush_notifier) { test_single("log_flush_notifier"); }
 
 TEST(log0log, log_users) { test_single("log_users"); }
-
-TEST(log0log, log_closer) { test_single("log_closer"); }
 
 TEST(log0log, log_checkpointer) { test_single("log_checkpointer"); }

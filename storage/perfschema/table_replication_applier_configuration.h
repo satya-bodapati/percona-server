@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -57,15 +58,17 @@ enum enum_rpl_yes_no { PS_RPL_YES = 1, PS_RPL_NO };
 /** A row in the table*/
 struct st_row_applier_config {
   char channel_name[CHANNEL_NAME_LENGTH];
-  uint channel_name_length;
-  time_t desired_delay;
-  bool desired_delay_is_set;
+  uint channel_name_length{0};
+  time_t desired_delay{0};
+  bool desired_delay_is_set{false};
   std::string privilege_checks_user;
   enum_rpl_yes_no requires_row_format;
   Relay_log_info::enum_require_table_primary_key
-      require_table_primary_key_check;
+      require_table_primary_key_check{
+          Relay_log_info::enum_require_table_primary_key::PK_CHECK_NONE};
   Assign_gtids_to_anonymous_transactions_info::enum_type
-      assign_gtids_to_anonymous_transactions_type;
+      assign_gtids_to_anonymous_transactions_type{
+          Assign_gtids_to_anonymous_transactions_info::enum_type::AGAT_OFF};
   std::string assign_gtids_to_anonymous_transactions_value;
 };
 

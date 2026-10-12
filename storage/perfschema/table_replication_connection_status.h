@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -70,33 +71,33 @@ enum enum_rpl_connect_status_service_state {
 */
 struct st_row_connect_status {
   char group_name[UUID_LENGTH];
-  bool group_name_is_null;
+  bool group_name_is_null{true};
   char channel_name[CHANNEL_NAME_LENGTH];
-  uint channel_name_length;
+  uint channel_name_length{0};
   char source_uuid[UUID_LENGTH];
-  bool source_uuid_is_null;
+  bool source_uuid_is_null{true};
   ulonglong thread_id{0};
-  bool thread_id_is_null;
+  bool thread_id_is_null{true};
   enum_rpl_connect_status_service_state service_state;
-  ulonglong count_received_heartbeats;
-  ulonglong last_heartbeat_timestamp;
-  char *received_transaction_set;
-  int received_transaction_set_length;
-  uint last_error_number;
+  ulonglong count_received_heartbeats{0};
+  ulonglong last_heartbeat_timestamp{0};
+  char *received_transaction_set{nullptr};
+  int received_transaction_set_length{0};
+  uint last_error_number{0};
   char last_error_message[MAX_SLAVE_ERRMSG];
-  uint last_error_message_length;
-  ulonglong last_error_timestamp;
+  uint last_error_message_length{0};
+  ulonglong last_error_timestamp{0};
   char last_queued_trx[Gtid::MAX_TEXT_LENGTH + 1];
-  uint last_queued_trx_length;
-  ulonglong last_queued_trx_original_commit_timestamp;
-  ulonglong last_queued_trx_immediate_commit_timestamp;
-  ulonglong last_queued_trx_start_queue_timestamp;
-  ulonglong last_queued_trx_end_queue_timestamp;
+  uint last_queued_trx_length{0};
+  ulonglong last_queued_trx_original_commit_timestamp{0};
+  ulonglong last_queued_trx_immediate_commit_timestamp{0};
+  ulonglong last_queued_trx_start_queue_timestamp{0};
+  ulonglong last_queued_trx_end_queue_timestamp{0};
   char queueing_trx[Gtid::MAX_TEXT_LENGTH + 1];
-  uint queueing_trx_length;
-  ulonglong queueing_trx_original_commit_timestamp;
-  ulonglong queueing_trx_immediate_commit_timestamp;
-  ulonglong queueing_trx_start_queue_timestamp;
+  uint queueing_trx_length{0};
+  ulonglong queueing_trx_original_commit_timestamp{0};
+  ulonglong queueing_trx_immediate_commit_timestamp{0};
+  ulonglong queueing_trx_start_queue_timestamp{0};
 
   st_row_connect_status() : received_transaction_set(nullptr) {}
 

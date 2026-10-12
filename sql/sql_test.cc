@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -172,15 +173,20 @@ void print_keyuse_array(THD *thd, Opt_trace_context *trace,
                        keyuse.optimize, keyuse.used_tables,
                        (ulong)keyuse.ref_table_rows, keyuse.keypart_map));
 
+    const char *field_str;
+    if (keyuse.keypart == FT_KEYPART)
+      field_str = "<fulltext>";
+    else if (keyuse.keypart == VECTOR_KEYPART)
+      field_str = "<vector>";
+    else
+      field_str = get_field_name_or_expression(
+          thd, keyuse.table_ref->table->key_info[keyuse.key]
+                   .key_part[keyuse.keypart]
+                   .field);
+
     Opt_trace_object(trace)
         .add_utf8_table(keyuse.table_ref)
-        .add_utf8("field",
-                  (keyuse.keypart == FT_KEYPART)
-                      ? "<fulltext>"
-                      : get_field_name_or_expression(
-                            thd, keyuse.table_ref->table->key_info[keyuse.key]
-                                     .key_part[keyuse.keypart]
-                                     .field))
+        .add_utf8("field", field_str)
         .add("equals", keyuse.val)
         .add("null_rejecting", keyuse.null_rejecting);
   }
@@ -281,24 +287,6 @@ struct TABLE_LOCK_INFO {
   bool waiting;
   const char *lock_text;
   enum thr_lock_type type;
-};
-
-typedef Prealloced_array<TABLE_LOCK_INFO, 20> Saved_locks_array;
-
-static inline int dl_compare(const TABLE_LOCK_INFO *a,
-                             const TABLE_LOCK_INFO *b) {
-  if (a->thread_id > b->thread_id) return 1;
-  if (a->thread_id < b->thread_id) return -1;
-  if (a->waiting == b->waiting) return 0;
-  if (a->waiting) return -1;
-  return 1;
-}
-
-class DL_commpare {
- public:
-  bool operator()(const TABLE_LOCK_INFO &a, const TABLE_LOCK_INFO &b) {
-    return dl_compare(&a, &b) < 0;
-  }
 };
 
 #ifndef NDEBUG

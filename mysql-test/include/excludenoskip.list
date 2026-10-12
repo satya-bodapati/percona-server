@@ -15,6 +15,7 @@
 # Below files are OS specific and tests will run only on selective platform
 # where conditions are met and skip on others.
 have_mac_os.inc
+not_asan_mac.inc
 not_mac_os.inc
 freebsd.inc
 not_freebsd.inc
@@ -45,7 +46,8 @@ costmodel_planchange.test
 have_met_timezone.inc
 # Checks if server is started with Moscow leap timezone. Including the below inc file until Bug#25188986 is fixed.
 have_moscow_leap_timezone.inc
-
+# Skip filesystems which do not support O_DIRECT mode, e.g. when using --mem option on Linux
+have_odirect.inc
 
 # 2.0 Binlog formats
 # Below files are included because rpl suite runs each test with 3 different
@@ -93,7 +95,7 @@ not_log_bin.inc
 # 4.3 Tests are run only on Dev builds compiled with -DWITH_DEBUG=1 option
 # Additional references for more details:
 # https://dev.mysql.com/doc/internals/en/cmake-build-types.html
-mysqlbinlog_have_debug.inc
+have_mysqlbinlog_debug.inc
 have_innochecksum_debug.inc
 have_udf.inc
 have_mecab.inc
@@ -159,7 +161,11 @@ no_cursor_protocol.inc
 have_valgrind.inc
 not_valgrind.inc
 not_ubsan.inc
+have_asan.inc
 not_asan.inc
+no_valgrind_without_big.inc
+not_ubsan_without_big.inc
+not_asan_without_big.inc
 
 # 7.0 Few skipped test-cases
 mysql_tzinfo_to_sql_sys.test
@@ -198,28 +204,13 @@ have_group_replication_plugin.inc
 have_group_replication_plugin_base.inc
 not_group_replication_plugin.inc
 
-# 13.0 Memcached plugin is not available on all PB2 builds. Only supported by
-# Linux, Solaris and OS X platforms.
-have_memcached_plugin.inc
-have_memcached_sasl.inc
-
 # 14.0 MTR tests that runs only with specific rpl modes:
 
-# 14.1 Some rpl tests can run only with MTS_LC, MTS_DB and Non MTS
-have_replica_parallel_type_logical_clock.inc
-have_replica_parallel_type_database.inc
-only_mts_replica_parallel_workers.inc
-only_mts_replica_parallel_type_logical_clock.inc
-only_mts_replica_parallel_type_database.inc
-not_mts_replica_parallel_workers.inc
-only_replica_preserve_commit_order.inc
+# 14.1 replica_preserve_commit_order=ON
+have_replica_preserve_commit_order.inc
 # 14.2 rpl misc files
-have_slave_repository_type_table.inc
-not_relay_log_info_file.inc
-not_master_info_file.inc
-have_transaction_write_set_extraction.inc
 have_default_replica_transaction_retries.inc
-have_default_slave_rows_search_algorithms.inc
+
 
 #14.3 Some replication tests cannot run with GTID_ONLY == 1
 not_rpl_gtid_only.inc
@@ -234,11 +225,6 @@ not_sparc_debug.inc
 not_mac_os_debug.inc
 # This also fails with non-debug
 statement_digest_long_query.test
-
-# 17.0 Reason for inclusion: the extra JSON cause on builds with other
-# storage engines than InnoDB is hard to
-# separate. see innodb.sdi test
-have_only_innodb.inc
 
 # 18.0 Test to be run on local machine
 # This file is used by test scenarios that depend on time and it isn't possible
@@ -258,10 +244,13 @@ require_icu_version.inc
 not_have_zstd_proper_ver.inc
 have_zstd_proper_ver.inc
 
-#21.0 fips realted test will be run only on system where opensssl fips module is installed
+#21.0 fips related test will be run only on system where OpenSSL fips module is installed
 # currently we are checking via this env $OPENSSL_FIPS_INSTALLED
 not_have_fips.inc
 have_fips.inc
+# Checking via env $OPENSSL3_FIPS_ACTIVE
+fips_active.inc
+not_fips_active.inc
 
 # 22.0 Tests for "disk full" conditions. Need special environment.
 # Shall not run on PB2.
@@ -269,13 +258,6 @@ redo_log_archive_05.test
 
 # 23.0 Tests that do/don't need clone plugin.
 have_clone_plugin.inc
-
-# 24.0 Binlog_transaction_dependency_tracking
-# The below files included because default value of
-# binlog_transaction_dependency_tracking is COMMIT_ORDER and few rpl suite runs
-# with binlog_transaction_dependency_tracking=WRITESET and all the test may not
-# be meant to run on binlog_transaction_dependency_tracking=WRITESET.
-have_binlog_transaction_dependency_tracking_commit_order.inc
 
 # 25.0 Binlog_transaction_compression
 # The below file is included because by default
@@ -308,6 +290,11 @@ not_partial_revokes.inc
 have_hypergraph.inc
 not_hypergraph.inc
 
+# Must be skipped when the server is built without the Hypergraph Optimizer.
+# This is different to not_hypergraph in that not_hypergraph skips if the
+# Hypergraph is OFF, while this skips if the Hypergraph is unavailable.
+not_built_with_hypergraph.inc
+
 # 30. Keyring_file component - can be skipped based on cmake configuration
 have_component_keyring_file.inc
 
@@ -325,7 +312,57 @@ not_tlsv13.inc
 # language component which is not supported for now
 have_python.inc
 have_ruby.inc
+have_wasm.inc
 
 # 33. Skip tests on platforms that don't support the FIDO plugins
 have_fido_plugin.inc
 have_webauthn_plugin.inc
+
+# 34.0 Tests skipped due to conflicting use of ./mtr --defaults-extra-file
+
+# 34.1 ./mtr-defaults-extra-file=suite/ndb/encrypted_filesystem.cnf (and ndb/secure.cnf)
+ndb_redo_log_reader.test
+ndb_secretsfile1.test
+
+# 34.2 ./mtr-defaults-extra-file=suite/ndb/tls.cnf (and ndb/secure.cnf)
+api_require_trp.test
+clusterj.test
+no_path.test
+require_mgm_tls.test
+sign_keys.test
+test_mgmd.test
+tls_off_certs.test
+
+# 35. These tests require a server with LTS version
+have_mysql_version_maturity_lts.inc
+
+# 36. Skip tests which expect the option tracker
+have_option_tracker.inc
+
+# 37. Skip tests which expect the GR flow control statistics component
+have_gr_replication_flow_control_stats.inc
+
+# 38. Skip tests which expect the replication applier metrics component
+have_component_replication_applier_metrics.inc
+
+# 39. Skip tests that need the diagnostic log.
+have_log_diagnostic.inc
+
+# 40. Skip tests which expect the Group Replication resource manager component
+have_group_replication_resource_manager.inc
+
+# 41. Skip tests which expect the Group Replication primary election prefer most updated
+have_gr_replication_primary_elect_prefer_most_updated.inc
+
+# 42. Skip router/mrs tests requring specific metadata version
+is_mrs_schema_v2.inc
+is_mrs_schema_v3.inc
+is_mrs_schema_v4.inc
+is_mrs_schema_v2_or_v3.inc
+is_mrs_schema_v3_or_v4.inc
+
+# 43. CREATE EXTERNAL TABLE tests
+external_table.test
+
+# 45. These tests require a server with non LTS version
+have_mysql_version_maturity_non_lts.inc

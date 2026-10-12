@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -78,12 +79,12 @@ class METADATA_CACHE_EXPORT GRClusterMetadata : public ClusterMetadata {
    * for writable node
    * @param clusterset_id UUID of the ClusterSet the Cluster belongs to (if
    * bootstrapped as a ClusterSet)
-   * @param whole_topology return all usable nodes, ignore potential metadata
-   * filters or policies (like target_cluster etc.)
    * @param [out] instance_id of the server the metadata was fetched from
+   * @param [out] guidelines routing guidelines document feched from the
+   * metadata
    * @return object containing cluster topology information in case of success,
    * or error code in case of failure
-   * @throws metadata_cache::metadata_error
+   * @throws metadata_cache::metadata_error If fetching metadata fails.
    */
   stdx::expected<metadata_cache::ClusterTopology, std::error_code>
   fetch_cluster_topology(
@@ -91,7 +92,7 @@ class METADATA_CACHE_EXPORT GRClusterMetadata : public ClusterMetadata {
       mysqlrouter::TargetCluster &target_cluster, const unsigned router_id,
       const metadata_cache::metadata_servers_list_t &metadata_servers,
       bool needs_writable_node, const std::string &clusterset_id,
-      bool whole_topology, std::size_t &instance_id) override;
+      std::size_t &instance_id, std::string &guidelines) override;
 
   /** @brief Initializes the notifications listener thread (if a given cluster
    * type supports it)
@@ -153,7 +154,7 @@ class METADATA_CACHE_EXPORT GRClusterMetadata : public ClusterMetadata {
    *
    * The information is pulled from GR maintained performance_schema tables.
    */
-  void update_cluster_status_from_gr(
+  stdx::expected<void, std::error_code> update_cluster_status_from_gr(
       const bool unreachable_quorum_allowed_traffic,
       metadata_cache::ManagedCluster &cluster);
 
@@ -166,8 +167,9 @@ class METADATA_CACHE_EXPORT GRClusterMetadata : public ClusterMetadata {
   std::unique_ptr<GRMetadataBackend> metadata_backend_;
 
  private:
-  void update_backend(const mysqlrouter::MetadataSchemaVersion &version,
-                      unsigned int router_id);
+  stdx::expected<void, std::string> update_backend(
+      const mysqlrouter::MetadataSchemaVersion &version,
+      unsigned int router_id);
 
   std::unique_ptr<GRNotificationListener> gr_notifications_listener_;
 

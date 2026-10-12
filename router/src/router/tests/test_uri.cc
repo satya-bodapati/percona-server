@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,6 +29,8 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "unittest/gunit/benchmark.h"
+
 using mysqlrouter::URI;
 using mysqlrouter::URIAuthority;
 using mysqlrouter::URIError;
@@ -40,7 +43,7 @@ class URISimpleTests : public ::testing::Test {};
 // default constructor tests
 
 TEST_F(URISimpleTests, Constructor) {
-  URI u;
+  URI const u;
   ASSERT_TRUE(u.scheme.empty());
   ASSERT_TRUE(u.host.empty());
   ASSERT_EQ(u.port, 0);
@@ -633,7 +636,7 @@ class URIParseThrowingTests
 
 TEST_P(URIParseThrowingTests, FailsParseURI) {
   // call GetParam outside the ASSERT to actually make it work
-  URITestFailData test_data = GetParam();
+  URITestFailData const test_data = GetParam();
 
   try {
     auto u = URI(test_data.input.uri);
@@ -1219,6 +1222,33 @@ URIRootlessTestFailData uri_rootless_test_fail_data[] = {
 
 INSTANTIATE_TEST_SUITE_P(URITests, URIRootlessThrowingTests,
                          ::testing::ValuesIn(uri_rootless_test_fail_data));
+
+namespace {
+void UriStr(size_t iter) {
+  std::string const uri_str = "http://user:pass@host:80/path?query=val";
+  mysqlrouter::URI const uri(uri_str);
+
+  while ((iter--) != 0) {
+    if (uri_str != uri.str()) abort();
+  }
+}
+
+void UriOstream(size_t iter) {
+  std::string const uri_str = "http://user:pass@host:80/path?query=val";
+  mysqlrouter::URI const uri(uri_str);
+
+  while ((iter--) != 0) {
+    std::stringstream os;
+    os << uri;
+
+    if (uri_str != os.str()) abort();
+  }
+}
+
+}  // namespace
+
+BENCHMARK(UriStr)
+BENCHMARK(UriOstream)
 
 int main(int argc, char **argv) {
   ::testing::InitGoogleTest(&argc, argv);

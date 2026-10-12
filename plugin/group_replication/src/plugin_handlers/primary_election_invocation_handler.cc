@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,8 +22,12 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include "plugin/group_replication/include/plugin_handlers/primary_election_invocation_handler.h"
+#include <mysql/components/services/group_replication_elect_prefers_most_updated_service.h>
+#include "plugin/group_replication/include/leave_group_on_failure.h"
 #include "plugin/group_replication/include/plugin.h"
 #include "plugin/group_replication/include/plugin_handlers/member_actions_handler.h"
+#include "plugin/group_replication/include/plugin_handlers/metrics_handler.h"
+#include "plugin/group_replication/include/plugin_handlers/primary_election_most_uptodate.h"
 #include "plugin/group_replication/include/plugin_handlers/primary_election_utils.h"
 #include "plugin/group_replication/include/services/system_variable/get_system_variable.h"
 
@@ -94,7 +99,8 @@ int Primary_election_handler::execute_primary_election(
 
   bool has_primary_changed;
   bool in_primary_mode;
-  Group_member_info *primary_member_info = nullptr;
+  Group_member_info primary_member_info;
+  bool primary_member_info_not_found = true;
   Group_member_info_list *all_members_info =
       group_member_mgr->get_all_members();
 
@@ -120,12 +126,15 @@ int Primary_election_handler::execute_primary_election(
   }
 
   if (!appointed_uuid) {
-    pick_primary_member(primary_uuid, all_members_info);
+    if (pick_primary_member(primary_uuid, all_members_info, mode)) {
+      goto end;
+    }
   }
 
-  primary_member_info = group_member_mgr->get_group_member_info(primary_uuid);
+  primary_member_info_not_found = group_member_mgr->get_group_member_info(
+      primary_uuid, primary_member_info);
 
-  if (primary_member_info == nullptr) {
+  if (primary_member_info_not_found) {
     if (all_members_info->size() != 1) {
       // There are no servers in the group or they are all recovering WARN the
       // user
@@ -137,7 +146,7 @@ int Primary_election_handler::execute_primary_election(
         enum_primary_election_primary_change_status::
             PRIMARY_DID_NOT_CHANGE_NO_CANDIDATE,
         mode, PRIMARY_ELECTION_NO_CANDIDATES_ERROR);
-    if (enable_server_read_mode()) {
+    if (enable_server_read_mode("(GR) primary election failed")) {
       LogPluginErr(WARNING_LEVEL,
                    ER_GRP_RPL_ENABLE_READ_ONLY_FAILED); /* purecov: inspected */
     }
@@ -146,7 +155,7 @@ int Primary_election_handler::execute_primary_election(
 
   in_primary_mode = local_member_info->in_primary_mode();
   has_primary_changed = Group_member_info::MEMBER_ROLE_PRIMARY !=
-                            primary_member_info->get_role() ||
+                            primary_member_info.get_role() ||
                         !in_primary_mode;
   if (has_primary_changed) {
     /*
@@ -189,14 +198,14 @@ int Primary_election_handler::execute_primary_election(
             "relay logs.");
 
       LogPluginErr(SYSTEM_LEVEL, ER_GRP_RPL_NEW_PRIMARY_ELECTED,
-                   primary_member_info->get_hostname().c_str(),
-                   primary_member_info->get_port(), message.c_str());
+                   primary_member_info.get_hostname().c_str(),
+                   primary_member_info.get_port(), message.c_str());
       internal_primary_election(primary_uuid, mode);
     } else {
       // retain the old message
       LogPluginErr(SYSTEM_LEVEL, ER_GRP_RPL_NEW_PRIMARY_ELECTED,
-                   primary_member_info->get_hostname().c_str(),
-                   primary_member_info->get_port(),
+                   primary_member_info.get_hostname().c_str(),
+                   primary_member_info.get_port(),
                    "Enabling conflict detection until the new primary applies "
                    "all relay logs.");
       legacy_primary_election(primary_uuid);
@@ -214,7 +223,6 @@ end:
     delete (*it);
   }
   delete all_members_info;
-  delete primary_member_info;
   return 0;
 }
 
@@ -287,8 +295,10 @@ int Primary_election_handler::legacy_primary_election(
     std::string &primary_uuid) {
   const bool is_primary_local =
       !primary_uuid.compare(local_member_info->get_uuid());
-  Group_member_info *primary_member_info =
-      group_member_mgr->get_group_member_info(primary_uuid);
+  Group_member_info primary_member_info;
+  const bool primary_member_info_not_found =
+      group_member_mgr->get_group_member_info(primary_uuid,
+                                              primary_member_info);
 
   /*
     A new primary was elected, inform certifier to enable conflict
@@ -303,7 +313,7 @@ int Primary_election_handler::legacy_primary_election(
     member_actions_handler->trigger_actions(
         Member_actions::AFTER_PRIMARY_ELECTION);
   } else {
-    if (enable_server_read_mode()) {
+    if (enable_server_read_mode("(GR) new primary elected")) {
       LogPluginErr(WARNING_LEVEL,
                    ER_GRP_RPL_ENABLE_READ_ONLY_FAILED); /* purecov: inspected */
     }
@@ -319,25 +329,34 @@ int Primary_election_handler::legacy_primary_election(
     internal_primary_election(primary_uuid, LEGACY_ELECTION_PRIMARY);
   } else {
     set_election_running(false);
-    LogPluginErr(SYSTEM_LEVEL, ER_GRP_RPL_SRV_SECONDARY_MEM,
-                 primary_member_info->get_hostname().c_str(),
-                 primary_member_info->get_port());
+    if (primary_member_info_not_found) {
+      LogPluginErr(WARNING_LEVEL, ER_GRP_RPL_MEMBER_INFO_DOES_NOT_EXIST,
+                   "as the primary by the member uuid", primary_uuid.c_str(),
+                   "a primary election. The group will heal itself on the next "
+                   "primary election that will be triggered automatically");
+    } else {
+      LogPluginErr(SYSTEM_LEVEL, ER_GRP_RPL_SRV_SECONDARY_MEM,
+                   primary_member_info.get_hostname().c_str(),
+                   primary_member_info.get_port());
+    }
   }
 
   group_events_observation_manager->after_primary_election(
       primary_uuid,
       enum_primary_election_primary_change_status::PRIMARY_DID_CHANGE,
       DEAD_OLD_PRIMARY);
-  delete primary_member_info;
 
   return 0;
 }
 
 bool Primary_election_handler::pick_primary_member(
-    std::string &primary_uuid, Group_member_info_list *all_members_info) {
+    std::string &primary_uuid, Group_member_info_list *all_members_info,
+    enum_primary_election_mode mode) {
   DBUG_TRACE;
 
+  bool error = false;
   bool am_i_leaving = true;
+  bool primary_failover = false;
 #ifndef NDEBUG
   int n = 0;
 #endif
@@ -345,6 +364,12 @@ bool Primary_election_handler::pick_primary_member(
 
   Group_member_info_list_iterator it;
   Group_member_info_list_iterator lowest_version_end;
+
+  // to store most uptodate delta of transactions
+  std::vector<Gr_primary_election_member> members;
+  bool most_update_enabled =
+      group_member_mgr
+          ->is_group_replication_elect_prefers_most_updated_enabled();
 
   /* sort members based on member_version and get first iterator position
      where member version differs
@@ -398,6 +423,33 @@ bool Primary_election_handler::pick_primary_member(
      till lowest_version_end.
     */
     if (the_primary == nullptr) {
+      /*
+       When group is bootstrap there isn't a primary, to avoid call confirm
+       group has at least two elements.
+      */
+      if ((lowest_version_end - all_members_info->begin()) > 1 &&
+          DEAD_OLD_PRIMARY == mode) {
+        primary_failover = true;
+        if (most_update_enabled) {
+          error = sort_member_by_most_up_to_date(all_members_info,
+                                                 lowest_version_end, members);
+
+          if (!error) {
+            // check to confirm happened right after a view change (5s)
+            assert(Metrics_handler::get_current_time() -
+                       group_member_mgr->get_timestamp_last_view_change() <
+                   500000);
+          }
+        } else {
+          // if this member has option enabled but is disabled on group throw a
+          // warning
+          if (local_member_info->get_component_primary_election_enabled()) {
+            LogPluginErr(WARNING_LEVEL,
+                         ER_GRP_PREFER_MOST_UPDATED_CONFIG_DIFFER_ON_FAILOVER);
+          }
+        }
+      }
+
       for (it = all_members_info->begin();
            it != lowest_version_end && the_primary == nullptr; it++) {
         Group_member_info *member_info = *it;
@@ -410,10 +462,116 @@ bool Primary_election_handler::pick_primary_member(
     }
   }
 
-  if (the_primary == nullptr) return true;
+  if (error || the_primary == nullptr) {
+    the_primary = nullptr;
+    return true;
+  }
+
+  if (primary_failover) {
+    if (most_update_enabled) {
+      // uuid for next member on list of election
+      std::string next_uuid{""};
+      uint64_t delta = 0;
+      auto mi_next = members.end();
+
+      for (auto mi = members.begin(); mi != members.end(); mi++) {
+        if (mi->uuid == the_primary->get_uuid()) {
+          mi_next = std::next(mi);
+          break;
+        }
+      }
+
+      if (mi_next != members.end()) {
+        next_uuid.assign(mi_next->uuid);
+        delta = mi_next->delta;
+      }
+
+      LogPluginErr(SYSTEM_LEVEL, ER_GRP_PRIMARY_ELECTION_METHOD_MOST_UPDATE,
+                   the_primary->get_uuid().c_str(), delta, next_uuid.c_str());
+
+      Primary_election_most_update::update_status(
+          Metrics_handler::get_current_time(), delta);
+
+    } else {
+      LogPluginErr(SYSTEM_LEVEL, ER_GRP_PRIMARY_ELECTION_METHOD_MEMBER_WEIGHT,
+                   the_primary->get_uuid().c_str(),
+                   the_primary->get_member_weight());
+    }
+  }
 
   primary_uuid.assign(the_primary->get_uuid());
   return false;
+}
+
+int Primary_election_handler::sort_member_by_most_up_to_date(
+    Group_member_info_list *all_members_info,
+    Group_member_info_list_iterator lowest_version_end,
+    std::vector<Gr_primary_election_member> &members) {
+  DBUG_TRACE;
+
+  std::unordered_map<std::string, Gtid_set> members_gtid_executed;
+  Tsid_map tsid_map(nullptr);
+
+  auto leave_on_error = []() -> int {
+    const char *exit_state_action_abort_log_message =
+        "Fatal error in the Group Replication election of new primary.";
+    leave_group_on_failure::mask leave_actions;
+    leave_actions.set(leave_group_on_failure::HANDLE_EXIT_STATE_ACTION, true);
+    leave_group_on_failure::leave(leave_actions,
+                                  ER_GRP_PRIMARY_ELECTION_FATAL_PROCESS,
+                                  nullptr, exit_state_action_abort_log_message);
+    return 1;
+  };
+
+  for (auto it = all_members_info->begin(); it != lowest_version_end; it++) {
+    auto [gtid_set_it, inserted] = members_gtid_executed.emplace(
+        std::piecewise_construct, std::forward_as_tuple((*it)->get_uuid()),
+        std::forward_as_tuple(&tsid_map, nullptr));
+    assert(inserted);
+    DBUG_EXECUTE_IF("group_replication_primary_election_most_uptodate_fail",
+                    { inserted = false; });
+    if (!inserted ||
+        gtid_set_it->second.add_gtid_text((*it)->get_gtid_executed().c_str()) !=
+            RETURN_STATUS_OK) {
+      return leave_on_error();
+    }
+  }
+
+  auto sorting_func = [&members_gtid_executed](const auto &arg1,
+                                               const auto &arg2) -> auto{
+    const auto &m1 = members_gtid_executed.find(arg1->get_uuid());
+    const auto &m2 = members_gtid_executed.find(arg2->get_uuid());
+    assert(m1 != members_gtid_executed.end());
+    assert(m2 != members_gtid_executed.end());
+    bool is_equal = (m1->second).equals(&m2->second);
+    return (
+        (!is_equal && (m2->second).is_subset(&m1->second)) ||
+        (is_equal && arg1->get_member_weight() > arg2->get_member_weight()) ||
+        (is_equal && arg1->get_member_weight() == arg2->get_member_weight() &&
+         m1->first < m2->first));
+  };
+
+  std::sort(all_members_info->begin(), lowest_version_end, sorting_func);
+
+  auto prev = all_members_info->begin();
+  for (auto it = all_members_info->begin(); it != lowest_version_end; it++) {
+    Gtid_set gtid_empty(&tsid_map, nullptr);
+    Gr_primary_election_member new_obj;
+    auto *mi = *it;
+    new_obj.uuid.assign(mi->get_uuid());
+    gtid_empty.add_gtid_set(&members_gtid_executed.at((*prev)->get_uuid()));
+    gtid_empty.remove_gtid_set(&members_gtid_executed.at(mi->get_uuid()));
+    new_obj.delta = gtid_empty.get_count();
+    try {
+      members.push_back(std::move(new_obj));
+    } catch (...) {
+      members.clear();         /* purecov: inspected */
+      return leave_on_error(); /* purecov: inspected */
+    }
+    prev = it;
+  }
+
+  return 0;
 }
 
 Group_member_info_list_iterator sort_and_get_lowest_version_member_position(
@@ -434,45 +592,20 @@ Group_member_info_list_iterator sort_and_get_lowest_version_member_position(
    */
   it = all_members_info->begin();
   Group_member_info *first_member = *it;
-  uint32 lowest_major_version =
-      first_member->get_member_version().get_major_version();
 
   /* to avoid read compatibility issue leader should be picked only from lowest
      version members so save position where member version differs.
-     From 8.0.17 patch version will be considered during version comparison.
 
      set lowest_version_end when major version changes
-
-     eg: for a list: 5.7.18, 5.7.18, 5.7.19, 5.7.20, 5.7.21, 8.0.2
-         the members to be considered for election will be:
-            5.7.18, 5.7.18, 5.7.19, 5.7.20, 5.7.21
-         and server_uuid based algorithm will be used to elect primary
-
-     eg: for a list: 5.7.20, 5.7.21, 8.0.2, 8.0.2
-         the members to be considered for election will be:
-            5.7.20, 5.7.21
-         and member weight based algorithm will be used to elect primary
 
      eg: for a list: 8.0.17, 8.0.18, 8.0.19
          the members to be considered for election will be:
             8.0.17
-
-     eg: for a list: 8.0.13, 8.0.17, 8.0.18
-         the members to be considered for election will be:
-            8.0.13, 8.0.17, 8.0.18
-         and member weight based algorithm will be used to elect primary
   */
 
   for (it = all_members_info->begin() + 1; it != all_members_info->end();
        it++) {
-    if (first_member->get_member_version() >=
-            PRIMARY_ELECTION_PATCH_CONSIDERATION &&
-        (first_member->get_member_version() != (*it)->get_member_version())) {
-      lowest_version_end = it;
-      break;
-    }
-    if (lowest_major_version !=
-        (*it)->get_member_version().get_major_version()) {
+    if (first_member->get_member_version() != (*it)->get_member_version()) {
       lowest_version_end = it;
       break;
     }
@@ -488,12 +621,13 @@ void sort_members_for_election(
   Member_version lowest_version = first_member->get_member_version();
 
   // sort only lower version members as they only will be needed to pick leader
-  if (lowest_version >= PRIMARY_ELECTION_MEMBER_WEIGHT_VERSION)
+  if (lowest_version >= PRIMARY_ELECTION_MEMBER_WEIGHT_VERSION) {
     std::sort(all_members_info->begin(), lowest_version_end,
               Group_member_info::comparator_group_member_weight);
-  else
+  } else {
     std::sort(all_members_info->begin(), lowest_version_end,
               Group_member_info::comparator_group_member_uuid);
+  }
 }
 
 void Primary_election_handler::notify_election_running() {

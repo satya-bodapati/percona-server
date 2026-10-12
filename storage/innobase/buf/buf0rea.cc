@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -87,10 +88,17 @@ ulint buf_read_page_low(dberr_t *err, bool sync, ulint type, ulint mode,
     sync = true;
   }
 
-  /* The following call will also check if the tablespace does not exist
-  or is being dropped; if we succeed in initing the page in the buffer
-  pool for read, then DISCARD cannot proceed until the read has
-  completed */
+  /* buf_page_init_for_read() makes the page hash-visible, io-fixed for
+  read and linked into the LRU list before we dispatch the read IO below.
+  This does not stop a concurrent tablespace drop or truncation:
+  tablespace deletion does not scan the buffer pool (BUF_REMOVE_NONE); it
+  bumps the space version and relies on the pages becoming stale. If the
+  tablespace is dropped before the IO is dispatched, fil_io() refuses the
+  read (DB_TABLESPACE_DELETED, see Fil_shard::do_io()) and the page is
+  removed by buf_read_page_handle_error() below. If a read completes
+  against a space which was dropped meanwhile, the page is detected as
+  stale (buf_page_t::was_stale()) and freed lazily by
+  buf_page_free_stale(), which waits out the read io-fix. */
   bpage = buf_page_init_for_read(mode, page_id, page_size, unzip);
 
   ut_a(bpage == nullptr || bpage->get_space()->id == page_id.space());
@@ -575,8 +583,9 @@ ulint buf_read_ahead_linear(const page_id_t &page_id,
   os_aio_simulated_wake_handler_threads();
 
   if (count) {
-    DBUG_PRINT("ib_buf", ("linear read-ahead %lu pages, " UINT32PF ":" UINT32PF,
-                          count, page_id.space(), page_id.page_no()));
+    DBUG_PRINT("ib_buf",
+               ("linear read-ahead " ULINTPF " pages, " UINT32PF ":" UINT32PF,
+                count, page_id.space(), page_id.page_no()));
   }
 
   /* Read ahead is considered one I/O operation for the purpose of
@@ -658,7 +667,6 @@ void buf_read_ibuf_merge_pages(bool sync, const space_id_t *space_ids,
 
 void buf_read_recv_pages(space_id_t space_id, const page_no_t *page_nos,
                          ulint n_stored) {
-  ulint count;
   fil_space_t *space = fil_space_get(space_id);
 
   if (space == nullptr) {
@@ -696,32 +704,9 @@ void buf_read_recv_pages(space_id_t space_id, const page_no_t *page_nos,
   const page_size_t page_size(space->flags);
 
   for (ulint i = 0; i < n_stored; i++) {
-    buf_pool_t *buf_pool;
-    const page_id_t cur_page_id(space_id, page_nos[i]);
-
-    count = 0;
-
-    buf_pool = buf_pool_get(cur_page_id);
-    os_rmb;
-
-    while (buf_pool->n_pend_reads >=
-           recv_n_frames_for_pages_per_pool_instance / 2) {
-      os_aio_simulated_wake_handler_threads();
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-
-      count++;
-
-      if (!(count % 1000)) {
-        ib::error(ER_IB_MSG_145)
-            << "Waited for " << count / 100 << " seconds for "
-            << buf_pool->n_pend_reads << " pending reads";
-      }
-    }
-
     dberr_t err;
-
     buf_read_page_low(&err, false, IORequest::DO_NOT_WAKE, BUF_READ_ANY_PAGE,
-                      cur_page_id, page_size, true, nullptr, false);
+                      {space_id, page_nos[i]}, page_size, true, nullptr, false);
   }
 
   os_aio_simulated_wake_handler_threads();

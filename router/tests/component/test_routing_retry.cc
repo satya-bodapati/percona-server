@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2023, Oracle and/or its affiliates.
+  Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,8 +27,6 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-
-#define RAPIDJSON_HAS_STDSTRING 1
 
 #include "mysql/harness/net_ts/impl/socket.h"
 #include "rest_api_testutils.h"
@@ -168,11 +167,11 @@ TEST_P(RoutingRetryTest, retry_at_greeting) {
                  "Retry the connect when the greeting fails with 1040 "
                  "max-connections-reached.");
 
-  launch_mysql_server_mock(
-      mysql_server_mock_cmdline_args(
-          get_data_dir().join("max_connections_reached_at_greeting.js").str(),
-          server_port_, 0, 0, "", "0.0.0.0", true),
-      EXIT_SUCCESS);
+  mock_server_spawner().spawn(
+      mock_server_cmdline("max_connections_reached_at_greeting.js")
+          .port(server_port_)
+          .enable_ssl(true)
+          .args());
 
   auto writer = config_writer(conf_dir_.name());
 
@@ -220,11 +219,11 @@ TEST_P(RoutingRetryTest, retry_at_auth) {
                               (GetParam().client_ssl_mode == kPreferred &&
                                GetParam().server_ssl_mode == kAsClient));
 
-  launch_mysql_server_mock(
-      mysql_server_mock_cmdline_args(
-          get_data_dir().join("max_connections_reached_at_auth.js").str(),
-          server_port_, 0, 0, "", "0.0.0.0", true),
-      EXIT_SUCCESS);
+  mock_server_spawner().spawn(
+      mock_server_cmdline("max_connections_reached_at_auth.js")
+          .port(server_port_)
+          .enable_ssl(true)
+          .args());
 
   auto writer = config_writer(conf_dir_.name());
 
@@ -277,9 +276,10 @@ TEST_F(RoutingRetryFailTest, explicit_timeout) {
       "Requirement",
       "The connect MUST be retried at max `connect_retry_timeout` seconds.");
 
-  launch_mysql_server_mock(
-      get_data_dir().join("handshake_too_many_con_error.js").str(),
-      server_port_, EXIT_SUCCESS);
+  mock_server_spawner().spawn(
+      mock_server_cmdline("handshake_too_many_con_error.js")
+          .port(server_port_)
+          .args());
 
   auto writer = config_writer(conf_dir_.name());
 
@@ -326,9 +326,10 @@ TEST_F(RoutingRetryFailTest, default_timeout) {
                  "If `connect_retry_timeout` is not specified, it MUST default "
                  "to 2 seconds.");
 
-  launch_mysql_server_mock(
-      get_data_dir().join("handshake_too_many_con_error.js").str(),
-      server_port_, EXIT_SUCCESS);
+  mock_server_spawner().spawn(
+      mock_server_cmdline("handshake_too_many_con_error.js")
+          .port(server_port_)
+          .args());
 
   auto writer = config_writer(conf_dir_.name());
 

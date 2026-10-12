@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,6 +26,7 @@
 #ifndef ROUTING_MYSQLROUTING_INCLUDED
 #define ROUTING_MYSQLROUTING_INCLUDED
 
+#include "mysqlrouter/datatypes.h"
 #include "mysqlrouter/routing_export.h"
 #include "mysqlrouter/routing_plugin_export.h"
 
@@ -36,14 +38,9 @@
  *
  */
 
-#include <array>
 #include <atomic>
 #include <chrono>
-#include <iostream>
-#include <map>
 #include <memory>
-#include <mutex>
-#include <stdexcept>
 
 #ifndef _WIN32
 #include <arpa/inet.h>
@@ -71,20 +68,19 @@
 #include "mysql/harness/stdx/monitor.h"
 #include "mysql_router_thread.h"
 #include "mysql_routing_base.h"
+#include "mysqlrouter/base_protocol.h"
 #include "mysqlrouter/io_thread.h"
+#include "mysqlrouter/metadata_cache_datatypes.h"
 #include "mysqlrouter/routing.h"
 #include "mysqlrouter/routing_component.h"
-#include "mysqlrouter/routing_export.h"
 #include "mysqlrouter/uri.h"
 #include "plugin_config.h"
-#include "protocol/base_protocol.h"
+#include "routing_guidelines/routing_guidelines.h"
 #include "socket_container.h"
-#include "ssl_mode.h"
-#include "tcp_address.h"
 
 namespace mysql_harness {
 class PluginFuncEnv;
-}
+}  // namespace mysql_harness
 
 struct Nothing {};
 class MySQLRouting;
@@ -167,32 +163,6 @@ class ROUTING_EXPORT AcceptingEndpointUnixSocket : public AcceptingEndpoint {
  *  The class MySQLRouter is used to start a service listening on a particular
  *  TCP port for incoming MySQL Client connection and route these to a MySQL
  *  Server.
- *
- *  Connection routing will not analyze or parse any MySQL package (except from
- *  those in the handshake phase to be able to discover invalid connection
- *  error) nor will it do any authentication. It will not handle errors from the
- *  MySQL server and not automatically recover. The client communicate through
- *  MySQL Router just like it would directly connecting.
- *
- *  The MySQL Server is chosen from a given list of hosts or IP addresses
- *  (with or without TCP port) based on the the mode. For example, mode
- *  read-only will go through the list of servers in a round-robin way. The
- *  mode read-write will always go through the list from the beginning and
- *  failover to the next available.
- *
- *
- *  Example usage: bind to all IP addresses and use TCP Port 7001
- *
- *  @code
- *      MySQLRouting r(conf, ioctx);
- *      r.destination_connect_timeout = std::chrono::seconds(1);
- *      r.set_destinations_from_csv("10.0.10.5;10.0.11.6");
- *      r.run();
- *  @endcode
- *
- *  The above example will, when MySQL running on 10.0.10.5 is not available,
- *  use 10.0.11.6 to setup the connection routing.
- *
  */
 class ROUTING_EXPORT MySQLRouting : public MySQLRoutingBase {
  public:
@@ -200,14 +170,17 @@ class ROUTING_EXPORT MySQLRouting : public MySQLRoutingBase {
    *
    * @param routing_config routing configuration
    * @param io_ctx IO context
+   * @param guidelines routing guidelines engine
    * @param route_name Name of connection routing (can be empty string)
    * @param client_ssl_ctx SSL context of the client side
    * @param dest_ssl_ctx SSL contexts of the destinations
    */
-  MySQLRouting(const RoutingConfig &routing_config, net::io_context &io_ctx,
-               const std::string &route_name = {},
-               TlsServerContext *client_ssl_ctx = nullptr,
-               DestinationTlsContext *dest_ssl_ctx = nullptr);
+  MySQLRouting(
+      const RoutingConfig &routing_config, net::io_context &io_ctx,
+      std::shared_ptr<routing_guidelines::Routing_guidelines_engine> guidelines,
+      const std::string &route_name = {},
+      TlsServerContext *client_ssl_ctx = nullptr,
+      DestinationTlsContext *dest_ssl_ctx = nullptr);
 
   /** @brief Runs the service and accept incoming connections
    *
@@ -219,20 +192,15 @@ class ROUTING_EXPORT MySQLRouting : public MySQLRoutingBase {
    */
   void run(mysql_harness::PluginFuncEnv *env);
 
-  /** @brief Sets the destinations from URI
+  void set_destinations(const std::string &dests);
+
+  /**
+   * Sets the destinations.
    *
-   * Sets destinations using the given string and the given mode. The string
-   * should be a comma separated list of MySQL servers.
-   *
-   * The mode is one of MySQLRouting::Mode, for example
-   * MySQLRouting::Mode::kReadOnly.
-   *
-   * Example of destinations:
-   *   "10.0.10.5,10.0.11.6:3307"
-   *
-   * @param csv destinations as comma-separated-values
+   * @param dests destinations
    */
-  void set_destinations_from_csv(const std::string &csv);
+  void set_destinations_from_dests(
+      const std::vector<mysql_harness::Destination> &dests);
 
   void set_destinations_from_uri(const mysqlrouter::URI &uri);
 
@@ -284,24 +252,30 @@ class ROUTING_EXPORT MySQLRouting : public MySQLRoutingBase {
       typename ClientProtocol::socket client_socket,
       const typename ClientProtocol::endpoint &client_endpoint);
 
-  routing::RoutingStrategy get_routing_strategy() const override;
+  std::optional<routing::RoutingStrategy> get_routing_strategy()
+      const override {
+    return routing_strategy_;
+  }
 
-  routing::Mode get_mode() const override;
-
-  std::vector<mysql_harness::TCPAddress> get_destinations() const override;
+  std::vector<mysql_harness::Destination> get_destination_candidates()
+      const override;
 
   std::vector<MySQLRoutingAPI::ConnData> get_connections() override;
 
   MySQLRoutingConnectionBase *get_connection(const std::string &) override;
 
-  RouteDestination *destinations() { return destination_.get(); }
+  DestinationManager *destination_manager() override {
+    return destination_manager_.get();
+  }
 
   void disconnect_all();
 
   /**
    * Stop accepting new connections on a listening socket.
+   *
+   * @param shutting_down is plugin shutting down.
    */
-  void stop_socket_acceptors() override;
+  void stop_socket_acceptors(const bool shutting_down) override;
 
   /**
    * Check if we are accepting connections on a routing socket.
@@ -325,6 +299,37 @@ class ROUTING_EXPORT MySQLRouting : public MySQLRoutingBase {
    */
   stdx::expected<void, std::string> restart_accepting_connections() override;
 
+  /**
+   * In case when routing guideline was updated go through each established
+   * connection and verify if it is allowed according to the new guideline. If
+   * not then such connection is dropped.
+   *
+   * @param affected_routing_sources list of routing guideline route names that
+   * were affected by the guideline update
+   */
+  void on_routing_guidelines_update(
+      const routing_guidelines::Routing_guidelines_engine::RouteChanges
+          &affected_routing_sources);
+
+  /**
+   * Try to update routing guideline with a new guideline.
+   *
+   * @return list of routing guideline route names that were affected by the
+   * guideline update
+   */
+  routing_guidelines::Routing_guidelines_engine::RouteChanges
+  update_routing_guidelines(const std::string &routing_guidelines_document);
+
+  /**
+   * If the router info was updated then register this info in routing context.
+   *
+   * @param router_info updated router info
+   */
+  void on_router_info_update(
+      const routing_guidelines::Router_info &router_info);
+
+  bool is_standalone() const override { return is_destination_standalone_; }
+
  private:
   /** @brief Sets unix socket permissions so that the socket is accessible
    *         to all users (no-op on Windows)
@@ -337,12 +342,36 @@ class ROUTING_EXPORT MySQLRouting : public MySQLRoutingBase {
   stdx::expected<void, std::string> run_acceptor(
       mysql_harness::PluginFuncEnv *env);
 
+  stdx::expected<void, std::string> run_with_no_acceptor(
+      mysql_harness::PluginFuncEnv *env);
+
  public:
   MySQLRoutingContext &get_context() override { return context_; }
 
   bool is_running() const override { return is_running_; }
 
+  /**
+   * get the purpose of connections to this route.
+   *
+   * - read-write : all statements are treated as "read-write".
+   * - read-only  : all statements are treated as "read-only".
+   * - unavailable: it is currently unknown where the statement should go to.
+   *
+   * "Unavailable" is used for read-write splitting where the purpose is
+   * determined per statement, session, ...
+   *
+   * A statement over a read-only server connection may end up on a read-write
+   * server in case all read-only servers aren't reachable. Even if the server
+   * is read-write, the connections purpose is read-only and if the server
+   * changes its role from PRIMARY to SECONDARY, these read-only connections
+   * will not be abort as a SECONDARY is good enough to serve read-only
+   * connections.
+   */
+  mysqlrouter::ServerMode purpose() const override;
+
  private:
+  bool accept_connections_{true};
+
   /** Monitor for notifying socket acceptor */
   WaitableMonitor<Nothing> acceptor_waitable_{Nothing{}};
 
@@ -352,15 +381,12 @@ class ROUTING_EXPORT MySQLRouting : public MySQLRoutingBase {
   net::io_context &io_ctx_;
 
   /** @brief Destination object to use when getting next connection */
-  std::unique_ptr<RouteDestination> destination_;
+  std::unique_ptr<DestinationManager> destination_manager_{nullptr};
 
   bool is_destination_standalone_{false};
 
   /** @brief Routing strategy to use when getting next destination */
-  routing::RoutingStrategy routing_strategy_;
-
-  /** @brief mode of the servers in the routing */
-  routing::Mode mode_;
+  std::optional<routing::RoutingStrategy> routing_strategy_;
 
   /** @brief access_mode of the servers in the routing */
   routing::AccessMode access_mode_;

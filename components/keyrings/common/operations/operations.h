@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,6 +24,7 @@
 #ifndef OPERATIONS_INCLUDED
 #define OPERATIONS_INCLUDED
 
+#include <assert.h>
 #include <memory> /* std::unique_ptr */
 
 #include "components/keyrings/common/data/data_extension.h"
@@ -460,9 +462,7 @@
 
 /* clang-format on */
 
-namespace keyring_common {
-
-namespace operations {
+namespace keyring_common::operations {
 
 /**
   Keyring operations
@@ -508,7 +508,7 @@ class Keyring_operations {
   */
   bool insert(const meta::Metadata &metadata, Data_extension secret_data) {
     /* valid_ = true implies cache is operational. Do not permit bulk insert */
-    if (valid_ == true) return true;
+    if (valid_) return true;
     if (!cache_data_) secret_data.set_data(data::Data{});
     return !cache_.store(metadata, secret_data);
   }
@@ -616,6 +616,14 @@ class Keyring_operations {
     /* Remove it from the cache */
     cache_.erase(metadata);
     return false;
+  }
+
+  /**
+    Clear API to clear entire data cache
+  */
+  void clear() {
+    cache_.clear();
+    valid_ = 0;
   }
 
   /**
@@ -797,7 +805,7 @@ class Keyring_operations {
       return;
     }
 
-    if (backend->load_cache(*this) == true) return;
+    if (backend->load_cache(*this)) return;
 
     /*
       If we fail to load metadata (and data) for all keys,
@@ -820,8 +828,6 @@ class Keyring_operations {
   bool valid_;
 };
 
-}  // namespace operations
-
-}  // namespace keyring_common
+}  // namespace keyring_common::operations
 
 #endif  // !OPERATIONS_INCLUDED

@@ -1,15 +1,16 @@
-// Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+// Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License, version 2.0,
 // as published by the Free Software Foundation.
 //
-// This program is also distributed with certain software (including
+// This program is designed to work with certain software (including
 // but not limited to OpenSSL) that is licensed under separate terms,
 // as designated in a particular file or component or in included license
 // documentation.  The authors of MySQL hereby grant you an additional
 // permission to link the program and your derivative works with the
-// separately licensed software that they have included with MySQL.
+// separately licensed software that they have either included with
+// the program or referenced in the documentation.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,7 +25,7 @@
 #include "client/mysqltest/error_names.h"
 #include "client/mysqltest/utils.h"
 
-#include <assert.h>
+#include <cassert>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -49,7 +50,7 @@ bool Secondary_engine::offload_count(MYSQL *mysql, const char *mode) {
       "SHOW GLOBAL STATUS LIKE 'Secondary_engine_execution_count'";
 
   if (query_get_string(mysql, query, 1, &offload_count)) {
-    int error = mysql_errno(mysql);
+    int const error = mysql_errno(mysql);
     if (error == 0 || error == 1104 || error == 2006) return false;
     std::cerr << "mysqltest: Query '" << query << "' failed, ERROR " << error
               << " (" << mysql_sqlstate(mysql) << "): " << mysql_error(mysql)
@@ -78,13 +79,13 @@ void Secondary_engine::report_offload_count(const char *filename) {
   if (!offload_count_after && offload_count_after < offload_count_before)
     offload_count_after = offload_count_before;
 
-  int count_val = offload_count_after - offload_count_before;
+  int const count_val = offload_count_after - offload_count_before;
   assert(count_val >= 0);
 
   std::ofstream report_file(filename, std::ios::out);
 
   if (report_file.is_open()) {
-    std::string count = std::to_string(count_val);
+    std::string const count = std::to_string(count_val);
     report_file << count << std::endl;
   }
 

@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -67,9 +68,9 @@ extern void my_hash_sort_simple(const CHARSET_INFO *cs, const uint8_t *key,
 extern size_t my_lengthsp_8bit(const CHARSET_INFO *cs, const char *ptr,
                                size_t length);
 
-extern unsigned my_instr_simple(const CHARSET_INFO *, const char *b,
-                                size_t b_length, const char *s, size_t s_length,
-                                my_match_t *match, unsigned nmatch);
+extern bool my_instr_simple(const CHARSET_INFO *, const char *b,
+                            size_t b_length, const char *s, size_t s_length,
+                            my_match_t *match);
 
 /* Functions for 8bit */
 extern size_t my_caseup_str_8bit(const CHARSET_INFO *, char *);
@@ -192,9 +193,8 @@ size_t my_charpos_mb3(const CHARSET_INFO *, const char *b, const char *e,
                       size_t pos);
 size_t my_well_formed_len_mb(const CHARSET_INFO *, const char *b, const char *e,
                              size_t pos, int *error);
-unsigned my_instr_mb(const CHARSET_INFO *, const char *b, size_t b_length,
-                     const char *s, size_t s_length, my_match_t *match,
-                     unsigned nmatch);
+bool my_instr_mb(const CHARSET_INFO *, const char *b, size_t b_length,
+                 const char *s, size_t s_length, my_match_t *match);
 
 int my_strnncoll_mb_bin(const CHARSET_INFO *cs, const uint8_t *s, size_t slen,
                         const uint8_t *t, size_t tlen, bool t_is_prefix);

@@ -1,15 +1,16 @@
-// Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+// Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License, version 2.0,
 // as published by the Free Software Foundation.
 //
-// This program is also distributed with certain software (including
+// This program is designed to work with certain software (including
 // but not limited to OpenSSL) that is licensed under separate terms,
 // as designated in a particular file or component or in included license
 // documentation.  The authors of MySQL hereby grant you an additional
 // permission to link the program and your derivative works with the
-// separately licensed software that they have included with MySQL.
+// separately licensed software that they have either included with
+// the program or referenced in the documentation.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,8 +23,8 @@
 
 #include "sql/gis/srs/srs.h"
 
-#include <assert.h>
-#include <stddef.h>
+#include <cassert>
+#include <cstddef>
 
 #include <cmath>
 #include <map>
@@ -65,7 +66,7 @@ static bool has_no_conflicting_authority(const T &element, const char *name,
   if (!my_strcasecmp(&my_charset_latin1, name,
                      element.authority.name.c_str())) {
     try {
-      int auth_code = std::stoi(element.authority.code);
+      int const auth_code = std::stoi(element.authority.code);
       if (auth_code == code) return true;  // Authority name and code matches.
     } catch (...) {
       // Code is invalid or out of range.
@@ -91,10 +92,8 @@ static bool has_no_conflicting_authority(const T &element, const char *name,
 /// @retval false The element doesn't have the specified authority clause.
 template <typename T>
 static bool has_authority(const T &element, const char *name, int code) {
-  if (element.authority.valid &&
-      has_no_conflicting_authority(element, name, code))
-    return true;
-  return false;
+  return static_cast<bool>(element.authority.valid &&
+                           has_no_conflicting_authority(element, name, code));
 }
 
 /**
@@ -185,32 +184,32 @@ static bool set_parameters(gis::srid_t srid,
     In other words: If a parameter has an EPSG authority code, obey
     it. If not, use the parameter name.
   */
-  for (auto i = proj->parameters.begin(); i != proj->parameters.end(); i++) {
+  for (auto &parameter : proj->parameters) {
     bool unused = true;
-    for (size_t j = 0; j < params->size(); j++) {
+    for (auto &param : *params) {
       if (!my_strcasecmp(&my_charset_latin1, "EPSG",
-                         i->authority.name.c_str())) {
+                         parameter.authority.name.c_str())) {
         if (!my_strcasecmp(&my_charset_latin1,
-                           std::to_string(params->at(j).first).c_str(),
-                           i->authority.code.c_str())) {
-          *(params->at(j).second) = i->value;
+                           std::to_string(param.first).c_str(),
+                           parameter.authority.code.c_str())) {
+          *(param.second) = parameter.value;
           unused = false;
         }
       } else if (!my_strcasecmp(&my_charset_latin1,
-                                param_names[params->at(j).first].c_str(),
-                                i->name.c_str())) {
-        *(params->at(j).second) = i->value;
+                                param_names[param.first].c_str(),
+                                parameter.name.c_str())) {
+        *(param.second) = parameter.value;
         unused = false;
       } else if (!my_strcasecmp(&my_charset_latin1,
-                                param_aliases[params->at(j).first].c_str(),
-                                i->name.c_str())) {
-        *(params->at(j).second) = i->value;
+                                param_aliases[param.first].c_str(),
+                                parameter.name.c_str())) {
+        *(param.second) = parameter.value;
         unused = false;
       }
     }
     if (unused) {
       my_error(ER_SRS_UNUSED_PROJ_PARAMETER_PRESENT, MYF(0), srid,
-               i->name.c_str());
+               parameter.name.c_str());
       return true;
     }
   }
@@ -219,7 +218,7 @@ static bool set_parameters(gis::srid_t srid,
   // function. If any parameters are still NAN, raise an exception
   // condition.
   for (auto param : *params) {
-    int epsg_code = param.first;
+    int const epsg_code = param.first;
     double param_value = *(param.second);
     if (std::isnan(param_value)) {
       my_error(ER_SRS_PROJ_PARAMETER_MISSING, MYF(0), srid,
@@ -335,8 +334,7 @@ void push_fp_to_string(std::stringstream &proj4,
   proj4 << proj4_parameter << double_str;
 }
 
-namespace gis {
-namespace srs {
+namespace gis::srs {
 
 bool Geographic_srs::init(gis::srid_t srid,
                           gis::srs::wkt_parser::Geographic_cs *g) {
@@ -423,24 +421,24 @@ bool Geographic_srs::init(gis::srid_t srid,
   const double wgs84_semi_major_axis = 6378137.0;
   const double wgs84_inverse_flattening = 298.257223563;
   const double meter = 0.017453292519943278;
-  bool wgs84_spheroid =
+  bool const wgs84_spheroid =
       has_no_conflicting_authority(g->datum.spheroid, "EPSG", 7030) &&
       m_semi_major_axis == wgs84_semi_major_axis &&
       m_inverse_flattening == wgs84_inverse_flattening;
-  bool wgs84_datum =
+  bool const wgs84_datum =
       has_no_conflicting_authority(g->datum, "EPSG", 6326) && wgs84_spheroid;
-  bool wgs84_primem =
+  bool const wgs84_primem =
       has_no_conflicting_authority(g->prime_meridian, "EPSG", 8901) &&
       m_prime_meridian == 0.0;
-  bool wgs84_unit =
+  bool const wgs84_unit =
       has_no_conflicting_authority(g->angular_unit, "EPSG", 9122) &&
       m_angular_unit == meter;
-  bool wgs84_towgs84 =
+  bool const wgs84_towgs84 =
       !g->datum.towgs84.valid ||
       (m_towgs84[0] == 0.0 && m_towgs84[1] == 0.0 && m_towgs84[2] == 0.0 &&
        m_towgs84[3] == 0.0 && m_towgs84[4] == 0.0 && m_towgs84[5] == 0.0 &&
        m_towgs84[6] == 0.0);
-  bool wgs84_axes =
+  bool const wgs84_axes =
       m_axes[0] == Axis_direction::NORTH && m_axes[1] == Axis_direction::EAST;
   m_is_wgs84 = has_authority(*g, "EPSG", 4326) && wgs84_datum && wgs84_primem &&
                wgs84_unit && wgs84_towgs84 && wgs84_axes;
@@ -451,10 +449,10 @@ bool Geographic_srs::init(gis::srid_t srid,
 bool Geographic_srs::can_be_modified_to(
     const Spatial_reference_system &srs) const {
   if (srs.srs_type() == Srs_type::GEOGRAPHIC) {
-    const Geographic_srs &that = static_cast<const Geographic_srs &>(srs);
+    const auto &that = static_cast<const Geographic_srs &>(srs);
 
     // The SRS is WGS 84 and we're adding a all-zero TOWGS84 clause.
-    bool wgs84_add_towgs84 =
+    bool const wgs84_add_towgs84 =
         m_is_wgs84 && !has_towgs84() && that.m_towgs84[0] == 0.0 &&
         that.m_towgs84[1] == 0.0 && that.m_towgs84[2] == 0.0 &&
         that.m_towgs84[3] == 0.0 && that.m_towgs84[4] == 0.0 &&
@@ -462,23 +460,23 @@ bool Geographic_srs::can_be_modified_to(
 
     // The SRS is WGS 84 and we're removing a TOWGS84 clause. The clause is
     // all-zero and redundant, otherwise m_is_wgs84 would be false.
-    bool wgs84_remove_towgs84 = m_is_wgs84 && !that.has_towgs84();
+    bool const wgs84_remove_towgs84 = m_is_wgs84 && !that.has_towgs84();
 
     // The SRS is not WGS 84 and doesn't have a TOWGS84 clause. We're allowed to
     // add a TOWGS84 clause since that doesn't change any currently allowed
     // computations -- it only enables more transformations.
-    bool non_wgs84_add_or_no_towgs84 = !m_is_wgs84 && !has_towgs84();
+    bool const non_wgs84_add_or_no_towgs84 = !m_is_wgs84 && !has_towgs84();
 
     // Both the current and the new SRS definitions have the same TOWGS84
     // clause.
-    bool has_same_towgs84 = has_towgs84() && that.has_towgs84() &&
-                            m_towgs84[0] == that.m_towgs84[0] &&
-                            m_towgs84[1] == that.m_towgs84[1] &&
-                            m_towgs84[2] == that.m_towgs84[2] &&
-                            m_towgs84[3] == that.m_towgs84[3] &&
-                            m_towgs84[4] == that.m_towgs84[4] &&
-                            m_towgs84[5] == that.m_towgs84[5] &&
-                            m_towgs84[6] == that.m_towgs84[6];
+    bool const has_same_towgs84 = has_towgs84() && that.has_towgs84() &&
+                                  m_towgs84[0] == that.m_towgs84[0] &&
+                                  m_towgs84[1] == that.m_towgs84[1] &&
+                                  m_towgs84[2] == that.m_towgs84[2] &&
+                                  m_towgs84[3] == that.m_towgs84[3] &&
+                                  m_towgs84[4] == that.m_towgs84[4] &&
+                                  m_towgs84[5] == that.m_towgs84[5] &&
+                                  m_towgs84[6] == that.m_towgs84[6];
 
     return m_semi_major_axis == that.m_semi_major_axis &&
            m_inverse_flattening == that.m_inverse_flattening &&
@@ -495,7 +493,7 @@ bool Geographic_srs::can_be_modified_to(
 bool Projected_srs::common_proj_parameters_can_be_modified_to(
     const Spatial_reference_system &srs) const {
   if (srs.srs_type() == Srs_type::PROJECTED) {
-    const Projected_srs &that = static_cast<const Projected_srs &>(srs);
+    const auto &that = static_cast<const Projected_srs &>(srs);
     return m_geographic_srs.can_be_modified_to(that.m_geographic_srs) &&
            m_linear_unit == that.m_linear_unit && m_axes[0] == that.m_axes[0] &&
            m_axes[1] == that.m_axes[1];
@@ -509,14 +507,14 @@ std::string Geographic_srs::partial_proj4_parameters() const {
   std::stringstream proj4;
 
   my_fcvt_compact(semi_major_axis(), double_str, &error);
-  if (error) return std::string();
+  if (error) return {};
   proj4 << " +a=" << double_str;
 
   if (inverse_flattening() == 0.0) {
     proj4 << " +b=" << double_str;
   } else {
     my_fcvt_compact(inverse_flattening(), double_str, &error);
-    if (error) return std::string();
+    if (error) return {};
     proj4 << " +rf=" << double_str;
   }
 
@@ -534,7 +532,7 @@ std::string Geographic_srs::partial_proj4_parameters() const {
     for (int i = 0; i < 7; i++) {
       if (i != 0) proj4 << ",";
       my_fcvt_compact(m_towgs84[i], double_str, &error);
-      if (error) return std::string();
+      if (error) return {};
       proj4 << double_str;
     }
   } else {
@@ -591,10 +589,10 @@ bool Popular_visualisation_pseudo_mercator_srs::init(
   // Note: the parameter latitude of natural origin is not used.
   // However for completeness in CRS labelling the EPSG Dataset
   // includes this parameter
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -607,7 +605,7 @@ bool Popular_visualisation_pseudo_mercator_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::POPULAR_VISUALISATION_PSEUDO_MERCATOR) {
-    const Popular_visualisation_pseudo_mercator_srs &that =
+    const auto &that =
         static_cast<const Popular_visualisation_pseudo_mercator_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
@@ -638,10 +636,10 @@ bool Lambert_azimuthal_equal_area_spherical_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -654,7 +652,7 @@ bool Lambert_azimuthal_equal_area_spherical_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::LAMBERT_AZIMUTHAL_EQUAL_AREA_SPHERICAL) {
-    const Lambert_azimuthal_equal_area_spherical_srs &that =
+    const auto &that =
         static_cast<const Lambert_azimuthal_equal_area_spherical_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
@@ -684,10 +682,10 @@ bool Equidistant_cylindrical_srs::init(gis::srid_t srid,
                                        gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8823, &m_standard_parallel_1));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8823, &m_standard_parallel_1);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -700,8 +698,7 @@ bool Equidistant_cylindrical_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::EQUIDISTANT_CYLINDRICAL) {
-    const Equidistant_cylindrical_srs &that =
-        static_cast<const Equidistant_cylindrical_srs &>(srs);
+    const auto &that = static_cast<const Equidistant_cylindrical_srs &>(srs);
     return m_standard_parallel_1 == that.m_standard_parallel_1 &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
            m_false_easting == that.m_false_easting &&
@@ -729,10 +726,10 @@ bool Equidistant_cylindrical_spherical_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8823, &m_standard_parallel_1));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8823, &m_standard_parallel_1);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -745,7 +742,7 @@ bool Equidistant_cylindrical_spherical_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::EQUIDISTANT_CYLINDRICAL_SPHERICAL) {
-    const Equidistant_cylindrical_spherical_srs &that =
+    const auto &that =
         static_cast<const Equidistant_cylindrical_spherical_srs &>(srs);
     return m_standard_parallel_1 == that.m_standard_parallel_1 &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
@@ -774,13 +771,13 @@ bool Krovak_north_orientated_srs::init(gis::srid_t srid,
                                        gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8811, &m_latitude_of_center));
-  params.push_back(std::make_pair(8833, &m_longitude_of_center));
-  params.push_back(std::make_pair(1036, &m_azimuth));
-  params.push_back(std::make_pair(8818, &m_pseudo_standard_parallel_1));
-  params.push_back(std::make_pair(8819, &m_scale_factor));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8811, &m_latitude_of_center);
+  params.emplace_back(8833, &m_longitude_of_center);
+  params.emplace_back(1036, &m_azimuth);
+  params.emplace_back(8818, &m_pseudo_standard_parallel_1);
+  params.emplace_back(8819, &m_scale_factor);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -793,8 +790,7 @@ bool Krovak_north_orientated_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::KROVAK_NORTH_ORIENTATED) {
-    const Krovak_north_orientated_srs &that =
-        static_cast<const Krovak_north_orientated_srs &>(srs);
+    const auto &that = static_cast<const Krovak_north_orientated_srs &>(srs);
     return m_latitude_of_center == that.m_latitude_of_center &&
            m_longitude_of_center == that.m_longitude_of_center &&
            m_azimuth == that.m_azimuth &&
@@ -828,25 +824,25 @@ bool Krovak_modified_srs::init(gis::srid_t srid,
                                gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8811, &m_latitude_of_center));
-  params.push_back(std::make_pair(8833, &m_longitude_of_center));
-  params.push_back(std::make_pair(1036, &m_azimuth));
-  params.push_back(std::make_pair(8818, &m_pseudo_standard_parallel_1));
-  params.push_back(std::make_pair(8819, &m_scale_factor));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
-  params.push_back(std::make_pair(8617, &m_evaluation_point_ordinate_1));
-  params.push_back(std::make_pair(8618, &m_evaluation_point_ordinate_2));
-  params.push_back(std::make_pair(1026, &m_c1));
-  params.push_back(std::make_pair(1027, &m_c2));
-  params.push_back(std::make_pair(1028, &m_c3));
-  params.push_back(std::make_pair(1029, &m_c4));
-  params.push_back(std::make_pair(1030, &m_c5));
-  params.push_back(std::make_pair(1031, &m_c6));
-  params.push_back(std::make_pair(1032, &m_c7));
-  params.push_back(std::make_pair(1033, &m_c8));
-  params.push_back(std::make_pair(1034, &m_c9));
-  params.push_back(std::make_pair(1035, &m_c10));
+  params.emplace_back(8811, &m_latitude_of_center);
+  params.emplace_back(8833, &m_longitude_of_center);
+  params.emplace_back(1036, &m_azimuth);
+  params.emplace_back(8818, &m_pseudo_standard_parallel_1);
+  params.emplace_back(8819, &m_scale_factor);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
+  params.emplace_back(8617, &m_evaluation_point_ordinate_1);
+  params.emplace_back(8618, &m_evaluation_point_ordinate_2);
+  params.emplace_back(1026, &m_c1);
+  params.emplace_back(1027, &m_c2);
+  params.emplace_back(1028, &m_c3);
+  params.emplace_back(1029, &m_c4);
+  params.emplace_back(1030, &m_c5);
+  params.emplace_back(1031, &m_c6);
+  params.emplace_back(1032, &m_c7);
+  params.emplace_back(1033, &m_c8);
+  params.emplace_back(1034, &m_c9);
+  params.emplace_back(1035, &m_c10);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -859,8 +855,7 @@ bool Krovak_modified_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::KROVAK_MODIFIED) {
-    const Krovak_modified_srs &that =
-        static_cast<const Krovak_modified_srs &>(srs);
+    const auto &that = static_cast<const Krovak_modified_srs &>(srs);
     return m_latitude_of_center == that.m_latitude_of_center &&
            m_longitude_of_center == that.m_longitude_of_center &&
            m_azimuth == that.m_azimuth &&
@@ -885,25 +880,25 @@ bool Krovak_modified_north_orientated_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8811, &m_latitude_of_center));
-  params.push_back(std::make_pair(8833, &m_longitude_of_center));
-  params.push_back(std::make_pair(1036, &m_azimuth));
-  params.push_back(std::make_pair(8818, &m_pseudo_standard_parallel_1));
-  params.push_back(std::make_pair(8819, &m_scale_factor));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
-  params.push_back(std::make_pair(8617, &m_evaluation_point_ordinate_1));
-  params.push_back(std::make_pair(8618, &m_evaluation_point_ordinate_2));
-  params.push_back(std::make_pair(1026, &m_c1));
-  params.push_back(std::make_pair(1027, &m_c2));
-  params.push_back(std::make_pair(1028, &m_c3));
-  params.push_back(std::make_pair(1029, &m_c4));
-  params.push_back(std::make_pair(1030, &m_c5));
-  params.push_back(std::make_pair(1031, &m_c6));
-  params.push_back(std::make_pair(1032, &m_c7));
-  params.push_back(std::make_pair(1033, &m_c8));
-  params.push_back(std::make_pair(1034, &m_c9));
-  params.push_back(std::make_pair(1035, &m_c10));
+  params.emplace_back(8811, &m_latitude_of_center);
+  params.emplace_back(8833, &m_longitude_of_center);
+  params.emplace_back(1036, &m_azimuth);
+  params.emplace_back(8818, &m_pseudo_standard_parallel_1);
+  params.emplace_back(8819, &m_scale_factor);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
+  params.emplace_back(8617, &m_evaluation_point_ordinate_1);
+  params.emplace_back(8618, &m_evaluation_point_ordinate_2);
+  params.emplace_back(1026, &m_c1);
+  params.emplace_back(1027, &m_c2);
+  params.emplace_back(1028, &m_c3);
+  params.emplace_back(1029, &m_c4);
+  params.emplace_back(1030, &m_c5);
+  params.emplace_back(1031, &m_c6);
+  params.emplace_back(1032, &m_c7);
+  params.emplace_back(1033, &m_c8);
+  params.emplace_back(1034, &m_c9);
+  params.emplace_back(1035, &m_c10);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -916,7 +911,7 @@ bool Krovak_modified_north_orientated_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::KROVAK_MODIFIED_NORTH_ORIENTATED) {
-    const Krovak_modified_north_orientated_srs &that =
+    const auto &that =
         static_cast<const Krovak_modified_north_orientated_srs &>(srs);
     return m_latitude_of_center == that.m_latitude_of_center &&
            m_longitude_of_center == that.m_longitude_of_center &&
@@ -941,13 +936,13 @@ bool Lambert_conic_conformal_2sp_michigan_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8821, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8822, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8823, &m_standard_parallel_1));
-  params.push_back(std::make_pair(8824, &m_standard_parallel_2));
-  params.push_back(std::make_pair(8826, &m_false_easting));
-  params.push_back(std::make_pair(8827, &m_false_northing));
-  params.push_back(std::make_pair(1038, &m_ellipsoid_scale_factor));
+  params.emplace_back(8821, &m_latitude_of_origin);
+  params.emplace_back(8822, &m_longitude_of_origin);
+  params.emplace_back(8823, &m_standard_parallel_1);
+  params.emplace_back(8824, &m_standard_parallel_2);
+  params.emplace_back(8826, &m_false_easting);
+  params.emplace_back(8827, &m_false_northing);
+  params.emplace_back(1038, &m_ellipsoid_scale_factor);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -960,7 +955,7 @@ bool Lambert_conic_conformal_2sp_michigan_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::LAMBERT_CONIC_CONFORMAL_2SP_MICHIGAN) {
-    const Lambert_conic_conformal_2sp_michigan_srs &that =
+    const auto &that =
         static_cast<const Lambert_conic_conformal_2sp_michigan_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
@@ -995,11 +990,11 @@ bool Colombia_urban_srs::init(gis::srid_t srid,
                               gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
-  params.push_back(std::make_pair(1039, &m_projection_plane_height_at_origin));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
+  params.emplace_back(1039, &m_projection_plane_height_at_origin);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1012,8 +1007,7 @@ bool Colombia_urban_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::COLOMBIA_URBAN) {
-    const Colombia_urban_srs &that =
-        static_cast<const Colombia_urban_srs &>(srs);
+    const auto &that = static_cast<const Colombia_urban_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
            m_false_easting == that.m_false_easting &&
@@ -1044,11 +1038,11 @@ bool Lambert_conic_conformal_1sp_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8805, &m_scale_factor));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8805, &m_scale_factor);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1061,7 +1055,7 @@ bool Lambert_conic_conformal_1sp_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::LAMBERT_CONIC_CONFORMAL_1SP) {
-    const Lambert_conic_conformal_1sp_srs &that =
+    const auto &that =
         static_cast<const Lambert_conic_conformal_1sp_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
@@ -1093,12 +1087,12 @@ bool Lambert_conic_conformal_2sp_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8821, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8822, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8823, &m_standard_parallel_1));
-  params.push_back(std::make_pair(8824, &m_standard_parallel_2));
-  params.push_back(std::make_pair(8826, &m_false_easting));
-  params.push_back(std::make_pair(8827, &m_false_northing));
+  params.emplace_back(8821, &m_latitude_of_origin);
+  params.emplace_back(8822, &m_longitude_of_origin);
+  params.emplace_back(8823, &m_standard_parallel_1);
+  params.emplace_back(8824, &m_standard_parallel_2);
+  params.emplace_back(8826, &m_false_easting);
+  params.emplace_back(8827, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1111,7 +1105,7 @@ bool Lambert_conic_conformal_2sp_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::LAMBERT_CONIC_CONFORMAL_2SP) {
-    const Lambert_conic_conformal_2sp_srs &that =
+    const auto &that =
         static_cast<const Lambert_conic_conformal_2sp_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
@@ -1144,12 +1138,12 @@ bool Lambert_conic_conformal_2sp_belgium_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8821, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8822, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8823, &m_standard_parallel_1));
-  params.push_back(std::make_pair(8824, &m_standard_parallel_2));
-  params.push_back(std::make_pair(8826, &m_false_easting));
-  params.push_back(std::make_pair(8827, &m_false_northing));
+  params.emplace_back(8821, &m_latitude_of_origin);
+  params.emplace_back(8822, &m_longitude_of_origin);
+  params.emplace_back(8823, &m_standard_parallel_1);
+  params.emplace_back(8824, &m_standard_parallel_2);
+  params.emplace_back(8826, &m_false_easting);
+  params.emplace_back(8827, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1162,7 +1156,7 @@ bool Lambert_conic_conformal_2sp_belgium_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::LAMBERT_CONIC_CONFORMAL_2SP_BELGIUM) {
-    const Lambert_conic_conformal_2sp_belgium_srs &that =
+    const auto &that =
         static_cast<const Lambert_conic_conformal_2sp_belgium_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
@@ -1195,11 +1189,11 @@ bool Mercator_variant_a_srs::init(gis::srid_t srid,
                                   gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8805, &m_scale_factor));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8805, &m_scale_factor);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1212,8 +1206,7 @@ bool Mercator_variant_a_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::MERCATOR_VARIANT_A) {
-    const Mercator_variant_a_srs &that =
-        static_cast<const Mercator_variant_a_srs &>(srs);
+    const auto &that = static_cast<const Mercator_variant_a_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
            m_scale_factor == that.m_scale_factor &&
@@ -1243,10 +1236,10 @@ bool Mercator_variant_b_srs::init(gis::srid_t srid,
                                   gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8823, &m_standard_parallel_1));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8823, &m_standard_parallel_1);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1259,8 +1252,7 @@ bool Mercator_variant_b_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::MERCATOR_VARIANT_B) {
-    const Mercator_variant_b_srs &that =
-        static_cast<const Mercator_variant_b_srs &>(srs);
+    const auto &that = static_cast<const Mercator_variant_b_srs &>(srs);
     return m_standard_parallel_1 == that.m_standard_parallel_1 &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
            m_false_easting == that.m_false_easting &&
@@ -1288,10 +1280,10 @@ bool Cassini_soldner_srs::init(gis::srid_t srid,
                                gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1304,8 +1296,7 @@ bool Cassini_soldner_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::CASSINI_SOLDNER) {
-    const Cassini_soldner_srs &that =
-        static_cast<const Cassini_soldner_srs &>(srs);
+    const auto &that = static_cast<const Cassini_soldner_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
            m_false_easting == that.m_false_easting &&
@@ -1333,11 +1324,11 @@ bool Transverse_mercator_srs::init(gis::srid_t srid,
                                    gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8805, &m_scale_factor));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8805, &m_scale_factor);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1350,8 +1341,7 @@ bool Transverse_mercator_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::TRANSVERSE_MERCATOR) {
-    const Transverse_mercator_srs &that =
-        static_cast<const Transverse_mercator_srs &>(srs);
+    const auto &that = static_cast<const Transverse_mercator_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
            m_scale_factor == that.m_scale_factor &&
@@ -1381,11 +1371,11 @@ bool Transverse_mercator_south_orientated_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8805, &m_scale_factor));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8805, &m_scale_factor);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1398,7 +1388,7 @@ bool Transverse_mercator_south_orientated_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::TRANSVERSE_MERCATOR_SOUTH_ORIENTATED) {
-    const Transverse_mercator_south_orientated_srs &that =
+    const auto &that =
         static_cast<const Transverse_mercator_south_orientated_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
@@ -1429,11 +1419,11 @@ bool Oblique_stereographic_srs::init(gis::srid_t srid,
                                      gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8805, &m_scale_factor));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8805, &m_scale_factor);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1446,8 +1436,7 @@ bool Oblique_stereographic_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::OBLIQUE_STEREOGRAPHIC) {
-    const Oblique_stereographic_srs &that =
-        static_cast<const Oblique_stereographic_srs &>(srs);
+    const auto &that = static_cast<const Oblique_stereographic_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
            m_scale_factor == that.m_scale_factor &&
@@ -1477,11 +1466,11 @@ bool Polar_stereographic_variant_a_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8805, &m_scale_factor));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8805, &m_scale_factor);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1494,7 +1483,7 @@ bool Polar_stereographic_variant_a_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::POLAR_STEREOGRAPHIC_VARIANT_A) {
-    const Polar_stereographic_variant_a_srs &that =
+    const auto &that =
         static_cast<const Polar_stereographic_variant_a_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
@@ -1525,10 +1514,10 @@ bool New_zealand_map_grid_srs::init(gis::srid_t srid,
                                     gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1541,8 +1530,7 @@ bool New_zealand_map_grid_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::NEW_ZEALAND_MAP_GRID) {
-    const New_zealand_map_grid_srs &that =
-        static_cast<const New_zealand_map_grid_srs &>(srs);
+    const auto &that = static_cast<const New_zealand_map_grid_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
            m_false_easting == that.m_false_easting &&
@@ -1565,13 +1553,13 @@ bool Hotine_oblique_mercator_variant_a_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8811, &m_latitude_of_center));
-  params.push_back(std::make_pair(8812, &m_longitude_of_center));
-  params.push_back(std::make_pair(8813, &m_azimuth));
-  params.push_back(std::make_pair(8814, &m_rectified_grid_angle));
-  params.push_back(std::make_pair(8815, &m_scale_factor));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8811, &m_latitude_of_center);
+  params.emplace_back(8812, &m_longitude_of_center);
+  params.emplace_back(8813, &m_azimuth);
+  params.emplace_back(8814, &m_rectified_grid_angle);
+  params.emplace_back(8815, &m_scale_factor);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1584,7 +1572,7 @@ bool Hotine_oblique_mercator_variant_a_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::HOTINE_OBLIQUE_MERCATOR_VARIANT_A) {
-    const Hotine_oblique_mercator_variant_a_srs &that =
+    const auto &that =
         static_cast<const Hotine_oblique_mercator_variant_a_srs &>(srs);
     return m_latitude_of_center == that.m_latitude_of_center &&
            m_longitude_of_center == that.m_longitude_of_center &&
@@ -1619,12 +1607,12 @@ bool Laborde_oblique_mercator_srs::init(gis::srid_t srid,
                                         gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8811, &m_latitude_of_center));
-  params.push_back(std::make_pair(8812, &m_longitude_of_center));
-  params.push_back(std::make_pair(8813, &m_azimuth));
-  params.push_back(std::make_pair(8815, &m_scale_factor));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8811, &m_latitude_of_center);
+  params.emplace_back(8812, &m_longitude_of_center);
+  params.emplace_back(8813, &m_azimuth);
+  params.emplace_back(8815, &m_scale_factor);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1637,8 +1625,7 @@ bool Laborde_oblique_mercator_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::LABORDE_OBLIQUE_MERCATOR) {
-    const Laborde_oblique_mercator_srs &that =
-        static_cast<const Laborde_oblique_mercator_srs &>(srs);
+    const auto &that = static_cast<const Laborde_oblique_mercator_srs &>(srs);
     return m_latitude_of_center == that.m_latitude_of_center &&
            m_longitude_of_center == that.m_longitude_of_center &&
            m_azimuth == that.m_azimuth &&
@@ -1670,13 +1657,13 @@ bool Hotine_oblique_mercator_variant_b_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8811, &m_latitude_of_center));
-  params.push_back(std::make_pair(8812, &m_longitude_of_center));
-  params.push_back(std::make_pair(8813, &m_azimuth));
-  params.push_back(std::make_pair(8814, &m_rectified_grid_angle));
-  params.push_back(std::make_pair(8815, &m_scale_factor));
-  params.push_back(std::make_pair(8816, &m_false_easting));
-  params.push_back(std::make_pair(8817, &m_false_northing));
+  params.emplace_back(8811, &m_latitude_of_center);
+  params.emplace_back(8812, &m_longitude_of_center);
+  params.emplace_back(8813, &m_azimuth);
+  params.emplace_back(8814, &m_rectified_grid_angle);
+  params.emplace_back(8815, &m_scale_factor);
+  params.emplace_back(8816, &m_false_easting);
+  params.emplace_back(8817, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1689,7 +1676,7 @@ bool Hotine_oblique_mercator_variant_b_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::HOTINE_OBLIQUE_MERCATOR_VARIANT_B) {
-    const Hotine_oblique_mercator_variant_b_srs &that =
+    const auto &that =
         static_cast<const Hotine_oblique_mercator_variant_b_srs &>(srs);
     return m_latitude_of_center == that.m_latitude_of_center &&
            m_longitude_of_center == that.m_longitude_of_center &&
@@ -1725,10 +1712,10 @@ bool Tunisia_mining_grid_srs::init(gis::srid_t srid,
                                    gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8821, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8822, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8826, &m_false_easting));
-  params.push_back(std::make_pair(8827, &m_false_northing));
+  params.emplace_back(8821, &m_latitude_of_origin);
+  params.emplace_back(8822, &m_longitude_of_origin);
+  params.emplace_back(8826, &m_false_easting);
+  params.emplace_back(8827, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1741,8 +1728,7 @@ bool Tunisia_mining_grid_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::TUNISIA_MINING_GRID) {
-    const Tunisia_mining_grid_srs &that =
-        static_cast<const Tunisia_mining_grid_srs &>(srs);
+    const auto &that = static_cast<const Tunisia_mining_grid_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
            m_false_easting == that.m_false_easting &&
@@ -1755,11 +1741,11 @@ bool Lambert_conic_near_conformal_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8805, &m_scale_factor));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8805, &m_scale_factor);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1772,7 +1758,7 @@ bool Lambert_conic_near_conformal_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::LAMBERT_CONIC_NEAR_CONFORMAL) {
-    const Lambert_conic_near_conformal_srs &that =
+    const auto &that =
         static_cast<const Lambert_conic_near_conformal_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
@@ -1804,10 +1790,10 @@ bool American_polyconic_srs::init(gis::srid_t srid,
                                   gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1820,8 +1806,7 @@ bool American_polyconic_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::AMERICAN_POLYCONIC) {
-    const American_polyconic_srs &that =
-        static_cast<const American_polyconic_srs &>(srs);
+    const auto &that = static_cast<const American_polyconic_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
            m_false_easting == that.m_false_easting &&
@@ -1848,13 +1833,13 @@ std::string American_polyconic_srs::proj4_parameters() const {
 bool Krovak_srs::init(gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8811, &m_latitude_of_center));
-  params.push_back(std::make_pair(8833, &m_longitude_of_center));
-  params.push_back(std::make_pair(1036, &m_azimuth));
-  params.push_back(std::make_pair(8818, &m_pseudo_standard_parallel_1));
-  params.push_back(std::make_pair(8819, &m_scale_factor));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8811, &m_latitude_of_center);
+  params.emplace_back(8833, &m_longitude_of_center);
+  params.emplace_back(1036, &m_azimuth);
+  params.emplace_back(8818, &m_pseudo_standard_parallel_1);
+  params.emplace_back(8819, &m_scale_factor);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1866,7 +1851,7 @@ bool Krovak_srs::can_be_modified_to(const Spatial_reference_system &srs) const {
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::KROVAK) {
-    const Krovak_srs &that = static_cast<const Krovak_srs &>(srs);
+    const auto &that = static_cast<const Krovak_srs &>(srs);
     return m_latitude_of_center == that.m_latitude_of_center &&
            m_longitude_of_center == that.m_longitude_of_center &&
            m_azimuth == that.m_azimuth &&
@@ -1901,10 +1886,10 @@ bool Lambert_azimuthal_equal_area_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1917,7 +1902,7 @@ bool Lambert_azimuthal_equal_area_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::LAMBERT_AZIMUTHAL_EQUAL_AREA) {
-    const Lambert_azimuthal_equal_area_srs &that =
+    const auto &that =
         static_cast<const Lambert_azimuthal_equal_area_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
@@ -1946,12 +1931,12 @@ bool Albers_equal_area_srs::init(gis::srid_t srid,
                                  gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8821, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8822, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8823, &m_standard_parallel_1));
-  params.push_back(std::make_pair(8824, &m_standard_parallel_2));
-  params.push_back(std::make_pair(8826, &m_false_easting));
-  params.push_back(std::make_pair(8827, &m_false_northing));
+  params.emplace_back(8821, &m_latitude_of_origin);
+  params.emplace_back(8822, &m_longitude_of_origin);
+  params.emplace_back(8823, &m_standard_parallel_1);
+  params.emplace_back(8824, &m_standard_parallel_2);
+  params.emplace_back(8826, &m_false_easting);
+  params.emplace_back(8827, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -1964,8 +1949,7 @@ bool Albers_equal_area_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::ALBERS_EQUAL_AREA) {
-    const Albers_equal_area_srs &that =
-        static_cast<const Albers_equal_area_srs &>(srs);
+    const auto &that = static_cast<const Albers_equal_area_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
            m_standard_parallel_1 == that.m_standard_parallel_1 &&
@@ -1997,12 +1981,12 @@ bool Transverse_mercator_zoned_grid_system_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8830, &m_initial_longitude));
-  params.push_back(std::make_pair(8831, &m_zone_width));
-  params.push_back(std::make_pair(8805, &m_scale_factor));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8830, &m_initial_longitude);
+  params.emplace_back(8831, &m_zone_width);
+  params.emplace_back(8805, &m_scale_factor);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -2015,7 +1999,7 @@ bool Transverse_mercator_zoned_grid_system_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::TRANSVERSE_MERCATOR_ZONED_GRID_SYSTEM) {
-    const Transverse_mercator_zoned_grid_system_srs &that =
+    const auto &that =
         static_cast<const Transverse_mercator_zoned_grid_system_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_initial_longitude == that.m_initial_longitude &&
@@ -2052,11 +2036,11 @@ bool Lambert_conic_conformal_west_orientated_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8805, &m_scale_factor));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8805, &m_scale_factor);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -2069,7 +2053,7 @@ bool Lambert_conic_conformal_west_orientated_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::LAMBERT_CONIC_CONFORMAL_WEST_ORIENTATED) {
-    const Lambert_conic_conformal_west_orientated_srs &that =
+    const auto &that =
         static_cast<const Lambert_conic_conformal_west_orientated_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
@@ -2084,10 +2068,10 @@ bool Bonne_south_orientated_srs::init(gis::srid_t srid,
                                       gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -2100,8 +2084,7 @@ bool Bonne_south_orientated_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::BONNE_SOUTH_ORIENTATED) {
-    const Bonne_south_orientated_srs &that =
-        static_cast<const Bonne_south_orientated_srs &>(srs);
+    const auto &that = static_cast<const Bonne_south_orientated_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
            m_false_easting == that.m_false_easting &&
@@ -2129,10 +2112,10 @@ bool Polar_stereographic_variant_b_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8832, &m_standard_parallel));
-  params.push_back(std::make_pair(8833, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8832, &m_standard_parallel);
+  params.emplace_back(8833, &m_longitude_of_origin);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -2145,7 +2128,7 @@ bool Polar_stereographic_variant_b_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::POLAR_STEREOGRAPHIC_VARIANT_B) {
-    const Polar_stereographic_variant_b_srs &that =
+    const auto &that =
         static_cast<const Polar_stereographic_variant_b_srs &>(srs);
     return m_standard_parallel == that.m_standard_parallel &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
@@ -2174,10 +2157,10 @@ bool Polar_stereographic_variant_c_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8832, &m_standard_parallel));
-  params.push_back(std::make_pair(8833, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8826, &m_false_easting));
-  params.push_back(std::make_pair(8827, &m_false_northing));
+  params.emplace_back(8832, &m_standard_parallel);
+  params.emplace_back(8833, &m_longitude_of_origin);
+  params.emplace_back(8826, &m_false_easting);
+  params.emplace_back(8827, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -2190,7 +2173,7 @@ bool Polar_stereographic_variant_c_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::POLAR_STEREOGRAPHIC_VARIANT_C) {
-    const Polar_stereographic_variant_c_srs &that =
+    const auto &that =
         static_cast<const Polar_stereographic_variant_c_srs &>(srs);
     return m_standard_parallel == that.m_standard_parallel &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
@@ -2219,10 +2202,10 @@ bool Guam_projection_srs::init(gis::srid_t srid,
                                gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -2235,8 +2218,7 @@ bool Guam_projection_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::GUAM_PROJECTION) {
-    const Guam_projection_srs &that =
-        static_cast<const Guam_projection_srs &>(srs);
+    const auto &that = static_cast<const Guam_projection_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
            m_false_easting == that.m_false_easting &&
@@ -2264,10 +2246,10 @@ bool Modified_azimuthal_equidistant_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -2280,7 +2262,7 @@ bool Modified_azimuthal_equidistant_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::MODIFIED_AZIMUTHAL_EQUIDISTANT) {
-    const Modified_azimuthal_equidistant_srs &that =
+    const auto &that =
         static_cast<const Modified_azimuthal_equidistant_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
@@ -2309,10 +2291,10 @@ bool Hyperbolic_cassini_soldner_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8801, &m_latitude_of_origin));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8801, &m_latitude_of_origin);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -2325,8 +2307,7 @@ bool Hyperbolic_cassini_soldner_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::HYPERBOLIC_CASSINI_SOLDNER) {
-    const Hyperbolic_cassini_soldner_srs &that =
-        static_cast<const Hyperbolic_cassini_soldner_srs &>(srs);
+    const auto &that = static_cast<const Hyperbolic_cassini_soldner_srs &>(srs);
     return m_latitude_of_origin == that.m_latitude_of_origin &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
            m_false_easting == that.m_false_easting &&
@@ -2354,10 +2335,10 @@ bool Lambert_cylindrical_equal_area_spherical_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8823, &m_standard_parallel_1));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8823, &m_standard_parallel_1);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -2370,7 +2351,7 @@ bool Lambert_cylindrical_equal_area_spherical_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::LAMBERT_CYLINDRICAL_EQUAL_AREA_SPHERICAL) {
-    const Lambert_cylindrical_equal_area_spherical_srs &that =
+    const auto &that =
         static_cast<const Lambert_cylindrical_equal_area_spherical_srs &>(srs);
     return m_standard_parallel_1 == that.m_standard_parallel_1 &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
@@ -2400,10 +2381,10 @@ bool Lambert_cylindrical_equal_area_srs::init(
     gis::srid_t srid, gis::srs::wkt_parser::Projected_cs *p) {
   std::vector<std::pair<int, double *>> params;
 
-  params.push_back(std::make_pair(8823, &m_standard_parallel_1));
-  params.push_back(std::make_pair(8802, &m_longitude_of_origin));
-  params.push_back(std::make_pair(8806, &m_false_easting));
-  params.push_back(std::make_pair(8807, &m_false_northing));
+  params.emplace_back(8823, &m_standard_parallel_1);
+  params.emplace_back(8802, &m_longitude_of_origin);
+  params.emplace_back(8806, &m_false_easting);
+  params.emplace_back(8807, &m_false_northing);
 
   bool res = Projected_srs::init(srid, p);
   res |= set_parameters(srid, p, &params);
@@ -2416,7 +2397,7 @@ bool Lambert_cylindrical_equal_area_srs::can_be_modified_to(
   if (common_proj_parameters_can_be_modified_to(srs) &&
       static_cast<const Projected_srs &>(srs).projection_type() ==
           Projection_type::LAMBERT_CYLINDRICAL_EQUAL_AREA) {
-    const Lambert_cylindrical_equal_area_srs &that =
+    const auto &that =
         static_cast<const Lambert_cylindrical_equal_area_srs &>(srs);
     return m_standard_parallel_1 == that.m_standard_parallel_1 &&
            m_longitude_of_origin == that.m_longitude_of_origin &&
@@ -2441,8 +2422,7 @@ std::string Lambert_cylindrical_equal_area_srs::proj4_parameters() const {
   return proj4.str();
 }
 
-}  // namespace srs
-}  // namespace gis
+}  // namespace gis::srs
 
 /**
   Create a geographic SRS description from a parse tree.

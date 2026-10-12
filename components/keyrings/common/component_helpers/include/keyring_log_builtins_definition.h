@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,8 +29,7 @@
 
 #include <mysql/components/services/log_builtins.h>
 
-namespace keyring_common {
-namespace service_definition {
+namespace keyring_common::service_definition {
 
 class Log_builtins_keyring {
  public:
@@ -76,9 +76,7 @@ class Log_builtins_keyring {
   static DEFINE_METHOD(log_item_iter *, line_item_iter_acquire, (log_line *)) {
     return nullptr;
   }
-  static DEFINE_METHOD(void, line_item_iter_release, (log_item_iter *)) {
-    return;
-  }
+  static DEFINE_METHOD(void, line_item_iter_release, (log_item_iter *)) {}
   static DEFINE_METHOD(log_item *, line_item_iter_first, (log_item_iter *)) {
     return nullptr;
   }
@@ -111,6 +109,9 @@ class Log_builtins_keyring {
     return LOG_SERVICE_NOTHING_DONE;
   }
   static DEFINE_METHOD(int, message, (int, ...)) { return 0; }
+  static DEFINE_METHOD(void, line_set_flag,
+                       (log_line *, log_line_flags_mask, log_line_flags_mask)) {
+  }
 
   /* log_builtins_string */
   static DEFINE_METHOD(char *, find_first, (const char *, int)) {
@@ -160,8 +161,7 @@ class Log_builtins_keyring {
       MY_ATTRIBUTE((format(printf, 3, 0)));
 };
 
-}  // namespace service_definition
-}  // namespace keyring_common
+}  // namespace keyring_common::service_definition
 
 #define KEYRING_LOG_BUILTINS_IMPLEMENTOR(component_name)                       \
   BEGIN_SERVICE_IMPLEMENTATION(component_name, log_builtins)                   \
@@ -187,6 +187,7 @@ class Log_builtins_keyring {
           item_set_lexstring,                                                  \
       keyring_common::service_definition::Log_builtins_keyring::               \
           item_set_cstring,                                                    \
+      keyring_common::service_definition::Log_builtins_keyring::line_set_flag, \
       keyring_common::service_definition::Log_builtins_keyring::               \
           item_set_with_key,                                                   \
       keyring_common::service_definition::Log_builtins_keyring::item_set,      \

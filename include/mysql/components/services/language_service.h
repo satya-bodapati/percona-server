@@ -1,15 +1,16 @@
-/* Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,6 +26,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include "mysql/components/service.h"
 #include "mysql/components/services/bits/thd.h"
+#include "mysql/components/services/defs/mysql_string_defs.h"
 
 /**
   The handle is created by the caller of
@@ -141,5 +143,71 @@ DECLARE_BOOL_METHOD(execute, (external_program_handle lang_sp,
                               stored_program_statement_handle sp_statement));
 
 END_SERVICE_DEFINITION(external_program_execution)
+
+/**
+  @ingroup group_components_services_inventory
+
+  A service to parse library code
+*/
+BEGIN_SERVICE_DEFINITION(external_library)
+
+/**
+  Check if the language of the library is supported
+
+  @param [in]  language   Language of the library source code
+  @param [out] result     Returns true if the language is supported
+
+  @return Status of the performed operation
+  @retval false success
+  @retval true failure
+*/
+DECLARE_BOOL_METHOD(is_language_supported,
+                    (mysql_cstring_with_length language, bool *result));
+
+/**
+  Parses library code.
+
+  @param [in]  name       Name of the library
+  @param [in]  language   Language of the library source code
+  @param [in]  body       Library's source code in UTF8MB4 charset
+
+  @return Status of the performed operation
+  @retval false success
+  @retval true failure
+*/
+DECLARE_BOOL_METHOD(parse, (mysql_cstring_with_length name,
+                            mysql_cstring_with_length language,
+                            mysql_cstring_with_length body));
+
+END_SERVICE_DEFINITION(external_library)
+
+/**
+  @ingroup group_components_services_inventory
+
+  A service to parse library code in either UTF8 or BINARY character set.
+*/
+BEGIN_SERVICE_DEFINITION(external_library_ext)
+
+/**
+  Parses library code.
+
+  @param [in]  name          Name of the library.
+  @param [in]  language      Language of the library source code.
+  @param [in]  body          Library's source code in provided charset.
+  @param [in]  is_binary     Is the library body stored with a binary character
+  set?
+  @param [out] result        True if the parse succeeds.
+                             False if the library cannot be parsed.
+
+  @return Status of the performed operation.
+  @retval false success.
+  @retval true failure.
+*/
+DECLARE_BOOL_METHOD(parse, (mysql_cstring_with_length name,
+                            mysql_cstring_with_length language,
+                            mysql_cstring_with_length body, bool is_binary,
+                            bool *result));
+
+END_SERVICE_DEFINITION(external_library_ext)
 
 #endif /* LANGUAGE_SERVICE_GUARD */

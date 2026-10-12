@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -45,15 +46,15 @@ struct FT_STOPWORD {
 static TREE *stopwords3 = nullptr;
 
 static int FT_STOPWORD_cmp(const void *, const void *a, const void *b) {
-  const FT_STOPWORD *w1 = static_cast<const FT_STOPWORD *>(a);
-  const FT_STOPWORD *w2 = static_cast<const FT_STOPWORD *>(b);
+  const auto *w1 = static_cast<const FT_STOPWORD *>(a);
+  const auto *w2 = static_cast<const FT_STOPWORD *>(b);
   return ha_compare_text(ft_stopword_cs, pointer_cast<const uchar *>(w1->pos),
                          w1->len, pointer_cast<const uchar *>(w2->pos), w2->len,
                          false);
 }
 
 static void FT_STOPWORD_free(void *v_w, TREE_FREE action, const void *) {
-  FT_STOPWORD *w = static_cast<FT_STOPWORD *>(v_w);
+  auto *w = static_cast<FT_STOPWORD *>(v_w);
   if (action == free_free) my_free(const_cast<char *>(w->pos));
 }
 

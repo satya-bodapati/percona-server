@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -31,12 +32,11 @@
 
 /* Not MT-SAFE */
 
-#include <errno.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/types.h>
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
 
-#include "my_alloc.h"
 #include "my_dbug.h"
 #include "my_inttypes.h"
 #include "my_pointer_arithmetic.h"
@@ -98,13 +98,13 @@ void *my_once_alloc(size_t Size, myf MyFlags) {
 
 char *my_once_strdup(const char *src, myf myflags) {
   const size_t len = strlen(src) + 1;
-  uchar *dst = static_cast<uchar *>(my_once_alloc(len, myflags));
+  auto *dst = static_cast<uchar *>(my_once_alloc(len, myflags));
   if (dst) memcpy(dst, src, len);
   return (char *)dst;
 }
 
 void *my_once_memdup(const void *src, size_t len, myf myflags) {
-  uchar *dst = static_cast<uchar *>(my_once_alloc(len, myflags));
+  auto *dst = static_cast<uchar *>(my_once_alloc(len, myflags));
   if (dst) memcpy(dst, src, len);
   return dst;
 }
@@ -116,7 +116,7 @@ void *my_once_memdup(const void *src, size_t len, myf myflags) {
     my_once_free()
 */
 
-void my_once_free(void) {
+void my_once_free() {
   USED_MEM *next, *old;
   DBUG_TRACE;
 

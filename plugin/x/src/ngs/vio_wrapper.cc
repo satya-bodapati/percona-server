@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -54,9 +55,9 @@ void Vio_wrapper::set_timeout_in_ms(const Direction direction,
   // To get the millisecond resolution, we need to duplicate the logic
   // from "vio_timeout".
 
-  bool old_mode = m_vio->write_timeout < 0 && m_vio->read_timeout < 0;
+  bool const old_mode = m_vio->write_timeout < 0 && m_vio->read_timeout < 0;
 
-  int which = direction == Direction::k_write ? 1 : 0;
+  int const which = direction == Direction::k_write ? 1 : 0;
 
   if (which)
     m_vio->write_timeout = timeout_ms;
@@ -86,7 +87,7 @@ xpl::Connection_type Vio_wrapper::get_type() const {
 
 sockaddr_storage *Vio_wrapper::peer_addr(std::string *address, uint16_t *port) {
   address->resize(256);
-  char *buffer = &(*address)[0];
+  char *buffer = address->data();
 
   buffer[0] = 0;
 

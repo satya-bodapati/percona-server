@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,8 +26,8 @@
 #endif
 #include "xcom/xcom_interface.h"
 
-#include <assert.h>
-#include <stdlib.h>
+#include <cassert>
+#include <cstdlib>
 
 #include "xcom/app_data.h"
 #include "xcom/bitset.h"
@@ -118,7 +119,7 @@ void deliver_to_app(pax_machine *pma, app_data_ptr app,
 
   if (app_status == delivery_ok) {
     if (!pma) {
-      g_critical(
+      G_FATAL(
           "A fatal error ocurred that prevents XCom from delivering a message "
           "that achieved consensus. XCom cannot proceed without compromising "
           "correctness. XCom will now crash.");
@@ -128,8 +129,8 @@ void deliver_to_app(pax_machine *pma, app_data_ptr app,
 
   if (!(full_doit || doit)) return;
 
-  IFDBG(D_NONE, FN; PTREXP(pma); PTREXP(app); NDBG(app_status, d);
-        COPY_AND_FREE_GOUT(dbg_app_data(app)));
+  XCOM_IFDBG(D_NONE, FN; PTREXP(pma); PTREXP(app); NDBG(app_status, d);
+             COPY_AND_FREE_GOUT(dbg_app_data(app)));
   if (pma)
     site = find_site_def(pma->synode);
   else
@@ -139,8 +140,8 @@ void deliver_to_app(pax_machine *pma, app_data_ptr app,
     if (app->body.c_t == app_type) { /* Decode application data */
       if (!(app->unique_id.node == app->app_key.node &&
             app->unique_id.msgno == app->app_key.msgno)) {
-        IFDBG(D_BASE, FN; if (pma) SYCEXP(pma->synode); SYCEXP(app->unique_id);
-              SYCEXP(app->app_key));
+        XCOM_IFDBG(D_BASE, FN; if (pma) SYCEXP(pma->synode);
+                   SYCEXP(app->unique_id); SYCEXP(app->app_key));
       }
       if (full_doit) {
         /* purecov: begin deadcode */

@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -144,16 +145,6 @@ struct alignas(ut::INNODB_CACHE_LINE_SIZE) log_t {
   /** Used for pausing the log writer threads.
   When paused, each user thread should write log as in the former version. */
   std::atomic_bool writer_threads_paused;
-
-  /** Some threads waiting for the ready for write lsn by closer_event. */
-  lsn_t current_ready_waiting_lsn;
-
-  /** current_ready_waiting_lsn is waited using this sig_count. */
-  int64_t current_ready_waiting_sig_count;
-
-  /** The recent closed buffer.
-  Protected by: locking sn not to add. */
-  alignas(ut::INNODB_CACHE_LINE_SIZE) Link_buf<lsn_t> recent_closed;
 
   /** @} */
 
@@ -299,7 +290,7 @@ struct alignas(ut::INNODB_CACHE_LINE_SIZE) log_t {
   to do writes (protected by writer_mutex). The log_flusher uses this handle
   to do fsyncs (protected by flusher_mutex). Both these threads might use
   this handle in parallel. The required synchronization between writes and
-  fsyncs will happen on the OS side. When m_current_file is repointed to
+  fsyncs will happen on the OS side. When m_current_file is re-pointed to
   other file, this field is also updated, in the same critical section.
   Updates of this field are protected by: writer_mutex, m_files_mutex
   and flusher_mutex acquired all together. The reason for flusher_mutex
@@ -345,17 +336,27 @@ struct alignas(ut::INNODB_CACHE_LINE_SIZE) log_t {
 
   /**************************************************/ /**
 
-   @name Log closer thread
+   @name Log closing
 
    *******************************************************/
 
   /** @{ */
 
-  /** Event used by the log closer thread to wait for tasks. */
+  /** Event used by threads to wait for recent_written.tail() to advance.
+  Protected by: closer_mutex. */
   alignas(ut::INNODB_CACHE_LINE_SIZE) os_event_t closer_event;
 
-  /** Mutex which can be used to pause log closer thread. */
+  /** Mutex protecting closer_event, current_ready_waiting_lsn, and
+  current_ready_waiting_sig_count. */
   mutable ib_mutex_t closer_mutex;
+
+  /** Some threads waiting for the ready for write lsn by closer_event.
+  Protected by: closer_mutex. */
+  lsn_t current_ready_waiting_lsn;
+
+  /** current_ready_waiting_lsn is waited using this sig_count.
+  Protected by: closer_mutex. */
+  int64_t current_ready_waiting_sig_count;
 
   /** @} */
 
@@ -602,8 +603,9 @@ struct alignas(ut::INNODB_CACHE_LINE_SIZE) log_t {
   Up to this lsn value, all dirty pages have been added to flush
   lists and flushed. Updated in the log checkpointer thread by
   taking minimum oldest_modification out of the last dirty pages
-  from each flush list. However it will not be bigger than the
-  current value of log.buf_dirty_pages_added_up_to_lsn.
+  from each flush list minus buf_flush_list_added->order_lag(). However
+  it will not be bigger than the current value of
+  buf_flush_list_added->smallest_not_added_lsn().
   Read by: user threads when requesting fuzzy checkpoint
   Read by: log_print() (printing status of redo)
   Updated by: log_checkpointer
@@ -714,6 +716,10 @@ struct alignas(ut::INNODB_CACHE_LINE_SIZE) log_t {
   /** Redo log consumer which is always registered and which is responsible
   for protecting redo log records at lsn >= last_checkpoint_lsn. */
   Log_checkpoint_consumer m_checkpoint_consumer{*this};
+
+  /** Throttles writing to log a message about the user threads not able to
+  reserve space in the redo log. The default value is 10s. */
+  ib::Throttler m_THREADS_WAITING_FOR_REDO_throttler;
 
 #ifdef UNIV_DEBUG
   /** THD used by the log_checkpointer thread. */

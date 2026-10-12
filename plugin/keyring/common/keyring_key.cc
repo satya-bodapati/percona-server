@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,8 +25,8 @@
 
 #include "plugin/keyring/common/keyring_key.h"
 
-#include <assert.h>
-#include <stddef.h>
+#include <cassert>
+#include <cstddef>
 
 namespace keyring {
 
@@ -208,7 +209,7 @@ bool Key::is_key_type_valid() { return key_type_enum != Key_type::unknown; }
 bool Key::is_key_valid() { return is_key_id_valid() || is_key_type_valid(); }
 
 bool Key::is_key_length_valid() {
-  bool valid = false;
+  bool valid;
   switch (key_type_enum) {
     case Key_type::aes: {
       valid = (key_len == 16 || key_len == 24 || key_len == 32);
@@ -271,7 +272,7 @@ void Key::create_key_signature() const {
 }
 
 std::string *Key::get_key_signature() const {
-  if (key_signature.empty() == true) create_key_signature();
+  if (key_signature.empty()) create_key_signature();
   return &key_signature;
 }
 

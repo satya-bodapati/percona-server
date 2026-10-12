@@ -1,8 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; version 2 of the License.
+
+   This program is designed to work with certain software (including
+   but not limited to OpenSSL) that is licensed under separate terms,
+   as designated in a particular file or component or in included license
+   documentation.  The authors of MySQL hereby grant you an additional
+   permission to link the program and your derivative works with the
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,20 +28,19 @@
 #include "plugin/group_replication/include/perfschema/table_replication_group_member_actions.h"
 #include "plugin/group_replication/include/perfschema/utilities.h"
 
-namespace gr {
-namespace perfschema {
+namespace gr::perfschema {
 
 bool Perfschema_module::register_pfs_tables(Pfs_tables &tables) {
   Registry_guard guard;
   if (guard.get_registry() == nullptr) return true;
 
-  my_service<SERVICE_TYPE(pfs_plugin_table_v1)> reg("pfs_plugin_table_v1",
-                                                    guard.get_registry());
+  my_service<SERVICE_TYPE(pfs_plugin_table_v1)> const reg("pfs_plugin_table_v1",
+                                                          guard.get_registry());
   std::vector<PFS_engine_table_share_proxy *> shares;
 
   for (auto &table : tables) shares.push_back(table->get_share());
 
-  if (!reg.is_valid() || reg->add_tables(&shares[0], shares.size()))
+  if (!reg.is_valid() || reg->add_tables(shares.data(), shares.size()))
     return true; /* purecov: inspected */
 
   return false;
@@ -43,13 +50,13 @@ bool Perfschema_module::unregister_pfs_tables(Pfs_tables &tables) {
   Registry_guard guard;
   if (guard.get_registry() == nullptr) return true;
 
-  my_service<SERVICE_TYPE(pfs_plugin_table_v1)> reg("pfs_plugin_table_v1",
-                                                    guard.get_registry());
+  my_service<SERVICE_TYPE(pfs_plugin_table_v1)> const reg("pfs_plugin_table_v1",
+                                                          guard.get_registry());
   std::vector<PFS_engine_table_share_proxy *> shares;
 
   for (auto &table : tables) shares.push_back(table->get_share());
 
-  if (!reg.is_valid() || reg->delete_tables(&shares[0], shares.size()))
+  if (!reg.is_valid() || reg->delete_tables(shares.data(), shares.size()))
     return true; /* purecov: inspected */
 
   return false;
@@ -96,5 +103,4 @@ bool Perfschema_module::finalize() {
   return false;
 }
 
-}  // namespace perfschema
-}  // namespace gr
+}  // namespace gr::perfschema

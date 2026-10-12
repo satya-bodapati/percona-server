@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -82,12 +83,11 @@ int Multi_primary_migration_action::process_action_message(
     return 1;                     /* purecov: inspected */
   }
 
-  Group_member_info *primary_info = group_member_mgr->get_primary_member_info();
-  if (primary_info != nullptr) {
-    primary_uuid.assign(primary_info->get_uuid());
-    primary_gcs_id.assign(primary_info->get_gcs_member_id().get_member_id());
+  Group_member_info primary_info;
+  if (!group_member_mgr->get_primary_member_info(primary_info)) {
+    primary_uuid.assign(primary_info.get_uuid());
+    primary_gcs_id.assign(primary_info.get_gcs_member_id().get_member_id());
     is_primary = !primary_uuid.compare(local_member_info->get_uuid());
-    delete primary_info;
   }
 
   group_events_observation_manager->register_group_event_observer(this);
@@ -160,7 +160,9 @@ Multi_primary_migration_action::execute_action(
          !multi_primary_switch_aborted) {
     DBUG_PRINT("sleep",
                ("Waiting for transaction to be applied on the primary."));
-    mysql_cond_wait(&notification_cond, &notification_lock);
+    struct timespec abstime;
+    set_timespec(&abstime, 1);
+    mysql_cond_timedwait(&notification_cond, &notification_lock, &abstime);
   }
   mysql_mutex_unlock(&notification_lock);
 
@@ -202,7 +204,7 @@ Multi_primary_migration_action::execute_action(
               local_member_info->get_member_version(),
               group_member_mgr->get_group_lowest_online_version()) ==
           READ_COMPATIBLE) {
-        if (enable_server_read_mode()) {
+        if (enable_server_read_mode("(GR) version compatibility")) {
           /* purecov: begin inspected */
           LogPluginErr(WARNING_LEVEL, ER_GRP_RPL_ENABLE_READ_ONLY_FAILED);
           /* purecov: end */

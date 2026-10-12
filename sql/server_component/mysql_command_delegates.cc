@@ -1,15 +1,16 @@
-/* Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2022, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -36,7 +37,7 @@ Command_delegate::Command_delegate(void *srv, SRV_CTX_H srv_ctx_h)
   assert(m_srv_ctx_h != nullptr);
 }
 
-Command_delegate::~Command_delegate() {}
+Command_delegate::~Command_delegate() = default;
 
 Callback_command_delegate::Callback_command_delegate(void *srv,
                                                      SRV_CTX_H srv_ctx_h)
@@ -109,7 +110,7 @@ int Callback_command_delegate::get_longlong(longlong value,
 }
 
 int Callback_command_delegate::get_decimal(const decimal_t *value) {
-  decimal_t *decimal = const_cast<decimal_t *>(value);
+  auto *decimal = const_cast<decimal_t *>(value);
   return ((class mysql_command_consumer_refs *)(m_srv))
       ->get_decimal_srv->get(m_srv_ctx_h,
                              reinterpret_cast<DECIMAL_T_H>(decimal));
@@ -121,7 +122,7 @@ int Callback_command_delegate::get_double(double value, unsigned int decimals) {
 }
 
 int Callback_command_delegate::get_date(const MYSQL_TIME *value) {
-  MYSQL_TIME *date = const_cast<MYSQL_TIME *>(value);
+  auto *date = const_cast<MYSQL_TIME *>(value);
   return ((class mysql_command_consumer_refs *)(m_srv))
       ->get_date_time_srv->get_date(m_srv_ctx_h,
                                     reinterpret_cast<MYSQL_TIME_H>(date));
@@ -129,7 +130,7 @@ int Callback_command_delegate::get_date(const MYSQL_TIME *value) {
 
 int Callback_command_delegate::get_time(const MYSQL_TIME *value,
                                         unsigned int precision) {
-  MYSQL_TIME *time = const_cast<MYSQL_TIME *>(value);
+  auto *time = const_cast<MYSQL_TIME *>(value);
   return ((class mysql_command_consumer_refs *)(m_srv))
       ->get_date_time_srv->get_time(
           m_srv_ctx_h, reinterpret_cast<MYSQL_TIME_H>(time), precision);
@@ -137,7 +138,7 @@ int Callback_command_delegate::get_time(const MYSQL_TIME *value,
 
 int Callback_command_delegate::get_datetime(const MYSQL_TIME *value,
                                             unsigned int precision) {
-  MYSQL_TIME *date_time = const_cast<MYSQL_TIME *>(value);
+  auto *date_time = const_cast<MYSQL_TIME *>(value);
   return ((class mysql_command_consumer_refs *)(m_srv))
       ->get_date_time_srv->get_datatime(
           m_srv_ctx_h, reinterpret_cast<MYSQL_TIME_H>(date_time), precision);

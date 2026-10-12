@@ -1,15 +1,16 @@
-/* Copyright (c) 2008, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -36,8 +37,10 @@
 #include "mysql/psi/psi_error.h"
 #include "mysql/psi/psi_file.h"
 #include "mysql/psi/psi_idle.h"
+#include "mysql/psi/psi_logger_client.h"
 #include "mysql/psi/psi_mdl.h"
 #include "mysql/psi/psi_memory.h"
+#include "mysql/psi/psi_metric.h"
 #include "mysql/psi/psi_mutex.h"
 #include "mysql/psi/psi_rwlock.h"
 #include "mysql/psi/psi_socket.h"
@@ -90,6 +93,9 @@
 #ifndef PFS_MAX_METRIC_CLASS
 #define PFS_MAX_METRIC_CLASS 600
 #endif
+#ifndef PFS_MAX_LOGGER_CLASS
+#define PFS_MAX_LOGGER_CLASS 80
+#endif
 
 #ifndef PFS_MAX_GLOBAL_SERVER_ERRORS
 #define PFS_MAX_GLOBAL_SERVER_ERRORS \
@@ -136,11 +142,14 @@ struct PFS_global_param {
   bool m_consumer_thread_instrumentation_enabled;
   bool m_consumer_statement_digest_enabled;
 
-  /** True if SHOW PROCESSLIST is enabeld in the performance schema. */
-  bool m_processlist_enabled;
-
   /** Default instrument configuration option. */
   char *m_pfs_instrument;
+
+  /** Default meter instrument configuration option. */
+  char *m_pfs_meter;
+
+  /** Default logger instrument configuration option. */
+  char *m_pfs_logger;
 
   /**
     Maximum number of instrumented mutex classes.
@@ -293,6 +302,12 @@ struct PFS_global_param {
   */
   ulong m_metric_class_sizing;
 
+  /**
+    Maximum number of instrumented logger classes.
+    @sa logger_class_lost.
+  */
+  ulong m_logger_class_sizing;
+
   long m_metadata_lock_sizing;
 
   long m_max_digest_length;
@@ -347,6 +362,10 @@ void pre_initialize_performance_schema();
   @param [out] system_bootstrap System instrumentation service bootstrap
   @param [out] tls_channel_bootstrap TLS channel instrumentation service
   bootstrap
+  @param [out] metric_bootstrap Telemetry metrics instrumentation service
+  bootstrap
+  @param [out] logs_client_bootstrap Telemetry logs client instrumentation
+  service bootstrap
   @retval 0 success
 */
 int initialize_performance_schema(
@@ -363,7 +382,9 @@ int initialize_performance_schema(
     PSI_error_bootstrap **error_bootstrap,
     PSI_data_lock_bootstrap **data_lock_bootstrap,
     PSI_system_bootstrap **system_bootstrap,
-    PSI_tls_channel_bootstrap **tls_channel_bootstrap);
+    PSI_tls_channel_bootstrap **tls_channel_bootstrap,
+    PSI_metric_bootstrap **metric_bootstrap,
+    PSI_logs_client_bootstrap **logs_client_bootstrap);
 
 void pfs_automated_sizing(PFS_global_param *param);
 
@@ -395,16 +416,26 @@ void init_pfs_instrument_array();
 int add_pfs_instr_to_array(const char *name, const char *value);
 
 /**
-  Register/unregister notification service.
+  Initialize the dynamic array holding individual meter instrument settings
+  collected from the server configuration options.
 */
-int register_pfs_notification_service();
-int unregister_pfs_notification_service();
+void init_pfs_meter_array();
 
 /**
-  Register/unregister resource group service.
+  Process one PFS_METER configuration string.
 */
-int register_pfs_resource_group_service();
-int unregister_pfs_resource_group_service();
+int add_pfs_meter_to_array(const char *name, const char *value);
+
+/**
+  Initialize the dynamic array holding individual logger instrument settings
+  collected from the server configuration options.
+*/
+void init_pfs_logger_array();
+
+/**
+  Process one PFS_LOGGER configuration string.
+*/
+int add_pfs_logger_to_array(const char *name, const char *value);
 
 /**
   Shutdown the performance schema.

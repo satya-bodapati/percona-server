@@ -1,4 +1,4 @@
-include/master-slave.inc
+include/rpl/init_source_replica.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
@@ -11,13 +11,13 @@ CREATE TABLE non_trans_table1 (i INT) ENGINE=MYISAM;
 INSERT INTO non_trans_table1 VALUES (1);
 CREATE TABLE non_trans_table2 (i INT) ENGINE=MYISAM;
 INSERT INTO non_trans_table2 VALUES (1);
-CREATE FUNCTION func1 () RETURNS varchar(30) CHARSET utf8
+CREATE FUNCTION func1 () RETURNS varchar(30) CHARSET utf8mb3
 BEGIN
 CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; DROP TEMPORARY TABLE IF EXISTS tt1;
 RETURN 0;
 END;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN SELECT QUERY.
@@ -25,7 +25,7 @@ Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but wil
 SELECT func1();
 func1()
 0
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN SELECT QUERY IN MULTI
@@ -36,7 +36,7 @@ SELECT func1();
 func1()
 0
 COMMIT;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN SELECT QUERY IN MULTI
@@ -50,7 +50,7 @@ ROLLBACK;
 Warnings:
 Warning	1751	The creation of some temporary tables could not be rolled back.
 Warning	1752	Some temporary tables were dropped, but these operations could not be rolled back.
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN INSERT/UPDATE/DELETE QUERY ON
@@ -62,31 +62,31 @@ DELETE FROM trans_table2 WHERE i=func1();
 INSERT INTO non_trans_table2 VALUES (func1());
 UPDATE non_trans_table2 SET i=func1();
 DELETE FROM non_trans_table2 WHERE i=func1();
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP FUNCTION func1;
 CREATE TRIGGER trigger1
@@ -100,11 +100,11 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -118,11 +118,11 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -136,11 +136,11 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -154,7 +154,7 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE DELETE ON trans_table2 FOR EACH ROW
@@ -167,11 +167,11 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -185,7 +185,7 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE INSERT ON non_trans_table2 FOR EACH ROW
@@ -198,11 +198,11 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO non_trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -216,11 +216,11 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO non_trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -234,11 +234,11 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE non_trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -252,7 +252,7 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE non_trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE DELETE ON non_trans_table2 FOR EACH ROW
@@ -265,11 +265,11 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM non_trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -283,15 +283,15 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM non_trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
-CREATE FUNCTION func1 () RETURNS varchar(30) CHARSET utf8
+CREATE FUNCTION func1 () RETURNS varchar(30) CHARSET utf8mb3
 BEGIN
 CREATE TEMPORARY TABLE tt1(i INT) ENGINE=INNODB; DROP TEMPORARY TABLE IF EXISTS tt1;
 RETURN 0;
 END;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN SELECT QUERY.
@@ -299,7 +299,7 @@ Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but wil
 SELECT func1();
 func1()
 0
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN SELECT QUERY IN MULTI
@@ -310,7 +310,7 @@ SELECT func1();
 func1()
 0
 COMMIT;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN SELECT QUERY IN MULTI
@@ -324,7 +324,7 @@ ROLLBACK;
 Warnings:
 Warning	1751	The creation of some temporary tables could not be rolled back.
 Warning	1752	Some temporary tables were dropped, but these operations could not be rolled back.
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN INSERT/UPDATE/DELETE QUERY ON
@@ -336,23 +336,23 @@ DELETE FROM trans_table2 WHERE i=func1();
 INSERT INTO non_trans_table2 VALUES (func1());
 UPDATE non_trans_table2 SET i=func1();
 DELETE FROM non_trans_table2 WHERE i=func1();
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP FUNCTION func1;
 CREATE TRIGGER trigger1
@@ -366,11 +366,11 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -384,11 +384,11 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -402,11 +402,11 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -420,7 +420,7 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE DELETE ON trans_table2 FOR EACH ROW
@@ -433,11 +433,11 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -451,7 +451,7 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE INSERT ON non_trans_table2 FOR EACH ROW
@@ -464,11 +464,11 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO non_trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -482,11 +482,11 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO non_trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -500,11 +500,11 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE non_trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -518,7 +518,7 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE non_trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE DELETE ON non_trans_table2 FOR EACH ROW
@@ -531,11 +531,11 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM non_trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -549,15 +549,15 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM non_trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
-CREATE FUNCTION func1 () RETURNS varchar(30) CHARSET utf8
+CREATE FUNCTION func1 () RETURNS varchar(30) CHARSET utf8mb3
 BEGIN
 DROP TEMPORARY TABLE IF EXISTS tt1;
 RETURN 0;
 END;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN SELECT QUERY.
@@ -565,7 +565,7 @@ Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but wil
 SELECT func1();
 func1()
 0
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN SELECT QUERY IN MULTI
@@ -576,7 +576,7 @@ SELECT func1();
 func1()
 0
 COMMIT;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN SELECT QUERY IN MULTI
@@ -587,7 +587,7 @@ SELECT func1();
 func1()
 0
 ROLLBACK;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN INSERT/UPDATE/DELETE QUERY ON
@@ -599,23 +599,23 @@ DELETE FROM trans_table2 WHERE i=func1();
 INSERT INTO non_trans_table2 VALUES (func1());
 UPDATE non_trans_table2 SET i=func1();
 DELETE FROM non_trans_table2 WHERE i=func1();
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP FUNCTION func1;
 CREATE TRIGGER trigger1
@@ -629,11 +629,11 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -647,11 +647,11 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -665,11 +665,11 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -683,7 +683,7 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE DELETE ON trans_table2 FOR EACH ROW
@@ -696,11 +696,11 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -714,7 +714,7 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE INSERT ON non_trans_table2 FOR EACH ROW
@@ -727,11 +727,11 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO non_trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -745,11 +745,11 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO non_trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -763,11 +763,11 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE non_trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -781,7 +781,7 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE non_trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE DELETE ON non_trans_table2 FOR EACH ROW
@@ -794,11 +794,11 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM non_trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -812,15 +812,15 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM non_trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
-CREATE FUNCTION func1 () RETURNS varchar(30) CHARSET utf8
+CREATE FUNCTION func1 () RETURNS varchar(30) CHARSET utf8mb3
 BEGIN
 CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
 RETURN 0;
 END;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN SELECT QUERY.
@@ -828,7 +828,7 @@ Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but wil
 SELECT func1();
 func1()
 0
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN SELECT QUERY IN MULTI
@@ -839,283 +839,7 @@ SELECT func1();
 func1()
 0
 COMMIT;
-include/show_binlog_events.inc
-#
-# Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
-# into binlog when using the FUNCTION IN SELECT QUERY IN MULTI
-# TRANSACTION STATEMENT with rollback.
-#
-START TRANSACTION;
-SELECT func1();
-func1()
-0
-ROLLBACK;
-Warnings:
-Warning	1751	The creation of some temporary tables could not be rolled back.
-Warning	1752	Some temporary tables were dropped, but these operations could not be rolled back.
-include/show_binlog_events.inc
-#
-# Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
-# into binlog when using the FUNCTION IN INSERT/UPDATE/DELETE QUERY ON
-# transactional/non-transactional table.
-#
-INSERT INTO trans_table2 VALUES (func1());
-UPDATE trans_table2 SET i=func1();
-DELETE FROM trans_table2 WHERE i=func1();
-INSERT INTO non_trans_table2 VALUES (func1());
-UPDATE non_trans_table2 SET i=func1();
-DELETE FROM non_trans_table2 WHERE i=func1();
-include/show_binlog_events.inc
-Log_name	Pos	Event_type	Server_id	End_log_pos	Info
-master-bin.000001	#	Query	#	#	BEGIN
-master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
-master-bin.000001	#	Xid	#	#	COMMIT /* XID */
-master-bin.000001	#	Query	#	#	BEGIN
-master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
-master-bin.000001	#	Xid	#	#	COMMIT /* XID */
-master-bin.000001	#	Query	#	#	BEGIN
-master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
-master-bin.000001	#	Query	#	#	COMMIT
-master-bin.000001	#	Query	#	#	BEGIN
-master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
-master-bin.000001	#	Query	#	#	COMMIT
-DROP FUNCTION func1;
-CREATE TRIGGER trigger1
-BEFORE INSERT ON trans_table2 FOR EACH ROW
-BEGIN
-CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
-END;
-#
-# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
-# into binlog when the trigger is triggered before/after
-# INSERT QUERY ON transactional/non-transactional table.
-#
-INSERT INTO trans_table2 VALUES (10);
-include/show_binlog_events.inc
-Log_name	Pos	Event_type	Server_id	End_log_pos	Info
-master-bin.000001	#	Query	#	#	BEGIN
-master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
-master-bin.000001	#	Xid	#	#	COMMIT /* XID */
-DROP TRIGGER trigger1;
-CREATE TRIGGER trigger1
-AFTER INSERT ON trans_table2 FOR EACH ROW
-BEGIN
-CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
-END;
-#
-# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
-# into binlog when the trigger is triggered before/after
-# INSERT QUERY ON transactional/non-transactional table.
-#
-INSERT INTO trans_table2 VALUES (10);
-include/show_binlog_events.inc
-Log_name	Pos	Event_type	Server_id	End_log_pos	Info
-master-bin.000001	#	Query	#	#	BEGIN
-master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
-master-bin.000001	#	Xid	#	#	COMMIT /* XID */
-DROP TRIGGER trigger1;
-CREATE TRIGGER trigger1
-BEFORE UPDATE ON trans_table2 FOR EACH ROW
-BEGIN
-CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
-END;
-#
-# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
-# into binlog when the trigger is triggered before/after
-# UPDATE QUERY ON transactional/non-transactional table.
-#
-UPDATE trans_table2 SET i=12;
-include/show_binlog_events.inc
-Log_name	Pos	Event_type	Server_id	End_log_pos	Info
-master-bin.000001	#	Query	#	#	BEGIN
-master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F
-master-bin.000001	#	Xid	#	#	COMMIT /* XID */
-DROP TRIGGER trigger1;
-CREATE TRIGGER trigger1
-AFTER UPDATE ON trans_table2 FOR EACH ROW
-BEGIN
-CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
-END;
-#
-# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
-# into binlog when the trigger is triggered before/after
-# UPDATE QUERY ON transactional/non-transactional table.
-#
-UPDATE trans_table2 SET i=12;
-include/show_binlog_events.inc
-DROP TRIGGER trigger1;
-CREATE TRIGGER trigger1
-BEFORE DELETE ON trans_table2 FOR EACH ROW
-BEGIN
-CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
-END;
-#
-# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
-# into binlog when the trigger is triggered before/after
-# DELETE QUERY ON transactional/non-transactional table.
-#
-DELETE FROM trans_table2;
-include/show_binlog_events.inc
-Log_name	Pos	Event_type	Server_id	End_log_pos	Info
-master-bin.000001	#	Query	#	#	BEGIN
-master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
-master-bin.000001	#	Xid	#	#	COMMIT /* XID */
-DROP TRIGGER trigger1;
-CREATE TRIGGER trigger1
-AFTER DELETE ON trans_table2 FOR EACH ROW
-BEGIN
-CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
-END;
-#
-# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
-# into binlog when the trigger is triggered before/after
-# DELETE QUERY ON transactional/non-transactional table.
-#
-DELETE FROM trans_table2;
-include/show_binlog_events.inc
-DROP TRIGGER trigger1;
-CREATE TRIGGER trigger1
-BEFORE INSERT ON non_trans_table2 FOR EACH ROW
-BEGIN
-CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
-END;
-#
-# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
-# into binlog when the trigger is triggered before/after
-# INSERT QUERY ON transactional/non-transactional table.
-#
-INSERT INTO non_trans_table2 VALUES (10);
-include/show_binlog_events.inc
-Log_name	Pos	Event_type	Server_id	End_log_pos	Info
-master-bin.000001	#	Query	#	#	BEGIN
-master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
-master-bin.000001	#	Query	#	#	COMMIT
-DROP TRIGGER trigger1;
-CREATE TRIGGER trigger1
-AFTER INSERT ON non_trans_table2 FOR EACH ROW
-BEGIN
-CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
-END;
-#
-# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
-# into binlog when the trigger is triggered before/after
-# INSERT QUERY ON transactional/non-transactional table.
-#
-INSERT INTO non_trans_table2 VALUES (10);
-include/show_binlog_events.inc
-Log_name	Pos	Event_type	Server_id	End_log_pos	Info
-master-bin.000001	#	Query	#	#	BEGIN
-master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
-master-bin.000001	#	Query	#	#	COMMIT
-DROP TRIGGER trigger1;
-CREATE TRIGGER trigger1
-BEFORE UPDATE ON non_trans_table2 FOR EACH ROW
-BEGIN
-CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
-END;
-#
-# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
-# into binlog when the trigger is triggered before/after
-# UPDATE QUERY ON transactional/non-transactional table.
-#
-UPDATE non_trans_table2 SET i=12;
-include/show_binlog_events.inc
-Log_name	Pos	Event_type	Server_id	End_log_pos	Info
-master-bin.000001	#	Query	#	#	BEGIN
-master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F
-master-bin.000001	#	Query	#	#	COMMIT
-DROP TRIGGER trigger1;
-CREATE TRIGGER trigger1
-AFTER UPDATE ON non_trans_table2 FOR EACH ROW
-BEGIN
-CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
-END;
-#
-# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
-# into binlog when the trigger is triggered before/after
-# UPDATE QUERY ON transactional/non-transactional table.
-#
-UPDATE non_trans_table2 SET i=12;
-include/show_binlog_events.inc
-DROP TRIGGER trigger1;
-CREATE TRIGGER trigger1
-BEFORE DELETE ON non_trans_table2 FOR EACH ROW
-BEGIN
-CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
-END;
-#
-# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
-# into binlog when the trigger is triggered before/after
-# DELETE QUERY ON transactional/non-transactional table.
-#
-DELETE FROM non_trans_table2;
-include/show_binlog_events.inc
-Log_name	Pos	Event_type	Server_id	End_log_pos	Info
-master-bin.000001	#	Query	#	#	BEGIN
-master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
-master-bin.000001	#	Query	#	#	COMMIT
-DROP TRIGGER trigger1;
-CREATE TRIGGER trigger1
-AFTER DELETE ON non_trans_table2 FOR EACH ROW
-BEGIN
-CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
-END;
-#
-# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
-# into binlog when the trigger is triggered before/after
-# DELETE QUERY ON transactional/non-transactional table.
-#
-DELETE FROM non_trans_table2;
-include/show_binlog_events.inc
-DROP TRIGGER trigger1;
-CREATE FUNCTION func1 () RETURNS varchar(30) CHARSET utf8
-BEGIN
-INSERT INTO trans_table1 VALUES (12); CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; DROP TEMPORARY TABLE IF EXISTS tt1;
-RETURN 0;
-END;
-Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
-#
-# Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
-# into binlog when using the FUNCTION IN SELECT QUERY.
-#
-SELECT func1();
-func1()
-0
-include/show_binlog_events.inc
-Log_name	Pos	Event_type	Server_id	End_log_pos	Info
-master-bin.000001	#	Query	#	#	BEGIN
-master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
-master-bin.000001	#	Xid	#	#	COMMIT /* XID */
-#
-# Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
-# into binlog when using the FUNCTION IN SELECT QUERY IN MULTI
-# TRANSACTION STATEMENT with commit.
-#
-START TRANSACTION;
-SELECT func1();
-func1()
-0
-COMMIT;
-include/show_binlog_events.inc
-Log_name	Pos	Event_type	Server_id	End_log_pos	Info
-master-bin.000001	#	Query	#	#	BEGIN
-master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
-master-bin.000001	#	Xid	#	#	COMMIT /* XID */
+include/rpl/deprecated/show_binlog_events.inc
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN SELECT QUERY IN MULTI
@@ -1129,7 +853,7 @@ ROLLBACK;
 Warnings:
 Warning	1751	The creation of some temporary tables could not be rolled back.
 Warning	1752	Some temporary tables were dropped, but these operations could not be rolled back.
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN INSERT/UPDATE/DELETE QUERY ON
@@ -1141,24 +865,300 @@ DELETE FROM trans_table2 WHERE i=func1();
 INSERT INTO non_trans_table2 VALUES (func1());
 UPDATE non_trans_table2 SET i=func1();
 DELETE FROM non_trans_table2 WHERE i=func1();
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
+Log_name	Pos	Event_type	Server_id	End_log_pos	Info
+master-bin.000001	#	Query	#	#	BEGIN
+master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Xid	#	#	COMMIT /* XID */
+master-bin.000001	#	Query	#	#	BEGIN
+master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Xid	#	#	COMMIT /* XID */
+master-bin.000001	#	Query	#	#	BEGIN
+master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Query	#	#	COMMIT
+master-bin.000001	#	Query	#	#	BEGIN
+master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Query	#	#	COMMIT
+DROP FUNCTION func1;
+CREATE TRIGGER trigger1
+BEFORE INSERT ON trans_table2 FOR EACH ROW
+BEGIN
+CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
+END;
+#
+# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
+# into binlog when the trigger is triggered before/after
+# INSERT QUERY ON transactional/non-transactional table.
+#
+INSERT INTO trans_table2 VALUES (10);
+include/rpl/deprecated/show_binlog_events.inc
+Log_name	Pos	Event_type	Server_id	End_log_pos	Info
+master-bin.000001	#	Query	#	#	BEGIN
+master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Xid	#	#	COMMIT /* XID */
+DROP TRIGGER trigger1;
+CREATE TRIGGER trigger1
+AFTER INSERT ON trans_table2 FOR EACH ROW
+BEGIN
+CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
+END;
+#
+# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
+# into binlog when the trigger is triggered before/after
+# INSERT QUERY ON transactional/non-transactional table.
+#
+INSERT INTO trans_table2 VALUES (10);
+include/rpl/deprecated/show_binlog_events.inc
+Log_name	Pos	Event_type	Server_id	End_log_pos	Info
+master-bin.000001	#	Query	#	#	BEGIN
+master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Xid	#	#	COMMIT /* XID */
+DROP TRIGGER trigger1;
+CREATE TRIGGER trigger1
+BEFORE UPDATE ON trans_table2 FOR EACH ROW
+BEGIN
+CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
+END;
+#
+# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
+# into binlog when the trigger is triggered before/after
+# UPDATE QUERY ON transactional/non-transactional table.
+#
+UPDATE trans_table2 SET i=12;
+include/rpl/deprecated/show_binlog_events.inc
+Log_name	Pos	Event_type	Server_id	End_log_pos	Info
+master-bin.000001	#	Query	#	#	BEGIN
+master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
+master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Xid	#	#	COMMIT /* XID */
+DROP TRIGGER trigger1;
+CREATE TRIGGER trigger1
+AFTER UPDATE ON trans_table2 FOR EACH ROW
+BEGIN
+CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
+END;
+#
+# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
+# into binlog when the trigger is triggered before/after
+# UPDATE QUERY ON transactional/non-transactional table.
+#
+UPDATE trans_table2 SET i=12;
+include/rpl/deprecated/show_binlog_events.inc
+DROP TRIGGER trigger1;
+CREATE TRIGGER trigger1
+BEFORE DELETE ON trans_table2 FOR EACH ROW
+BEGIN
+CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
+END;
+#
+# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
+# into binlog when the trigger is triggered before/after
+# DELETE QUERY ON transactional/non-transactional table.
+#
+DELETE FROM trans_table2;
+include/rpl/deprecated/show_binlog_events.inc
+Log_name	Pos	Event_type	Server_id	End_log_pos	Info
+master-bin.000001	#	Query	#	#	BEGIN
+master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Xid	#	#	COMMIT /* XID */
+DROP TRIGGER trigger1;
+CREATE TRIGGER trigger1
+AFTER DELETE ON trans_table2 FOR EACH ROW
+BEGIN
+CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
+END;
+#
+# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
+# into binlog when the trigger is triggered before/after
+# DELETE QUERY ON transactional/non-transactional table.
+#
+DELETE FROM trans_table2;
+include/rpl/deprecated/show_binlog_events.inc
+DROP TRIGGER trigger1;
+CREATE TRIGGER trigger1
+BEFORE INSERT ON non_trans_table2 FOR EACH ROW
+BEGIN
+CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
+END;
+#
+# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
+# into binlog when the trigger is triggered before/after
+# INSERT QUERY ON transactional/non-transactional table.
+#
+INSERT INTO non_trans_table2 VALUES (10);
+include/rpl/deprecated/show_binlog_events.inc
+Log_name	Pos	Event_type	Server_id	End_log_pos	Info
+master-bin.000001	#	Query	#	#	BEGIN
+master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Query	#	#	COMMIT
+DROP TRIGGER trigger1;
+CREATE TRIGGER trigger1
+AFTER INSERT ON non_trans_table2 FOR EACH ROW
+BEGIN
+CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
+END;
+#
+# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
+# into binlog when the trigger is triggered before/after
+# INSERT QUERY ON transactional/non-transactional table.
+#
+INSERT INTO non_trans_table2 VALUES (10);
+include/rpl/deprecated/show_binlog_events.inc
+Log_name	Pos	Event_type	Server_id	End_log_pos	Info
+master-bin.000001	#	Query	#	#	BEGIN
+master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Query	#	#	COMMIT
+DROP TRIGGER trigger1;
+CREATE TRIGGER trigger1
+BEFORE UPDATE ON non_trans_table2 FOR EACH ROW
+BEGIN
+CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
+END;
+#
+# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
+# into binlog when the trigger is triggered before/after
+# UPDATE QUERY ON transactional/non-transactional table.
+#
+UPDATE non_trans_table2 SET i=12;
+include/rpl/deprecated/show_binlog_events.inc
+Log_name	Pos	Event_type	Server_id	End_log_pos	Info
+master-bin.000001	#	Query	#	#	BEGIN
+master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
+master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Query	#	#	COMMIT
+DROP TRIGGER trigger1;
+CREATE TRIGGER trigger1
+AFTER UPDATE ON non_trans_table2 FOR EACH ROW
+BEGIN
+CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
+END;
+#
+# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
+# into binlog when the trigger is triggered before/after
+# UPDATE QUERY ON transactional/non-transactional table.
+#
+UPDATE non_trans_table2 SET i=12;
+include/rpl/deprecated/show_binlog_events.inc
+DROP TRIGGER trigger1;
+CREATE TRIGGER trigger1
+BEFORE DELETE ON non_trans_table2 FOR EACH ROW
+BEGIN
+CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
+END;
+#
+# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
+# into binlog when the trigger is triggered before/after
+# DELETE QUERY ON transactional/non-transactional table.
+#
+DELETE FROM non_trans_table2;
+include/rpl/deprecated/show_binlog_events.inc
+Log_name	Pos	Event_type	Server_id	End_log_pos	Info
+master-bin.000001	#	Query	#	#	BEGIN
+master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Query	#	#	COMMIT
+DROP TRIGGER trigger1;
+CREATE TRIGGER trigger1
+AFTER DELETE ON non_trans_table2 FOR EACH ROW
+BEGIN
+CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; CREATE TEMPORARY TABLE tt2(i INT) ENGINE=Innodb; DROP TEMPORARY TABLE IF EXISTS tt1; DROP TEMPORARY TABLE IF EXISTS tt2;
+END;
+#
+# Verify that CREATE/DROP TEMPORARY TABLE in a TRIGGER are not written
+# into binlog when the trigger is triggered before/after
+# DELETE QUERY ON transactional/non-transactional table.
+#
+DELETE FROM non_trans_table2;
+include/rpl/deprecated/show_binlog_events.inc
+DROP TRIGGER trigger1;
+CREATE FUNCTION func1 () RETURNS varchar(30) CHARSET utf8mb3
+BEGIN
+INSERT INTO trans_table1 VALUES (12); CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; DROP TEMPORARY TABLE IF EXISTS tt1;
+RETURN 0;
+END;
+Warnings:
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+#
+# Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
+# into binlog when using the FUNCTION IN SELECT QUERY.
+#
+SELECT func1();
+func1()
+0
+include/rpl/deprecated/show_binlog_events.inc
+Log_name	Pos	Event_type	Server_id	End_log_pos	Info
+master-bin.000001	#	Query	#	#	BEGIN
+master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Xid	#	#	COMMIT /* XID */
+#
+# Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
+# into binlog when using the FUNCTION IN SELECT QUERY IN MULTI
+# TRANSACTION STATEMENT with commit.
+#
+START TRANSACTION;
+SELECT func1();
+func1()
+0
+COMMIT;
+include/rpl/deprecated/show_binlog_events.inc
+Log_name	Pos	Event_type	Server_id	End_log_pos	Info
+master-bin.000001	#	Query	#	#	BEGIN
+master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Xid	#	#	COMMIT /* XID */
+#
+# Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
+# into binlog when using the FUNCTION IN SELECT QUERY IN MULTI
+# TRANSACTION STATEMENT with rollback.
+#
+START TRANSACTION;
+SELECT func1();
+func1()
+0
+ROLLBACK;
+Warnings:
+Warning	1751	The creation of some temporary tables could not be rolled back.
+Warning	1752	Some temporary tables were dropped, but these operations could not be rolled back.
+include/rpl/deprecated/show_binlog_events.inc
+#
+# Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
+# into binlog when using the FUNCTION IN INSERT/UPDATE/DELETE QUERY ON
+# transactional/non-transactional table.
+#
+INSERT INTO trans_table2 VALUES (func1());
+UPDATE trans_table2 SET i=func1();
+DELETE FROM trans_table2 WHERE i=func1();
+INSERT INTO non_trans_table2 VALUES (func1());
+UPDATE non_trans_table2 SET i=func1();
+DELETE FROM non_trans_table2 WHERE i=func1();
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP FUNCTION func1;
 CREATE TRIGGER trigger1
@@ -1172,13 +1172,13 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -1192,13 +1192,13 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -1212,15 +1212,15 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Update_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Update_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -1234,12 +1234,12 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -1253,15 +1253,15 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Delete_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -1275,7 +1275,7 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE INSERT ON non_trans_table2 FOR EACH ROW
@@ -1288,7 +1288,7 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO non_trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 AFTER INSERT ON non_trans_table2 FOR EACH ROW
@@ -1301,7 +1301,7 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO non_trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE UPDATE ON non_trans_table2 FOR EACH ROW
@@ -1314,7 +1314,7 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE non_trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 AFTER UPDATE ON non_trans_table2 FOR EACH ROW
@@ -1327,7 +1327,7 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE non_trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE DELETE ON non_trans_table2 FOR EACH ROW
@@ -1340,7 +1340,7 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM non_trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 AFTER DELETE ON non_trans_table2 FOR EACH ROW
@@ -1353,15 +1353,15 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM non_trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
-CREATE FUNCTION func1 () RETURNS varchar(30) CHARSET utf8
+CREATE FUNCTION func1 () RETURNS varchar(30) CHARSET utf8mb3
 BEGIN
 INSERT INTO non_trans_table1 VALUES (12); CREATE TEMPORARY TABLE tt1(i INT) ENGINE=INNODB; DROP TEMPORARY TABLE IF EXISTS tt1;
 RETURN 0;
 END;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN SELECT QUERY.
@@ -1369,11 +1369,11 @@ Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but wil
 SELECT func1();
 func1()
 0
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
@@ -1385,11 +1385,11 @@ SELECT func1();
 func1()
 0
 COMMIT;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
@@ -1405,11 +1405,11 @@ Warnings:
 Warning	1196	Some non-transactional changed tables couldn't be rolled back
 Warning	1751	The creation of some temporary tables could not be rolled back.
 Warning	1752	Some temporary tables were dropped, but these operations could not be rolled back.
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
@@ -1422,24 +1422,24 @@ DELETE FROM trans_table2 WHERE i=func1();
 INSERT INTO non_trans_table2 VALUES (func1());
 UPDATE non_trans_table2 SET i=func1();
 DELETE FROM non_trans_table2 WHERE i=func1();
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP FUNCTION func1;
 CREATE TRIGGER trigger1
@@ -1453,7 +1453,7 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 AFTER INSERT ON trans_table2 FOR EACH ROW
@@ -1466,7 +1466,7 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE UPDATE ON trans_table2 FOR EACH ROW
@@ -1479,7 +1479,7 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 AFTER UPDATE ON trans_table2 FOR EACH ROW
@@ -1492,7 +1492,7 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE DELETE ON trans_table2 FOR EACH ROW
@@ -1505,7 +1505,7 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 AFTER DELETE ON trans_table2 FOR EACH ROW
@@ -1518,7 +1518,7 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE INSERT ON non_trans_table2 FOR EACH ROW
@@ -1531,13 +1531,13 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO non_trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -1551,13 +1551,13 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO non_trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -1571,15 +1571,15 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE non_trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Update_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Update_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -1593,12 +1593,12 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE non_trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -1612,15 +1612,15 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM non_trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Delete_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -1634,15 +1634,15 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM non_trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
-CREATE FUNCTION func1 () RETURNS varchar(30) CHARSET utf8
+CREATE FUNCTION func1 () RETURNS varchar(30) CHARSET utf8mb3
 BEGIN
 CREATE TEMPORARY TABLE tt1(i INT) ENGINE=INNODB; DROP TEMPORARY TABLE IF EXISTS tt1; INSERT INTO non_trans_table1 VALUES (12);
 RETURN 0;
 END;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN SELECT QUERY.
@@ -1650,11 +1650,11 @@ Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but wil
 SELECT func1();
 func1()
 0
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
@@ -1666,11 +1666,11 @@ SELECT func1();
 func1()
 0
 COMMIT;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
@@ -1686,11 +1686,11 @@ Warnings:
 Warning	1196	Some non-transactional changed tables couldn't be rolled back
 Warning	1751	The creation of some temporary tables could not be rolled back.
 Warning	1752	Some temporary tables were dropped, but these operations could not be rolled back.
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
@@ -1703,24 +1703,24 @@ DELETE FROM trans_table2 WHERE i=func1();
 INSERT INTO non_trans_table2 VALUES (func1());
 UPDATE non_trans_table2 SET i=func1();
 DELETE FROM non_trans_table2 WHERE i=func1();
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP FUNCTION func1;
 CREATE TRIGGER trigger1
@@ -1734,7 +1734,7 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 AFTER INSERT ON trans_table2 FOR EACH ROW
@@ -1747,7 +1747,7 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE UPDATE ON trans_table2 FOR EACH ROW
@@ -1760,7 +1760,7 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 AFTER UPDATE ON trans_table2 FOR EACH ROW
@@ -1773,7 +1773,7 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE DELETE ON trans_table2 FOR EACH ROW
@@ -1786,7 +1786,7 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 AFTER DELETE ON trans_table2 FOR EACH ROW
@@ -1799,7 +1799,7 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE INSERT ON non_trans_table2 FOR EACH ROW
@@ -1812,13 +1812,13 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO non_trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -1832,13 +1832,13 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO non_trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -1852,15 +1852,15 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE non_trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Update_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Update_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -1874,12 +1874,12 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE non_trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -1893,15 +1893,15 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM non_trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.non_trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Delete_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Query	#	#	COMMIT
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -1915,15 +1915,15 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM non_trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
-CREATE FUNCTION func1 () RETURNS varchar(30) CHARSET utf8
+CREATE FUNCTION func1 () RETURNS varchar(30) CHARSET utf8mb3
 BEGIN
 CREATE TEMPORARY TABLE tt1(i INT) ENGINE=MyISAM; DROP TEMPORARY TABLE IF EXISTS tt1; INSERT INTO trans_table1 VALUES (12);
 RETURN 0;
 END;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN SELECT QUERY.
@@ -1931,11 +1931,11 @@ Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but wil
 SELECT func1();
 func1()
 0
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
@@ -1947,11 +1947,11 @@ SELECT func1();
 func1()
 0
 COMMIT;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
@@ -1966,7 +1966,7 @@ ROLLBACK;
 Warnings:
 Warning	1751	The creation of some temporary tables could not be rolled back.
 Warning	1752	Some temporary tables were dropped, but these operations could not be rolled back.
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 #
 # Verify that CREATE/DROP TEMPORARY TABLE in a FUNCTION are not written
 # into binlog when using the FUNCTION IN INSERT/UPDATE/DELETE QUERY ON
@@ -1978,24 +1978,24 @@ DELETE FROM trans_table2 WHERE i=func1();
 INSERT INTO non_trans_table2 VALUES (func1());
 UPDATE non_trans_table2 SET i=func1();
 DELETE FROM non_trans_table2 WHERE i=func1();
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP FUNCTION func1;
 CREATE TRIGGER trigger1
@@ -2009,13 +2009,13 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -2029,13 +2029,13 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -2049,15 +2049,15 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Update_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Update_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Update_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -2071,12 +2071,12 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -2090,15 +2090,15 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
 master-bin.000001	#	Query	#	#	BEGIN
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table2)
 master-bin.000001	#	Table_map	#	#	table_id: # (test.trans_table1)
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Delete_rows	#	#	table_id: #
-master-bin.000001	#	Write_rows	#	#	table_id: #
-master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Write_rows	#	#	table_id: # flags: USE_SQL_FOREIGN_KEY_F
+master-bin.000001	#	Delete_rows	#	#	table_id: # flags: STMT_END_F USE_SQL_FOREIGN_KEY_F
 master-bin.000001	#	Xid	#	#	COMMIT /* XID */
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
@@ -2112,7 +2112,7 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE INSERT ON non_trans_table2 FOR EACH ROW
@@ -2125,7 +2125,7 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO non_trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 AFTER INSERT ON non_trans_table2 FOR EACH ROW
@@ -2138,7 +2138,7 @@ END;
 # INSERT QUERY ON transactional/non-transactional table.
 #
 INSERT INTO non_trans_table2 VALUES (10);
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE UPDATE ON non_trans_table2 FOR EACH ROW
@@ -2151,7 +2151,7 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE non_trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 AFTER UPDATE ON non_trans_table2 FOR EACH ROW
@@ -2164,7 +2164,7 @@ END;
 # UPDATE QUERY ON transactional/non-transactional table.
 #
 UPDATE non_trans_table2 SET i=12;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 BEFORE DELETE ON non_trans_table2 FOR EACH ROW
@@ -2177,7 +2177,7 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM non_trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
 CREATE TRIGGER trigger1
 AFTER DELETE ON non_trans_table2 FOR EACH ROW
@@ -2190,9 +2190,9 @@ END;
 # DELETE QUERY ON transactional/non-transactional table.
 #
 DELETE FROM non_trans_table2;
-include/show_binlog_events.inc
+include/rpl/deprecated/show_binlog_events.inc
 DROP TRIGGER trigger1;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 [connection master]
 include/diff_tables.inc [master:trans_table1, slave:trans_table1]
 include/diff_tables.inc [master:trans_table2, slave:trans_table2]
@@ -2200,4 +2200,4 @@ include/diff_tables.inc [master:non_trans_table1, slave:non_trans_table1]
 include/diff_tables.inc [master:non_trans_table2, slave:non_trans_table2]
 DROP TABLE trans_table1, trans_table2;
 DROP TABLE non_trans_table1, non_trans_table2;
-include/rpl_end.inc
+include/rpl/deinit.inc

@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,10 +23,11 @@
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-#include <array>
 #include <thread>
 
 #include <gmock/gmock.h>
+#include <gtest/gtest.h>
+
 #ifdef RAPIDJSON_NO_SIZETYPEDEFINE
 #include "my_rapidjson_size_t.h"
 #endif
@@ -35,28 +37,30 @@
 #include <rapidjson/stringbuffer.h>
 
 #include "config_builder.h"
-#include "dim.h"
 #include "mock_server_rest_client.h"
 #include "mock_server_testutils.h"
-#include "mysql/harness/logging/registry.h"
+#include "mysql/harness/stdx/ranges.h"     // enumerate
 #include "mysql/harness/utility/string.h"  // ::join
 #include "mysqlrouter/mysql_session.h"
 #include "mysqlrouter/rest_client.h"
 #include "rest_api_testutils.h"
 #include "router_component_test.h"
+#include "router_component_testutils.h"  // make_bad_connection
 #include "tcp_port_pool.h"
 #include "test/helpers.h"
 #include "test/temp_directory.h"
 
 using namespace std::string_literals;
-
 using namespace std::chrono_literals;
 
 class RestRoutingApiTest
     : public RestApiComponentTest,
       public ::testing::WithParamInterface<RestApiTestParams> {
  protected:
-  RestRoutingApiTest() : mock_port_{port_pool_.get_next_available()} {}
+  RestRoutingApiTest()
+      : mock_port_(port_pool_.get_next_available()),
+        mock_socket_(
+            mysql_harness::Path(socket_dir_.name()).join("mock.sock").str()) {}
 
   bool wait_route_ready(std::chrono::milliseconds max_wait_time,
                         const std::string &route_name, const uint16_t http_port,
@@ -86,11 +90,19 @@ class RestRoutingApiTest
     return false;
   }
 
+  TempDirectory socket_dir_;
+
   const uint16_t mock_port_;
+  const std::string mock_socket_;
   std::vector<uint16_t> routing_ports_;
 
  public:
-  static const size_t kRoutesQty = 5;
+  static const size_t kRoutesQty = 5
+#ifndef _WIN32
+                                   // for the "sockets" route. (not on windows)
+                                   + 1
+#endif
+      ;
 };
 
 /*static*/ const size_t RestRoutingApiTest::kRoutesQty;
@@ -109,6 +121,10 @@ static const std::vector<SwaggerPath> kRoutingSwaggerPaths{
     {"/routes/{routeName}/blockedHosts", "Get blocked host list for a route",
      "blocked host list for a route", "route not found"},
     {"/routes", "Get list of the routes", "list of the routes", ""},
+    {"/routing/guidelines", "Get routing guidelines document",
+     "routing guidelines document", ""},
+    {"/routing/guidelines/schema", "Get routing guidelines document schema",
+     "routing guidelines document schema", ""},
 };
 
 /**
@@ -126,16 +142,28 @@ TEST_P(RestRoutingApiTest, ensure_openapi) {
 
   const std::string userfile = create_password_file();
 
-  const std::vector<std::string> route_names{"", "_", "123", "Aaz", "ro"};
+  const std::vector<std::string> route_names{
+      "",        "_", "123", "Aaz", "ro",
+#ifndef _WIN32
+      "sockets",
+#endif
+  };
+
+  ASSERT_EQ(route_names.size(), kRoutesQty);
 
   auto config_sections = get_restapi_config("rest_routing", userfile,
                                             GetParam().request_authentication);
-  size_t i = 0;
-  for (const auto &route_name : route_names) {
+  for (const auto [i, route_name] : stdx::views::enumerate(route_names)) {
     // let's make "_" route a metadata cache one, all other are static
-    const std::string destinations =
-        (route_name == "_") ? "metadata-cache://test/default?role=PRIMARY"
-                            : "127.0.0.1:" + std::to_string(mock_port_);
+    std::string destinations;
+    if (route_name == "_") {
+      destinations = "metadata-cache://test/default?role=PRIMARY";
+    } else if (route_name == "sockets") {
+      destinations = "local:" + mock_socket_;
+    } else {
+      destinations = "127.0.0.1:" + std::to_string(mock_port_);
+    }
+
     config_sections.push_back(mysql_harness::ConfigBuilder::build_section(
         std::string("routing") + (route_name.empty() ? "" : ":") + route_name,
         {
@@ -148,41 +176,51 @@ TEST_P(RestRoutingApiTest, ensure_openapi) {
             {"max_connect_errors", "3"},
             {"max_connections", "1000"},
         }));
-    ++i;
   }
 
   // create a "dead" metadata-cache referenced by the routing "_" to check
   // route/health isActive == 0
   const std::string keyring_username = "mysql_router1_user";
   config_sections.push_back(mysql_harness::ConfigBuilder::build_section(
-      "metadata_cache:test",
-      {
-          {"router_id", "1"},
-          {"user", keyring_username},
-          {"metadata_cluster", "test"},
-          // 198.51.100.0/24 is a reserved address block, it could not be
-          // connected to. https://tools.ietf.org/html/rfc5737#section-4
-          {"bootstrap_server_addresses", "mysql://198.51.100.1"},
-          //"ttl", "0.5"
-      }));
+      "metadata_cache:test", {
+                                 {"router_id", "1"},
+                                 {"user", keyring_username},
+                                 {"metadata_cluster", "test"},
+                                 //"ttl", "0.5"
+                             }));
 
   std::map<std::string, std::string> default_section = get_DEFAULT_defaults();
   init_keyring(default_section, conf_dir_.name());
+
+  // 198.51.100.0/24 is a reserved address block, it could not be
+  // connected to. https://tools.ietf.org/html/rfc5737#section-4
+  const auto state_file = create_state_file(
+      get_test_temp_dir_name(),
+      create_state_file_content(
+          {mysql_harness::TcpDestination("198.51.100.1", 3060)}, "uuid", "",
+          0));
+  default_section["dynamic_state"] = state_file;
 
   const std::string conf_file{create_config_file(
       conf_dir_.name(), mysql_harness::join(config_sections, ""),
       &default_section, "mysqlrouter.conf", "connect_timeout=1")};
 
   SCOPED_TRACE("// starting router");
-  ProcessWrapper &http_server =
-      launch_router({"-c", conf_file}, EXIT_SUCCESS, true, false, -1s);
+  auto &http_server =
+      router_spawner()
+          // wait for the signal-handler to be ready.
+          // Router will be reach "READY" as metadata-cache is dead.
+          .wait_for_sync_point(Spawner::SyncPoint::RUNNING)
+          .spawn({"-c", conf_file});
 
   // doesn't really matter which file we use here, we are not going to do any
   // queries
-  const std::string json_stmts = get_data_dir().join("bootstrap_gr.js").str();
 
   SCOPED_TRACE("// launch the server mock");
-  launch_mysql_server_mock(json_stmts, mock_port_, EXIT_SUCCESS, false);
+  mock_server_spawner().spawn(mock_server_cmdline("bootstrap_gr.js")
+                                  .port(mock_port_)
+                                  .socket(mock_socket_)
+                                  .args());
 
   // wait for route being available if we expect it to be and plan to do some
   // connections to it (which are routes: "ro" and "Aaz")
@@ -208,10 +246,17 @@ TEST_P(RestRoutingApiTest, ensure_openapi) {
   EXPECT_NO_THROW(client_Aaz_1.connect("127.0.0.1", routing_ports_[3], "root",
                                        "fake-pass", "", ""));
 
+#ifndef _WIN32
+  // make 1 connection to route "socket"
+  mysqlrouter::MySQLSession client_sockets;
+  EXPECT_NO_THROW(client_sockets.connect("127.0.0.1", routing_ports_[5], "root",
+                                         "fake-pass", "", ""));
+#endif
+
   // call wait_port_ready a few times on "123" to trigger blocked client
   // on that route (we set max_connect_errors to 2)
   for (size_t i = 0; i < 3; ++i) {
-    ASSERT_TRUE(wait_for_port_ready(routing_ports_[2], 500ms));
+    ASSERT_NO_FATAL_FAILURE(make_bad_connection(routing_ports_[2]));
   }
 
   // wait until we see that the Router has blocked the host
@@ -356,6 +401,30 @@ get_expected_destinations_fields(int expected_destinations_num) {
   return result;
 }
 
+#ifndef _WIN32
+static const RestApiComponentTest::json_verifiers_t
+get_expected_destinations_socket_fields(int expected_destinations_num) {
+  RestApiComponentTest::json_verifiers_t result{
+      {"/items",
+       [=](const JsonValue *value) {
+         ASSERT_NE(value, nullptr);
+         ASSERT_TRUE(value->IsArray());
+         ASSERT_EQ(value->GetArray().Size(), expected_destinations_num);
+       }},
+  };
+
+  for (int i = 0; i < expected_destinations_num; ++i) {
+    result.emplace_back("/items/0/socket", [](const JsonValue *value) {
+      ASSERT_TRUE(value != nullptr);
+      ASSERT_TRUE(value->IsString());
+      ASSERT_THAT(value->GetString(), Not(testing::IsEmpty()));
+    });
+  }
+
+  return result;
+}
+#endif  // _WIN32
+
 static RestApiComponentTest::json_verifiers_t get_expected_blocked_hosts_fields(
     const int expected_blocked_hosts) {
   RestApiComponentTest::json_verifiers_t result{
@@ -427,6 +496,30 @@ get_expected_connections_fields_fields(const int expected_connection_qty) {
   return result;
 }
 
+static RestApiComponentTest::json_verifiers_t get_expected_schema_parts(
+    std::string_view item_name, const std::vector<std::string> &values) {
+  RestApiComponentTest::json_verifiers_t result;
+
+  result.emplace_back(std::string(item_name) + "/items/enum",
+                      [cnt = values.size()](const JsonValue *value) {
+                        ASSERT_TRUE(value != nullptr);
+                        ASSERT_TRUE(value->IsArray());
+                        ASSERT_EQ(value->GetArray().Size(), cnt);
+                      });
+
+  for (uint32_t i = 0; i < values.size(); i++) {
+    std::string item =
+        std::string(item_name) + "/items/enum/" + std::to_string(i);
+    result.emplace_back(item, [values](const JsonValue *value) {
+      ASSERT_TRUE(value != nullptr);
+      ASSERT_TRUE(value->IsString());
+      ASSERT_THAT(values, ::testing::Contains(value->GetString()));
+    });
+  }
+
+  return result;
+}
+
 // ****************************************************************************
 // Request the resource(s) using supported methods with authentication enabled
 // and valid credentials
@@ -439,7 +532,68 @@ static const RestApiTestParams rest_api_valid_methods[]{
      /*request_authentication =*/true,
      get_expected_status_fields(
          /*expected_max_total_connections=*/512,
-         /*expected_current_total_connections=*/3 + 1),
+         /*expected_current_total_connections=*/
+         3 + 1
+#ifndef _WIN32
+             + 1
+#endif
+         ),
+     kRoutingSwaggerPaths},
+    {"routing_guidelines",
+     std::string(rest_api_basepath) + "/routing/guidelines",
+     "/routing/guidelines",
+     HttpMethod::Get,
+     HttpStatusCode::Ok,
+     kContentTypeJson,
+     kRestApiUsername,
+     kRestApiPassword,
+     /*request_authentication =*/true,
+     {{"/version",
+       [](const JsonValue *value) {
+         ASSERT_NE(value, nullptr);
+         ASSERT_TRUE(value->IsString());
+         ASSERT_STREQ(value->GetString(), "1.1");
+       }}},
+     kRoutingSwaggerPaths},
+    {"routing_guidelines_schema_keywords",
+     std::string(rest_api_basepath) + "/routing/guidelines/schema",
+     "/routing/guidelines/schema", HttpMethod::Get, HttpStatusCode::Ok,
+     kContentTypeJson, kRestApiUsername, kRestApiPassword,
+     /*request_authentication =*/true,
+     get_expected_schema_parts(
+         "/match_rules/keywords",
+         {"LIKE", "FALSE", "NULL", "NOT", "IN", "OR", "AND", "TRUE"}),
+     kRoutingSwaggerPaths},
+    {"routing_guidelines_schema_functions",
+     std::string(rest_api_basepath) + "/routing/guidelines/schema",
+     "/routing/guidelines/schema", HttpMethod::Get, HttpStatusCode::Ok,
+     kContentTypeJson, kRestApiUsername, kRestApiPassword,
+     /*request_authentication =*/true,
+     get_expected_schema_parts(
+         "/match_rules/functions",
+         {"SQRT", "NUMBER", "IS_IPV4", "IS_IPV6", "REGEXP_LIKE",
+          "SUBSTRING_INDEX", "STARTSWITH", "ENDSWITH", "CONTAINS", "RESOLVE_V4",
+          "RESOLVE_V6", "CONCAT", "NETWORK"}),
+     kRoutingSwaggerPaths},
+    {"routing_guidelines_schema_variables",
+     std::string(rest_api_basepath) + "/routing/guidelines/schema",
+     "/routing/guidelines/schema", HttpMethod::Get, HttpStatusCode::Ok,
+     kContentTypeJson, kRestApiUsername, kRestApiPassword,
+     /*request_authentication =*/true,
+     get_expected_schema_parts(
+         "/match_rules/variables",
+         {"router.localCluster",   "router.hostname",
+          "router.bindAddress",    "router.port.ro",
+          "router.port.rw",        "router.port.rw_split",
+          "router.routeName",      "router.name",
+          "server.label",          "server.address",
+          "server.port",           "server.uuid",
+          "server.version",        "server.clusterName",
+          "server.clusterSetName", "server.isClusterInvalidated",
+          "server.memberRole",     "server.clusterRole",
+          "session.targetIP",      "session.targetPort",
+          "session.sourceIP",      "session.randomValue",
+          "session.user",          "session.schema"}),
      kRoutingSwaggerPaths},
     {"routing_routes_status_ro",
      std::string(rest_api_basepath) + "/routes/ro/status",
@@ -545,6 +699,14 @@ static const RestApiTestParams rest_api_valid_methods[]{
             ASSERT_TRUE(value->IsString());
             ASSERT_STREQ(value->GetString(), "ro");
           }},
+#ifndef _WIN32
+         {"/items/5/name",
+          [](const JsonValue *value) {
+            ASSERT_TRUE(value != nullptr);
+            ASSERT_TRUE(value->IsString());
+            ASSERT_STREQ(value->GetString(), "sockets");
+          }},
+#endif
      },
      kRoutingSwaggerPaths},
     {"routes_config_ro", std::string(rest_api_basepath) + "/routes/ro/config",
@@ -605,6 +767,14 @@ static const RestApiTestParams rest_api_valid_methods[]{
      kContentTypeJson, kRestApiUsername, kRestApiPassword,
      /*request_authentication =*/true, get_expected_health_fields(true),
      kRoutingSwaggerPaths},
+#ifndef _WIN32
+    {"routes_health_sockets",
+     std::string(rest_api_basepath) + "/routes/sockets/health",
+     "/routes/{routeName}/health", HttpMethod::Get, HttpStatusCode::Ok,
+     kContentTypeJson, kRestApiUsername, kRestApiPassword,
+     /*request_authentication =*/true, get_expected_health_fields(true),
+     kRoutingSwaggerPaths},
+#endif
     {"routes_health_123_params",
      std::string(rest_api_basepath) + "/routes/123/health?someparam",
      "/routes/{routeName}/health",
@@ -651,6 +821,14 @@ static const RestApiTestParams rest_api_valid_methods[]{
      /*request_authentication =*/true,
      {},
      kRoutingSwaggerPaths},
+#ifndef _WIN32
+    {"routes_destinations_sockets",
+     std::string(rest_api_basepath) + "/routes/sockets/destinations",
+     "/routes/{routeName}/destinations", HttpMethod::Get, HttpStatusCode::Ok,
+     kContentTypeJson, kRestApiUsername, kRestApiPassword,
+     /*request_authentication =*/true,
+     get_expected_destinations_socket_fields(1), kRoutingSwaggerPaths},
+#endif
     {"routes_destinations_nonexistent",
      std::string(rest_api_basepath) + "/routes/nonexistent/destinations",
      "/routes/{routeName}/destinations", HttpMethod::Get,
@@ -958,8 +1136,10 @@ TEST_F(RestRoutingApiTest, routing_api_no_auth) {
 
   const std::string conf_file{create_config_file(
       conf_dir_.name(), mysql_harness::join(config_sections, "\n"))};
-  auto &router =
-      launch_router({"-c", conf_file}, EXIT_FAILURE, true, false, -1s);
+  auto &router = router_spawner()
+                     .wait_for_sync_point(Spawner::SyncPoint::NONE)
+                     .expected_exit_code(EXIT_FAILURE)
+                     .spawn({"-c", conf_file});
 
   check_exit_code(router, EXIT_FAILURE, 10s);
 
@@ -982,8 +1162,10 @@ TEST_F(RestRoutingApiTest, invalid_realm) {
 
   const std::string conf_file{create_config_file(
       conf_dir_.name(), mysql_harness::join(config_sections, "\n"))};
-  auto &router =
-      launch_router({"-c", conf_file}, EXIT_FAILURE, true, false, -1s);
+  auto &router = router_spawner()
+                     .wait_for_sync_point(Spawner::SyncPoint::NONE)
+                     .expected_exit_code(EXIT_FAILURE)
+                     .spawn({"-c", conf_file});
 
   check_exit_code(router, EXIT_FAILURE, 10s);
 
@@ -1026,8 +1208,10 @@ TEST_F(RestRoutingApiTest, rest_routing_section_twice) {
 
   const std::string conf_file{create_config_file(
       conf_dir_.name(), mysql_harness::join(config_sections, "\n"))};
-  auto &router =
-      launch_router({"-c", conf_file}, EXIT_FAILURE, true, false, -1s);
+  auto &router = router_spawner()
+                     .wait_for_sync_point(Spawner::SyncPoint::NONE)
+                     .expected_exit_code(EXIT_FAILURE)
+                     .spawn({"-c", conf_file});
 
   check_exit_code(router, EXIT_FAILURE, 10s);
 
@@ -1050,8 +1234,10 @@ TEST_F(RestRoutingApiTest, rest_routing_section_has_key) {
 
   const std::string conf_file{create_config_file(
       conf_dir_.name(), mysql_harness::join(config_sections, "\n"))};
-  auto &router =
-      launch_router({"-c", conf_file}, EXIT_FAILURE, true, false, -1s);
+  auto &router = router_spawner()
+                     .wait_for_sync_point(Spawner::SyncPoint::NONE)
+                     .expected_exit_code(EXIT_FAILURE)
+                     .spawn({"-c", conf_file});
 
   check_exit_code(router, EXIT_FAILURE, 10s);
 
@@ -1060,22 +1246,6 @@ TEST_F(RestRoutingApiTest, rest_routing_section_has_key) {
                                  "  init 'rest_routing' failed: [rest_routing] "
                                  "section does not expect a key, found 'A'"))
       << router_output;
-}
-
-static std::string get_server_addr_list(const std::vector<uint16_t> &ports) {
-  std::string result;
-  bool use_comma = false;
-
-  for (const auto &port : ports) {
-    if (use_comma) {
-      result += ",";
-    } else {
-      use_comma = true;
-    }
-    result += "mysql://localhost:" + std::to_string(port);
-  }
-
-  return result;
 }
 
 class RestRoutingApiTestCluster : public RestRoutingApiTest {};
@@ -1095,21 +1265,22 @@ TEST_P(RestRoutingApiTestCluster, ensure_openapi_cluster) {
   std::vector<ProcessWrapper *> nodes;
   std::vector<uint16_t> node_classic_ports;
   uint16_t first_node_http_port{0};
-  const std::string json_metadata =
-      get_data_dir().join("metadata_dynamic_nodes.js").str();
+
   for (size_t i = 0; i < 3; ++i) {
     node_classic_ports.push_back(port_pool_.get_next_available());
     if (i == 0) first_node_http_port = port_pool_.get_next_available();
 
-    nodes.push_back(&launch_mysql_server_mock(
-        json_metadata, node_classic_ports[i], EXIT_SUCCESS, false,
-        i == 0 ? first_node_http_port : 0));
+    nodes.push_back(&mock_server_spawner().spawn(
+        mock_server_cmdline("metadata_dynamic_nodes_v2_gr.js")
+            .port(node_classic_ports[i])
+            .http_port(i == 0 ? first_node_http_port : 0)
+            .args()));
   }
 
   ASSERT_TRUE(MockServerRestClient(first_node_http_port)
                   .wait_for_rest_endpoint_ready());
 
-  set_mock_metadata(first_node_http_port, "",
+  set_mock_metadata(first_node_http_port, "uuid",
                     classic_ports_to_gr_nodes(node_classic_ports), 0,
                     classic_ports_to_cluster_nodes(node_classic_ports));
 
@@ -1149,19 +1320,23 @@ TEST_P(RestRoutingApiTestCluster, ensure_openapi_cluster) {
                                  {"router_id", "1"},
                                  {"user", keyring_username},
                                  {"metadata_cluster", "test"},
-                                 {"bootstrap_server_addresses",
-                                  get_server_addr_list(node_classic_ports)},
                              }));
 
   auto default_section = get_DEFAULT_defaults();
   init_keyring(default_section, conf_dir_.name());
 
+  const auto state_file = create_state_file(
+      get_test_temp_dir_name(),
+      create_state_file_content("uuid", "", node_classic_ports, 0));
+  default_section["dynamic_state"] = state_file;
+
   const std::string conf_file{create_config_file(
       conf_dir_.name(), mysql_harness::join(config_sections, ""),
       &default_section)};
 
-  ProcessWrapper &http_server =
-      launch_router({"-c", conf_file}, EXIT_SUCCESS, true, false, -1s);
+  auto &http_server = router_spawner()
+                          .wait_for_sync_point(Spawner::SyncPoint::RUNNING)
+                          .spawn({"-c", conf_file});
 
   // wait for both (rw and ro) routes being available
   for (size_t i = 0; i < 2; ++i) {

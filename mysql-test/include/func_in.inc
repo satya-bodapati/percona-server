@@ -61,11 +61,11 @@ c char(1) character set latin1 collate latin1_danish_ci
 );
 insert into t1 values ('A','B','C');
 insert into t1 values ('a','c','c');
---error 1267
+--error ER_CANT_AGGREGATE_2COLLATIONS
 select * from t1 where a in (b);
---error 1270
+--error ER_CANT_AGGREGATE_3COLLATIONS
 select * from t1 where a in (b,c);
---error 1271
+--error ER_CANT_AGGREGATE_NCOLLATIONS
 select * from t1 where 'a' in (a,b,c);
 select * from t1 where 'a' in (a);
 select * from t1 where a in ('a');
@@ -77,8 +77,8 @@ explain select * from t1 where 'a' in (a,b,c collate latin1_bin);
 drop table t1;
 set names utf8mb4;
 
-set names utf8;
-create table t1 (a char(10) character set utf8 not null);
+set names utf8mb3;
+create table t1 (a char(10) character set utf8mb3 not null);
 insert into t1 values ('bbbb'),(_koi8r x'C3C3C3C3'),(_latin1 x'C4C4C4C4');
 select a from t1 where a in ('bbbb',_koi8r x'C3C3C3C3',_latin1 x'C4C4C4C4') order by a;
 drop table t1;
@@ -383,7 +383,6 @@ DROP TABLE t1,t2,t3,t4;
 CREATE TABLE t1 (id int not null);
 INSERT INTO t1 VALUES (1),(2);
 
---skip_if_hypergraph  # Different warnings.
 SELECT id FROM t1 WHERE id IN(4564, (SELECT IF(1=0,1,1/0)) );
 
 DROP TABLE t1;

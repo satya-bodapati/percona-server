@@ -1,15 +1,16 @@
-/* Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,6 +26,7 @@
 
 #include <assert.h>
 #include <algorithm>
+#include <memory>
 #include <type_traits>
 #include <utility>
 
@@ -203,7 +205,7 @@ class Mem_root_array_YY {
     @return true if out-of-memory, false otherwise.
   */
   template <typename... Args>
-  bool emplace_back(Args &&... args) {
+  bool emplace_back(Args &&...args) {
     constexpr size_t min_capacity = 20;
     constexpr size_t expansion_factor = 2;
     if (m_size == m_capacity) {
@@ -271,38 +273,43 @@ class Mem_root_array_YY {
 
     Notice that this function changes the actual content of the
     container by inserting or erasing elements from it.
+
+    @param n The new size of the container.
+    @param val The value to copy into new elements.
+    @return True if out of memory, false otherwise.
    */
-  void resize(size_t n, const value_type &val) {
-    if (n == m_size) return;
+  [[nodiscard]] bool resize(size_t n, const value_type &val) {
     if (n > m_size) {
-      if (!reserve(n)) {
-        while (n != m_size) push_back(val);
+      if (reserve(n)) {
+        return true;
       }
-      return;
+      std::uninitialized_fill(m_array + m_size, m_array + n, val);
+      m_size = n;
+    } else if (n < m_size) {
+      chop(n);
     }
-    if (!has_trivial_destructor) {
-      while (n != m_size) pop_back();
-    }
-    m_size = n;
+    return false;
   }
 
   /**
-    Same as resize(size_t, const value_type &val), but default-constructs
+    Same as resize(size_t, const value_type &val), but value-initializes
     the new elements. This allows one to resize containers even if
     value_type is not copy-constructible.
+
+    @param n The new size of the container.
+    @return True if out of memory, false otherwise.
    */
-  void resize(size_t n) {
-    if (n == m_size) return;
+  [[nodiscard]] bool resize(size_t n) {
     if (n > m_size) {
-      if (!reserve(n)) {
-        while (n != m_size) push_back(value_type());
+      if (reserve(n)) {
+        return true;
       }
-      return;
+      std::uninitialized_value_construct(m_array + m_size, m_array + n);
+      m_size = n;
+    } else if (n < m_size) {
+      chop(n);
     }
-    if (!has_trivial_destructor) {
-      while (n != m_size) pop_back();
-    }
-    m_size = n;
+    return false;
   }
 
   /**
@@ -454,12 +461,12 @@ class Mem_root_array : public Mem_root_array_YY<Element_type> {
 
   Mem_root_array(MEM_ROOT *root, size_t n) {
     super::init(root);
-    super::resize(n);
+    (void)super::resize(n);
   }
 
   Mem_root_array(MEM_ROOT *root, size_t n, const value_type &val) {
     super::init(root);
-    super::resize(n, val);
+    (void)super::resize(n, val);
   }
 
   /**

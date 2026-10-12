@@ -1,15 +1,16 @@
-/* Copyright (c) 2008, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,10 +29,9 @@
 #include "storage/perfschema/pfs_global.h"
 
 bool pfs_initialized = false;
-size_t pfs_allocated_memory_size = 0;
-size_t pfs_allocated_memory_count = 0;
 
 bool stub_alloc_always_fails = true;
+bool stub_alloc_maybe_fails = true;
 int stub_alloc_fails_after_count = 0;
 
 void *pfs_malloc(PFS_builtin_memory_class *, size_t size, myf) {
@@ -42,15 +42,64 @@ void *pfs_malloc(PFS_builtin_memory_class *, size_t size, myf) {
 
   if (stub_alloc_always_fails) return nullptr;
 
-  if (--stub_alloc_fails_after_count <= 0) return nullptr;
+  if (stub_alloc_maybe_fails) {
+    if (--stub_alloc_fails_after_count <= 0) {
+      return nullptr;
+    }
+  }
 
-  void *ptr = malloc(size);
+  void *ptr = nullptr;
+
+#ifdef PFS_ALIGNMENT
+#ifdef HAVE_POSIX_MEMALIGN
+  /* Linux */
+  if (unlikely(posix_memalign(&ptr, PFS_ALIGNMENT, size))) {
+    return nullptr;
+  }
+#else
+#ifdef HAVE_MEMALIGN
+  /* Solaris */
+  ptr = memalign(PFS_ALIGNMENT, size);
+#else
+#ifdef HAVE_ALIGNED_MALLOC
+  /* Windows */
+  ptr = _aligned_malloc(size, PFS_ALIGNMENT);
+#else
+#error "Missing implementation for PFS_ALIGNMENT"
+#endif /* HAVE_ALIGNED_MALLOC */
+#endif /* HAVE_MEMALIGN */
+#endif /* HAVE_POSIX_MEMALIGN */
+#else  /* PFS_ALIGNMENT */
+  /* Everything else */
+  ptr = malloc(size);
+#endif
+
   if (ptr != nullptr) memset(ptr, 0, size);
   return ptr;
 }
 
 void pfs_free(PFS_builtin_memory_class *, size_t, void *ptr) {
-  if (ptr != nullptr) free(ptr);
+  if (ptr == nullptr) {
+    return;
+  }
+
+#ifdef HAVE_POSIX_MEMALIGN
+  /* Allocated with posix_memalign() */
+  free(ptr);
+#else
+#ifdef HAVE_MEMALIGN
+  /* Allocated with memalign() */
+  free(ptr);
+#else
+#ifdef HAVE_ALIGNED_MALLOC
+  /* Allocated with _aligned_malloc() */
+  _aligned_free(ptr);
+#else
+  /* Allocated with malloc() */
+  free(ptr);
+#endif /* HAVE_ALIGNED_MALLOC */
+#endif /* HAVE_MEMALIGN */
+#endif /* HAVE_POSIX_MEMALIGN */
 }
 
 void *pfs_malloc_array(PFS_builtin_memory_class *klass, size_t n, size_t size,

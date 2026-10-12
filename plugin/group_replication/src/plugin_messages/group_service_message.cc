@@ -1,15 +1,16 @@
-/* Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,20 +22,18 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include "plugin/group_replication/include/plugin_messages/group_service_message.h"
-#include <string.h>
+#include <cstring>
 #include "my_dbug.h"
 #include "plugin/group_replication/include/plugin_handlers/metrics_handler.h"
 
 Group_service_message::Group_service_message()
     : Plugin_gcs_message(CT_MESSAGE_SERVICE_MESSAGE),
-      m_tag(""),
       m_data(Malloc_allocator<uchar>(key_message_service_received_message)),
       m_data_pointer(nullptr),
       m_data_pointer_length(0) {}
 
 Group_service_message::Group_service_message(const uchar *buf, size_t len)
     : Plugin_gcs_message(CT_MESSAGE_SERVICE_MESSAGE),
-      m_tag(""),
       m_data(Malloc_allocator<uchar>(key_message_service_received_message)),
       m_data_pointer(nullptr),
       m_data_pointer_length(0) {
@@ -58,9 +57,8 @@ const uchar *Group_service_message::get_data() {
 
   if (nullptr != m_data_pointer) {
     return m_data_pointer; /* purecov: inspected */
-  } else {
-    return m_data.data();
   }
+  return m_data.data();
 }
 
 size_t Group_service_message::get_data_length() {
@@ -68,9 +66,8 @@ size_t Group_service_message::get_data_length() {
 
   if (nullptr != m_data_pointer) {
     return m_data_pointer_length; /* purecov: inspected */
-  } else {
-    return m_data.size();
   }
+  return m_data.size();
 }
 
 void Group_service_message::encode_payload(std::vector<uchar> *buffer) const {

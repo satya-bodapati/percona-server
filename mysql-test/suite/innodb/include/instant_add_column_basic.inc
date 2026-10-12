@@ -3,9 +3,6 @@
 --echo # Create a small table, and add all kinds of new columns and verify
 --echo #
 
---disable_query_log
-call mtr.add_suppression("\\[Warning\\] .*MY-\\d+.* Cannot add field.*");
---enable_query_log
 SET @saved_innodb_strict_mode=@@SESSION.innodb_strict_mode;
 
 --eval CREATE TABLE t1 (a INT NOT NULL AUTO_INCREMENT PRIMARY KEY, b INT) ROW_FORMAT=$row_format
@@ -577,6 +574,7 @@ SELECT count(e) FROM t1 WHERE e LIKE '%world%';
 
 ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY(a, c);
 
+--sorted_result
 SELECT a, c, e FROM t1 WHERE a > 25 AND a < 40;
 
 CHECK TABLE t1;
@@ -763,6 +761,8 @@ DROP TABLE t1;
 --echo # Check FK constraints on instantly added columns
 --echo #
 
+SET restrict_fk_on_non_standard_key=OFF;
+
 --eval CREATE TABLE t1 (a INT NOT NULL AUTO_INCREMENT PRIMARY KEY, b INT) ROW_FORMAT=$row_format
 
 CREATE TABLE t2(a INT NOT NULL PRIMARY KEY, b INT, c INT, KEY(c));
@@ -798,7 +798,7 @@ SHOW CREATE TABLE t1;
 DROP TABLE t2;
 DROP TABLE t1;
 
-
+SET restrict_fk_on_non_standard_key=ON;
 
 --echo #
 --echo # Scenario 9:

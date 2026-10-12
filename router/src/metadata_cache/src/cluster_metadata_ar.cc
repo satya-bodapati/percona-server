@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -44,14 +45,14 @@ ARClusterMetadata::fetch_cluster_topology(
     mysqlrouter::TargetCluster &target_cluster, const unsigned router_id,
     const metadata_cache::metadata_servers_list_t &metadata_servers,
     bool /* needs_writable_node */, const std::string & /*clusterset_id*/,
-    bool /*whole_topology*/, std::size_t &instance_id) {
+    std::size_t &instance_id, std::string & /*guidelines*/) {
   metadata_cache::ClusterTopology result;
 
   bool metadata_read = false;
 
   for (size_t i = 0; i < metadata_servers.size(); ++i) {
     if (terminated) {
-      return stdx::make_unexpected(make_error_code(
+      return stdx::unexpected(make_error_code(
           metadata_cache::metadata_errc::metadata_refresh_terminated));
     }
     const auto &metadata_server = metadata_servers[i];
@@ -61,6 +62,12 @@ ARClusterMetadata::fetch_cluster_topology(
       }
 
       MySQLSession::Transaction transaction(metadata_connection_.get());
+
+      if (!is_server_version_compatible(metadata_connection_.get())) {
+        log_warning("%s", get_incompatible_server_version_msg(
+                              metadata_connection_.get())
+                              .c_str());
+      }
 
       // throws metadata_cache::metadata_error and
       // MetadataUpgradeInProgressException
@@ -85,8 +92,8 @@ ARClusterMetadata::fetch_cluster_topology(
               ? target_cluster.to_string()
               : "";
       if (!get_member_view_id(*metadata_connection_, cluster_id, view_id)) {
-        log_warning("Failed fetching view_id from the metadata server on %s:%d",
-                    metadata_server.address().c_str(), metadata_server.port());
+        log_warning("Failed fetching view_id from the metadata server on %s",
+                    metadata_server.str().c_str());
         continue;
       }
 
@@ -111,16 +118,15 @@ ARClusterMetadata::fetch_cluster_topology(
     } catch (const mysqlrouter::MetadataUpgradeInProgressException &) {
       throw;
     } catch (const std::exception &e) {
-      log_warning("Failed fetching metadata from metadata server on %s:%d - %s",
-                  metadata_server.address().c_str(), metadata_server.port(),
-                  e.what());
+      log_warning("Failed fetching metadata from metadata server on %s - %s",
+                  metadata_server.str().c_str(), e.what());
     }
   }
 
   const auto &cluster_members = result.get_all_members();
 
   if (cluster_members.empty()) {
-    return stdx::make_unexpected(make_error_code(
+    return stdx::unexpected(make_error_code(
         metadata_cache::metadata_errc::no_metadata_read_successful));
   }
 
@@ -174,7 +180,7 @@ metadata_cache::ClusterTopology ARClusterMetadata::fetch_topology_from_member(
   // comparing to other members view of the world
   std::string query =
       "select C.cluster_id, C.cluster_name, M.member_id, I.endpoint, "
-      "I.xendpoint, M.member_role, I.attributes from "
+      "I.xendpoint, M.member_role, I.attributes, I.label from "
       "mysql_innodb_cluster_metadata.v2_ar_members M join "
       "mysql_innodb_cluster_metadata.v2_instances I on I.instance_id = "
       "M.instance_id join mysql_innodb_cluster_metadata.v2_ar_clusters C on "
@@ -185,10 +191,10 @@ metadata_cache::ClusterTopology ARClusterMetadata::fetch_topology_from_member(
   }
 
   auto result_processor = [&cluster](const MySQLSession::Row &row) -> bool {
-    if (row.size() != 7) {
+    if (row.size() != 8) {
       throw metadata_cache::metadata_error(
           "Unexpected number of fields in the resultset. "
-          "Expected = 7, got = " +
+          "Expected = 8, got = " +
           std::to_string(row.size()));
     }
 
@@ -211,6 +217,7 @@ metadata_cache::ClusterTopology ARClusterMetadata::fetch_topology_from_member(
     }
 
     set_instance_attributes(instance, as_string(row[6]));
+    instance.label = as_string(row[7]);
 
     std::string warning;
     if (instance.type == mysqlrouter::InstanceType::AsyncMember) {

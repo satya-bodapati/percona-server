@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,7 +22,6 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include "sql/log_resource.h"
-#include "debug_sync.h"
 #include "sql-common/json_dom.h"
 
 int MY_ATTRIBUTE((visibility("default")))
@@ -48,7 +48,7 @@ bool Log_resource_mi_wrapper::collect_info() {
 
   Json_string json_channel_name(mi->get_channel());
 
-  LOG_INFO log_info;
+  Log_info log_info;
   mi->get_flushed_relay_log_info(&log_info);
   const size_t dir_len = dirname_length(log_info.log_file_name);
   Json_string json_log_file(log_info.log_file_name + dir_len);
@@ -89,7 +89,7 @@ bool Log_resource_binlog_wrapper::collect_info() {
   if (binlog->is_open()) {
     Json_object *json_local = static_cast<Json_object *>(get_json());
 
-    LOG_INFO log_info;
+    Log_info log_info;
     binlog->get_current_log(&log_info, false);
     const size_t dir_len = dirname_length(log_info.log_file_name);
     Json_string json_log_file(log_info.log_file_name + dir_len);
@@ -102,23 +102,20 @@ bool Log_resource_binlog_wrapper::collect_info() {
 }
 
 void Log_resource_gtid_state_wrapper::lock() {
-  DEBUG_SYNC(current_thd, "log_resource_gtid_lock");
-  mysql_mutex_lock(binlog->get_sync_lock());
-  mysql_mutex_lock(binlog->get_commit_lock());
-  global_sid_lock->wrlock();
+  /*
+    Ensure that the number of prepared XIDs is zero to confirm the completion
+    of transactions in the BGC pipeline.
+   */
+  binlog->wait_for_prep_xids();
+
+  global_tsid_lock->wrlock();
 }
 
-void Log_resource_gtid_state_wrapper::unlock() {
-  global_sid_lock->unlock();
-  mysql_mutex_unlock(binlog->get_commit_lock());
-  mysql_mutex_unlock(binlog->get_sync_lock());
-}
+void Log_resource_gtid_state_wrapper::unlock() { global_tsid_lock->unlock(); }
 
 bool Log_resource_gtid_state_wrapper::collect_info() {
   bool error = false;
-  mysql_mutex_assert_owner(binlog->get_sync_lock());
-  mysql_mutex_assert_owner(binlog->get_commit_lock());
-  global_sid_lock->assert_some_wrlock();
+  global_tsid_lock->assert_some_wrlock();
 
   char *gtid_executed_string;
   Json_object *json_local = static_cast<Json_object *>(get_json());
@@ -163,10 +160,10 @@ Log_resource *Log_resource_factory::get_wrapper(MYSQL_BIN_LOG *binlog,
 }
 
 Log_resource *Log_resource_factory::get_wrapper(Gtid_state *gtid_state,
-                                                MYSQL_BIN_LOG *binlog,
-                                                Json_dom *json) {
+                                                Json_dom *json,
+                                                MYSQL_BIN_LOG *binlog) {
   Log_resource_gtid_state_wrapper *wrapper;
-  wrapper = new Log_resource_gtid_state_wrapper(gtid_state, binlog, json);
+  wrapper = new Log_resource_gtid_state_wrapper(gtid_state, json, binlog);
   return wrapper;
 }
 

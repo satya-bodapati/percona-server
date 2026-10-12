@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License, version 2.0,
  as published by the Free Software Foundation.
 
- This program is also distributed with certain software (including
+ This program is designed to work with certain software (including
  but not limited to OpenSSL) that is licensed under separate terms,
  as designated in a particular file or component or in included license
  documentation.  The authors of MySQL hereby grant you an additional
  permission to link the program and your derivative works with the
- separately licensed software that they have included with MySQL.
+ separately licensed software that they have either included with
+ the program or referenced in the documentation.
 
  This program is distributed in the hope that it will be useful,
  but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -31,9 +32,7 @@
 #include "plugin/x/src/helper/multithread/sync_variable.h"
 #include "plugin/x/src/ngs/thread.h"
 
-namespace xpl {
-
-namespace test {
+namespace xpl::test {
 
 const int EXPECTED_VALUE_FIRST = 10;
 const int EXPECTED_VALUE_SECOND = 20;
@@ -48,14 +47,14 @@ class Xpl_sync_variable : public ::testing::Test {
         m_thread_ended(false) {}
 
   static void *start_routine_set(void *data) {
-    Xpl_sync_variable *self = static_cast<Xpl_sync_variable *>(data);
+    auto *self = static_cast<Xpl_sync_variable *>(data);
     self->set_value();
 
     return nullptr;
   }
 
   static void *start_routine_set_and_expect(void *data) {
-    Xpl_sync_variable *self = static_cast<Xpl_sync_variable *>(data);
+    auto *self = static_cast<Xpl_sync_variable *>(data);
     self->set_value();
     self->m_sut.wait_for(EXPECTED_VALUE_SET_EXPECT);
 
@@ -106,7 +105,7 @@ TEST_F(Xpl_sync_variable, wait_returnsRightAway_whenCurrentValueMatches) {
 
 TEST_F(Xpl_sync_variable,
        wait_returnsRightAway_whenCurrentValueInArrayMatches) {
-  int VALUES[] = {EXPECTED_VALUE_SECOND, EXPECTED_VALUE_FIRST};
+  int const VALUES[] = {EXPECTED_VALUE_SECOND, EXPECTED_VALUE_FIRST};
   m_sut.wait_for(VALUES);
 }
 
@@ -126,7 +125,7 @@ TEST_F(Xpl_sync_variable, set_returnsOldValue) {
 
 TEST_F(Xpl_sync_variable,
        wait_returnsRightAway_whenNewCurrentValueInArrayMatches) {
-  int VALUES[] = {EXPECTED_VALUE_SECOND, EXPECTED_VALUE_FIRST};
+  int const VALUES[] = {EXPECTED_VALUE_SECOND, EXPECTED_VALUE_FIRST};
   m_sut.set(EXPECTED_VALUE_SECOND);
   m_sut.wait_for(VALUES);
 }
@@ -144,7 +143,7 @@ TEST_F(
     Xpl_sync_variable,
     wait_returnsDelayed_whenThreadChangesValueAndItsInArrayOfExpectedValues) {
   std::thread t(&Xpl_sync_variable::start_routine_set_and_expect, this);
-  int VALUES[] = {EXPECTED_VALUE_SET};
+  int const VALUES[] = {EXPECTED_VALUE_SET};
   m_sut.wait_for_and_set(VALUES, EXPECTED_VALUE_SET_EXPECT);
   t.join();
 
@@ -152,5 +151,4 @@ TEST_F(
   ASSERT_TRUE(m_sut.is(EXPECTED_VALUE_SET_EXPECT));
 }
 
-}  // namespace test
-}  // namespace xpl
+}  // namespace xpl::test

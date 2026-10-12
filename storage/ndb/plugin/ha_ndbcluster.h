@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -187,6 +188,7 @@ class ha_ndbcluster : public handler, public Partition_handler {
   ha_rows multi_range_read_info_const(uint keyno, RANGE_SEQ_IF *seq,
                                       void *seq_init_param, uint n_ranges,
                                       uint *bufsz, uint *flags,
+                                      bool *force_default_mrr,
                                       Cost_estimate *cost) override;
   ha_rows multi_range_read_info(uint keyno, uint n_ranges, uint keys,
                                 uint *bufsz, uint *flags,
@@ -560,7 +562,8 @@ class ha_ndbcluster : public handler, public Partition_handler {
   const NdbOperation *pk_unique_index_read_key(uint idx, const uchar *key,
                                                uchar *buf,
                                                NdbOperation::LockMode lm,
-                                               Uint32 *ppartition_id);
+                                               Uint32 *ppartition_id,
+                                               uchar *row_side_buffer);
   int pk_unique_index_read_key_pushed(uint idx, const uchar *key);
 
   int read_multi_range_fetch_next();
@@ -707,6 +710,12 @@ class ha_ndbcluster : public handler, public Partition_handler {
                                  const NdbDictionary::Table *ndbtab) const;
   } copying_alter;
 
+  MY_BITMAP m_in_row_side_buffer;
+
+  uint m_row_side_buffer_size;
+  uint m_mrr_reclength;
+  uchar *m_row_side_buffer;
+
   /* State for setActiveHook() callback for reading blob data. */
   uint m_blob_counter;
   uint m_blob_expected_count_per_row;
@@ -739,5 +748,6 @@ class ha_ndbcluster : public handler, public Partition_handler {
 };
 
 int ndb_to_mysql_error(const NdbError *ndberr);
+int fail_index_offline(TABLE *t, int index);
 
 #endif

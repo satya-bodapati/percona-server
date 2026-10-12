@@ -1,18 +1,19 @@
 #ifndef PROTOCOL_CLASSIC_INCLUDED
 #define PROTOCOL_CLASSIC_INCLUDED
 
-/* Copyright (c) 2002, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2002, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -230,8 +231,8 @@ class Protocol_text : public Protocol_classic {
   bool store_float(float nr, uint32 decimals, uint32 zerofill) override;
   bool store_double(double from, uint32 decimals, uint32 zerofill) override;
   bool store_datetime(const MYSQL_TIME &time, uint precision) override;
-  bool store_date(const MYSQL_TIME &time) override;
-  bool store_time(const MYSQL_TIME &time, uint precision) override;
+  bool store_date(const Date_val date) override;
+  bool store_time(const Time_val time, uint precision) override;
   void start_row() override;
   bool send_parameters(List<Item_param> *parameters, bool) override;
 
@@ -255,8 +256,8 @@ class Protocol_binary final : public Protocol_text {
   // Decimals are sent as text, also over the binary protocol.
   using Protocol_text::store_decimal;
   bool store_datetime(const MYSQL_TIME &time, uint precision) override;
-  bool store_date(const MYSQL_TIME &time) override;
-  bool store_time(const MYSQL_TIME &time, uint precision) override;
+  bool store_date(const Date_val date) override;
+  bool store_time(const Time_val time, uint precision) override;
   bool store_float(float nr, uint32 decimals, uint32 zerofill) override;
   bool store_double(double from, uint32 decimals, uint32 zerofill) override;
 

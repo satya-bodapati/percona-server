@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -34,6 +35,17 @@ template <typename TService>
 class my_service {
  public:
   /**
+    Default contructor: constructs an empty my_service
+  */
+  my_service() : m_service(nullptr), m_registry(nullptr) {}
+
+  /**
+    An acquire convenience constructor
+  */
+  my_service(const char *name, SERVICE_TYPE(registry) * registry) {
+    acquire(name, registry);
+  }
+  /**
     Acquires service by name.
 
     @param name Name of service, with or without component name, to acquire.
@@ -41,8 +53,8 @@ class my_service {
       must be valid (i.e. not released) up to the moment when this instance
       dies.
   */
-  my_service(const char *name, SERVICE_TYPE(registry) * registry)
-      : m_registry(registry) {
+  void acquire(const char *name, SERVICE_TYPE(registry) * registry) {
+    m_registry = registry;
     if (registry->acquire(name, &m_service)) {
       /* NULLed service handle means no valid service managed. */
       m_service = {};
@@ -78,12 +90,24 @@ class my_service {
       : m_service(other.m_service), m_registry(other.m_registry) {
     other.m_service = nullptr;
   }
+  my_service<TService> &operator=(const my_service<TService> &other) = delete;
 
-  ~my_service() {
-    if (this->is_valid()) {
-      m_registry->release(m_service);
-    }
+  my_service<TService> &operator=(my_service<TService> &other) {
+    m_service = other.m_service;
+    m_registry = other.m_registry;
+    other.m_service = nullptr;
   }
+
+  /**
+    Releases the reference, if any, and cleans the instance up.
+  */
+  void release() {
+    if (this->is_valid()) m_registry->release(m_service);
+    m_service = nullptr;
+    m_registry = nullptr;
+  }
+
+  ~my_service() { release(); }
 
   operator TService *() const {
     return reinterpret_cast<TService *>(m_service);

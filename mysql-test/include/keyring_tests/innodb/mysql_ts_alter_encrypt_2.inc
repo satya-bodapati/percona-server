@@ -17,6 +17,9 @@
 #   12 - Create tablespace with name as mysql
 ################################################################################
 
+# Waiting time when (re)starting the server
+--let $explicit_default_wait_counter=10000
+
 --disable_query_log
 call mtr.add_suppression("Error generating data for Data ID");
 call mtr.add_suppression("\\[ERROR\\] \\[[^]]*\\] \\[[^]]*\\] Check keyring fail, please check the keyring is loaded.");
@@ -27,6 +30,9 @@ call mtr.add_suppression("\\[ERROR\\] \\[[^]]*\\] \\[[^]]*\\] Encryption can't f
 --echo # SETUP #
 --echo #########
 --echo
+let datadir=`SELECT @@datadir`;
+let search_pattern=samplerecord;
+let ts_name=mysql.ibd;
 
 # Take backup of instance manifest
 --source include/keyring_tests/helper/instance_backup_manifest.inc
@@ -282,12 +288,6 @@ DROP TABLESPACE mysql;
 
 --error ER_WRONG_TABLESPACE_NAME
 ALTER TABLESPACE mysql RENAME TO xyz;
-
---error ER_TABLESPACE_ENGINE_MISMATCH
-ALTER TABLESPACE mysql ENGINE=myisam;
-
---error ER_TABLESPACE_ENGINE_MISMATCH
-ALTER TABLESPACE mysql ENGINE=memory;
 
 --echo #########################################################################
 --echo # Restart with same keyring option

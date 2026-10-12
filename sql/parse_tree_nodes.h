@@ -1,15 +1,16 @@
-/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,6 +27,7 @@
 #include <assert.h>
 #include <sys/types.h>  // TODO: replace with cstdint
 
+#include <bit>
 #include <cctype>  // std::isspace
 #include <cstddef>
 #include <memory>
@@ -33,9 +35,8 @@
 #include "lex_string.h"
 #include "my_alloc.h"
 #include "my_base.h"
-#include "my_bit.h"  // is_single_bit
-
 #include "my_inttypes.h"  // TODO: replace with cstdint
+#include "my_list.h"
 #include "my_sqlcommand.h"
 #include "my_sys.h"
 #include "my_thread_local.h"
@@ -55,6 +56,7 @@
 #include "sql/resourcegroups/resource_group_basic_types.h"
 #include "sql/resourcegroups/resource_group_sql_cmd.h"
 #include "sql/set_var.h"
+#include "sql/sp_head.h"
 #include "sql/sql_admin.h"  // Sql_cmd_shutdown etc.
 #include "sql/sql_alter.h"
 #include "sql/sql_check_constraint.h"  // Sql_check_constraint_spec
@@ -68,6 +70,7 @@
 #include "sql/sql_tablespace.h"      // Tablespace_options
 #include "sql/sql_truncate.h"        // Sql_cmd_truncate_table
 #include "sql/table.h"               // Common_table_expr
+#include "sql/tablesample.h"
 #include "sql/window_lex.h"
 #include "string_with_len.h"
 #include "thr_lock.h"
@@ -473,17 +476,20 @@ class PT_table_factor_table_ident : public PT_table_reference {
   List<String> *opt_use_partition;
   const char *const opt_table_alias;
   List<Index_hint> *opt_key_definition;
+  PT_tablesample *opt_tablesample{nullptr};
 
  public:
   PT_table_factor_table_ident(const POS &pos, Table_ident *table_ident_arg,
                               List<String> *opt_use_partition_arg,
                               const LEX_CSTRING &opt_table_alias_arg,
-                              List<Index_hint> *opt_key_definition_arg)
+                              List<Index_hint> *opt_key_definition_arg,
+                              PT_tablesample *opt_tablesample_arg)
       : super(pos),
         table_ident(table_ident_arg),
         opt_use_partition(opt_use_partition_arg),
         opt_table_alias(opt_table_alias_arg.str),
-        opt_key_definition(opt_key_definition_arg) {}
+        opt_key_definition(opt_key_definition_arg),
+        opt_tablesample(opt_tablesample_arg) {}
 
  protected:
   bool do_contextualize(Parse_context *pc) override;
@@ -602,11 +608,12 @@ class PT_joined_table : public PT_table_reference {
         m_join_pos(join_pos_arg),
         m_type(type),
         m_right_pt_table(tab2_node_arg) {
-    static_assert(is_single_bit(JTT_INNER), "not a single bit");
-    static_assert(is_single_bit(JTT_STRAIGHT), "not a single bit");
-    static_assert(is_single_bit(JTT_NATURAL), "not a single bit");
-    static_assert(is_single_bit(JTT_LEFT), "not a single bit");
-    static_assert(is_single_bit(JTT_RIGHT), "not a single bit");
+    using std::has_single_bit;
+    static_assert(has_single_bit(unsigned{JTT_INNER}), "not a single bit");
+    static_assert(has_single_bit(unsigned{JTT_STRAIGHT}), "not a single bit");
+    static_assert(has_single_bit(unsigned{JTT_NATURAL}), "not a single bit");
+    static_assert(has_single_bit(unsigned{JTT_LEFT}), "not a single bit");
+    static_assert(has_single_bit(unsigned{JTT_RIGHT}), "not a single bit");
 
     assert(type == JTT_INNER || type == JTT_STRAIGHT_INNER ||
            type == JTT_NATURAL_INNER || type == JTT_NATURAL_LEFT ||
@@ -692,10 +699,29 @@ class PT_joined_table_using : public PT_joined_table {
   void add_json_info(Json_object *obj) override;
 };
 
+/*
+  PT_tablesample - parse tree node
+
+  Information contained in TABLESAMPLE clause is here.
+*/
+class PT_tablesample : public Parse_tree_node {
+  typedef Parse_tree_node super;
+
+ public:
+  tablesample_type m_sampling_type;
+  Item *m_sample_percentage{nullptr};
+
+  PT_tablesample(const POS &pos, tablesample_type tablesample_type_arg,
+                 Item *sample_percentage)
+      : super(pos),
+        m_sampling_type(tablesample_type_arg),
+        m_sample_percentage(sample_percentage) {}
+};
+
 class PT_group : public Parse_tree_node {
   typedef Parse_tree_node super;
 
-  PT_order_list *group_list;
+  Mem_root_array_YY<PT_order_list *> group_list;
   olap_type olap;
 
  protected:
@@ -706,10 +732,42 @@ class PT_group : public Parse_tree_node {
   }
 
  public:
-  PT_group(const POS &pos, PT_order_list *group_list_arg, olap_type olap_arg)
+  PT_group(const POS &pos, Mem_root_array_YY<PT_order_list *> group_list_arg,
+           olap_type olap_arg)
       : super(pos), group_list(group_list_arg), olap(olap_arg) {}
 
   bool do_contextualize(Parse_context *pc) override;
+
+  bool set_olap_type(Parse_context *pc);
+
+  bool set_num_grouping_sets(Parse_context *pc, int &num_grouping_sets);
+
+  void check_if_execute_only_in_secondary_engine(Parse_context *pc,
+                                                 int num_grouping_sets);
+
+  /**
+   Initializes the grouping set if the query block includes GROUP BY
+   modifiers.
+ */
+  bool allocate_grouping_sets(Parse_context *pc, int &num_grouping_sets);
+
+  /**
+    Populates the grouping sets if the query block includes non-primitive
+    grouping.
+  */
+  bool populate_grouping_sets(Parse_context *pc);
+
+  /**
+    Populate the grouping set bitvector if the query block has non-primitive
+    ROLLUP and CUBE grouping.
+  */
+  void populate_grouping_sets_rollup_cube(Parse_context *pc);
+
+  /**
+    Populate the grouping set bitvector if the query block has GROUPING SETS
+    group by modifier.
+  */
+  bool populate_grouping_sets_fornon_primitive_grouping(Parse_context *pc);
 };
 
 class PT_order : public Parse_tree_node {
@@ -810,9 +868,9 @@ class PT_locking_clause_list : public Parse_tree_node {
 class PT_query_expression_body : public Parse_tree_node {
  public:
   explicit PT_query_expression_body(const POS &pos) : Parse_tree_node(pos) {}
-
+  enum Setop_type { NONE, UNION, INTERSECT, EXCEPT };
+  virtual Setop_type type() const { return NONE; }
   virtual bool is_set_operation() const = 0;
-
   /**
     True if this query expression can absorb an extraneous order by/limit
     clause. The `ORDER BY`/`LIMIT` syntax is mostly consistestent, i.e. a
@@ -1280,19 +1338,45 @@ class PT_into_destination_outfile final : public PT_into_destination {
 
  public:
   PT_into_destination_outfile(const POS &pos, const LEX_STRING &file_name_arg,
-                              const CHARSET_INFO *charset_arg,
-                              const Field_separators &field_term_arg,
-                              const Line_separators &line_term_arg)
-      : PT_into_destination(pos), m_exchange(file_name_arg.str, false) {
-    m_exchange.cs = charset_arg;
+                              File_information *file_info,
+                              const Field_separators *field_term_arg,
+                              const Line_separators *line_term_arg,
+                              enum_destination dumpfile_flag)
+      : PT_into_destination(pos),
+        m_exchange(file_name_arg.str, dumpfile_flag),
+        dumpfile_dest(dumpfile_flag) {
+    m_exchange.file_info.merge_file_information(file_info);
     m_exchange.field.merge_field_separators(field_term_arg);
     m_exchange.line.merge_line_separators(line_term_arg);
+  }
+
+  PT_into_destination_outfile(const POS &pos, LEX_CSTRING attr,
+                              enum_destination dumpfile_flag)
+      : PT_into_destination(pos),
+        m_exchange(dumpfile_flag),
+        dumpfile_dest(dumpfile_flag) {
+    m_exchange.outfile_json = attr;
+  }
+
+  PT_into_destination_outfile(const POS &pos, URI_information *outfile_uri_arg,
+                              File_information *file_info,
+                              const Field_separators *field_term_arg,
+                              const Line_separators *line_term_arg,
+                              enum_destination dumpfile_flag)
+      : PT_into_destination(pos),
+        m_exchange(dumpfile_flag),
+        dumpfile_dest(dumpfile_flag) {
+    m_exchange.file_info.merge_file_information(file_info);
+    m_exchange.field.merge_field_separators(field_term_arg);
+    m_exchange.line.merge_line_separators(line_term_arg);
+    m_exchange.uri_info.merge_uri_info_separators(outfile_uri_arg);
   }
 
   bool do_contextualize(Parse_context *pc) override;
 
  private:
   sql_exchange m_exchange;
+  enum_destination dumpfile_dest;
 };
 
 class PT_into_destination_dumpfile final : public PT_into_destination {
@@ -1300,7 +1384,8 @@ class PT_into_destination_dumpfile final : public PT_into_destination {
 
  public:
   PT_into_destination_dumpfile(const POS &pos, const LEX_STRING &file_name_arg)
-      : PT_into_destination(pos), m_exchange(file_name_arg.str, true) {}
+      : PT_into_destination(pos),
+        m_exchange(file_name_arg.str, DUMPFILE_DEST) {}
 
   bool do_contextualize(Parse_context *pc) override;
 
@@ -1491,6 +1576,7 @@ class PT_query_specification : public PT_query_primary {
   PT_group *opt_group_clause;
   Item *opt_having_clause;
   PT_window_list *opt_window_clause;
+  Item *opt_qualify_clause;
 
  public:
   PT_query_specification(
@@ -1500,7 +1586,7 @@ class PT_query_specification : public PT_query_primary {
       const Mem_root_array_YY<PT_table_reference *> &from_clause_arg,
       Item *opt_where_clause_arg, PT_group *opt_group_clause_arg,
       Item *opt_having_clause_arg, PT_window_list *opt_window_clause_arg,
-      bool implicit_from_clause)
+      Item *opt_qualify_clause_arg, bool implicit_from_clause)
       : super(pos),
         opt_hints(opt_hints_arg),
         options(options_arg),
@@ -1511,7 +1597,8 @@ class PT_query_specification : public PT_query_primary {
         opt_where_clause(opt_where_clause_arg),
         opt_group_clause(opt_group_clause_arg),
         opt_having_clause(opt_having_clause_arg),
-        opt_window_clause(opt_window_clause_arg) {
+        opt_window_clause(opt_window_clause_arg),
+        opt_qualify_clause(opt_qualify_clause_arg) {
     assert(implicit_from_clause ? from_clause.empty() : true);
   }
 
@@ -1530,7 +1617,8 @@ class PT_query_specification : public PT_query_primary {
         opt_where_clause(opt_where_clause_arg),
         opt_group_clause(nullptr),
         opt_having_clause(nullptr),
-        opt_window_clause(nullptr) {}
+        opt_window_clause(nullptr),
+        opt_qualify_clause(nullptr) {}
 
   PT_query_specification(const POS &pos, const Query_options &options_arg,
                          PT_item_list *item_list_arg)
@@ -1544,7 +1632,8 @@ class PT_query_specification : public PT_query_primary {
         opt_where_clause(nullptr),
         opt_group_clause(nullptr),
         opt_having_clause(nullptr),
-        opt_window_clause(nullptr) {}
+        opt_window_clause(nullptr),
+        opt_qualify_clause(nullptr) {}
 
   bool do_contextualize(Parse_context *pc) override;
 
@@ -1552,7 +1641,8 @@ class PT_query_specification : public PT_query_primary {
   bool has_trailing_into_clause() const override {
     return (has_into_clause() && is_implicit_from_clause() &&
             opt_where_clause == nullptr && opt_group_clause == nullptr &&
-            opt_having_clause == nullptr && opt_window_clause == nullptr);
+            opt_having_clause == nullptr && opt_window_clause == nullptr &&
+            opt_qualify_clause == nullptr);
   }
 
   bool is_set_operation() const override { return false; }
@@ -1632,6 +1722,13 @@ class PT_query_expression final : public PT_query_expression_body {
   bool has_trailing_into_clause() const override {
     return (m_body->has_trailing_into_clause() && m_order == nullptr &&
             m_limit == nullptr);
+  }
+
+  bool contextualize_deferred_hints(Parse_context *pc) {
+    pc->thd->lex->opt_hints_global->deferred_hints_flag = true;
+    pc->thd->lex->opt_hints_global->deferred_hints->contextualize(pc);
+    pc->thd->lex->opt_hints_global->deferred_hints_flag = false;
+    return false;
   }
 
   bool can_absorb_order_and_limit(bool order, bool limit) const override {
@@ -1782,36 +1879,43 @@ class PT_set_operation : public PT_query_expression_body {
                    bool is_distinct, PT_query_expression_body *rhs,
                    bool is_rhs_in_parentheses = false)
       : super(pos),
-        m_lhs(lhs),
         m_is_distinct(is_distinct),
-        m_rhs(rhs),
-        m_is_rhs_in_parentheses{is_rhs_in_parentheses} {}
+        m_is_rhs_in_parentheses{is_rhs_in_parentheses} {
+    m_list.push_back(lhs);
+    m_list.push_back(rhs);
+  }
 
   void merge_descendants(Parse_context *pc, Query_term_set_op *setop,
                          QueryLevel &ql);
   bool is_set_operation() const override { return true; }
 
   bool has_into_clause() const override {
-    return m_lhs->has_into_clause() || m_rhs->has_into_clause();
+    return std::any_of(m_list.cbegin(), m_list.cend(),
+                       [](const PT_query_expression_body &body) {
+                         return body.has_into_clause();
+                       });
   }
   bool has_trailing_into_clause() const override {
-    return !m_is_rhs_in_parentheses && m_rhs->has_trailing_into_clause();
+    return !m_is_rhs_in_parentheses &&
+           m_list[m_list.elements - 1]->has_trailing_into_clause();
   }
 
   bool can_absorb_order_and_limit(bool, bool) const override { return false; }
 
   bool is_table_value_constructor() const override { return false; }
   PT_insert_values_list *get_row_value_list() const override { return nullptr; }
+  bool is_distinct() const { return m_is_distinct; }
+
+  List<PT_query_expression_body> m_list;
+  void set_is_rhs_in_parentheses(bool v) { m_is_rhs_in_parentheses = v; }
 
  protected:
   bool contextualize_setop(Parse_context *pc, Query_term_type setop_type,
                            Surrounding_context context);
-  PT_query_expression_body *m_lhs;
+  void merge_children(Query_term_set_op *setop, Query_term_set_op *lower);
   bool m_is_distinct;
-  PT_query_expression_body *m_rhs;
   PT_into_destination *m_into{nullptr};
-  const bool m_is_rhs_in_parentheses;
-
+  bool m_is_rhs_in_parentheses;
   void add_json_info(Json_object *obj) override {
     obj->add_alias("distinct", create_dom_ptr<Json_boolean>(m_is_distinct));
     obj->add_alias("rhs_in_parentheses",
@@ -1825,6 +1929,7 @@ class PT_union : public PT_set_operation {
  public:
   using PT_set_operation::PT_set_operation;
   bool do_contextualize(Parse_context *pc) override;
+  enum Setop_type type() const override { return UNION; }
 };
 
 class PT_except : public PT_set_operation {
@@ -1833,6 +1938,7 @@ class PT_except : public PT_set_operation {
  public:
   using PT_set_operation::PT_set_operation;
   bool do_contextualize(Parse_context *pc) override;
+  enum Setop_type type() const override { return EXCEPT; }
 };
 
 class PT_intersect : public PT_set_operation {
@@ -1841,6 +1947,7 @@ class PT_intersect : public PT_set_operation {
  public:
   using PT_set_operation::PT_set_operation;
   bool do_contextualize(Parse_context *pc) override;
+  enum Setop_type type() const override { return INTERSECT; }
 };
 
 class PT_select_stmt : public Parse_tree_root {
@@ -2400,6 +2507,41 @@ typedef PT_traceable_index_option<ha_key_alg, &KEY_CREATE_INFO::algorithm,
                                   &KEY_CREATE_INFO::is_algorithm_explicit>
     PT_index_type;
 
+/**
+  A single key=value parameter in a vector index construction clause.
+*/
+class PT_vector_index_param : public Parse_tree_node {
+ public:
+  PT_vector_index_param(const POS &pos, const LEX_STRING &key,
+                        const LEX_STRING &value)
+      : Parse_tree_node(pos), m_key(key), m_value(value) {}
+
+  [[nodiscard]] const LEX_STRING &key() const { return m_key; }
+  [[nodiscard]] const LEX_STRING &value() const { return m_value; }
+
+ private:
+  LEX_STRING m_key;
+  LEX_STRING m_value;
+};
+
+/**
+  Index option for vector index type with optional construction parameters.
+
+  Represents TYPE <type_name> [WITH (key=value, ...)] in index definitions.
+*/
+class PT_vector_index_type : public PT_base_index_option {
+ public:
+  PT_vector_index_type(const POS &pos, LEX_CSTRING type_name,
+                       const Mem_root_array_YY<PT_vector_index_param *> &params)
+      : PT_base_index_option(pos), m_type_name(type_name), m_params(params) {}
+
+  bool do_contextualize(Table_ddl_parse_context *pc) override;
+
+ private:
+  LEX_CSTRING m_type_name;
+  Mem_root_array_YY<PT_vector_index_param *> m_params;
+};
+
 class PT_create_index_stmt final : public PT_table_ddl_stmt_base {
  public:
   PT_create_index_stmt(const POS &pos, MEM_ROOT *mem_root, keytype type_par,
@@ -2496,6 +2638,10 @@ class PT_foreign_key_definition : public PT_table_constraint_def {
 
   bool do_contextualize(Table_ddl_parse_context *pc) override;
 
+  void set_column_name(const LEX_STRING &column_name) {
+    m_column_name = column_name;
+  }
+
  private:
   const LEX_STRING m_constraint_name;
   const LEX_STRING m_key_name;
@@ -2505,6 +2651,9 @@ class PT_foreign_key_definition : public PT_table_constraint_def {
   fk_match_opt m_fk_match_option;
   fk_option m_fk_update_opt;
   fk_option m_fk_delete_opt;
+
+  // Column name. Set when FK is specified at the column level.
+  LEX_STRING m_column_name{nullptr, 0};
 };
 
 /**
@@ -2689,7 +2838,7 @@ typedef decltype(HA_CREATE_INFO::table_options) table_options_t;
   A template for options that set HA_CREATE_INFO::table_options and
   also records if the option was explicitly set.
 */
-template <ulong Property_flag, table_options_t Default, table_options_t Yes,
+template <uint64_t Property_flag, table_options_t Default, table_options_t Yes,
           table_options_t No>
 class PT_ternary_create_table_option : public PT_create_table_option {
   typedef PT_create_table_option super;
@@ -2968,6 +3117,156 @@ class PT_create_table_default_collation : public PT_create_table_option {
   bool do_contextualize(Table_ddl_parse_context *pc) override;
 };
 
+class PT_create_external_file_format : public PT_create_table_option {
+  typedef PT_create_table_option super;
+
+ public:
+  PT_create_external_file_format(const POS &pos,
+                                 File_information *file_info_arg,
+                                 const Field_separators *field_term_arg,
+                                 const Line_separators *line_term_arg,
+                                 ulong ignore_lines_arg)
+      : super(pos),
+        file_info(file_info_arg),
+        field_term(field_term_arg),
+        line_term(line_term_arg),
+        ignore_lines(ignore_lines_arg) {}
+
+  bool do_contextualize(Table_ddl_parse_context *pc) override;
+
+  File_information *file_info;
+  const Field_separators *field_term;
+  const Line_separators *line_term;
+  ulong ignore_lines;
+};
+
+class PT_create_external_files : public PT_create_table_option {
+  typedef PT_create_table_option super;
+
+ public:
+  PT_create_external_files(const POS &pos,
+                           PT_external_file_list *external_files_arg)
+      : super(pos), external_files(external_files_arg) {}
+
+  bool do_contextualize(Table_ddl_parse_context *pc) override;
+
+  PT_external_file_list *external_files;
+};
+
+class PT_file_attributes {
+ public:
+  bool merge_attributes(PT_file_attributes *attr);
+
+  const String *uri{nullptr};
+  const String *name{nullptr};
+  const String *pattern{nullptr};
+  const String *prefix{nullptr};
+  Ternary_option allow_missing_files{Ternary_option::DEFAULT};
+  Ternary_option strict_load{Ternary_option::DEFAULT};
+};
+
+class PT_external_file_list {
+ public:
+  PT_external_file_list(THD *thd) : files(thd->mem_root) {}
+
+  bool push_back(PT_file_attributes *file_attributes) {
+    return files.push_back(file_attributes);
+  }
+
+  mem_root_deque<PT_file_attributes *> files;
+};
+
+/**
+  Node for the @SQL{ALLOW_MISSING_FILES [=] @B{1|0|DEFAULT}} table option
+
+  @ingroup ptn_create_or_alter_table_options
+
+  ALLOW_MISSING_FILES | Constructor parameter
+  --------------------|------------------------
+  1                   | Ternary_option::ON
+  0                   | Ternary_option::OFF
+  DEFAULT             | Ternary_option::DEFAULT
+*/
+typedef PT_ternary_create_table_option<
+    HA_CREATE_USED_ALLOW_MISSING_FILES,  // flag
+    0,                                   // DEFAULT
+    HA_OPTION_ALLOW_MISSING_FILES,       // ON
+    HA_OPTION_NO_ALLOW_MISSING_FILES>    // OFF
+    PT_create_allow_missing_files_option;
+
+/**
+  Node for the @SQL{VERIFY_KEY_CONSTRAINTS [=] @B{1|0|DEFAULT}} table option
+
+  @ingroup ptn_create_or_alter_table_options
+
+  VERIFY_KEY_CONSTRAINTS | Constructor parameter
+  -----------------------|------------------------
+  1                      | Ternary_option::ON
+  0                      | Ternary_option::OFF
+  DEFAULT                | Ternary_option::DEFAULT
+*/
+typedef PT_ternary_create_table_option<
+    HA_CREATE_USED_VERIFY_KEY_CONSTRAINTS,  // flag
+    0,                                      // DEFAULT
+    HA_OPTION_VERIFY_KEY_CONSTRAINTS,       // ON
+    HA_OPTION_NO_VERIFY_KEY_CONSTRAINTS>    // OFF
+    PT_create_verify_key_constraints_option;
+
+/**
+  Node for the @SQL{STRICT_LOAD [=] @B{1|0|DEFAULT}} table option
+
+  @ingroup ptn_create_or_alter_table_options
+
+  STRICT_LOAD      | Constructor parameter
+  -----------------|------------------------
+  1                | Ternary_option::ON
+  0                | Ternary_option::OFF
+  DEFAULT          | Ternary_option::DEFAULT
+*/
+typedef PT_ternary_create_table_option<HA_CREATE_USED_STRICT_LOAD,  // flag
+                                       0,                           // DEFAULT
+                                       HA_OPTION_STRICT_LOAD,       // ON
+                                       HA_OPTION_NO_STRICT_LOAD>    // OFF
+    PT_create_strict_load_option;
+
+/**
+  Node for the @SQL{AUTO_REFRESH_MODE [=] @B{1|0|DEFAULT}} table option
+
+  @ingroup ptn_create_or_alter_table_options
+
+  AUTO_REFRESH     | Constructor parameter
+  -----------------|------------------------
+  1                | Ternary_option::ON
+  0                | Ternary_option::OFF
+  DEFAULT          | Ternary_option::DEFAULT
+*/
+typedef PT_ternary_create_table_option<HA_CREATE_USED_AUTO_REFRESH,  // flag
+                                       0,                            // DEFAULT
+                                       HA_OPTION_AUTO_REFRESH,       // ON
+                                       HA_OPTION_NO_AUTO_REFRESH>    // OFF
+    PT_create_auto_refresh_option;
+
+/**
+  Node for the @SQL{AUTO_REFRESH_SOURCE [=] @B{@<string@>|NULL}}
+  table option.
+
+  @ingroup ptn_create_or_alter_table_options
+*/
+class PT_create_auto_refresh_event_source : public PT_create_table_option {
+  using super = PT_create_table_option;
+
+ public:
+  explicit PT_create_auto_refresh_event_source(const POS &pos) : super(pos) {}
+  explicit PT_create_auto_refresh_event_source(
+      const POS &pos, const LEX_CSTRING &auto_refresh_source)
+      : super(pos), m_auto_refresh_source(auto_refresh_source) {}
+
+  bool do_contextualize(Table_ddl_parse_context *pc) override;
+
+ private:
+  const LEX_CSTRING m_auto_refresh_source{nullptr, 0};
+};
+
 class PT_check_constraint final : public PT_table_constraint_def {
   typedef PT_table_constraint_def super;
   Sql_check_constraint_spec cc_spec;
@@ -2980,7 +3279,6 @@ class PT_check_constraint final : public PT_table_constraint_def {
     cc_spec.check_expr = expr;
     cc_spec.is_enforced = is_enforced;
   }
-  void set_column_name(const LEX_STRING &name) { cc_spec.column_name = name; }
 
   bool do_contextualize(Table_ddl_parse_context *pc) override;
 };
@@ -2990,7 +3288,6 @@ class PT_column_def : public PT_table_element {
 
   const LEX_STRING field_ident;
   PT_field_def_base *field_def;
-  // Currently we ignore that constraint in the executor.
   PT_table_constraint_def *opt_column_constraint;
 
   const char *opt_place;
@@ -3016,7 +3313,7 @@ class PT_column_def : public PT_table_element {
 */
 class PT_create_table_stmt final : public PT_table_ddl_stmt_base {
   PT_hint_list *m_opt_hints;
-  bool is_temporary;
+  unsigned int table_type;
   bool only_if_not_exists;
   Table_ident *table_name;
   const Mem_root_array<PT_table_element *> *opt_table_element_list;
@@ -3025,6 +3322,7 @@ class PT_create_table_stmt final : public PT_table_ddl_stmt_base {
   On_duplicate on_duplicate;
   PT_query_expression_body *opt_query_expression;
   Table_ident *opt_like_clause;
+  POS m_columns_end_pos;
 
   HA_CREATE_INFO m_create_info;
 
@@ -3034,7 +3332,8 @@ class PT_create_table_stmt final : public PT_table_ddl_stmt_base {
                                       statement.
     @param mem_root                   MEM_ROOT to use for allocation
     @param opt_hints                  SET_VAR hints
-    @param is_temporary               True if @SQL{CREATE @B{TEMPORARY} %TABLE}
+    @param table_type                 TABLE_TYPE_NORMAL, TABLE_TYPE_TEMPORARY or
+    TABLE_TYPE_EXTERNAL
     @param only_if_not_exists  True if @SQL{CREATE %TABLE ... @B{IF NOT EXISTS}}
     @param table_name                 @SQL{CREATE %TABLE ... @B{@<table name@>}}
     @param opt_table_element_list     NULL or a list of table column and
@@ -3048,17 +3347,20 @@ class PT_create_table_stmt final : public PT_table_ddl_stmt_base {
                                       for @SQL{CREATE TABLE ... SELECT}
                                       statements).
     @param opt_query_expression       NULL or the @SQL{@B{SELECT}} clause.
+    @param columns_end_pos            Position after column definitions end.
+                                      Used for CREATE EXTERNAL TABLE rewriting.
   */
   PT_create_table_stmt(
-      const POS &pos, MEM_ROOT *mem_root, PT_hint_list *opt_hints, bool is_temporary,
-      bool only_if_not_exists, Table_ident *table_name,
+      const POS &pos, MEM_ROOT *mem_root, PT_hint_list *opt_hints,
+      uint table_type, bool only_if_not_exists, Table_ident *table_name,
       const Mem_root_array<PT_table_element *> *opt_table_element_list,
       const Mem_root_array<PT_create_table_option *> *opt_create_table_options,
       PT_partition *opt_partitioning, On_duplicate on_duplicate,
-      PT_query_expression_body *opt_query_expression)
+      PT_query_expression_body *opt_query_expression,
+      const POS &columns_end_pos = POS())
       : PT_table_ddl_stmt_base(pos, mem_root),
         m_opt_hints(opt_hints),
-        is_temporary(is_temporary),
+        table_type(table_type),
         only_if_not_exists(only_if_not_exists),
         table_name(table_name),
         opt_table_element_list(opt_table_element_list),
@@ -3066,22 +3368,25 @@ class PT_create_table_stmt final : public PT_table_ddl_stmt_base {
         opt_partitioning(opt_partitioning),
         on_duplicate(on_duplicate),
         opt_query_expression(opt_query_expression),
-        opt_like_clause(nullptr) {}
+        opt_like_clause(nullptr),
+        m_columns_end_pos(columns_end_pos) {}
   /**
     @param pos                Position of this clause in the SQL statement.
     @param mem_root           MEM_ROOT to use for allocation
     @param opt_hints          SET_VAR hints
-    @param is_temporary       True if @SQL{CREATE @B{TEMPORARY} %TABLE}.
+    @param table_type         TABLE_TYPE_NORMAL, TABLE_TYPE_TEMPORARY or
+    TABLE_TYPE_EXTERNAL.
     @param only_if_not_exists True if @SQL{CREATE %TABLE ... @B{IF NOT EXISTS}}.
     @param table_name         @SQL{CREATE %TABLE ... @B{@<table name@>}}.
     @param opt_like_clause    NULL or the @SQL{@B{LIKE @<table name@>}} clause.
   */
-  PT_create_table_stmt(const POS &pos, MEM_ROOT *mem_root, PT_hint_list *opt_hints,
-                       bool is_temporary, bool only_if_not_exists,
-                       Table_ident *table_name, Table_ident *opt_like_clause)
+  PT_create_table_stmt(const POS &pos, MEM_ROOT *mem_root,
+                       PT_hint_list *opt_hints, uint table_type,
+                       bool only_if_not_exists, Table_ident *table_name,
+                       Table_ident *opt_like_clause)
       : PT_table_ddl_stmt_base(pos, mem_root),
         m_opt_hints(opt_hints),
-        is_temporary(is_temporary),
+        table_type(table_type),
         only_if_not_exists(only_if_not_exists),
         table_name(table_name),
         opt_table_element_list(nullptr),
@@ -3089,7 +3394,8 @@ class PT_create_table_stmt final : public PT_table_ddl_stmt_base {
         opt_partitioning(nullptr),
         on_duplicate(On_duplicate::ERROR),
         opt_query_expression(nullptr),
-        opt_like_clause(opt_like_clause) {}
+        opt_like_clause(opt_like_clause),
+        m_columns_end_pos(POS()) {}
 
   Sql_cmd *make_cmd(THD *thd) override;
 };
@@ -3475,6 +3781,21 @@ class PT_show_create_function final : public PT_show_base {
   Sql_cmd_show_create_function m_sql_cmd;
 };
 
+/// Parse tree node for SHOW CREATE LIBRARY statement
+
+class PT_show_create_library final : public PT_show_base {
+ public:
+  PT_show_create_library(const POS &pos, sp_name *library_name)
+      : PT_show_base(pos, SQLCOM_SHOW_CREATE_LIBRARY), m_spname(library_name) {}
+
+  Sql_cmd *make_cmd(THD *thd) override;
+
+ private:
+  sp_name *const m_spname;
+
+  Sql_cmd_show_create_library m_sql_cmd;
+};
+
 /// Parse tree node for SHOW CREATE PROCEDURE statement
 
 class PT_show_create_procedure final : public PT_show_base {
@@ -3788,7 +4109,7 @@ class PT_show_keys final : public PT_show_table_base {
 class PT_show_binary_log_status final : public PT_show_base {
  public:
   PT_show_binary_log_status(const POS &pos)
-      : PT_show_base(pos, SQLCOM_SHOW_MASTER_STAT) {}
+      : PT_show_base(pos, SQLCOM_SHOW_BINLOG_STATUS) {}
 
   Sql_cmd *make_cmd(THD *thd) override;
 
@@ -3933,8 +4254,7 @@ class PT_show_relaylog_events final : public PT_show_base {
 
 class PT_show_replicas final : public PT_show_base {
  public:
-  PT_show_replicas(const POS &pos)
-      : PT_show_base(pos, SQLCOM_SHOW_SLAVE_HOSTS) {}
+  PT_show_replicas(const POS &pos) : PT_show_base(pos, SQLCOM_SHOW_REPLICAS) {}
 
   Sql_cmd *make_cmd(THD *thd) override;
 
@@ -3947,7 +4267,7 @@ class PT_show_replicas final : public PT_show_base {
 class PT_show_replica_status final : public PT_show_base {
  public:
   PT_show_replica_status(const POS &pos, LEX_CSTRING opt_channel_name = {})
-      : PT_show_base(pos, SQLCOM_SHOW_SLAVE_STAT),
+      : PT_show_base(pos, SQLCOM_SHOW_REPLICA_STATUS),
         m_opt_channel_name(opt_channel_name) {}
 
   Sql_cmd *make_cmd(THD *thd) override;
@@ -3975,6 +4295,19 @@ class PT_show_status final : public PT_show_filter_base {
   Sql_cmd_show_status m_sql_cmd;
 
   enum_var_type m_var_type;
+};
+
+/// Parse tree node for SHOW STATUS LIBRARY statement
+
+class PT_show_status_library final : public PT_show_filter_base {
+ public:
+  PT_show_status_library(const POS &pos, const LEX_STRING &wild, Item *where)
+      : PT_show_filter_base(pos, SQLCOM_SHOW_STATUS_LIBRARY, wild, where) {}
+
+  Sql_cmd *make_cmd(THD *thd) override;
+
+ private:
+  Sql_cmd_show_status_library m_sql_cmd;
 };
 
 /// Parse tree node for SHOW STATUS FUNCTION statement
@@ -4330,6 +4663,24 @@ class PT_alter_table_set_default final : public PT_alter_table_action {
  private:
   const char *m_name;
   Item *m_expr;
+};
+
+class PT_alter_table_set_masking_policy_name final
+    : public PT_alter_table_action {
+  typedef PT_alter_table_action super;
+
+ private:
+  const char *m_name;
+  LEX_CSTRING m_policy_name;
+
+ public:
+  PT_alter_table_set_masking_policy_name(const POS &pos, const char *col_name,
+                                         LEX_CSTRING policy_name)
+      : super{pos, Alter_info::ALTER_COLUMN_MASKING},
+        m_name{col_name},
+        m_policy_name{policy_name} {}
+
+  bool do_contextualize(Table_ddl_parse_context *pc) override;
 };
 
 class PT_alter_table_column_visibility final : public PT_alter_table_action {
@@ -4829,11 +5180,33 @@ class PT_alter_table_secondary_load final
     : public PT_alter_table_standalone_action {
   using super = PT_alter_table_standalone_action;
 
+  const List<String> *opt_use_partition = nullptr;
+  Item_num *m_validation_rows;
+  const Alter_info::enum_with_validation m_guided;
+
  public:
-  explicit PT_alter_table_secondary_load(const POS &pos)
-      : super(pos, Alter_info::ALTER_SECONDARY_LOAD) {}
+  explicit PT_alter_table_secondary_load(
+      const POS &pos, Item_num *validation_only_rows,
+      Alter_info::enum_with_validation guided,
+      const List<String> *opt_use_partition = nullptr)
+      : super(pos, Alter_info::ALTER_SECONDARY_LOAD),
+        opt_use_partition{opt_use_partition},
+        m_validation_rows(validation_only_rows),
+        m_guided(guided) {}
 
   Sql_cmd *make_cmd(Table_ddl_parse_context *pc) override {
+    if (opt_use_partition != nullptr)
+      pc->alter_info->partition_names = *opt_use_partition;
+
+    pc->alter_info->guided_load = m_guided;
+    if (m_validation_rows != nullptr) {
+      pc->alter_info->validation_only = true;
+      pc->alter_info->validate_num_rows = m_validation_rows->val_int();
+    } else {
+      pc->alter_info->validation_only = false;
+      pc->alter_info->validate_num_rows = 0;
+    }
+
     return new (pc->mem_root) Sql_cmd_secondary_load_unload(pc->alter_info);
   }
 };
@@ -4842,11 +5215,18 @@ class PT_alter_table_secondary_unload final
     : public PT_alter_table_standalone_action {
   using super = PT_alter_table_standalone_action;
 
+  const List<String> *opt_use_partition = nullptr;
+
  public:
-  explicit PT_alter_table_secondary_unload(const POS &pos)
-      : super(pos, Alter_info::ALTER_SECONDARY_UNLOAD) {}
+  explicit PT_alter_table_secondary_unload(
+      const POS &pos, const List<String> *opt_use_partition = nullptr)
+      : super(pos, Alter_info::ALTER_SECONDARY_UNLOAD),
+        opt_use_partition{opt_use_partition} {}
 
   Sql_cmd *make_cmd(Table_ddl_parse_context *pc) override {
+    if (opt_use_partition != nullptr)
+      pc->alter_info->partition_names = *opt_use_partition;
+
     return new (pc->mem_root) Sql_cmd_secondary_load_unload(pc->alter_info);
   }
 };
@@ -4908,7 +5288,8 @@ class PT_alter_table_import_tablespace final
 class PT_alter_table_stmt final : public PT_table_ddl_stmt_base {
  public:
   explicit PT_alter_table_stmt(
-      const POS &pos, MEM_ROOT *mem_root, PT_hint_list *opt_hints, Table_ident *table_name,
+      const POS &pos, MEM_ROOT *mem_root, PT_hint_list *opt_hints,
+      Table_ident *table_name,
       Mem_root_array<PT_ddl_table_option *> *opt_actions,
       Alter_info::enum_alter_table_algorithm algo,
       Alter_info::enum_alter_table_lock lock,
@@ -4937,8 +5318,8 @@ class PT_alter_table_stmt final : public PT_table_ddl_stmt_base {
 class PT_alter_table_standalone_stmt final : public PT_table_ddl_stmt_base {
  public:
   explicit PT_alter_table_standalone_stmt(
-      const POS &pos, MEM_ROOT *mem_root, PT_hint_list *opt_hints, Table_ident *table_name,
-      PT_alter_table_standalone_action *action,
+      const POS &pos, MEM_ROOT *mem_root, PT_hint_list *opt_hints,
+      Table_ident *table_name, PT_alter_table_standalone_action *action,
       Alter_info::enum_alter_table_algorithm algo,
       Alter_info::enum_alter_table_lock lock,
       Alter_info::enum_with_validation validation)
@@ -4987,11 +5368,12 @@ class PT_repair_table_stmt final : public PT_table_ddl_stmt_base {
 
 class PT_analyze_table_stmt final : public PT_table_ddl_stmt_base {
  public:
-  PT_analyze_table_stmt(const POS &pos, MEM_ROOT *mem_root, PT_hint_list *opt_hints,
-                        bool no_write_to_binlog,
+  PT_analyze_table_stmt(const POS &pos, MEM_ROOT *mem_root,
+                        PT_hint_list *opt_hints, bool no_write_to_binlog,
                         Mem_root_array<Table_ident *> *table_list,
                         Sql_cmd_analyze_table::Histogram_command command,
-                        int num_buckets, List<String> *columns, LEX_STRING data)
+                        int num_buckets, List<String> *columns, LEX_STRING data,
+                        bool auto_update)
       : PT_table_ddl_stmt_base(pos, mem_root),
         m_opt_hints(opt_hints),
         m_no_write_to_binlog(no_write_to_binlog),
@@ -4999,7 +5381,8 @@ class PT_analyze_table_stmt final : public PT_table_ddl_stmt_base {
         m_command(command),
         m_num_buckets(num_buckets),
         m_columns(columns),
-        m_data{data} {}
+        m_data{data},
+        m_auto_update(auto_update) {}
 
   Sql_cmd *make_cmd(THD *thd) override;
 
@@ -5011,11 +5394,13 @@ class PT_analyze_table_stmt final : public PT_table_ddl_stmt_base {
   const int m_num_buckets;
   List<String> *m_columns;
   const LEX_STRING m_data;
+  const bool m_auto_update;
 };
 
 class PT_check_table_stmt final : public PT_table_ddl_stmt_base {
  public:
-  PT_check_table_stmt(const POS &pos, MEM_ROOT *mem_root, PT_hint_list *opt_hints,
+  PT_check_table_stmt(const POS &pos, MEM_ROOT *mem_root,
+                      PT_hint_list *opt_hints,
                       Mem_root_array<Table_ident *> *table_list,
                       decltype(HA_CHECK_OPT::flags) flags,
                       decltype(HA_CHECK_OPT::sql_flags) sql_flags)
@@ -5036,8 +5421,8 @@ class PT_check_table_stmt final : public PT_table_ddl_stmt_base {
 
 class PT_optimize_table_stmt final : public PT_table_ddl_stmt_base {
  public:
-  PT_optimize_table_stmt(const POS &pos, MEM_ROOT *mem_root, PT_hint_list *opt_hints,
-                         bool no_write_to_binlog,
+  PT_optimize_table_stmt(const POS &pos, MEM_ROOT *mem_root,
+                         PT_hint_list *opt_hints, bool no_write_to_binlog,
                          Mem_root_array<Table_ident *> *table_list)
       : PT_table_ddl_stmt_base(pos, mem_root),
         m_opt_hints(opt_hints),
@@ -5197,7 +5582,8 @@ class PT_load_index_partitions_stmt final : public PT_table_ddl_stmt_base {
 
 class PT_load_index_stmt final : public PT_table_ddl_stmt_base {
  public:
-  PT_load_index_stmt(const POS &pos, MEM_ROOT *mem_root, PT_hint_list *opt_hints,
+  PT_load_index_stmt(const POS &pos, MEM_ROOT *mem_root,
+                     PT_hint_list *opt_hints,
                      Mem_root_array<PT_preload_keys *> *preload_list)
       : PT_table_ddl_stmt_base(pos, mem_root),
         m_opt_hints(opt_hints),
@@ -5295,9 +5681,9 @@ class PT_alter_tablespace_option final
   const Option_type m_value;
 };
 
-typedef PT_alter_tablespace_option<decltype(
-                                       Tablespace_options::autoextend_size),
-                                   &Tablespace_options::autoextend_size>
+typedef PT_alter_tablespace_option<
+    decltype(Tablespace_options::autoextend_size),
+    &Tablespace_options::autoextend_size>
     PT_alter_tablespace_option_autoextend_size;
 
 typedef PT_alter_tablespace_option<decltype(Tablespace_options::extent_size),
@@ -5312,14 +5698,14 @@ typedef PT_alter_tablespace_option<decltype(Tablespace_options::max_size),
                                    &Tablespace_options::max_size>
     PT_alter_tablespace_option_max_size;
 
-typedef PT_alter_tablespace_option<decltype(
-                                       Tablespace_options::redo_buffer_size),
-                                   &Tablespace_options::redo_buffer_size>
+typedef PT_alter_tablespace_option<
+    decltype(Tablespace_options::redo_buffer_size),
+    &Tablespace_options::redo_buffer_size>
     PT_alter_tablespace_option_redo_buffer_size;
 
-typedef PT_alter_tablespace_option<decltype(
-                                       Tablespace_options::undo_buffer_size),
-                                   &Tablespace_options::undo_buffer_size>
+typedef PT_alter_tablespace_option<
+    decltype(Tablespace_options::undo_buffer_size),
+    &Tablespace_options::undo_buffer_size>
     PT_alter_tablespace_option_undo_buffer_size;
 
 typedef PT_alter_tablespace_option<
@@ -5544,9 +5930,10 @@ class PT_load_table final : public Parse_tree_root {
                 const LEX_STRING filename, ulong file_count, bool in_key_order,
                 On_duplicate on_duplicate, Table_ident *table,
                 List<String> *opt_partitions, const CHARSET_INFO *opt_charset,
+                LEX_CSTRING compression_algorithm,
                 String *opt_xml_rows_identified_by,
-                const Field_separators &opt_field_separators,
-                const Line_separators &opt_line_separators,
+                const Field_separators *opt_field_separators,
+                const Line_separators *opt_line_separators,
                 ulong opt_ignore_lines, PT_item_list *opt_fields_or_vars,
                 PT_item_list *opt_set_fields, PT_item_list *opt_set_exprs,
                 List<String> *opt_set_expr_strings, ulong parallel,
@@ -5554,8 +5941,8 @@ class PT_load_table final : public Parse_tree_root {
       : Parse_tree_root(pos),
         m_cmd(filetype, is_local_file, source_type, filename, file_count,
               in_key_order, on_duplicate, table, opt_partitions, opt_charset,
-              opt_xml_rows_identified_by, opt_field_separators,
-              opt_line_separators, opt_ignore_lines,
+              compression_algorithm, opt_xml_rows_identified_by,
+              opt_field_separators, opt_line_separators, opt_ignore_lines,
               opt_fields_or_vars ? &opt_fields_or_vars->value : nullptr,
               opt_set_fields ? &opt_set_fields->value : nullptr,
               opt_set_exprs ? &opt_set_exprs->value : nullptr,
@@ -5572,6 +5959,174 @@ class PT_load_table final : public Parse_tree_root {
   Sql_cmd_load_table m_cmd;
 
   const thr_lock_type m_lock_type;
+};
+
+class PT_create_library_stmt final : public Parse_tree_root {
+ public:
+  PT_create_library_stmt(const POS &pos, THD *thd, bool if_not_exists,
+                         sp_name *lib_name, LEX_CSTRING comment,
+                         LEX_CSTRING language, LEX_STRING lib_source,
+                         bool is_binary)
+      : Parse_tree_root(pos),
+        m_cmd(thd, if_not_exists, lib_name, comment, language, lib_source,
+              is_binary) {}
+
+  Sql_cmd *make_cmd(THD *) override { return &m_cmd; }
+
+ private:
+  Sql_cmd_create_library m_cmd;
+};
+
+class PT_alter_library_stmt final : public Parse_tree_root {
+ public:
+  PT_alter_library_stmt(const POS &pos, THD *thd, sp_name *name,
+                        LEX_STRING comment)
+      : Parse_tree_root(pos), m_cmd(thd, name, comment) {}
+
+  Sql_cmd *make_cmd(THD *) override { return &m_cmd; }
+
+ private:
+  Sql_cmd_alter_library m_cmd;
+};
+
+class PT_drop_library_stmt final : public Parse_tree_root {
+ public:
+  PT_drop_library_stmt(const POS &pos, bool if_exists, sp_name *lib_name)
+      : Parse_tree_root(pos), m_cmd(if_exists, lib_name) {}
+
+  Sql_cmd *make_cmd(THD *) override { return &m_cmd; }
+
+ private:
+  Sql_cmd_drop_library m_cmd;
+};
+
+class PT_library_with_alias final : public Parse_tree_node {
+  typedef Parse_tree_node super;
+
+  sp_name_with_alias m_library;
+
+ public:
+  explicit PT_library_with_alias(const POS &pos, sp_name *lib_name,
+                                 const LEX_CSTRING &alias)
+      : super(pos), m_library(lib_name->m_db, lib_name->m_name, alias) {}
+
+  sp_name_with_alias library() { return m_library; }
+};
+
+class PT_library_list final : public Parse_tree_node {
+  typedef Parse_tree_node super;
+
+  mem_root_deque<sp_name_with_alias> m_libraries;
+
+ public:
+  explicit PT_library_list(const POS &pos)
+      : super(pos), m_libraries(*THR_MALLOC) {}
+
+  bool push_back(PT_library_with_alias *lib) {
+    if (lib == nullptr) return true;  // OOM
+    m_libraries.push_back(lib->library());
+    return false;
+  }
+
+  mem_root_deque<sp_name_with_alias> &get_libraries() { return m_libraries; }
+};
+
+class PT_jdv_name_value : public Parse_tree_node {
+  typedef Parse_tree_node super;
+
+  LEX_STRING m_name{nullptr, 0};
+  Item *m_value{nullptr};
+  uint m_col_tags{0};
+
+ public:
+  explicit PT_jdv_name_value(const POS &pos, LEX_STRING &name, Item *value,
+                             int col_tags)
+      : super(pos), m_name(name), m_value(value), m_col_tags(col_tags) {}
+
+  LEX_STRING name() { return m_name; }
+  Item *value() { return m_value; }
+  uint col_tags() { return m_col_tags; }
+};
+
+class PT_jdv_name_value_list : public Parse_tree_node {
+  typedef Parse_tree_node super;
+
+  THD *m_thd{nullptr};
+  PT_item_list *m_name_value_list{nullptr};
+  Mem_root_array<LEX_STRING> m_name_list;
+  Mem_root_array<uint> m_jdv_col_tags_list;
+
+ public:
+  explicit PT_jdv_name_value_list(const POS &pos, THD *thd)
+      : super(pos),
+        m_thd(thd),
+        m_name_list(thd->mem_root),
+        m_jdv_col_tags_list(thd->mem_root) {}
+
+  bool push_back(PT_jdv_name_value *jdv_name_value) {
+    if (m_name_value_list == nullptr) {
+      m_name_value_list = new (m_thd->mem_root) PT_item_list(m_pos);
+      if (m_name_value_list == nullptr) return true;
+    }
+
+    Item_string *name = new (m_thd->mem_root)
+        Item_string(jdv_name_value->name().str, jdv_name_value->name().length,
+                    m_thd->charset());
+    if (name == nullptr) return true;
+
+    return (m_name_value_list->push_back(name) ||
+            m_name_value_list->push_back(jdv_name_value->value()) ||
+            m_name_list.push_back(jdv_name_value->name()) ||
+            m_jdv_col_tags_list.push_back(jdv_name_value->col_tags()));
+  }
+
+  Mem_root_array<LEX_STRING> *name_list() { return &m_name_list; }
+  PT_item_list *name_value_list() { return m_name_value_list; }
+  Mem_root_array<uint> *col_tags_list() { return &m_jdv_col_tags_list; }
+};
+
+class PT_create_masking_policy_stmt final : public Parse_tree_root {
+ public:
+  PT_create_masking_policy_stmt(const POS &pos, bool if_not_exists,
+                                LEX_CSTRING policy_name, LEX_CSTRING arg_name,
+                                Item *expr)
+      : Parse_tree_root{pos},
+        m_if_not_exists{if_not_exists},
+        m_policy_name{policy_name},
+        m_argument_name{arg_name},
+        m_expr{expr} {}
+
+  Sql_cmd *make_cmd(THD *) override;
+
+ private:
+  bool m_if_not_exists;
+  LEX_CSTRING m_policy_name;
+  LEX_CSTRING m_argument_name;
+  Item *m_expr;
+};
+
+class PT_drop_masking_policy_stmt final : public Parse_tree_root {
+ public:
+  PT_drop_masking_policy_stmt(const POS &pos, bool if_exists,
+                              LEX_CSTRING policy_name)
+      : Parse_tree_root{pos}, m_cmd{if_exists, policy_name} {}
+
+  Sql_cmd *make_cmd(THD *) override { return &m_cmd; }
+
+ private:
+  Sql_cmd_drop_masking_policy m_cmd;
+};
+
+class PT_show_create_masking_policy final : public PT_show_base {
+ public:
+  PT_show_create_masking_policy(const POS &pos, LEX_CSTRING policy_name)
+      : PT_show_base{pos, SQLCOM_SHOW_CREATE_MASKING_POLICY},
+        m_policy_name{policy_name} {}
+
+  Sql_cmd *make_cmd(THD *) override;
+
+ private:
+  LEX_CSTRING m_policy_name;
 };
 
 /**
@@ -5610,8 +6165,74 @@ PT_create_table_option *make_table_secondary_engine_attribute(MEM_ROOT *,
 PT_column_attr_base *make_column_engine_attribute(MEM_ROOT *, LEX_CSTRING);
 PT_column_attr_base *make_column_secondary_engine_attribute(MEM_ROOT *,
                                                             LEX_CSTRING);
+PT_column_attr_base *make_column_external_format(MEM_ROOT *, LEX_CSTRING);
 
 PT_base_index_option *make_index_engine_attribute(MEM_ROOT *, LEX_CSTRING);
 PT_base_index_option *make_index_secondary_engine_attribute(MEM_ROOT *,
                                                             LEX_CSTRING);
+
+/**
+  Helper function to imitate \c dynamic_cast for \c PT_set_operation hierarchy.
+
+  Template parameter @p To is the destination type (@c PT_union, \c PT_except or
+  \c PT_intersect). For \c PT_intersect we return nullptr if ALL due to impl.
+  restriction: we cannot merge INTERSECT ALL.
+
+  @param from        source item
+  @param is_distinct true if distinct
+  @return typecast   item to the type To or NULL
+*/
+template <class To, PT_set_operation::Setop_type Tag>
+To *setop_cast(PT_query_expression_body *from, bool is_distinct) {
+  return (from->type() == Tag &&
+          down_cast<PT_set_operation *>(from)->is_distinct() == is_distinct &&
+          (Tag != PT_query_expression_body::INTERSECT || is_distinct))
+             ? static_cast<To *>(from)
+             : nullptr;
+}
+
+/**
+  Flatten set operators at parse time
+
+  This function flattens UNION ALL/DISTINCT, EXCEPT All/DISTINCT
+  and INTERSECT DISTINCT (not ALL due to implementation restrictions) operators
+  at parse time if applicable, otherwise it creates
+  new \c PT_<setop> nodes respectively of the two input operands.
+
+  Template parameter @p Class is @c PT_union or @c PT_intersect
+  Template parameter @p Tag is @c PT_query_specification::UNION or
+                     @c ::INTERSECT
+
+  @param mem_root       MEM_ROOT
+  @param pos            parse location
+  @param left           left argument of the operator
+  @param is_distinct    true if DISTINCT
+  @param right          right argument of the operator
+  @param is_right_in_parentheses
+                        true if right hand size is parenthesized
+  @return resulting parse tree Item
+*/
+template <class Class, PT_set_operation::Setop_type Tag>
+PT_set_operation *flatten_equal_set_ops(MEM_ROOT *mem_root, const POS &pos,
+                                        PT_query_expression_body *left,
+                                        bool is_distinct,
+                                        PT_query_expression_body *right,
+                                        bool is_right_in_parentheses) {
+  if (left == nullptr || right == nullptr) return nullptr;
+  Class *left_setop = setop_cast<Class, Tag>(left, is_distinct);
+  Class *right_setop [[maybe_unused]] =
+      setop_cast<Class, Tag>(right, is_distinct);
+  assert(right_setop == nullptr);  // doesn't happen
+  if (left_setop != nullptr) {
+    // X1 op X2 op Y ==> op (X1, X2, Y)
+    left_setop->m_list.push_back(right);
+    left_setop->set_is_rhs_in_parentheses(is_right_in_parentheses);
+    return left_setop;
+  } else {
+    /* X op Y */
+    return new (mem_root)
+        Class(pos, left, is_distinct, right, is_right_in_parentheses);
+  }
+}
+
 #endif /* PARSE_TREE_NODES_INCLUDED */

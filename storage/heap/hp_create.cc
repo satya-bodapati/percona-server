@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,9 +21,9 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
-#include <errno.h>
 #include <sys/types.h>
-#include <time.h>
+#include <cerrno>
+#include <ctime>
 
 #include <algorithm>
 
@@ -54,8 +55,8 @@ int heap_create(const char *name, HP_CREATE_INFO *create_info, HP_SHARE **res,
   HA_KEYSEG *keyseg;
   HP_KEYDEF *keydef = create_info->keydef;
   uint reclength = create_info->reclength;
-  uint keys = create_info->keys;
-  ulong min_records = create_info->min_records;
+  uint const keys = create_info->keys;
+  ulong const min_records = create_info->min_records;
   ulong max_records = create_info->max_records;
   ulong max_rows_for_stated_memory;
   DBUG_TRACE;
@@ -386,9 +387,9 @@ err:
 
 static int keys_compare(const void *a, const void *b, const void *c) {
   uint not_used[2];
-  const heap_rb_param *param = pointer_cast<const heap_rb_param *>(a);
-  const uchar *key1 = pointer_cast<const uchar *>(b);
-  const uchar *key2 = pointer_cast<const uchar *>(c);
+  const auto *param = pointer_cast<const heap_rb_param *>(a);
+  const auto *key1 = pointer_cast<const uchar *>(b);
+  const auto *key2 = pointer_cast<const uchar *>(c);
   return ha_key_cmp(param->keyseg, key1, key2, param->key_length,
                     param->search_flag, not_used);
 }
@@ -421,9 +422,9 @@ static void init_block(HP_BLOCK *block, uint chunk_length, ulong min_records,
   for (i = 0; i <= HP_MAX_LEVELS; i++)
     block->level_info[i].records_under_level =
         (!i ? 1
-            : i == 1 ? records_in_block
-                     : HP_PTRS_IN_NOD *
-                           block->level_info[i - 1].records_under_level);
+         : i == 1
+             ? records_in_block
+             : HP_PTRS_IN_NOD * block->level_info[i - 1].records_under_level);
 }
 
 static inline void heap_try_free(HP_SHARE *share) {
@@ -458,12 +459,11 @@ void heap_drop_table(HP_INFO *info) {
 }
 
 void hp_free(HP_SHARE *share) {
-  bool not_internal_table = (share->open_list.data != nullptr);
+  bool const not_internal_table = (share->open_list.data != nullptr);
   if (not_internal_table) /* If not internal table */
     heap_share_list = list_delete(heap_share_list, &share->open_list);
   hp_clear(share); /* Remove blocks from memory */
   if (not_internal_table) thr_lock_delete(&share->lock);
   my_free(share->name);
   my_free(share);
-  return;
 }

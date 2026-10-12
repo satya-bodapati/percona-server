@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2026, Oracle and/or its affiliates.
 Copyright (c) 2008, 2009 Google Inc.
 Copyright (c) 2009, Percona Inc.
 
@@ -21,12 +21,13 @@ This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -79,11 +80,14 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "row0log.h"
 #include "row0mysql.h"
 #include "sql/current_thd.h"
+#include "sql/sql_class.h"
 #include "sql_thd_internal_api.h"
 #include "srv0mon.h"
 
+#include "debug_sync.h" /* CONDITIONAL_SYNC_POINT */
 #include "my_dbug.h"
 #include "my_psi_config.h"
+#include "mysql/components/library_mysys/my_system.h" /* my_num_vcpus */
 
 #endif /* !UNIV_HOTBACKUP */
 #include "srv0srv.h"
@@ -94,6 +98,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "trx0purge.h"
 #include "usr0sess.h"
 #include "ut0crc32.h"
+#include "vec0arena.h"
 #endif /* !UNIV_HOTBACKUP */
 #include "ha_innodb.h"
 #include "sql/handler.h"
@@ -108,13 +113,6 @@ Srv_threads srv_threads;
 /** Structure with cpu usage information. */
 Srv_cpu_usage srv_cpu_usage;
 #endif /* UNIV_HOTBACKUP */
-
-#ifdef INNODB_DD_TABLE
-/* true when upgrading. */
-bool srv_is_upgrade_mode = false;
-bool srv_downgrade_logs = false;
-bool srv_upgrade_old_undo_found = false;
-#endif /* INNODB_DD_TABLE */
 
 /* Revert to old partition file name if upgrade fails. */
 bool srv_downgrade_partition_files = false;
@@ -159,13 +157,9 @@ uint32_t srv_rseg_init_threads = 1;
 separated by ';' and can also be absolute paths. */
 char *srv_undo_dir = nullptr;
 
-/** The number of implicit undo tablespaces to use for rollback
-segments. */
-ulong srv_undo_tablespaces = FSP_IMPLICIT_UNDO_TABLESPACES;
-
 #ifndef UNIV_HOTBACKUP
 /* The number of rollback segments per tablespace */
-ulong srv_rollback_segments = TRX_SYS_N_RSEGS;
+ulong srv_rollback_segments = FSP_MAX_ROLLBACK_SEGMENTS;
 
 /* Used for the deprecated setting innodb_undo_logs. This will still get
 put into srv_rollback_segments if it is set to a non-default value. */
@@ -232,6 +226,14 @@ bool srv_use_native_aio = false;
 
 bool srv_numa_interleave = false;
 
+/** See srv0srv.h. Default off: latches are created eagerly. */
+bool srv_buf_pool_lazy_latch_init = false;
+
+/** Whether buffer pool allocations (huge and regular pages) are pre-populated
+(MAP_POPULATE and the explicit prefault step) at allocation time. Exposed as the
+innodb_buffer_pool_populate system variable. */
+bool srv_buf_pool_populate = true;
+
 #ifdef UNIV_DEBUG
 /** Force all user tables to use page compression. */
 ulong srv_debug_compress;
@@ -250,10 +252,6 @@ char *srv_log_group_home_dir = nullptr;
 
 /** Enable or disable Encrypt of REDO tablespace. */
 bool srv_redo_log_encrypt = false;
-
-ulong srv_log_n_files = 100; /* Deprecated (used only for deprecated sysvar). */
-
-ulonglong srv_log_file_size; /* Deprecated (used only for deprecated sysvar). */
 
 ulonglong srv_redo_log_capacity, srv_redo_log_capacity_used;
 
@@ -304,7 +302,7 @@ ulong srv_log_recent_written_size = INNODB_LOG_RECENT_WRITTEN_SIZE_DEFAULT;
 /** Number of slots in a small buffer, which is used to break requirement
 for total order of dirty pages, when they are added to flush lists.
 The slots are addressed by LSN values modulo number of the slots. */
-ulong srv_log_recent_closed_size = INNODB_LOG_RECENT_CLOSED_SIZE_DEFAULT;
+ulong srv_buf_flush_list_added_size = INNODB_BUF_FLUSH_LIST_ADDED_SIZE_DEFAULT;
 
 /** Number of spin iterations, when spinning and waiting for log buffer
 written up to given LSN, before we fallback to loop with sleeps.
@@ -463,6 +461,8 @@ bool srv_validate_tablespace_paths = true;
 bool srv_use_fdatasync = false;
 /** Scan depth for LRU flush batch i.e.: number of blocks scanned*/
 ulong srv_LRU_scan_depth = 1024;
+/** Whether per-pool LRU manager threads are enabled (after recovery). */
+bool srv_lru_threads_enabled = false;
 /** Whether or not to flush neighbors of a block */
 ulong srv_flush_neighbors = 1;
 /** Previously requested size. Accesses protected by memory barriers. */
@@ -475,14 +475,6 @@ long long srv_buf_pool_curr_size = 0;
 ulong srv_buf_pool_dump_pct;
 /** Lock table size in bytes */
 ulint srv_lock_table_size = ULINT_MAX;
-
-/** The maximum time limit for a single LRU tail flush iteration by the page
-cleaner thread */
-ulint srv_cleaner_max_lru_time = 1000;
-
-/** The maximum time limit for a single flush list flush iteration by the page
-cleaner thread */
-ulint srv_cleaner_max_flush_time = 1000;
 
 /** Page cleaner LSN age factor formula option */
 ulong srv_cleaner_lsn_age_factor = SRV_CLEANER_LSN_AGE_FACTOR_HIGH_CHECKPOINT;
@@ -639,6 +631,11 @@ this many index pages, there are 2 ways to calculate statistics:
 * quick transient stats, that are used if persistent stats for the given
   table/index are not found in the innodb database */
 unsigned long long srv_stats_transient_sample_pages = 8;
+
+/** Upper bound in bytes on the node arenas of HNSW vector index graphs,
+across all tables and indexes; 0 means no limit. */
+unsigned long long srv_hnsw_max_memory = 1ULL << 30;
+
 bool srv_stats_persistent = true;
 bool srv_stats_include_delete_marked = false;
 unsigned long long srv_stats_persistent_sample_pages = 20;
@@ -1220,6 +1217,7 @@ static void srv_init(void) {
       UT_NEW_THIS_FILE_PSI_KEY,
       ut::Count{srv_threads.m_page_cleaner_workers_n});
 
+  /* One LRU manager thread per buf_pool instance. */
   srv_threads.m_lru_managers_n = srv_buf_pool_instances;
 
   srv_threads.m_lru_managers = ut::new_arr_withkey<IB_thread>(
@@ -1269,10 +1267,10 @@ static void srv_init(void) {
   /* page_zip_stat_per_index_mutex is acquired from:
   1. page_zip_compress() (after SYNC_FSP)
   2. page_zip_decompress()
-  3. i_s_cmp_per_index_fill_low() (where SYNC_DICT is acquired)
+  3. i_s_cmp_per_index_fill_low() (after SYNC_DICT is acquired)
   4. innodb_cmp_per_index_update(), no other latches
-  since we do not acquire any other latches while holding this mutex,
-  it can have very low level. We pick SYNC_ANY_LATCH for it. */
+  5. dict_index_remove_from_cache_low(),
+  6. btr_free_if_exists() (after SYNC_DICT) */
   mutex_create(LATCH_ID_PAGE_ZIP_STAT_PER_INDEX,
                &page_zip_stat_per_index_mutex);
 
@@ -1325,20 +1323,24 @@ void srv_free(void) {
 
   srv_sys = nullptr;
 
-  if (srv_threads.m_lru_managers != nullptr) {
-    for (size_t i = 0; i < srv_threads.m_lru_managers_n; ++i) {
-      srv_threads.m_lru_managers[i] = {};
-    }
-    ut::free(srv_threads.m_lru_managers);
-    srv_threads.m_lru_managers = nullptr;
-  }
-
   if (srv_threads.m_page_cleaner_workers != nullptr) {
     for (size_t i = 0; i < srv_threads.m_page_cleaner_workers_n; ++i) {
       srv_threads.m_page_cleaner_workers[i] = {};
     }
     ut::delete_arr(srv_threads.m_page_cleaner_workers);
     srv_threads.m_page_cleaner_workers = nullptr;
+  }
+
+  if (srv_threads.m_lru_managers != nullptr) {
+    for (size_t i = 0; i < srv_threads.m_lru_managers_n; ++i) {
+      srv_threads.m_lru_managers[i] = {};
+    }
+    /* Allocated with ut::new_arr_withkey<IB_thread>(), so it must be released
+    with ut::delete_arr() (which runs the element destructors and uses the
+    matching array allocator), not ut::free(). This mirrors the
+    m_page_cleaner_workers / m_purge_workers teardown above. */
+    ut::delete_arr(srv_threads.m_lru_managers);
+    srv_threads.m_lru_managers = nullptr;
   }
 
   if (srv_threads.m_purge_workers != nullptr) {
@@ -1594,7 +1596,7 @@ bool srv_printf_innodb_monitor(FILE *file, bool nowait, ulint *trx_start_pos,
   fprintf(file, "%lu RW transactions active inside InnoDB\n",
           UT_LIST_GET_LEN(trx_sys->rw_trx_list));
 
-  ReadView *oldest_view = trx_sys->mvcc->get_oldest_view();
+  const ReadView *oldest_view = trx_sys->mvcc->get_oldest_view_stats();
   if (oldest_view) {
     fprintf(file, "---OLDEST VIEW---\n");
     oldest_view->print(file);
@@ -1798,12 +1800,12 @@ void srv_export_innodb_status(void) {
 
   mutex_enter(&trx_sys->mutex);
   auto *const oldest_view_for_low_limit_trx_id =
-      trx_sys->mvcc->get_oldest_view();
-  mutex_exit(&trx_sys->mutex);
+      trx_sys->mvcc->get_oldest_view_stats();
   export_vars.innodb_oldest_view_low_limit_trx_id =
       oldest_view_for_low_limit_trx_id
           ? oldest_view_for_low_limit_trx_id->low_limit_id()
           : 0;
+  mutex_exit(&trx_sys->mutex);
 
   export_vars.innodb_purge_trx_id = purge_sys->limit.trx_no;
   export_vars.innodb_purge_undo_no = purge_sys->limit.undo_no;
@@ -1846,8 +1848,9 @@ void srv_export_innodb_status(void) {
   export_vars.innodb_row_lock_time = srv_stats.n_lock_wait_time / 1000;
 
   if (srv_stats.n_lock_wait_count > 0) {
-    export_vars.innodb_row_lock_time_avg = (ulint)(
-        srv_stats.n_lock_wait_time / 1000 / srv_stats.n_lock_wait_count);
+    export_vars.innodb_row_lock_time_avg =
+        (ulint)(srv_stats.n_lock_wait_time / 1000 /
+                srv_stats.n_lock_wait_count);
 
   } else {
     export_vars.innodb_row_lock_time_avg = 0;
@@ -1900,6 +1903,8 @@ void srv_export_innodb_status(void) {
   }
   undo::spaces->s_unlock();
 
+  export_vars.innodb_hnsw_memory_used = Vec_arena::global_bytes();
+
   export_vars.innodb_n_merge_blocks_encrypted =
       srv_stats.n_merge_blocks_encrypted;
 
@@ -1921,7 +1926,7 @@ void srv_export_innodb_status(void) {
   below the low limit. */
   ReadView oldest_view;
   trx_sys->mvcc->clone_oldest_view(&oldest_view);
-  trx_id_t low_limit_no = oldest_view.view_low_limit_no();
+  trx_id_t low_limit_no = oldest_view.low_limit_no();
 
   rw_lock_s_unlock(&purge_sys->latch);
 
@@ -2369,21 +2374,7 @@ static void srv_update_cpu_usage() {
   srv_cpu_usage.stime_abs = cpu_stime;
 
   /* Calculate relative. */
-
-  cpu_set_t cs;
-  CPU_ZERO(&cs);
-  if (sched_getaffinity(0, sizeof(cs), &cs) != 0) {
-    return;
-  }
-
-  int n_cpu = 0;
-  constexpr int MAX_CPU_N = 128;
-  for (int i = 0; i < MAX_CPU_N; ++i) {
-    if (CPU_ISSET(i, &cs)) {
-      ++n_cpu;
-    }
-  }
-
+  const int n_cpu = my_num_vcpus();
   srv_cpu_usage.n_cpu = n_cpu;
   MONITOR_SET(MONITOR_CPU_N, int64_t(n_cpu));
 
@@ -2471,32 +2462,7 @@ static void srv_update_cpu_usage() {
   srv_cpu_usage.stime_abs = cpu_stime;
 
   /* Calculate relative. */
-
-  DWORD_PTR process_affinity_mask;
-  DWORD_PTR system_affinity_mask;
-  if (!GetProcessAffinityMask(GetCurrentProcess(), &process_affinity_mask,
-                              &system_affinity_mask)) {
-    return;
-  }
-
-  /* If the system has more than 64 processors and the current process
-     contains threads in multiple groups, GetProcessAffinityMask returns
-     zero for both affinity masks.
-  */
-  if ((process_affinity_mask == 0) && (system_affinity_mask == 0)) {
-    return;
-  }
-
-  int n_cpu = 0;
-  constexpr int MAX_CPU_N = 64;
-  uint64_t j = 1;
-  for (int i = 0; i < MAX_CPU_N; ++i) {
-    if (j & process_affinity_mask) {
-      ++n_cpu;
-    }
-    j = j << 1;
-  }
-
+  const int n_cpu = my_num_vcpus();
   srv_cpu_usage.n_cpu = n_cpu;
   MONITOR_SET(MONITOR_CPU_N, int64_t(n_cpu));
 
@@ -2518,7 +2484,7 @@ static void srv_update_cpu_usage() {
   srv_cpu_usage.utime_abs = 0;
   srv_cpu_usage.stime_pct = 0;
   srv_cpu_usage.stime_abs = 0;
-  srv_cpu_usage.n_cpu = 1;
+  srv_cpu_usage.n_cpu = my_num_vcpus();
 }
 #endif
 
@@ -2980,6 +2946,7 @@ bool srv_enable_undo_encryption(THD *thd) {
 static void srv_master_sleep(void) {
   srv_main_thread_op_info = "sleeping";
   std::this_thread::sleep_for(std::chrono::seconds(1));
+  CONDITIONAL_SYNC_POINT("srv_master_sleep");
   srv_main_thread_op_info = "";
 }
 
@@ -3436,6 +3403,9 @@ void srv_purge_coordinator_thread() {
   srv_slot_t *slot;
 
   THD *thd = create_internal_thd();
+
+  // Allow purge in read only mode as well.
+  thd->set_skip_readonly_check();
 
   purge_sys->is_this_a_purge_thread = true;
 

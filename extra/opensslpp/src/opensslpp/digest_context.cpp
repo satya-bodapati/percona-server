@@ -19,6 +19,7 @@
 #include <vector>
 
 #include <openssl/evp.h>
+#include <openssl/obj_mac.h>
 
 #include <opensslpp/digest_context.hpp>
 
@@ -27,6 +28,21 @@
 #include "opensslpp/digest_context_accessor.hpp"
 
 namespace opensslpp {
+
+#ifdef EVP_MD_FLAG_XOF
+static std::size_t get_xof_output_length(const EVP_MD *md
+                                         [[maybe_unused]]) noexcept {
+#if defined(NID_shake128) && defined(NID_shake256)
+  constexpr std::size_t kShake128DefaultDigestSize = 16;
+  constexpr std::size_t kShake256DefaultDigestSize = 32;
+
+  auto md_type = EVP_MD_type(md);
+  if (md_type == NID_shake128) return kShake128DefaultDigestSize;
+  if (md_type == NID_shake256) return kShake256DefaultDigestSize;
+#endif
+  return 0;
+}
+#endif
 
 void digest_context::digest_context_deleter::operator()(
     void *dc) const noexcept {
@@ -68,12 +84,26 @@ void digest_context::swap(digest_context &obj) noexcept {
 }
 
 std::size_t digest_context::get_size_in_bytes() const noexcept {
-  return EVP_MD_CTX_size(digest_context_accessor::get_impl(*this));
+  assert(!is_empty());
+
+  auto *ctx = digest_context_accessor::get_impl_const_casted(*this);
+  auto size = EVP_MD_CTX_size(ctx);
+  if (size > 0) return static_cast<std::size_t>(size);
+
+#ifdef EVP_MD_FLAG_XOF
+  const auto *md = EVP_MD_CTX_md(ctx);
+  if (md != nullptr && (EVP_MD_flags(md) & EVP_MD_FLAG_XOF)) {
+    auto xof_len = get_xof_output_length(md);
+    if (xof_len > 0) return xof_len;
+  }
+#endif
+
+  return 0;
 }
 
-void digest_context::update(const std::string &data) {
+void digest_context::update(std::string_view data) {
   assert(!is_empty());
-  if (EVP_DigestUpdate(digest_context_accessor::get_impl(*this), data.c_str(),
+  if (EVP_DigestUpdate(digest_context_accessor::get_impl(*this), data.data(),
                        data.size()) == 0)
     throw core_error{"cannot hash data into digest context"};
 }
@@ -81,19 +111,36 @@ void digest_context::update(const std::string &data) {
 std::string digest_context::finalize() {
   assert(!is_empty());
 
-  // TODO: use c++17 non-const std::string::data() member here
-  using buffer_type = std::array<unsigned char, EVP_MAX_MD_SIZE + 1>;
-  buffer_type res;
+  auto *ctx = digest_context_accessor::get_impl(*this);
+
+#ifdef EVP_MD_FLAG_XOF
+  const auto *md = EVP_MD_CTX_md(ctx);
+  if (md != nullptr && (EVP_MD_flags(md) & EVP_MD_FLAG_XOF)) {
+    auto xof_len = get_xof_output_length(md);
+    if (xof_len == 0) throw core_error{"cannot determine XOF output length"};
+
+    std::string res(xof_len, '\0');
+    if (EVP_DigestFinalXOF(ctx, reinterpret_cast<unsigned char *>(res.data()),
+                           xof_len) == 0)
+      throw core_error{"cannot finalize XOF digest context"};
+
+    digest_context_accessor::set_impl(*this, nullptr);
+    return res;
+  }
+#endif
+
+  auto digest_size = EVP_MD_CTX_size(ctx);
+  assert(digest_size > 0 && digest_size <= EVP_MAX_MD_SIZE);
+  std::string res(static_cast<std::size_t>(digest_size), '\0');
 
   unsigned int res_size = 0;
-  if (EVP_DigestFinal_ex(digest_context_accessor::get_impl(*this), res.data(),
+  if (EVP_DigestFinal_ex(ctx, reinterpret_cast<unsigned char *>(res.data()),
                          &res_size) == 0)
     throw core_error{"cannot finalize digest context"};
-  assert(res_size <= res.size());
+  assert(res_size == res.size());
 
   digest_context_accessor::set_impl(*this, nullptr);
-  return {reinterpret_cast<char *>(res.data()),
-          static_cast<std::size_t>(res_size)};
+  return res;
 }
 
 }  // namespace opensslpp

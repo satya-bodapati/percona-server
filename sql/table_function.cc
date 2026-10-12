@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -35,7 +36,9 @@
 #include "mysqld_error.h"
 #include "prealloced_array.h"
 #include "sql-common/json_dom.h"
+#include "sql-common/json_error_handler.h"
 #include "sql-common/json_path.h"
+#include "sql/current_thd.h"
 #include "sql/error_handler.h"
 #include "sql/field.h"
 #include "sql/handler.h"
@@ -92,6 +95,12 @@ bool Table_function::init_args() {
   return false;
 }
 
+void Table_function::fix_after_pullout(Query_block *parent_query_block,
+                                       Query_block *removed_query_block) {
+  do_fix_after_pullout(parent_query_block, removed_query_block);
+  table->pos_in_table_list->dep_tables = used_tables();
+}
+
 /******************************************************************************
   Implementation of JSON_TABLE function
 ******************************************************************************/
@@ -135,7 +144,7 @@ bool Table_function_json::init_json_table_col_lists(uint *nest_idx,
     if (col->m_jtc_type != enum_jt_column::JTC_NESTED_PATH) {
       col->m_field_idx = m_vt_list.elements;
       m_vt_list.push_back(col);
-      if (check_column_name(col->field_name)) {
+      if (check_column_name(to_lex_cstring(col->field_name))) {
         my_error(ER_WRONG_COLUMN_NAME, MYF(0), col->field_name);
         return true;
       }
@@ -756,13 +765,20 @@ bool Table_function_json::print(const THD *thd, String *str,
           str->append(')'));
 }
 
-table_map Table_function_json::used_tables() { return source->used_tables(); }
+table_map Table_function_json::used_tables() const {
+  return source->used_tables();
+}
 
 void Table_function_json::do_cleanup() {
   source->cleanup();
   is_source_parsed = false;
   for (uint i = 0; i < MAX_NESTED_PATH; i++) m_jds[i].cleanup();
   for (uint i = 0; i < m_all_columns.size(); i++) m_all_columns[i]->cleanup();
+}
+
+void Table_function_json::do_fix_after_pullout(
+    Query_block *parent_query_block, Query_block *removed_query_block) {
+  source->fix_after_pullout(parent_query_block, removed_query_block);
 }
 
 void JT_data_source::cleanup() {
@@ -820,13 +836,13 @@ bool Table_function_sequence::fill_result_table() {
   return false;
 }
 
-table_map Table_function_sequence::used_tables() {
+table_map Table_function_sequence::used_tables() const {
   return m_source->used_tables();
 }
 
 bool Table_function_sequence::print(const THD *thd, String *str,
                                     enum_query_type query_type) const {
-  if (str->append(STRING_WITH_LEN("sequence_table("))) return true;
+  if (str->append(STRING_WITH_LEN("percona_sequence_table("))) return true;
   m_source->print(thd, str, query_type);
   if (thd->is_error()) return true;
   return str->append(')');
@@ -850,7 +866,7 @@ bool Table_function_sequence::do_init_args() {
   assert(m_source->data_type() != MYSQL_TYPE_VAR_STRING);
   if (m_source->has_aggregation() || m_source->has_subquery() ||
       m_source != dummy) {
-    my_error(ER_WRONG_ARGUMENTS, MYF(0), "SEQUENCE_TABLE");
+    my_error(ER_WRONG_ARGUMENTS, MYF(0), "PERCONA_SEQUENCE_TABLE");
     return true;
   }
 
@@ -867,6 +883,11 @@ void Table_function_sequence::do_cleanup() {
   m_vt_list.clear();
   m_upper_bound_precalculated = false;
   m_precalculated_upper_bound = 0;
+}
+
+void Table_function_sequence::do_fix_after_pullout(
+    Query_block *parent_query_block, Query_block *removed_query_block) {
+  m_source->fix_after_pullout(parent_query_block, removed_query_block);
 }
 
 ulonglong Table_function_sequence::calculate_upper_bound() const {

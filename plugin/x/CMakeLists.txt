@@ -1,15 +1,16 @@
-# Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,11 +29,6 @@ SET(MYSQLX_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
 SET(MYSQLX_PLUGIN_NAME "mysqlx")
 
 MSVC_CPPCHECK_DISABLE()
-
-IF(WIN32)
-  # Activate necessary dllexport/dllimport declarations.
-  ADD_DEFINITIONS(-DPROTOBUF_USE_DLLS)
-ENDIF()
 
 ADD_DEFINITIONS(-DLOG_COMPONENT_TAG="mysqlx")
 
@@ -68,11 +64,9 @@ library for mysqlx plugin.")
 ENDIF()
 
 IF(WITH_MYSQLX_USE_PROTOBUF_FULL)
-  SET(MYSQLX_PROTOBUF_LIB ext::libprotobuf)
   SET(MYSQLX_PROTOCOL_LIB ${MYSQLX_PROTOCOL_FULL_LIB})
   SET(MYSQLX_CLIENT_LIB ${MYSQLX_CLIENT_FULL_LIB})
 ELSE()
-  SET(MYSQLX_PROTOBUF_LIB ext::libprotobuf-lite)
   SET(MYSQLX_PROTOCOL_LIB ${MYSQLX_PROTOCOL_LITE_LIB})
   SET(MYSQLX_CLIENT_LIB ${MYSQLX_CLIENT_LITE_LIB})
 ENDIF()
@@ -83,9 +77,15 @@ INCLUDE_DIRECTORIES(
   ${MYSQLX_CLIENT_INCLUDE_DIR}
 )
 
-ADD_COMPILE_FLAGS(${XPLUGIN_SRC}
-  COMPILE_FLAGS "${MYSQLX_PROTOCOL_FLAGS}"
-)
+# GCC 16's -O2 analysis emits a false-positive -Wmaybe-uninitialized warning
+# inside xpl::Cond / xpl::RWLock constructors when inline_mysql_cond_init /
+# inline_mysql_rwlock_init are inlined.
+IF(MY_COMPILER_IS_GNU AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 16)
+  ADD_COMPILE_FLAGS(
+    src/helper/multithread/cond.cc
+    src/helper/multithread/rw_lock.cc
+    COMPILE_FLAGS "-Wno-maybe-uninitialized")
+ENDIF()
 
 # MYSQL_ADD_PLUGIN may have disabled the plugin.
 IF(WITH_MYSQLX)
@@ -94,10 +94,9 @@ IF(WITH_MYSQLX)
     DEFAULT
     DEPENDENCIES xprotocol_tags
     LINK_LIBRARIES
-    ext::libevent
+    harness_net_ts
     ext::icu
     ${MYSQLX_PROTOCOL_LIB}
-    ${MYSQLX_PROTOBUF_LIB}
     extra::rapidjson
     ext::lz4
     ext::zstd

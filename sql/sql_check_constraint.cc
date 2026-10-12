@@ -1,15 +1,16 @@
-/* Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -128,41 +129,61 @@ bool check_constraint_expr_refers_to_only_column(Item *check_expr,
 }
 
 bool Check_constraint_column_dependency_checker::
-    any_check_constraint_uses_column(const char *column_name) {
-  auto column_used_by_constraint =
-      [column_name](Sql_check_constraint_spec *cc_spec) {
-        if (cc_spec->expr_refers_column(column_name)) {
+    any_check_constraint_uses_column(const char *column_name,
+                                     Operation operation) {
+  for (Sql_check_constraint_spec *cc_spec : m_check_constraint_list) {
+    if (cc_spec->expr_refers_column(column_name)) {
+      switch (operation) {
+        case Operation::kDropColumn:
+        case Operation::kRenameColumn:
           my_error(ER_DEPENDENT_BY_CHECK_CONSTRAINT, MYF(0), cc_spec->name.str,
                    column_name);
           return true;
-        }
-        return false;
-      };
+        case Operation::kSetMaskingPolicy:
+          my_error(ER_MASKING_POLICY_INCOMPATIBLE_COLUMN_FEATURE, MYF(0),
+                   column_name, "be referenced by a CHECK constraint");
+          return true;
+      }
+    }
+  }
 
-  return std::any_of(m_check_constraint_list.begin(),
-                     m_check_constraint_list.end(), column_used_by_constraint);
+  return false;
 }
 
 bool Check_constraint_column_dependency_checker::operator()(
     const Alter_drop *drop) {
   if (drop->type != Alter_drop::COLUMN) return false;
-  return any_check_constraint_uses_column(drop->name);
+  return any_check_constraint_uses_column(drop->name, Operation::kDropColumn);
 }
 
 bool Check_constraint_column_dependency_checker::operator()(
     const Alter_column *alter_column) {
-  if (alter_column->change_type() != Alter_column::Type::RENAME_COLUMN)
-    return false;
-  if (my_strcasecmp(system_charset_info, alter_column->name,
-                    alter_column->m_new_name) == 0)
-    return false;
-  return any_check_constraint_uses_column(alter_column->name);
+  switch (alter_column->change_type()) {
+    case Alter_column::Type::RENAME_COLUMN:
+      if (my_strcasecmp(system_charset_info, alter_column->name,
+                        alter_column->m_new_name) == 0) {
+        return false;
+      }
+      return any_check_constraint_uses_column(alter_column->name,
+                                              Operation::kRenameColumn);
+    case Alter_column::Type::SET_MASKING_POLICY:
+      return any_check_constraint_uses_column(alter_column->name,
+                                              Operation::kSetMaskingPolicy);
+    default:
+      return false;
+  }
 }
 
 bool Check_constraint_column_dependency_checker::operator()(
     const Create_field &fld) {
-  if (fld.change == nullptr) return false;
-  if (my_strcasecmp(system_charset_info, fld.field_name, fld.change) == 0)
-    return false;
-  return any_check_constraint_uses_column(fld.change);
+  if (fld.change != nullptr &&
+      my_strcasecmp(system_charset_info, fld.field_name, fld.change) != 0) {
+    return any_check_constraint_uses_column(fld.change,
+                                            Operation::kRenameColumn);
+  }
+  if (fld.m_masking_policy_name.length > 0) {
+    return any_check_constraint_uses_column(fld.field_name,
+                                            Operation::kSetMaskingPolicy);
+  }
+  return false;
 }

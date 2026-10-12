@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -279,11 +280,14 @@ bool Session::can_forward_error_code_to_client(const int error_code) {
   // Lets ignore ER_ACCESS_DENIED_ERROR it is used by the plugin to
   // return general authentication problem. It may have not too
   // accurate error message.
-  static const std::set<int> allowed_error_codes{
-      ER_DBACCESS_DENIED_ERROR,   ER_MUST_CHANGE_PASSWORD_LOGIN,
-      ER_ACCOUNT_HAS_BEEN_LOCKED, ER_SECURE_TRANSPORT_REQUIRED,
-      ER_SERVER_OFFLINE_MODE,     ER_BAD_DB_ERROR,
-      ER_AUDIT_API_ABORT};
+  static const std::set<int> allowed_error_codes{ER_DBACCESS_DENIED_ERROR,
+                                                 ER_MUST_CHANGE_PASSWORD_LOGIN,
+                                                 ER_ACCOUNT_HAS_BEEN_LOCKED,
+                                                 ER_SECURE_TRANSPORT_REQUIRED,
+                                                 ER_SERVER_OFFLINE_MODE,
+                                                 ER_SERVER_OFFLINE_MODE_REASON,
+                                                 ER_BAD_DB_ERROR,
+                                                 ER_AUDIT_API_ABORT};
 
   return 0 < allowed_error_codes.count(error_code);
 }

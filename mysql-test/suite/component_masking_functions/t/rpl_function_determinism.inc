@@ -1,9 +1,9 @@
---source include/master-slave.inc
+--source include/rpl/init_source_replica.inc
 
 INSTALL COMPONENT 'file://component_masking_functions';
---source include/rpl_connection_slave.inc
+--source include/rpl/connection_replica.inc
 INSTALL COMPONENT 'file://component_masking_functions';
---source include/rpl_connection_master.inc
+--source include/rpl/connection_source.inc
 
 
 --echo #
@@ -131,12 +131,13 @@ INSTALL COMPONENT 'file://component_masking_functions';
 --echo # Dictionary functions
 --echo #
 
---source include/rpl_connection_master.inc
+--source include/rpl/connection_source.inc
 CREATE TABLE mysql.masking_dictionaries(
     Dictionary VARCHAR(256) NOT NULL,
     Term VARCHAR(256) NOT NULL,
     UNIQUE INDEX dictionary_term_idx (Dictionary, Term)
 ) ENGINE = InnoDB DEFAULT CHARSET=utf8mb4;
+GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.masking_dictionaries TO 'mysql.session'@'localhost';
 
 --let $current_user = `SELECT USER()`
 eval GRANT MASKING_DICTIONARIES_ADMIN ON *.* TO $current_user;
@@ -147,7 +148,7 @@ SELECT masking_dictionary_term_add('dict1', 'word12');
 SELECT masking_dictionary_term_add('dict2', 'word21');
 SELECT masking_dictionary_term_add('dict2', 'word22');
 
---source include/sync_slave_sql_with_master.inc
+--source include/rpl/sync_to_replica.inc
 --let $assert_cond = [ SELECT COUNT(*) FROM mysql.masking_dictionaries ] = 4
 --let $assert_text =  mysql.masking_dictionaries must have 4 records
 --source include/assert.inc
@@ -161,32 +162,33 @@ SELECT masking_dictionary_term_add('dict2', 'word22');
 --source check_determinism.inc
 
 --echo # masking_dictionary_term_remove()
---source include/rpl_connection_master.inc
+--source include/rpl/connection_source.inc
 SELECT masking_dictionary_term_remove('dict2', 'word21');
 SELECT masking_dictionary_term_remove('dict2', 'word22');
 
---source include/sync_slave_sql_with_master.inc
+--source include/rpl/sync_to_replica.inc
 --let $assert_cond = [ SELECT COUNT(*) FROM mysql.masking_dictionaries ] = 2
 --let $assert_text =  mysql.masking_dictionaries must have 2 records
 --source include/assert.inc
 
 --echo # masking_dictionary_remove()
---source include/rpl_connection_master.inc
+--source include/rpl/connection_source.inc
 SELECT masking_dictionary_remove('dict1');
 
---source include/sync_slave_sql_with_master.inc
+--source include/rpl/sync_to_replica.inc
 --let $assert_cond = [ SELECT COUNT(*) FROM mysql.masking_dictionaries ] = 0
 --let $assert_text =  mysql.masking_dictionaries must have no records
 --source include/assert.inc
 
 
---source include/rpl_connection_master.inc
+--source include/rpl/connection_source.inc
 eval REVOKE MASKING_DICTIONARIES_ADMIN ON *.* FROM $current_user;
+REVOKE SELECT, INSERT, UPDATE, DELETE ON mysql.masking_dictionaries FROM 'mysql.session'@'localhost';
 DROP TABLE mysql.masking_dictionaries;
 
---source include/rpl_connection_slave.inc
+--source include/rpl/connection_replica.inc
 UNINSTALL COMPONENT 'file://component_masking_functions';
---source include/rpl_connection_master.inc
+--source include/rpl/connection_source.inc
 UNINSTALL COMPONENT 'file://component_masking_functions';
 
---source include/rpl_end.inc
+--source include/rpl/deinit.inc

@@ -1,18 +1,19 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2026, Oracle and/or its affiliates.
 Copyright (c) 2012, Facebook Inc.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -126,16 +127,16 @@ void dict_table_close_and_drop(
     trx_t *trx,           /*!< in: data dictionary transaction */
     dict_table_t *table); /*!< in/out: table */
 /** Inits the data dictionary module. */
-void dict_init(void);
+void dict_init();
 
 /** Closes the data dictionary module. */
-void dict_close(void);
+void dict_close();
 
 /** Inits the structure for persisting dynamic metadata */
-void dict_persist_init(void);
+void dict_persist_init();
 
 /** Clear the structure */
-void dict_persist_close(void);
+void dict_persist_close();
 
 #ifndef UNIV_HOTBACKUP
 /** Write back the dirty persistent dynamic metadata of the table
@@ -289,6 +290,10 @@ in constraints which reference it */
 be accessed by the caller afterwards */
 void dict_index_remove_from_cache(dict_table_t *table, dict_index_t *index);
 
+/** Gathers ids of all tables in cache at the moment.
+@return ids of all tables */
+std::vector<table_id_t> dict_get_all_table_ids();
+
 /** Change the id of a table object in the dictionary cache. This is used in
  DISCARD TABLESPACE. */
 void dict_table_change_id_in_cache(
@@ -329,19 +334,6 @@ void dict_foreign_remove_from_cache(
     to use table->col_names */
     const dict_index_t *index); /*!< in: index to be replaced */
 #endif                          /* !UNIV_HOTBACKUP */
-/** Returns a table object and increments its open handle count.
- NOTE! This is a high-level function to be used mainly from outside the
- 'dict' directory. Inside this directory dict_table_get_low
- is usually the appropriate function.
- @param[in] table_name Table name
- @param[in] dict_locked true=data dictionary locked
- @param[in] try_drop true=try to drop any orphan indexes after
-                                 an aborted online index creation
- @param[in] ignore_err error to be ignored when loading the table
- @return table, NULL if does not exist */
-[[nodiscard]] dict_table_t *dict_table_open_on_name(
-    const char *table_name, bool dict_locked, bool try_drop,
-    dict_err_ignore_t ignore_err);
 
 /** Tries to find an index whose first fields are the columns in the array,
  in the same order and is not marked for deletion and is not the same
@@ -689,7 +681,7 @@ added column.
 /** Gets the number of fields in the internal representation of an index,
  including fields added by the dictionary system.
  @return number of fields */
-[[nodiscard]] static inline ulint dict_index_get_n_fields(
+[[nodiscard]] inline uint16_t dict_index_get_n_fields(
     const dict_index_t *index); /*!< in: an internal
                                representation of index (in
                                the dictionary cache) */
@@ -698,14 +690,14 @@ added column.
  we do not take multiversioning into account: in the B-tree use the value
  returned by dict_index_get_n_unique_in_tree.
  @return number of fields */
-[[nodiscard]] static inline ulint dict_index_get_n_unique(
+[[nodiscard]] inline uint16_t dict_index_get_n_unique(
     const dict_index_t *index); /*!< in: an internal representation
                                of index (in the dictionary cache) */
 /** Gets the number of fields in the internal representation of an index
  which uniquely determine the position of an index entry in the index, if
  we also take multiversioning into account.
  @return number of fields */
-[[nodiscard]] static inline ulint dict_index_get_n_unique_in_tree(
+[[nodiscard]] inline uint16_t dict_index_get_n_unique_in_tree(
     const dict_index_t *index); /*!< in: an internal representation
                                of index (in the dictionary cache) */
 
@@ -719,14 +711,14 @@ index, if we also take multiversioning into account. Note, it doesn't
 include page no field.
 @param[in]      index   index
 @return number of fields */
-[[nodiscard]] static inline uint16_t dict_index_get_n_unique_in_tree_nonleaf(
+[[nodiscard]] inline uint16_t dict_index_get_n_unique_in_tree_nonleaf(
     const dict_index_t *index);
 /** Gets the number of user-defined ordering fields in the index. In the
  internal representation we add the row id to the ordering fields to make all
  indexes unique, but this function returns the number of fields the user defined
  in the index as ordering fields.
  @return number of fields */
-[[nodiscard]] static inline ulint dict_index_get_n_ordering_defined_by_user(
+[[nodiscard]] inline ulint dict_index_get_n_ordering_defined_by_user(
     const dict_index_t *index); /*!< in: an internal representation
                                of index (in the dictionary cache) */
 /** Returns true if the index contains a column or a prefix of that column.
@@ -850,7 +842,7 @@ static inline void dict_index_set_space(dict_index_t *index, space_id_t space);
  relevant only in the case of many consecutive inserts, as updates
  which make the records bigger might fragment the index.
  @return number of free bytes on page, reserved for updates */
-static inline ulint dict_index_get_space_reserve(void);
+static inline ulint dict_index_get_space_reserve();
 
 /* Online index creation @{ */
 /** Gets the status of online index creation.
@@ -878,9 +870,9 @@ static inline void dict_index_set_online_status(
 [[nodiscard]] ulint dict_index_calc_min_rec_len(
     const dict_index_t *index); /*!< in: index */
 /** Reserves the dictionary system mutex for MySQL. */
-void dict_mutex_enter_for_mysql(void);
+void dict_mutex_enter_for_mysql();
 /** Releases the dictionary system mutex for MySQL. */
-void dict_mutex_exit_for_mysql(void);
+void dict_mutex_exit_for_mysql();
 
 #ifndef UNIV_HOTBACKUP
 /** Create a dict_table_t's stats latch or delay for lazy creation.
@@ -889,13 +881,28 @@ or from a thread that has not shared the table object with other threads.
 @param[in,out]  table   table whose stats latch to create
 @param[in]      enabled if false then the latch is disabled
 and dict_table_stats_lock()/unlock() become noop on this table. */
-void dict_table_stats_latch_create(dict_table_t *table, bool enabled);
+void dict_table_stats_latch_create_lazy(dict_table_t *table, bool enabled);
+
+/** Create a dict_table_t's stats compute mutex or delay for lazy creation.
+This function is only called from either single threaded environment
+or from a thread that has not shared the table object with other threads.
+@param[in,out]  table   table whose stats compute mutex to create
+@param[in]      enabled if false then the latch is disabled
+and dict_table_stats_compute_lock()/unlock() become noop on this table. */
+void dict_table_stats_compute_mutex_create_lazy(dict_table_t *table,
+                                                bool enabled);
 
 /** Destroy a dict_table_t's stats latch.
 This function is only called from either single threaded environment
 or from a thread that has not shared the table object with other threads.
 @param[in,out]  table   table whose stats latch to destroy */
 void dict_table_stats_latch_destroy(dict_table_t *table);
+
+/** Destroy a dict_table_t's stats compute mutex.
+This function is only called from either single threaded environment
+or from a thread that has not shared the table object with other threads.
+@param[in,out]  table   table whose stats compute mutex to destroy */
+void dict_table_stats_compute_mutex_destroy(dict_table_t *table);
 
 /** Lock the appropriate latch to protect a given table's statistics.
 @param[in]      table           table whose stats to lock
@@ -906,6 +913,14 @@ void dict_table_stats_lock(dict_table_t *table, ulint latch_mode);
 @param[in]      table           table whose stats to unlock
 @param[in]      latch_mode      RW_S_LATCH or RW_X_LATCH */
 void dict_table_stats_unlock(dict_table_t *table, ulint latch_mode);
+
+/** Acquire table's statistics compute lock.
+@param[in]      table           table whose stats to lock */
+void dict_table_stats_compute_lock(dict_table_t *table);
+
+/** Unlock the lock locked by dict_table_stats_compute_lock().
+@param[in]      table           table whose stats to unlock */
+void dict_table_stats_compute_unlock(dict_table_t *table);
 
 /** Checks if the database name in two table names is the same.
  @return true if same db name */
@@ -1004,33 +1019,34 @@ extern dict_persist_t *dict_persist;
 /* Dictionary system struct */
 struct dict_sys_t {
 #ifndef UNIV_HOTBACKUP
-  DictSysMutex mutex;          /*!< mutex protecting the data
-                               dictionary; protects also the
-                               disk-based dictionary system tables;
-                               this mutex serializes CREATE TABLE
-                               and DROP TABLE, as well as reading
-                               the dictionary data for a table from
-                               system tables */
-#endif                         /* !UNIV_HOTBACKUP */
-  row_id_t row_id;             /*!< the next row id to assign;
-                               NOTE that at a checkpoint this
-                               must be written to the dict system
-                               header and flushed to a file; in
-                               recovery this must be derived from
-                               the log records */
-  hash_table_t *table_hash;    /*!< hash table of the tables, based
-                               on name */
-  hash_table_t *table_id_hash; /*!< hash table of the tables, based
-                               on id */
-  size_t size;                 /*!< varying space in bytes occupied
-                               by the data dictionary table and
-                               index objects */
-  /** Handler to sys_* tables, they're only for upgrade */
-  dict_table_t *sys_tables;  /*!< SYS_TABLES table */
-  dict_table_t *sys_columns; /*!< SYS_COLUMNS table */
-  dict_table_t *sys_indexes; /*!< SYS_INDEXES table */
-  dict_table_t *sys_fields;  /*!< SYS_FIELDS table */
-  dict_table_t *sys_virtual; /*!< SYS_VIRTUAL table */
+  /** mutex protecting the data dictionary; protects also the disk-based
+  dictionary system tables; this mutex serializes CREATE TABLE and DROP TABLE,
+  as well as reading the dictionary data for a table from system tables */
+  DictSysMutex mutex;
+
+  /** Writes the current value of the row id counter to the dictionary header
+  file page. */
+  virtual void dict_hdr_flush_row_id();
+
+  virtual ~dict_sys_t() = default;
+#endif /* !UNIV_HOTBACKUP */
+
+  /** the next row id to assign; NOTE: we only update the DICT_HDR_ROW_ID header
+  once for every DICT_HDR_ROW_ID_WRITE_MARGIN increments, which means that after
+  crash recovery the value found in this header might be smaller than the value
+  in some of the rows. This is why we add DICT_HDR_ROW_ID_WRITE_MARGIN to it
+  after recovery to prevent duplicates. */
+  std::atomic<row_id_t> row_id;
+
+  /** hash table of the tables, based on name */
+  hash_table_t *table_hash;
+
+  /** hash table of the tables, based on id*/
+  hash_table_t *table_id_hash;
+
+  /** varying space in bytes occupied by the data dictionary table and index
+  objects  */
+  size_t size;
 
   /** Permanent handle to mysql.innodb_table_stats */
   dict_table_t *table_stats;
@@ -1234,7 +1250,7 @@ struct dict_persist_t {
 extern dict_index_t *dict_ind_redundant;
 
 /** Inits dict_ind_redundant. */
-void dict_ind_init(void);
+void dict_ind_init();
 
 /** Converts a database and table name from filesystem encoding (e.g.
 "@code d@i1b/a@q1b@1Kc @endcode", same format as used in  dict_table_t::name)
@@ -1283,7 +1299,7 @@ class DDTableBuffer {
 
   /** Truncate the table. We can call it after all the dynamic
   metadata has been written back to DD table */
-  void truncate(void);
+  void truncate();
 
   /** Get the buffered metadata for a specific table, the caller
   has to delete the returned std::string object by ut::delete_
@@ -1404,11 +1420,6 @@ void dict_table_load_dynamic_metadata(dict_table_t *table);
 write dirty persistent data of table to mysql.innodb_dynamic_metadata
 accordingly. */
 void dict_persist_to_dd_table_buffer();
-
-/** Sets merge_threshold in the SYS_INDEXES
-@param[in,out]  index           index
-@param[in]      merge_threshold value to set */
-void dict_index_set_merge_threshold(dict_index_t *index, ulint merge_threshold);
 
 #ifdef UNIV_DEBUG
 /** Sets merge_threshold for all indexes in dictionary cache for debug.
@@ -1641,27 +1652,6 @@ static inline bool dict_table_is_partition(const dict_table_t *table);
 @param[in]      index   index object */
 static inline void dict_allocate_mem_intrinsic_cache(dict_index_t *index);
 
-/** Evict all tables that are loaded for applying purge.
-Since we move the offset of all table ids during upgrade,
-these tables cannot exist in cache. Also change table_ids
-of SYS_* tables if they are upgraded from earlier versions */
-void dict_upgrade_evict_tables_cache();
-
-/** @return true if table is InnoDB SYS_* table
-@param[in]      table_id        table id  */
-bool dict_table_is_system(table_id_t table_id);
-
-/** Build the table_id array of SYS_* tables. This
-array is used to determine if a table is InnoDB SYSTEM
-table or not.
-@return true if successful, false otherwise */
-bool dict_sys_table_id_build();
-
-/** Change the table_id of SYS_* tables if they have been created after
-an earlier upgrade. This will update the table_id by adding DICT_MAX_DD_TABLES
-*/
-void dict_table_change_id_sys_tables();
-
 /** Get the tablespace data directory if set, otherwise empty string.
 @return the data directory */
 [[nodiscard]] std::string dict_table_get_datadir(const dict_table_t *table);
@@ -1670,49 +1660,16 @@ void dict_table_change_id_sys_tables();
 void dict_table_set_corrupt_by_space(space_id_t space_id,
                                      bool need_mutex) noexcept;
 
-/** SYS_ZIP_DICT and SYS_ZIP_DICT_COLS will be missing when upgrading
-mysql-5.7 to PS-8.0 */
-extern bool dict_upgrade_zip_dict_missing;
-
-/** Get single compression dictionary id for the given
-(table id, column pos) pair.
-@param[in]	table_id	table id
-@param[in]	column_pos	column position
-@param[out]	dict_id		zip_dict id
-@retval	DB_SUCCESS		if OK
-@retval	DB_RECORD_NOT_FOUND	if not found */
-MY_NODISCARD
-dberr_t dict_get_dictionary_id_by_key(table_id_t table_id, ulint column_pos,
-                                      ulint *dict_id);
-
-/** Get compression dictionary info (name and data) for the given id.
-Allocates memory in name->str and data->str on success.
-Must be freed with mem_free().
-@param[in]	dict_id		zip dict id
-@param[out]	name		dictionary name
-@param[out]	name_len	dictionary name length
-@param[out]	data		dictionary data
-@param[out]	data_len	dictionary data length
-@retval	DB_SUCCESS		if OK
-@retval	DB_RECORD_NOT_FOUND	if not found */
-MY_NODISCARD
-dberr_t dict_get_dictionary_info_by_id(ulint dict_id, char **name,
-                                       ulint *name_len, char **data,
-                                       ulint *data_len);
-
 /** Detect if Percona Server 5.7 mysql database has encrypted InnoDB tables.
 This can happen if Percona Server is bootstrapped with
 --innodb-encrypt-tables=ON If yes or if srv_encrypt_tables is ON/FORCE, during
 upgrade, mysql.ibd should be encrpted.
 In no upgrade scenario it fetches encryption flag from first page of mysql.ibd
 to check whether it is encrypted.
-@param[in]  dict_init_mode      initalization mode
-@param[in]  mysql_plugin_space  space_id of mysql/plugin table. Used only
-                                during upgrade
-@param[out] do_encrypt          true if encrypted, false if not encrypted
+@param[in]  dict_init_mode  initalization mode
+@param[out] encrypt_mysql   true if encrypted, false if not encrypted
 @return true if success, false if failure */
 bool dict_detect_encryption_of_mysql_ibd(dict_init_mode_t dict_init_mode,
-                                         space_id_t mysql_plugin_space,
                                          bool &encrypt_mysql);
 
 /** Set the compression type for the tablespace of a table
@@ -1731,10 +1688,12 @@ uint32_t dict_vcol_base_is_foreign_key(dict_v_col_t *vcol,
                                        dict_foreign_t *foreign);
 
 /** Get maximum possible size needed for a field.
-@param[in]   table        innodb table definition cache
-@param[in]   index        index
-@param[in]   field        field
-@param[out]  rec_max_size max record size needed */
+@param[in]      table         innodb table definition cache
+@param[in]      index         index
+@param[in]      field         field
+@param[in,out]  rec_max_size  max record size calculated till now. It
+                              will be increased with the length needed
+                              for this field */
 void get_field_max_size(const dict_table_t *table, const dict_index_t *index,
                         const dict_field_t *field, size_t &rec_max_size);
 
@@ -1750,16 +1709,21 @@ void get_permissible_max_size(const dict_table_t *table,
 /** validate that maximum possible size of a row is within permissible limit.
 @param[in]  table        innodb table definition cache
 @param[in]  index        index
-@param[in]  strict       true if error is to be reported
 @param[in]  page_rec_max maximum size of possible record on leaf page
 @param[in]  page_ptr_max maximum size of possible record on non-leaf page
 @param[out] rec_max_size maximum size of record on page
 @return true if max record size is within limit, false otherwise. */
 bool dict_index_validate_max_rec_size(const dict_table_t *table,
-                                      const dict_index_t *index, bool strict,
+                                      const dict_index_t *index,
                                       const size_t page_rec_max,
                                       const size_t page_ptr_max,
                                       size_t &rec_max_size);
+
+#ifndef UNIV_HOTBACKUP
+/** Ensure that new row id generated by dict_sys is at least the specified one
+@param[in]  next_id  Minimum row id to use from now on to avoid conflict */
+void dict_sys_set_min_next_row_id(row_id_t next_id);
+#endif /* !UNIV_HOTBACKUP */
 
 #include "dict0dict.ic"
 

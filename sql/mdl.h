@@ -1,17 +1,18 @@
 #ifndef MDL_H
 #define MDL_H
-/* Copyright (c) 2009, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2009, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,6 +27,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <algorithm>
+#include <functional>
 #include <new>
 #include <unordered_map>
 
@@ -36,7 +38,7 @@
 #include "my_inttypes.h"
 #include "my_psi_config.h"
 #include "my_sys.h"
-#include "my_systime.h"  // Timout_type
+#include "my_systime.h"  // Timeout_type
 #include "mysql/components/services/bits/mysql_cond_bits.h"
 #include "mysql/components/services/bits/mysql_mutex_bits.h"
 #include "mysql/components/services/bits/mysql_rwlock_bits.h"
@@ -126,7 +128,7 @@ class MDL_context_owner {
   /**
     Does the owner still have connection to the client?
   */
-  virtual bool is_connected() = 0;
+  virtual bool is_connected(bool = false) = 0;
 
   /**
     Indicates that owner thread might have some commit order (non-MDL) waits
@@ -383,6 +385,7 @@ struct MDL_key {
      - TABLE is for tables and views.
      - FUNCTION is for stored functions.
      - PROCEDURE is for stored procedures.
+     - LIBRARY is for libraries.
      - TRIGGER is for triggers.
      - EVENT is for event scheduler events.
      - COMMIT is for enabling the global read lock to block commits.
@@ -416,6 +419,7 @@ struct MDL_key {
     RESOURCE_GROUPS,
     FOREIGN_KEY,
     CHECK_CONSTRAINT,
+    LIBRARY,
     BACKUP_TABLES, /* Percona LOCK TABLES FOR BACKUP */
     /* This should be the last ! */
     NAMESPACE_END
@@ -778,8 +782,8 @@ struct MDL_key {
   */
   bool use_normalized_object_name() const {
     return (mdl_namespace() == FUNCTION || mdl_namespace() == PROCEDURE ||
-            mdl_namespace() == EVENT || mdl_namespace() == RESOURCE_GROUPS ||
-            mdl_namespace() == TRIGGER);
+            mdl_namespace() == LIBRARY || mdl_namespace() == EVENT ||
+            mdl_namespace() == RESOURCE_GROUPS || mdl_namespace() == TRIGGER);
   }
 
  private:

@@ -24,7 +24,7 @@
 
 --echo
 --let $rpl_connection_name= server2
---source include/rpl_connection.inc
+--source include/connection.inc
 --source include/start_group_replication.inc
 
 --echo
@@ -67,7 +67,6 @@ SET @saved_binlog_order_commits = @@GLOBAL.binlog_order_commits;
 SET @saved_binlog_rows_query_log_events = @@GLOBAL.binlog_rows_query_log_events;
 SET @saved_binlog_stmt_cache_size = @@GLOBAL.binlog_stmt_cache_size;
 
-SET @saved_gr_allow_local_lower_version_join = @@GLOBAL.group_replication_allow_local_lower_version_join;
 SET @saved_gr_auto_increment_increment = @@GLOBAL.group_replication_auto_increment_increment;
 SET @saved_gr_bootstrap_group = @@GLOBAL.group_replication_bootstrap_group;
 SET @saved_gr_components_stop_timeout = @@GLOBAL.group_replication_components_stop_timeout;
@@ -79,7 +78,6 @@ SET @saved_gr_ip_allowlist = @@GLOBAL.group_replication_ip_allowlist;
 SET @saved_gr_local_address = @@GLOBAL.group_replication_local_address;
 SET @saved_gr_group_seeds = @@GLOBAL.group_replication_group_seeds;
 SET @saved_gr_poll_spin_loops = @@GLOBAL.group_replication_poll_spin_loops;
-SET @saved_gr_recovery_complete_at = @@GLOBAL.group_replication_recovery_complete_at;
 SET @saved_gr_recovery_reconnect_interval = @@GLOBAL.group_replication_recovery_reconnect_interval;
 SET @saved_gr_recovery_retry_count = @@GLOBAL.group_replication_recovery_retry_count;
 SET @saved_gr_recovery_ssl_ca = @@GLOBAL.group_replication_recovery_ssl_ca;
@@ -113,7 +111,6 @@ SET GLOBAL binlog_order_commits=true;
 SET GLOBAL binlog_rows_query_log_events= ON;
 SET GLOBAL binlog_stmt_cache_size= 4096;
 
-SET GLOBAL group_replication_allow_local_lower_version_join= ON;
 SET GLOBAL group_replication_auto_increment_increment= 5;
 SET GLOBAL group_replication_bootstrap_group= ON;
 SET GLOBAL group_replication_components_stop_timeout= 10;
@@ -125,7 +122,6 @@ SET GLOBAL group_replication_ip_allowlist= "AUTOMATIC";
 SET GLOBAL group_replication_local_address= "$saved_gr_local_address";
 SET GLOBAL group_replication_group_seeds= "$saved_gr_group_seeds";
 SET GLOBAL group_replication_poll_spin_loops= 10;
-SET GLOBAL group_replication_recovery_complete_at= "TRANSACTIONS_CERTIFIED";
 SET GLOBAL group_replication_recovery_reconnect_interval= 20;
 SET GLOBAL group_replication_recovery_retry_count= 5;
 SET GLOBAL group_replication_recovery_ssl_ca= '$MYSQL_TEST_DIR/std_data/cacert.pem';
@@ -160,7 +156,6 @@ SET @@GLOBAL.binlog_order_commits = @saved_binlog_order_commits;
 SET @@GLOBAL.binlog_rows_query_log_events = @saved_binlog_rows_query_log_events;
 SET @@GLOBAL.binlog_stmt_cache_size = @saved_binlog_stmt_cache_size;
 
-SET @@GLOBAL.group_replication_allow_local_lower_version_join= @saved_gr_allow_local_lower_version_join;
 SET @@GLOBAL.group_replication_auto_increment_increment= @saved_gr_auto_increment_increment;
 SET @@GLOBAL.group_replication_bootstrap_group= @saved_gr_bootstrap_group;
 SET @@GLOBAL.group_replication_components_stop_timeout= @saved_gr_components_stop_timeout;
@@ -173,7 +168,6 @@ SET @@GLOBAL.group_replication_ip_allowlist= @saved_gr_ip_allowlist;
 SET @@GLOBAL.group_replication_local_address= @saved_gr_local_address;
 SET @@GLOBAL.group_replication_group_seeds= @saved_gr_group_seeds;
 SET @@GLOBAL.group_replication_poll_spin_loops= @saved_gr_poll_spin_loops;
-SET @@GLOBAL.group_replication_recovery_complete_at= @saved_gr_recovery_complete_at;
 SET @@GLOBAL.group_replication_recovery_reconnect_interval= @saved_gr_recovery_reconnect_interval;
 SET @@GLOBAL.group_replication_recovery_retry_count= @saved_gr_recovery_retry_count;
 SET @@GLOBAL.group_replication_recovery_ssl_ca= @saved_gr_recovery_ssl_ca;
@@ -195,6 +189,6 @@ SET @@GLOBAL.group_replication_member_weight= @saved_gr_member_weight;
 
 ## Restore values for server2
 --let $rpl_connection_name= server2
---source include/rpl_connection.inc
+--source include/connection.inc
 SET @@GLOBAL.binlog_checksum= @binlog_checksum_save;
 --source include/group_replication_end.inc

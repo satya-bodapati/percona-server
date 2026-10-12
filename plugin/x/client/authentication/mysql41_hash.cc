@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,10 +25,12 @@
 
 #include "plugin/x/client/authentication/mysql41_hash.h"
 
+#include <openssl/opensslv.h>
 #include <openssl/sha.h>
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 #include <openssl/evp.h>
 #endif /* OPENSSL_VERSION_NUMBER < 0x30000000L */
+#include "my_ssl_algo_cache.h"
 
 #if OPENSSL_VERSION_NUMBER < 0x30000000L
 int mysql_mysql41_hash_reset(SHA_CTX *context) { return SHA1_Init(context); }
@@ -56,7 +59,7 @@ void compute_mysql41_hash(uint8_t *digest, const char *buf, unsigned len) {
     EVP_Digest() is a wrapper around the EVP_DigestInit_ex(),
     EVP_Update() and EVP_Final_ex() functions.
   */
-  EVP_Digest(buf, len, digest, nullptr, EVP_sha1(), nullptr);
+  EVP_Digest(buf, len, digest, nullptr, my_EVP_sha1(), nullptr);
 #else  /* OPENSSL_VERSION_NUMBER >= 0x30000000L */
   SHA_CTX mysql41_hash_context;
 
@@ -81,7 +84,7 @@ void compute_mysql41_hash_multi(uint8_t *digest, const char *buf1,
                                 unsigned len2) {
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
   EVP_MD_CTX *md_ctx = EVP_MD_CTX_new();
-  EVP_DigestInit_ex(md_ctx, EVP_sha1(), nullptr);
+  EVP_DigestInit_ex(md_ctx, my_EVP_sha1(), nullptr);
   EVP_DigestUpdate(md_ctx, buf1, len1);
   EVP_DigestUpdate(md_ctx, buf2, len2);
   EVP_DigestFinal_ex(md_ctx, digest, nullptr);

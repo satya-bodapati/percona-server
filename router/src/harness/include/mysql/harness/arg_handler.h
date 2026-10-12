@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -413,11 +414,15 @@ class HARNESS_EXPORT CmdArgHandler {
     return rest_arguments_;
   }
 
+  bool found_unknown_arguments() const noexcept {
+    return found_unkown_argument_;
+  }
+
   /** @brief Whether to allow rest arguments or not **/
-  bool allow_rest_arguments;
+  const bool allow_rest_arguments;
 
   /** @brief Whether to ignore unknown arguments **/
-  bool ignore_unknown_arguments;
+  const bool ignore_unknown_arguments;
 
   /** @brief The key is a section identificator (section name and optional
    * section key), the value is a map of all the overrides for a given section
@@ -435,6 +440,7 @@ class HARNESS_EXPORT CmdArgHandler {
   std::vector<std::string> rest_arguments_;
   /** @brief Keeps configuration options overwrites **/
   ConfigOverwrites config_overwrites_;
+  bool found_unkown_argument_{false};
 };
 
 #endif  // HARNESS_ARG_HANDLER_INCLUDED

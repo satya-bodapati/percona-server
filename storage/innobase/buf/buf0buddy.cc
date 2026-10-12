@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -38,6 +39,9 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "dict0dict.h"
 
 #include "page0zip.h"
+
+#include "sync0debug.h"
+#include "sync0types.h"
 
 /** When freeing a buf we attempt to coalesce by looking at its buddy
 and deciding whether it is free or not. To ascertain if the buddy is
@@ -415,6 +419,25 @@ static void *buf_buddy_alloc_from(buf_pool_t *buf_pool, void *buf, ulint i,
   return (buf);
 }
 
+#ifdef UNIV_DEBUG
+/** Asserts that the calling thread holds no buffer pool page hash cell
+latch (S or X). The buddy allocator must never be entered while one is
+held: buf_buddy_free() may recombine and call buf_buddy_relocate(),
+which acquires the cell X-latch of whatever page id is stamped in the
+buddy frame - possibly the very cell the caller holds, and in any case
+an unordered same-level acquisition (page-hash cell -> zip_free_mutex ->
+page-hash cell) which can form a deadlock cycle with other threads.
+This rule is what makes it safe for the keep-zip path of
+buf_LRU_free_page() to keep a cell X-latch across
+buf_LRU_block_remove_hashed() (keep_hash_lock): that path never reaches
+the buddy allocator. */
+namespace {
+void buf_buddy_no_page_hash_latch_validate() {
+  ut_ad(sync_check_find(SYNC_BUF_PAGE_HASH) == nullptr);
+}
+}  // namespace
+#endif /* UNIV_DEBUG */
+
 /** Allocate a block.
 @param[in,out]  buf_pool        buffer pool instance
 @param[in]      i               index of buf_pool->zip_free[]
@@ -424,6 +447,7 @@ void *buf_buddy_alloc_low(buf_pool_t *buf_pool, ulint i) {
   buf_block_t *block;
 
   ut_ad(!mutex_own(&buf_pool->zip_mutex));
+  ut_d(buf_buddy_no_page_hash_latch_validate());
   ut_ad(i >= buf_buddy_get_slot(UNIV_ZIP_SIZE_MIN));
 
   if (i < BUF_BUDDY_SIZES) {
@@ -475,6 +499,7 @@ static bool buf_buddy_relocate(buf_pool_t *buf_pool, void *src, void *dst,
 
   ut_ad(mutex_own(&buf_pool->zip_free_mutex));
   ut_ad(!mutex_own(&buf_pool->zip_mutex));
+  ut_d(buf_buddy_no_page_hash_latch_validate());
   ut_ad(!ut_align_offset(src, size));
   ut_ad(!ut_align_offset(dst, size));
   ut_ad(i >= buf_buddy_get_slot(UNIV_ZIP_SIZE_MIN));
@@ -610,6 +635,7 @@ void buf_buddy_free_low(buf_pool_t *buf_pool, void *buf, ulint i,
   buf_buddy_free_t *buddy;
 
   ut_ad(!mutex_own(&buf_pool->zip_mutex));
+  ut_d(buf_buddy_no_page_hash_latch_validate());
   ut_ad(i <= BUF_BUDDY_SIZES);
   ut_ad(i >= buf_buddy_get_slot(UNIV_ZIP_SIZE_MIN));
 

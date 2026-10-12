@@ -1,16 +1,17 @@
 /*****************************************************************************
-Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -32,6 +33,7 @@ Created 2020-04-24 by Mayank Prasad */
 #include "dict0dd.h"
 #include "dict0dict.h"
 #include "ha_innodb.h"
+#include "vec0aux.h"
 
 static void populate_to_be_instant_columns_low(
     const Alter_inplace_info *ha_alter_info, const TABLE *old_table,
@@ -60,12 +62,14 @@ bool Instant_ddl_impl<Table>::is_instant_add_drop_possible(
 
   /* Get the maximum size of a valid rec in current table */
   size_t current_max_size;
-  bool res = dict_index_validate_max_rec_size(
-      dict_table, index, true, page_rec_max, page_ptr_max, current_max_size);
+  const bool res = dict_index_validate_max_rec_size(
+      dict_table, index, page_rec_max, page_ptr_max, current_max_size);
 
   if (res) {
     /* Table is already in a state where possible row size can go beyond
     permissible size limit. Don't allow INSTANT ADD */
+    ib::error(ER_IB_INSTANT_ADD_DROP_COLUMN_NOT_ALLOWED,
+              dict_table->name.m_name, current_max_size, page_rec_max);
     return false;
   }
 
@@ -99,6 +103,8 @@ bool Instant_ddl_impl<Table>::is_instant_add_drop_possible(
     current_max_size += field_max_size;
     if (current_max_size > page_rec_max) {
       /* Don't allow INSTANT ADD */
+      ib::error(ER_IB_INSTANT_ADD_NOT_POSSIBLE, cols_to_add.size(),
+                dict_table->name.m_name, current_max_size, page_rec_max);
       return false;
     }
   }
@@ -191,6 +197,11 @@ bool Instant_ddl_impl<dd::Partition>::commit_instant_drop_col() {
 
 template <typename Table>
 bool Instant_ddl_impl<Table>::commit_instant_ddl() {
+  /* MVP: no INSTANT ALTER on a table with a vector index;
+  check_if_supported_inplace_alter() refuses it. Allowing it means handling
+  the hidden label column here and in build_template() (design doc). */
+  ut_ad(!DICT_TF2_FLAG_IS_SET(m_dict_table, DICT_TF2_HAS_VEC_AUX_COL));
+
   Instant_Type type =
       static_cast<Instant_Type>(m_ha_alter_info->handler_trivial_ctx);
 
@@ -432,6 +443,12 @@ void Instant_ddl_impl<Table>::dd_commit_inplace_no_change(bool ignore_fts) {
     copy_dropped_columns(&m_old_dd_tab->table(), &m_new_dd_tab->table(),
                          UINT32_UNDEFINED);
   }
+
+  /* No re-add of percona_vec_aux_id, unlike FTS_DOC_ID below: the column
+  exists only while the table has a vector index, and
+  check_if_supported_inplace_alter refuses INSTANT on such a table. So no
+  INSTANT ALTER ever starts from a definition that has the column. */
+  ut_ad(dd_find_column(&m_old_dd_tab->table(), VEC_AUX_ID_COL_NAME) == nullptr);
 
   if (!ignore_fts) {
     dd_add_fts_doc_id_index(m_new_dd_tab->table(), m_old_dd_tab->table());

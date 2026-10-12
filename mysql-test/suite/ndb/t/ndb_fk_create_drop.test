@@ -41,18 +41,18 @@ show create table child;
 # child pk, uk, oi
 # not supported
 
---error ER_FK_NO_INDEX_PARENT
+--error ER_FK_NO_UNIQUE_INDEX_PARENT
 alter table child algorithm=copy, add constraint fk7 foreign key (a) references parent(c);
---error ER_FK_NO_INDEX_PARENT
+--error ER_FK_NO_UNIQUE_INDEX_PARENT
 alter table child algorithm=copy, add constraint fk8 foreign key (a) references parent(c);
---error ER_FK_NO_INDEX_PARENT
+--error ER_FK_NO_UNIQUE_INDEX_PARENT
 alter table child algorithm=copy, add constraint fk9 foreign key (a) references parent(c);
 
---error ER_FK_NO_INDEX_PARENT
+--error ER_FK_NO_UNIQUE_INDEX_PARENT
 alter table child algorithm=inplace, add constraint fk7 foreign key (a) references parent(c);
---error ER_FK_NO_INDEX_PARENT
+--error ER_FK_NO_UNIQUE_INDEX_PARENT
 alter table child algorithm=inplace, add constraint fk8 foreign key (a) references parent(c);
---error ER_FK_NO_INDEX_PARENT
+--error ER_FK_NO_UNIQUE_INDEX_PARENT
 alter table child algorithm=inplace, add constraint fk9 foreign key (a) references parent(c);
 
 drop table child, parent;
@@ -211,3 +211,23 @@ create table test (
 
 --echo #Cleanup
 drop table test;
+
+--echo #
+--echo # Bug#38534367 : Dropping foreign key (with drop constraint) causes assertion failure (bad dereference)
+--echo #
+
+create table parent (
+  a int primary key,
+  b int
+) engine ndb;
+
+create table child (
+  a int primary key,
+  b int,
+  c int
+) engine = ndb;
+
+alter table child add foreign key(c) references parent(a);
+alter table child drop constraint child_fk_1;
+
+drop table parent, child;

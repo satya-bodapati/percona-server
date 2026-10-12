@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,23 +23,24 @@
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
+#include "mysqlrouter/component/http_auth_realm_component.h"
+
 #include <memory>
 #include <mutex>
 #include <string>
 
 #include "http_auth_error.h"
 #include "http_auth_realm.h"
-#include "mysqlrouter/http_auth_realm_component.h"
 
 void HttpAuthRealmComponent::add_realm(const std::string &name,
                                        std::shared_ptr<HttpAuthRealm> realm) {
-  std::lock_guard<std::mutex> lk(realms_m_);
+  std::lock_guard<std::mutex> const lk(realms_m_);
 
   auth_realms_[name] = std::move(realm);
 }
 
 void HttpAuthRealmComponent::remove_realm(const std::string &name) {
-  std::lock_guard<std::mutex> lk(realms_m_);
+  std::lock_guard<std::mutex> const lk(realms_m_);
 
   const auto it = auth_realms_.find(name);
   if (it != auth_realms_.end()) {
@@ -48,7 +50,7 @@ void HttpAuthRealmComponent::remove_realm(const std::string &name) {
 
 std::shared_ptr<HttpAuthRealm> HttpAuthRealmComponent::get(
     const std::string &inst) {
-  std::lock_guard<std::mutex> lk(realms_m_);
+  std::lock_guard<std::mutex> const lk(realms_m_);
 
   auto it = auth_realms_.find(inst);
   if (it == auth_realms_.end()) {
@@ -63,9 +65,8 @@ std::error_code HttpAuthRealmComponent::authenticate(
     const std::string &authdata) {
   if (auto realm = get(inst)) {
     return realm->authenticate(username, authdata);
-  } else {
-    return make_error_code(HttpAuthErrc::kRealmNotFound);
   }
+  return make_error_code(HttpAuthErrc::kRealmNotFound);
 }
 
 HttpAuthRealmComponent &HttpAuthRealmComponent::get_instance() {

@@ -1,15 +1,16 @@
-/* Copyright (c) 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,10 +24,8 @@
 #include "mysql/binlog/event/compression/payload_event_buffer_istream.h"
 
 #include "mysql/binlog/event/byteorder.h"
-#include "mysql/binlog/event/string/concat.h"
 #include "mysql/binlog/event/wrapper_functions.h"
-
-using mysql::binlog::event::string::concat;
+#include "mysql/utils/concat.h"  // concat
 
 namespace mysql::binlog::event::compression {
 
@@ -116,9 +115,9 @@ void Payload_event_buffer_istream::initialize() {
     m_decompressor = Factory_t::build_decompressor(m_compression_algorithm,
                                                    m_memory_resource);
     if (m_decompressor == nullptr) {
-      set_error_str(
-          concat("Unknown compression algorithm in Payload_log_event: ",
-                 m_compression_algorithm, "."));
+      set_error_str(mysql::utils::throwing::concat(
+          "Unknown compression algorithm in Payload_log_event: ",
+          m_compression_algorithm, "."));
       set_status(Status_t::corrupted);
       return;
     }
@@ -219,7 +218,7 @@ void Payload_event_buffer_istream::read_event() {
     reader.go_to(EVENT_LEN_OFFSET);
     read_length = reader.read<uint32_t>();
     if (read_length < LOG_EVENT_HEADER_LEN) {
-      set_error_str(concat(
+      set_error_str(mysql::utils::throwing::concat(
           "Length field of embedded event in Payload_log_event is only ",
           read_length, " bytes, but ", LOG_EVENT_HEADER_LEN, " are required."));
       set_status(Status_t::corrupted);
@@ -258,11 +257,11 @@ void Payload_event_buffer_istream::read_event() {
       set_status(status);
       return;
     case Status_t::exceeds_max_size: {
-      set_error_str(
-          concat("Length field of embedded event in Payload_log_event is ",
-                 read_length, " bytes, exceeding the maximum of ",
-                 m_managed_buffer_ptr->get_grow_calculator().get_max_size(),
-                 " bytes."));
+      set_error_str(mysql::utils::throwing::concat(
+          "Length field of embedded event in Payload_log_event is ",
+          read_length, " bytes, exceeding the maximum of ",
+          m_managed_buffer_ptr->get_grow_calculator().get_max_size(),
+          " bytes."));
       set_status(status);
       return;
     }

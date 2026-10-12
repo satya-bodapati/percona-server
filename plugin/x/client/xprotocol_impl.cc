@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -781,7 +782,7 @@ std::unique_ptr<XProtocol::Message> Protocol_impl::deserialize_message(
   DBUG_LOG("debug", "Deserialize message: " << ret_val->GetTypeName());
   if (!ret_val->ParseFromCodedStream(input_stream)) {
     std::string error_message(ERR_MSG_MESSAGE_NOT_INITIALIZED);
-    error_message += "Name:" + ret_val->GetTypeName() + ", ";
+    error_message += "Name:" + std::string(ret_val->GetTypeName()) + ", ";
     error_message += ret_val->InitializationErrorString();
     *out_error = XError(CR_MALFORMED_PACKET, error_message);
 
@@ -815,7 +816,7 @@ std::unique_ptr<XProtocol::Message> Protocol_impl::deserialize_received_message(
 
   if (!ret_val->IsInitialized()) {
     std::string err(ERR_MSG_MESSAGE_NOT_INITIALIZED);
-    err += "Name:" + ret_val->GetTypeName() + ", ";
+    err += "Name:" + std::string(ret_val->GetTypeName()) + ", ";
     err += ret_val->InitializationErrorString();
     *out_error = XError(CR_MALFORMED_PACKET, err);
 
@@ -1121,7 +1122,7 @@ XProtocol::Message *Protocol_impl::recv_message_with_header(
 
     if (!m_compressed.ParseFromCodedStream(&cis)) {
       std::string error_message(ERR_MSG_MESSAGE_NOT_INITIALIZED);
-      error_message += "Name:" + m_compressed.GetTypeName() + ", ";
+      error_message += "Name:" + std::string(m_compressed.GetTypeName()) + ", ";
       error_message += m_compressed.InitializationErrorString();
       *out_error = XError(CR_MALFORMED_PACKET, error_message);
       return nullptr;

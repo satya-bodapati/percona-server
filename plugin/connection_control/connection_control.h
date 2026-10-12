@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,6 +29,8 @@
 #include <mysql/psi/mysql_rwlock.h>
 #include <mysql/psi/mysql_stage.h>
 #include <mysql/psi/mysql_thread.h> /* mysql_rwlock_t */
+#include "mysql/components/service.h"
+#include "mysql/components/services/registry.h"
 
 #include "plugin/connection_control/connection_control_data.h"
 
@@ -35,6 +38,9 @@ extern PSI_mutex_key key_connection_delay_mutex;
 extern PSI_rwlock_key key_connection_event_delay_lock;
 extern PSI_cond_key key_connection_delay_wait;
 extern PSI_stage_info stage_waiting_in_connection_control_plugin;
+
+extern SERVICE_TYPE(registry) * reg_srv;
+extern SERVICE_TYPE(registry_registration) * reg_reg;
 
 namespace connection_control {
 

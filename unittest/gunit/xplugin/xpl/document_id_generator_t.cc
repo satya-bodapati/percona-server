@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2018, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,14 +29,13 @@
 
 #include "plugin/x/src/ngs/document_id_generator.h"
 
-namespace xpl {
-namespace test {
+namespace xpl::test {
 
 class Document_id_generator_test : public ::testing::Test {
  public:
   iface::Document_id_generator &generator(const uint64_t timestamp,
                                           const uint64_t serial) {
-    gen.reset(new ngs::Document_id_generator(timestamp, serial));
+    gen = std::make_unique<ngs::Document_id_generator>(timestamp, serial);
     return *gen;
   }
 
@@ -43,7 +43,7 @@ class Document_id_generator_test : public ::testing::Test {
 };
 
 TEST_F(Document_id_generator_test, generate_id_sequence_1) {
-  iface::Document_id_generator::Variables vars{0, 1, 1};
+  iface::Document_id_generator::Variables const vars{0, 1, 1};
   generator(0, 0);
 
   EXPECT_STREQ("0000000000000000000000000001", gen->generate(vars).c_str());
@@ -65,7 +65,7 @@ TEST_F(Document_id_generator_test, generate_id_sequence_1) {
 }
 
 TEST_F(Document_id_generator_test, generate_id_sequence_5) {
-  iface::Document_id_generator::Variables vars{0, 1, 5};
+  iface::Document_id_generator::Variables const vars{0, 1, 5};
   generator(0, 0);
 
   EXPECT_STREQ("0000000000000000000000000001", gen->generate(vars).c_str());
@@ -76,7 +76,7 @@ TEST_F(Document_id_generator_test, generate_id_sequence_5) {
 }
 
 TEST_F(Document_id_generator_test, generate_id_sequence_16) {
-  iface::Document_id_generator::Variables vars{0, 1, 16};
+  iface::Document_id_generator::Variables const vars{0, 1, 16};
   generator(0, 0);
 
   EXPECT_STREQ("0000000000000000000000000001", gen->generate(vars).c_str());
@@ -86,7 +86,7 @@ TEST_F(Document_id_generator_test, generate_id_sequence_16) {
 }
 
 TEST_F(Document_id_generator_test, generate_id_sequence_1_1_serial_limit) {
-  iface::Document_id_generator::Variables vars{0, 1, 1};
+  iface::Document_id_generator::Variables const vars{0, 1, 1};
   generator(0, std::numeric_limits<uint64_t>::max() - 2);
   EXPECT_STREQ("000000000000fffffffffffffffe", gen->generate(vars).c_str());
   EXPECT_STREQ("000000000000ffffffffffffffff", gen->generate(vars).c_str());
@@ -95,7 +95,7 @@ TEST_F(Document_id_generator_test, generate_id_sequence_1_1_serial_limit) {
 }
 
 TEST_F(Document_id_generator_test, generate_id_sequence_0_1_serial_limit) {
-  iface::Document_id_generator::Variables vars{0, 0, 1};
+  iface::Document_id_generator::Variables const vars{0, 0, 1};
   generator(0, std::numeric_limits<uint64_t>::max() - 2);
   EXPECT_STREQ("000000000000fffffffffffffffe", gen->generate(vars).c_str());
   EXPECT_STREQ("000000000000ffffffffffffffff", gen->generate(vars).c_str());
@@ -104,7 +104,7 @@ TEST_F(Document_id_generator_test, generate_id_sequence_0_1_serial_limit) {
 }
 
 TEST_F(Document_id_generator_test, generate_id_sequence_1_5_serial_limit) {
-  iface::Document_id_generator::Variables vars{0, 1, 5};
+  iface::Document_id_generator::Variables const vars{0, 1, 5};
   generator(0, std::numeric_limits<uint64_t>::max() - 2 * 5);
   EXPECT_STREQ("000000000000fffffffffffffff6", gen->generate(vars).c_str());
   EXPECT_STREQ("000000000000fffffffffffffffb", gen->generate(vars).c_str());
@@ -113,7 +113,7 @@ TEST_F(Document_id_generator_test, generate_id_sequence_1_5_serial_limit) {
 }
 
 TEST_F(Document_id_generator_test, generate_id_sequence_0_5_serial_limit) {
-  iface::Document_id_generator::Variables vars{0, 0, 5};
+  iface::Document_id_generator::Variables const vars{0, 0, 5};
   generator(0, std::numeric_limits<uint64_t>::max() - 2 * 5);
   EXPECT_STREQ("000000000000fffffffffffffffa", gen->generate(vars).c_str());
   EXPECT_STREQ("000000000000ffffffffffffffff", gen->generate(vars).c_str());
@@ -161,5 +161,4 @@ INSTANTIATE_TEST_SUITE_P(document_id_generation,
                          Document_id_generator_param_test,
                          testing::ValuesIn(document_id_param));
 
-}  // namespace test
-}  // namespace xpl
+}  // namespace xpl::test

@@ -1,18 +1,19 @@
 #ifndef PARTITION_ELEMENT_INCLUDED
 #define PARTITION_ELEMENT_INCLUDED
 
-/* Copyright (c) 2005, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2005, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -126,6 +127,9 @@ class partition_element {
   bool signed_flag;  // Range value signed
   bool max_value;    // MAXVALUE range
 
+  /*The load status of the specific partition*/
+  bool secondary_load{false};
+
   partition_element()
       : part_max_rows(0),
         part_min_rows(0),
@@ -155,7 +159,8 @@ class partition_element {
         nodegroup_id(part_elem->nodegroup_id),
         has_null_value(false),
         signed_flag(false),
-        max_value(false) {}
+        max_value(false),
+        secondary_load{part_elem->secondary_load} {}
   inline void set_from_info(const HA_CREATE_INFO *info) {
     data_file_name = info->data_file_name;
     index_file_name = info->index_file_name;

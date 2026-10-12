@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -39,11 +40,10 @@
 
 struct CHARSET_INFO;
 
-namespace dd {
-namespace tables {
+namespace dd::tables {
 
 const Tables &Tables::instance() {
-  static Tables *s_instance = new Tables();
+  static auto *s_instance = new Tables();
   return *s_instance;
 }
 
@@ -207,13 +207,11 @@ Tables::Tables() {
 ///////////////////////////////////////////////////////////////////////////
 
 Abstract_table *Tables::create_entity_object(const Raw_record &r) const {
-  enum_table_type table_type =
-      static_cast<enum_table_type>(r.read_int(FIELD_TYPE));
+  auto table_type = static_cast<enum_table_type>(r.read_int(FIELD_TYPE));
 
   if (table_type == enum_table_type::BASE_TABLE)
     return dd::create_object<Table>();
-  else
-    return dd::create_object<View>();
+  return dd::create_object<View>();
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -281,5 +279,4 @@ Object_id Tables::read_se_private_id(const Raw_record &r) {
   return r.read_uint(Tables::FIELD_SE_PRIVATE_ID, -1);
 }
 
-}  // namespace tables
-}  // namespace dd
+}  // namespace dd::tables

@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,8 +24,10 @@
 #include "sql/join_optimizer/interesting_orders.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <functional>
+#include <ranges>
 #include <type_traits>
 
 #include "map_helpers.h"
@@ -34,6 +37,7 @@
 #include "sql/item_func.h"
 #include "sql/item_sum.h"
 #include "sql/join_optimizer/bit_utils.h"
+#include "sql/join_optimizer/optimizer_trace.h"
 #include "sql/join_optimizer/print_utils.h"
 #include "sql/mem_root_array.h"
 #include "sql/parse_tree_nodes.h"
@@ -42,7 +46,6 @@
 #include "sql/sql_executor.h"
 
 using std::all_of;
-using std::bind;
 using std::distance;
 using std::equal;
 using std::fill;
@@ -50,6 +53,7 @@ using std::lower_bound;
 using std::make_pair;
 using std::max;
 using std::none_of;
+using std::ostream;
 using std::pair;
 using std::sort;
 using std::string;
@@ -194,7 +198,7 @@ LogicalOrderings::LogicalOrderings(THD *thd)
       m_dfsm_states(thd->mem_root),
       m_dfsm_edges(thd->mem_root),
       m_elements_pool(thd->mem_root) {
-  GetHandle(nullptr);  // Always has the zero handle.
+  GetHandle(static_cast<Item *>(nullptr));  // Always has the zero handle.
 
   // Add the empty ordering/grouping.
   m_orderings.push_back(OrderingWithInfo{Ordering(),
@@ -294,7 +298,7 @@ int LogicalOrderings::AddFunctionalDependency(THD *thd,
   return m_fds.size() - 1;
 }
 
-void LogicalOrderings::Build(THD *thd, string *trace) {
+void LogicalOrderings::Build(THD *thd) {
   // If we have no interesting orderings or groupings, just create a DFSM
   // directly with a single state for the empty ordering.
   if (m_orderings.size() == 1) {
@@ -321,35 +325,35 @@ void LogicalOrderings::Build(THD *thd, string *trace) {
   CreateOrderingsFromGroupings(thd);
   CreateHomogenizedOrderings(thd);
   PruneFDs(thd);
-  if (trace != nullptr) {
-    PrintFunctionalDependencies(trace);
+  if (TraceStarted(thd)) {
+    PrintFunctionalDependencies(&Trace(thd));
   }
   FindElementsThatCanBeAddedByFDs();
   PruneUninterestingOrders(thd);
-  if (trace != nullptr) {
-    PrintInterestingOrders(trace);
+  if (TraceStarted(thd)) {
+    PrintInterestingOrders(&Trace(thd));
   }
   BuildNFSM(thd);
-  if (trace != nullptr) {
-    *trace += "NFSM for interesting orders, before pruning:\n";
-    PrintNFSMDottyGraph(trace);
+  if (TraceStarted(thd)) {
+    Trace(thd) << "NFSM for interesting orders, before pruning:\n";
+    PrintNFSMDottyGraph(&Trace(thd));
     if (m_states.size() >= kMaxNFSMStates) {
-      *trace += "NOTE: NFSM is incomplete, because it became too big.\n";
+      Trace(thd) << "NOTE: NFSM is incomplete, because it became too big.\n";
     }
   }
   PruneNFSM(thd);
-  if (trace != nullptr) {
-    *trace += "\nNFSM for interesting orders, after pruning:\n";
-    PrintNFSMDottyGraph(trace);
+  if (TraceStarted(thd)) {
+    Trace(thd) << "\nNFSM for interesting orders, after pruning:\n";
+    PrintNFSMDottyGraph(&Trace(thd));
   }
   ConvertNFSMToDFSM(thd);
-  if (trace != nullptr) {
-    *trace += "\nDFSM for interesting orders:\n";
-    PrintDFSMDottyGraph(trace);
+  if (TraceStarted(thd)) {
+    Trace(thd) << "\nDFSM for interesting orders:\n";
+    PrintDFSMDottyGraph(&Trace(thd));
     if (m_dfsm_states.size() >= kMaxDFSMStates) {
-      *trace +=
-          "NOTE: DFSM does not contain all NFSM states, because it became too "
-          "big.\n";
+      Trace(thd) << "NOTE: DFSM does not contain all NFSM states, because it "
+                    "became too "
+                    "big.\n";
     }
   }
   FindInitialStatesForOrdering();
@@ -443,7 +447,8 @@ void LogicalOrderings::PruneUninterestingOrders(THD *thd) {
       m_orderings[new_length++] = m_orderings[ordering_idx];
     }
   }
-  m_orderings.resize(new_length);
+
+  m_orderings.erase(m_orderings.begin() + new_length, m_orderings.end());
 }
 
 void LogicalOrderings::PruneFDs(THD *thd) {
@@ -512,7 +517,7 @@ void LogicalOrderings::PruneFDs(THD *thd) {
     m_fds[new_length++] = m_fds[fd_idx];
   }
 
-  m_fds.resize(new_length);
+  m_fds.erase(m_fds.begin() + new_length, m_fds.end());
 }
 
 void LogicalOrderings::BuildEquivalenceClasses() {
@@ -638,7 +643,7 @@ void LogicalOrderings::AddFDsFromComputedItems(THD *thd) {
     const table_map used_tables = item->used_tables();
     if (item->type() == Item::FIELD_ITEM || item->has_aggregation() ||
         Overlaps(used_tables, PSEUDO_TABLE_BITS) ||
-        !IsSingleBitSet(used_tables)) {
+        !std::has_single_bit(used_tables)) {
       continue;
     }
 
@@ -670,8 +675,7 @@ void LogicalOrderings::AddFDsFromComputedItems(THD *thd) {
             return true;
           }
           if (sub_item->type() == Item::FIELD_ITEM) {
-            if (base_field != nullptr &&
-                !base_field->eq(sub_item, /*binary_cmp=*/true)) {
+            if (base_field != nullptr && !base_field->eq(sub_item)) {
               // More than one field in use.
               return true;
             }
@@ -743,7 +747,13 @@ void LogicalOrderings::AddFDsFromConstItems(THD *thd) {
       continue;
     }
 
-    if (m_items[item_idx].item->const_for_execution()) {
+    const Item &item = *m_items[item_idx].item;
+
+    // Add a FD for items that are known to be constant, and for items that are
+    // effectively constant because their type allows only a single value (for
+    // example CHAR(0) NOT NULL, which only allows the empty string).
+    if (item.const_for_execution() ||
+        (item.max_length == 0 && !item.is_nullable())) {
       // Add {} → item.
       FunctionalDependency fd;
       fd.type = FunctionalDependency::FD;
@@ -753,6 +763,51 @@ void LogicalOrderings::AddFDsFromConstItems(THD *thd) {
       AddFunctionalDependency(thd, fd);
     }
   }
+
+  // Propagate "constant" status through existing FDs. The loop above
+  // marks directly constant items (e.g. WHERE id = 1 gives {} -> id).
+  // Here we repeatedly scan all FDs: if every head item of an FD is
+  // already constant, the tail becomes constant too. For example,
+  // {} -> id (from WHERE) plus {id} -> a (from PRIMARY KEY) gives
+  // {} -> a by transitive closure, so ORDER BY a can be elided. We
+  // repeat until no new constants are found.
+  Mem_root_array<bool> is_const(thd->mem_root, num_original_items);
+  std::fill(is_const.begin(), is_const.end(), false);
+  for (const FunctionalDependency &fd : m_fds) {
+    if (fd.type == FunctionalDependency::FD && fd.head.empty()) {
+      assert(fd.tail >= 0 && fd.tail < num_original_items);
+      is_const[fd.tail] = true;
+    }
+  }
+
+  bool changed;
+  do {
+    changed = false;
+    const int num_fds = m_fds.size();
+    // For every FD: if head is not empty and tail is not const...
+    for (int i = 0; i < num_fds; ++i) {
+      const FunctionalDependency &fd = m_fds[i];
+      if (fd.type != FunctionalDependency::FD || fd.head.empty()) continue;
+      assert(fd.tail >= 0 && fd.tail < num_original_items);
+      if (is_const[fd.tail]) continue;
+
+      // Check that all FD head items are constants.
+      bool all_head_const =
+          std::all_of(fd.head.begin(), fd.head.end(),
+                      [&](ItemHandle h) { return is_const[h]; });
+      // All heads constant: tail is also constant, add {} -> tail.
+      if (all_head_const) {
+        FunctionalDependency new_fd;
+        new_fd.type = FunctionalDependency::FD;
+        new_fd.head = Bounds_checked_array<ItemHandle>();
+        new_fd.tail = fd.tail;
+        new_fd.always_active = fd.always_active;
+        AddFunctionalDependency(thd, new_fd);
+        is_const[fd.tail] = true;
+        changed = true;
+      }
+    }
+  } while (changed);
 }
 
 void LogicalOrderings::AddFDsFromAggregateItems(THD *thd) {
@@ -1028,6 +1083,12 @@ void LogicalOrderings::CreateHomogenizedOrderings(THD *thd) {
   }
   seen_tables &= ~PSEUDO_TABLE_BITS;
 
+  if (std::popcount(seen_tables) <= 1) {
+    // Since homogenization is about reducing the number of tables in the
+    // orderings, there's nothing to do if we haven't seen more than one table.
+    return;
+  }
+
   // Build a reverse table of canonical items to items,
   // and sort it, so that we can fairly efficiently make lookups into it.
   auto reverse_canonical =
@@ -1185,12 +1246,24 @@ void LogicalOrderings::SortElements(Ordering::Elements elements) const {
 
 ItemHandle LogicalOrderings::GetHandle(Item *item) {
   for (size_t i = 1; i < m_items.size(); ++i) {
-    if (item == m_items[i].item ||
-        item->eq(m_items[i].item, /*binary_cmp=*/true)) {
+    if (item == m_items[i].item || item->eq(m_items[i].item)) {
       return i;
     }
   }
   m_items.push_back(ItemInfo{item, /*canonical_item=*/0});
+  return m_items.size() - 1;
+}
+
+ItemHandle LogicalOrderings::GetHandle(Field *field) {
+  for (size_t i = 1; i < m_items.size(); ++i) {
+    if (Item *item = m_items[i].item->real_item();
+        item->type() == Item::FIELD_ITEM &&
+        down_cast<Item_field *>(item)->field == field) {
+      return i;
+    }
+  }
+  m_items.push_back(
+      ItemInfo{.item = new Item_field(field), .canonical_item = 0});
   return m_items.size() - 1;
 }
 
@@ -1849,27 +1922,22 @@ void LogicalOrderings::PruneNFSM(THD *thd) {
         }
         if (!can_reach_other_interesting) {
           // Remove this edge.
-          state.outgoing_edges[j] =
-              state.outgoing_edges[state.outgoing_edges.size() - 1];
-          state.outgoing_edges.resize(state.outgoing_edges.size() - 1);
+          state.outgoing_edges[j] = state.outgoing_edges.back();
+          state.outgoing_edges.pop_back();
           pruned_anything = true;
         }
       }
     }
 
     // Remove any edges to deleted m_states.
-    for (int i = 0; i < N; ++i) {
-      NFSMState &state = m_states[i];
+    for (NFSMState &state : m_states) {
       if (state.type == NFSMState::DELETED) {
         continue;
       }
-      int num_kept = 0;
-      for (const NFSMEdge &edge : state.outgoing_edges) {
-        if (edge.state(this)->type != NFSMState::DELETED) {
-          state.outgoing_edges[num_kept++] = edge;
-        }
-      }
-      state.outgoing_edges.resize(num_kept);
+      const auto removed = std::ranges::remove(
+          state.outgoing_edges, NFSMState::DELETED,
+          [this](const NFSMEdge &edge) { return edge.state(this)->type; });
+      state.outgoing_edges.erase(removed.begin(), removed.end());
     }
   } while (pruned_anything);
 
@@ -2017,18 +2085,12 @@ void LogicalOrderings::ConvertNFSMToDFSM(THD *thd) {
     {
       // Sort and deduplicate the edges. Note that we sort on FD first,
       // since we'll be grouping on that when creating new m_states.
-      sort(nfsm_edges.begin(), nfsm_edges.end(),
-           [](const NFSMEdge &a, const NFSMEdge &b) {
-             return make_pair(a.required_fd_idx, a.state_idx) <
-                    make_pair(b.required_fd_idx, b.state_idx);
-           });
-      auto new_end =
-          unique(nfsm_edges.begin(), nfsm_edges.end(),
-                 [](const NFSMEdge &a, const NFSMEdge &b) {
-                   return make_pair(a.required_fd_idx, a.state_idx) ==
-                          make_pair(b.required_fd_idx, b.state_idx);
-                 });
-      nfsm_edges.resize(distance(nfsm_edges.begin(), new_end));
+      const auto edge_as_pair = [](const NFSMEdge &edge) {
+        return make_pair(edge.required_fd_idx, edge.state_idx);
+      };
+      std::ranges::sort(nfsm_edges, {}, edge_as_pair);
+      const auto removed = std::ranges::unique(nfsm_edges, {}, edge_as_pair);
+      nfsm_edges.erase(removed.begin(), removed.end());
     }
 
     // For each relevant FD, find out which set of m_states we could reach.
@@ -2058,9 +2120,9 @@ void LogicalOrderings::ConvertNFSMToDFSM(THD *thd) {
                                    nfsm_edges[edge_idx].required_fd_idx);
 
       // Canonicalize: Sort and deduplicate.
-      sort(nfsm_states.begin(), nfsm_states.end());
-      auto new_end = unique(nfsm_states.begin(), nfsm_states.end());
-      nfsm_states.resize(distance(nfsm_states.begin(), new_end));
+      std::ranges::sort(nfsm_states);
+      const auto removed = std::ranges::unique(nfsm_states);
+      nfsm_states.erase(removed.begin(), removed.end());
 
       // Add a new DFSM state for the NFSM states we've collected.
       int target_dfsm_state_idx = m_dfsm_states.size();
@@ -2173,40 +2235,40 @@ string LogicalOrderings::PrintFunctionalDependency(
   return "";
 }
 
-void LogicalOrderings::PrintFunctionalDependencies(string *trace) {
+void LogicalOrderings::PrintFunctionalDependencies(ostream *trace) {
   if (m_fds.size() <= 1) {
-    *trace += "\nNo functional dependencies (after pruning).\n\n";
+    *trace << "\nNo functional dependencies (after pruning).\n\n";
   } else {
-    *trace += "\nFunctional dependencies (after pruning):\n";
+    *trace << "\nFunctional dependencies (after pruning):\n";
     for (size_t fd_idx = 1; fd_idx < m_fds.size(); ++fd_idx) {
-      *trace +=
-          " - " + PrintFunctionalDependency(m_fds[fd_idx], /*html=*/false);
+      *trace << " - " +
+                    PrintFunctionalDependency(m_fds[fd_idx], /*html=*/false);
       if (m_fds[fd_idx].always_active) {
-        *trace += " [always active]";
+        *trace << " [always active]";
       }
-      *trace += "\n";
+      *trace << "\n";
     }
-    *trace += "\n";
+    *trace << "\n";
   }
 }
 
-void LogicalOrderings::PrintInterestingOrders(string *trace) {
-  *trace += "Interesting orders:\n";
+void LogicalOrderings::PrintInterestingOrders(ostream *trace) {
+  *trace << "Interesting orders:\n";
   for (size_t order_idx = 0; order_idx < m_orderings.size(); ++order_idx) {
     const OrderingWithInfo &ordering = m_orderings[order_idx];
     if (order_idx == 0 && ordering.type == OrderingWithInfo::UNINTERESTING) {
       continue;
     }
 
-    *trace += StringPrintf(" - %zu: ", order_idx);
+    *trace << StringPrintf(" - %zu: ", order_idx);
     bool first = true;
     switch (ordering.ordering.GetKind()) {
       case Ordering::Kind::kRollup:
-        *trace += "rollup ";
+        *trace << "rollup ";
         break;
 
       case Ordering::Kind::kGroup:
-        *trace += "group ";
+        *trace << "group ";
         break;
 
       default:
@@ -2214,31 +2276,31 @@ void LogicalOrderings::PrintInterestingOrders(string *trace) {
     }
     for (OrderElement element : ordering.ordering.GetElements()) {
       if (!first) {
-        *trace += ", ";
+        *trace << ", ";
       }
       first = false;
-      *trace += ItemToString(m_items[element.item].item);
+      *trace << ItemToString(m_items[element.item].item);
       if (element.direction == ORDER_ASC) {
-        *trace += " ASC";
+        *trace << " ASC";
       } else if (element.direction == ORDER_DESC) {
-        *trace += " DESC";
+        *trace << " DESC";
       }
     }
     if (ordering.ordering.GetElements().empty()) {
-      *trace += "()";
+      *trace << "()";
     }
     if (ordering.type == OrderingWithInfo::HOMOGENIZED) {
-      *trace += " [homogenized from other ordering]";
+      *trace << " [homogenized from other ordering]";
     } else if (ordering.type == OrderingWithInfo::UNINTERESTING) {
-      *trace += " [support order]";
+      *trace << " [support order]";
     }
-    *trace += "\n";
+    *trace << "\n";
   }
-  *trace += "\n";
+  *trace << "\n";
 }
 
-void LogicalOrderings::PrintNFSMDottyGraph(string *trace) const {
-  *trace += "digraph G {\n";
+void LogicalOrderings::PrintNFSMDottyGraph(ostream *trace) const {
+  *trace << "digraph G {\n";
   for (size_t state_idx = 0; state_idx < m_states.size(); ++state_idx) {
     const NFSMState &state = m_states[state_idx];
     if (state.type == NFSMState::DELETED) {
@@ -2246,73 +2308,73 @@ void LogicalOrderings::PrintNFSMDottyGraph(string *trace) const {
     }
 
     // We're printing the NFSM.
-    *trace += StringPrintf("  s%zu [label=\"%s\"", state_idx,
+    *trace << StringPrintf("  s%zu [label=\"%s\"", state_idx,
                            PrintOrdering(state.satisfied_ordering).c_str());
     if (state.type == NFSMState::INTERESTING) {
-      *trace += ", peripheries=2";
+      *trace << ", peripheries=2";
     }
-    *trace += "]\n";
+    *trace << "]\n";
 
     for (const NFSMEdge &edge : state.outgoing_edges) {
       if (edge.required_fd_idx < 0) {
         // Pseudo-edge without a FD (from initial state only).
-        *trace +=
-            StringPrintf("  s%zu -> s%d [label=\"ordering %d\"]\n", state_idx,
-                         edge.state_idx, edge.required_fd_idx - INT_MIN);
+        *trace << StringPrintf("  s%zu -> s%d [label=\"ordering %d\"]\n",
+                               state_idx, edge.state_idx,
+                               edge.required_fd_idx - INT_MIN);
       } else {
         const FunctionalDependency *fd = edge.required_fd(this);
-        *trace += StringPrintf(
+        *trace << StringPrintf(
             "  s%zu -> s%d [label=\"%s\"]\n", state_idx, edge.state_idx,
             PrintFunctionalDependency(*fd, /*html=*/true).c_str());
       }
     }
   }
 
-  *trace += "}\n";
+  *trace << "}\n";
 }
 
-void LogicalOrderings::PrintDFSMDottyGraph(string *trace) const {
-  *trace += "digraph G {\n";
+void LogicalOrderings::PrintDFSMDottyGraph(ostream *trace) const {
+  *trace << "digraph G {\n";
   for (size_t state_idx = 0; state_idx < m_dfsm_states.size(); ++state_idx) {
     const DFSMState &state = m_dfsm_states[state_idx];
-    *trace += StringPrintf("  s%zu [label=< ", state_idx);
+    *trace << StringPrintf("  s%zu [label=< ", state_idx);
 
     bool any_interesting = false;
     for (size_t i = 0; i < state.nfsm_states.size(); ++i) {
       const NFSMState &nsfm_state = m_states[state.nfsm_states[i]];
       if (i != 0) {
-        *trace += ", ";
+        *trace << ", ";
       }
       if (nsfm_state.type == NFSMState::INTERESTING) {
         any_interesting = true;
-        *trace += "<b>";
+        *trace << "<b>";
       }
-      *trace += PrintOrdering(nsfm_state.satisfied_ordering);
+      *trace << PrintOrdering(nsfm_state.satisfied_ordering);
       if (nsfm_state.type == NFSMState::INTERESTING) {
-        *trace += "</b>";
+        *trace << "</b>";
       }
     }
-    *trace += " >";
+    *trace << " >";
     if (any_interesting) {
-      *trace += ", peripheries=2";
+      *trace << ", peripheries=2";
     }
-    *trace += "]\n";
+    *trace << "]\n";
 
     for (size_t edge_idx : state.outgoing_edges) {
       const DFSMEdge &edge = m_dfsm_edges[edge_idx];
       if (edge.required_fd_idx < 0) {
         // Pseudo-edge without a FD (from initial state only).
-        *trace +=
-            StringPrintf("  s%zu -> s%d [label=\"ordering %d\"]\n", state_idx,
-                         edge.state_idx, edge.required_fd_idx - INT_MIN);
+        *trace << StringPrintf("  s%zu -> s%d [label=\"ordering %d\"]\n",
+                               state_idx, edge.state_idx,
+                               edge.required_fd_idx - INT_MIN);
       } else {
         const FunctionalDependency *fd = edge.required_fd(this);
-        *trace += StringPrintf(
+        *trace << StringPrintf(
             "  s%zu -> s%d [label=\"%s\"]\n", state_idx, edge.state_idx,
             PrintFunctionalDependency(*fd, /*html=*/true).c_str());
       }
     }
   }
 
-  *trace += "}\n";
+  *trace << "}\n";
 }

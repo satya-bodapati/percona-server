@@ -39,7 +39,7 @@ TAR=${TAR:-tar}
 if ! getopt --test
 then
     go_out="$(getopt --options=iqdvj:m:t: \
-        --longoptions=i686,quiet,debug,valgrind,with-jemalloc:,with-mecab:,with-ssl:,tag: \
+        --longoptions=i686,quiet,debug,valgrind,with-jemalloc:,with-mecab:,with-v8:,with-ssl:,tag: \
         --name="$(basename "$0")" -- "$@")"
     test $? -eq 0 || exit 1
     eval set -- $go_out
@@ -82,6 +82,11 @@ do
     -m | --with-mecab )
         shift
         WITH_MECAB_OPTION="-DWITH_MECAB=$1"
+        shift
+        ;;
+    -v8 | --with-v8 )
+        shift
+        WITH_V8="$1"
         shift
         ;;
     --with-ssl )
@@ -214,8 +219,9 @@ if [ -n "$(command -v rpm)" ]; then
   if test "x$CMAKE_BUILD_TYPE" = "xDebug"
   then
     COMMON_FLAGS=`echo " ${COMMON_FLAGS} " | \
-              sed -e 's/ -O[0-9]* / /' \
-                  -e 's/-Wp,-D_FORTIFY_SOURCE=2/ /' \
+              sed -e 's/-Wall/-Wall -Wno-error=stringop-overflow -Wno-error=restrict -Wno-error=maybe-uninitialized -Wno-error=array-bounds -Wno-error=alloc-size-larger-than= -Wno-error=stringop-truncation/' \
+            #  sed -e 's/ -O[0-9]* / /' \
+                  -e 's/-Wp,-D_FORTIFY_SOURCE=2//' \
                   -e 's/ -unroll2 / /' \
                   -e 's/ -ip / /' \
                   -e 's/^ //' \
@@ -245,39 +251,105 @@ then
     JEMALLOCDIR="$(cd "$WITH_JEMALLOC"; pwd)"
 fi
 
+# Test V8 directory
+if test "x$WITH_V8" != "x"
+then
+    if ! test -d "$WITH_V8"
+    then
+        echo >&2 "V8 dir $WITH_V8 does not exist"
+        exit 1
+    fi
+
+    V8DIR="$(cd "$WITH_V8"; pwd)"
+fi
+
+# PGO + LTO settings
+#   WITH_PGO=1  (default)  - enable Profile-Guided Optimization (3-pass build)
+#   WITH_PGO=0             - skip PGO (single cmake pass)
+# Debug builds always skip PGO (no value profiling an unoptimized binary).
+WITH_PGO="${WITH_PGO:-1}"
+if [ "${CMAKE_BUILD_TYPE:-}" = "Debug" ]; then
+    WITH_PGO=0
+fi
+
+# Suppress GCC false positives that fire during LTO link on Bison-generated
+# parsers (sql_hints.yy.cc, pars0grm.cc, etc.) and on bundled libs.
+# Distro-built RPMs/DEBs get these via redhat-hardened-cc1 / dpkg-buildflags;
+# the standalone tarball build doesn't, so add them explicitly. Matches the
+# suppressions Oracle uses in their official MySQL RPM/DEB INFO_BIN.
+# Parameterized warnings (-Walloc-size-larger-than=N etc.) require -Wno- form,
+# not -Wno-error= form, in GCC 14+.
+TARBALL_WARN_SUPPRESS="-Wno-free-nonheap-object -Wno-stringop-overflow -Wno-stringop-overread -Wno-alloc-size-larger-than -Wno-array-bounds"
+
+# Common cmake flags shared across PGO instrumentation, PGO consume, and
+# non-PGO builds. Each invocation appends its unique pass-specific flag.
+CMAKE_COMMON_FLAGS=(
+    "$SOURCEDIR"
+    -DBUILD_CONFIG=mysql_release
+    -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}"
+    -DCMAKE_C_FLAGS="${TARBALL_WARN_SUPPRESS}"
+    -DCMAKE_CXX_FLAGS="${TARBALL_WARN_SUPPRESS}"
+    -DFEATURE_SET=community
+    -DCMAKE_INSTALL_PREFIX="/usr/local/$PRODUCT_FULL"
+    -DMYSQL_DATADIR="/usr/local/$PRODUCT_FULL/data"
+    -DROUTER_INSTALL_LIBDIR="/usr/local/$PRODUCT_FULL/lib/mysqlrouter/private"
+    -DROUTER_INSTALL_PLUGINDIR="/usr/local/$PRODUCT_FULL/lib/mysqlrouter/plugin"
+    -DCOMPILATION_COMMENT="$COMMENT"
+    -DWITH_PAM=ON
+    -DWITH_ROCKSDB=ON
+    -DROCKSDB_DISABLE_AVX2=1
+    -DROCKSDB_DISABLE_MARCH_NATIVE=1
+    -DWITH_INNODB_MEMCACHED=ON
+    -DWITH_ZLIB=bundled
+    -DWITH_CURL=bundled
+    -DWITH_NUMA=ON
+    -DWITH_LDAP=system
+    -DWITH_PACKAGE_FLAGS=OFF
+    -DFORCE_INSOURCE_BUILD=1
+    -DWITH_LIBEVENT=bundled
+    -DWITH_ZSTD=bundled
+    -DWITH_PERCONA_TELEMETRY=ON
+    -DWITH_LTO=ON
+    -DWITH_JS_LANG=ON
+    -DV8_INCLUDE_DIR=${WITH_V8}/include
+    -DV8_LIB_DIR=${WITH_V8}/out.gn/static/obj
+)
+
 # Build
 (
     rm -rf "$WORKDIR_ABS/bld"
     mkdir "$WORKDIR_ABS/bld"
     cd "$WORKDIR_ABS/bld"
 
-    cmake $SOURCEDIR ${CMAKE_OPTS:-} -DBUILD_CONFIG=mysql_release \
-        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE:-RelWithDebInfo} \
+    PGO_FIRST_FLAG=""
+    [ "${WITH_PGO}" = "1" ] && PGO_FIRST_FLAG="-DFPROFILE_GENERATE=1"
+
+    cmake "${CMAKE_COMMON_FLAGS[@]}" \
+        ${CMAKE_OPTS:-} \
         $DEBUG_EXTRA \
-        -DFEATURE_SET=community \
-        -DCMAKE_INSTALL_PREFIX="/usr/local/$PRODUCT_FULL" \
-        -DMYSQL_DATADIR="/usr/local/$PRODUCT_FULL/data" \
-        -DROUTER_INSTALL_LIBDIR="/usr/local/$PRODUCT_FULL/lib/mysqlrouter/private" \
-        -DROUTER_INSTALL_PLUGINDIR="/usr/local/$PRODUCT_FULL/lib/mysqlrouter/plugin" \
-        -DCOMPILATION_COMMENT="$COMMENT" \
-        -DWITH_PAM=ON \
-        -DWITH_ROCKSDB=ON \
-        -DROCKSDB_DISABLE_AVX2=1 \
-        -DROCKSDB_DISABLE_MARCH_NATIVE=1 \
-        -DWITH_INNODB_MEMCACHED=ON \
-        -DWITH_ZLIB=bundled \
-        -DWITH_CURL=bundled \
-        -DWITH_NUMA=ON \
-        -DWITH_LDAP=system \
-        -DDOWNLOAD_BOOST=1 \
-        -DWITH_PACKAGE_FLAGS=OFF \
-        -DFORCE_INSOURCE_BUILD=1 \
-        -DWITH_LIBEVENT=bundled \
-        -DWITH_ZSTD=bundled \
-        -DWITH_BOOST="$WORKDIR_ABS/libboost" \
+        $PGO_FIRST_FLAG \
         $WITH_MECAB_OPTION $OPENSSL_INCLUDE $OPENSSL_LIBRARY $CRYPTO_LIBRARY
 
     make $MAKE_JFLAG $QUIET
+
+    if [ "${WITH_PGO}" = "1" ]; then
+        echo "PGO: running MTR profile suite to generate .gcda profile data"
+        make run-profile-suite
+
+        echo "PGO: rebuilding with profile data (-DFPROFILE_USE=1)"
+        cd "$WORKDIR_ABS"
+        rm -rf bld
+        mkdir bld
+        cd bld
+        cmake "${CMAKE_COMMON_FLAGS[@]}" \
+            ${CMAKE_OPTS:-} \
+            $DEBUG_EXTRA \
+            -DFPROFILE_USE=1 \
+            $WITH_MECAB_OPTION $OPENSSL_INCLUDE $OPENSSL_LIBRARY $CRYPTO_LIBRARY
+
+        make $MAKE_JFLAG $QUIET
+    fi
+
     make DESTDIR="$INSTALLDIR" install
 
     # Build jemalloc
@@ -299,10 +371,19 @@ fi
         cp COPYING "$INSTALLDIR/usr/local/$PRODUCT_FULL/COPYING-jemalloc"
     )
     fi
+
+    if test "x$WITH_V8" != x
+    then
+    (
+        mv "$V8DIR"/LICENSE "$V8DIR"/LICENSE.v8.libraries
+        cp "$V8DIR"/LICENSE* "$INSTALLDIR/usr/local/$PRODUCT_FULL/"
+    )
+    fi
 )
 
 (
-    LIBLIST="libgssapi.so libldap_r-2.4.so.2 libldap.so.2 liblber-2.4.so.2 liblber.so.2 libcrypto.so libssl.so libtinfo.so libsasl2.so libbrotlidec.so libbrotlicommon.so librtmp.so libgssapi_krb5.so libkrb5.so libk5crypto.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplc4.so libnspr4.so libssl3.so libplds4.so libncurses.so.5 libtinfo.so.5 component_encryption_udf.so component_keyring_kms.so component_masking_functions.so"
+
+    LIBLIST="libaio.so.1 libnuma.so.1 libgssapi.so libldap_r-2.4.so.2 libldap.so.2 liblber-2.4.so.2 liblber.so.2 libtinfo.so libsasl2.so libbrotlidec.so libbrotlicommon.so librtmp.so libgssapi_krb5.so libkrb5.so libk5crypto.so libsmime3.so libnss3.so libssl3.so libnssutil3.so libplc4.so libnspr4.so libplds4.so libncurses.so.5 libtinfo.so.5 component_encryption_udf.so component_uuid_vx_udf.so component_keyring_kms.so component_masking_functions.so"
     DIRLIST="bin lib lib/private lib/plugin lib/mysqlrouter/plugin lib/mysqlrouter/private"
 
     LIBPATH=""
@@ -453,5 +534,4 @@ fi
 
 # Clean up
 rm -rf "$INSTALLDIR"
-rm -rf "$WORKDIR_ABS/libboost"
 rm -rf "$WORKDIR_ABS/bld"

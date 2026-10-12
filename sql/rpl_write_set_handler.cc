@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -31,12 +32,12 @@
 #include <utility>
 #include <vector>
 
+#include "extra/xxhash/my_xxhash.h"  // IWYU pragma: keep
 #include "lex_string.h"
 #include "my_base.h"
 #include "my_dbug.h"
 #include "my_inttypes.h"
 #include "my_murmur3.h"  // murmur3_32
-#include "my_xxhash.h"   // IWYU pragma: keep
 #include "mysql/strings/m_ctype.h"
 #include "mysql_com.h"
 #include "sql-common/json_binary.h"
@@ -53,30 +54,6 @@
 #include "template_utils.h"
 
 #define HASH_STRING_SEPARATOR "½"
-
-const char *transaction_write_set_hashing_algorithms[] = {"OFF", "MURMUR32",
-                                                          "XXHASH64", nullptr};
-
-const char *get_write_set_algorithm_string(unsigned int algorithm) {
-  switch (algorithm) {
-    case HASH_ALGORITHM_OFF:
-      return "OFF";
-    case HASH_ALGORITHM_MURMUR32:
-      return "MURMUR32";
-    case HASH_ALGORITHM_XXHASH64:
-      return "XXHASH64";
-    default:
-      return "UNKNOWN ALGORITHM";
-  }
-}
-
-template <class type>
-uint64 calc_hash(ulong algorithm, type T, size_t len) {
-  if (algorithm == HASH_ALGORITHM_MURMUR32)
-    return (murmur3_32((const uchar *)T, len, 0));
-  else
-    return (MY_XXH64((const uchar *)T, len, 0));
-}
 
 #ifndef NDEBUG
 static void debug_check_for_write_sets(
@@ -680,6 +657,114 @@ static void debug_check_for_write_sets(
              (hash_list[0] == 16097759999475440183ULL &&
               hash_list[1] == 1438169577983365775ULL &&
               hash_list[2] == 312264863968578629ULL)););
+
+  DBUG_EXECUTE_IF(
+      "PKE_assert_single_primary_key_generated_update_fk_sql",
+      assert(key_list_to_hash.size() == 1);
+      assert(key_list_to_hash[0] ==
+                 "PRIMARY" HASH_STRING_SEPARATOR "test" HASH_STRING_SEPARATOR
+                 "4t2" HASH_STRING_SEPARATOR "250" HASH_STRING_SEPARATOR "2" ||
+             key_list_to_hash[0] ==
+                 "PRIMARY" HASH_STRING_SEPARATOR "test" HASH_STRING_SEPARATOR
+                 "4t2" HASH_STRING_SEPARATOR "220" HASH_STRING_SEPARATOR "2" ||
+             key_list_to_hash[0] ==
+                 "PRIMARY" HASH_STRING_SEPARATOR "test" HASH_STRING_SEPARATOR
+                 "4t22" HASH_STRING_SEPARATOR "350" HASH_STRING_SEPARATOR "2" ||
+             key_list_to_hash[0] ==
+                 "PRIMARY" HASH_STRING_SEPARATOR "test" HASH_STRING_SEPARATOR
+                 "4t22" HASH_STRING_SEPARATOR "320" HASH_STRING_SEPARATOR "2" ||
+             key_list_to_hash[0] ==
+                 "PRIMARY" HASH_STRING_SEPARATOR "test" HASH_STRING_SEPARATOR
+                 "4t3" HASH_STRING_SEPARATOR "220" HASH_STRING_SEPARATOR "2" ||
+             key_list_to_hash[0] ==
+                 "PRIMARY" HASH_STRING_SEPARATOR "test" HASH_STRING_SEPARATOR
+                 "4t1" HASH_STRING_SEPARATOR "250" HASH_STRING_SEPARATOR "2" ||
+             key_list_to_hash[0] ==
+                 "PRIMARY" HASH_STRING_SEPARATOR "test" HASH_STRING_SEPARATOR
+                 "4t1" HASH_STRING_SEPARATOR "220" HASH_STRING_SEPARATOR "2");
+      assert(hash_list.size() == 1);
+      assert(hash_list[0] == 6418948306172450623ULL ||
+             hash_list[0] == 4095169591811485578ULL ||
+             hash_list[0] == 4162043869166089739ULL ||
+             hash_list[0] == 16194266566032125930ULL ||
+             hash_list[0] == 16847741612804908486ULL ||
+             hash_list[0] == 10028646423122624262ULL ||
+             hash_list[0] == 12873958579142614636ULL););
+
+  DBUG_EXECUTE_IF(
+      "PKE_assert_single_primary_key_generated_delete_fk_sql",
+      assert(key_list_to_hash.size() == 1);
+      assert(key_list_to_hash[0] ==
+                 "PRIMARY" HASH_STRING_SEPARATOR "test" HASH_STRING_SEPARATOR
+                 "4t2" HASH_STRING_SEPARATOR "210" HASH_STRING_SEPARATOR "2" ||
+             key_list_to_hash[0] ==
+                 "PRIMARY" HASH_STRING_SEPARATOR "test" HASH_STRING_SEPARATOR
+                 "4t22" HASH_STRING_SEPARATOR "310" HASH_STRING_SEPARATOR "2" ||
+             key_list_to_hash[0] ==
+                 "PRIMARY" HASH_STRING_SEPARATOR "test" HASH_STRING_SEPARATOR
+                 "4t3" HASH_STRING_SEPARATOR "210" HASH_STRING_SEPARATOR "2" ||
+             key_list_to_hash[0] ==
+                 "PRIMARY" HASH_STRING_SEPARATOR "test" HASH_STRING_SEPARATOR
+                 "4t1" HASH_STRING_SEPARATOR "210" HASH_STRING_SEPARATOR "2");
+      assert(hash_list.size() == 1);
+      assert(hash_list[0] == 16338251575733756774ULL ||
+             hash_list[0] == 15162848905666604246ULL ||
+             hash_list[0] == 14748473017617591124ULL ||
+             hash_list[0] == 14338920484889756510ULL););
+
+  DBUG_EXECUTE_IF(
+      "PKE_assert_single_primary_key_generated_update_fk_sql_triggers",
+      assert(key_list_to_hash.size() == 1);
+      assert(key_list_to_hash[0] ==
+                 "PRIMARY" HASH_STRING_SEPARATOR "test" HASH_STRING_SEPARATOR
+                 "4t2" HASH_STRING_SEPARATOR "250" HASH_STRING_SEPARATOR "2" ||
+             key_list_to_hash[0] ==
+                 "PRIMARY" HASH_STRING_SEPARATOR "test" HASH_STRING_SEPARATOR
+                 "4t2" HASH_STRING_SEPARATOR "220" HASH_STRING_SEPARATOR "2" ||
+             key_list_to_hash[0] == "PRIMARY" HASH_STRING_SEPARATOR
+                                    "test" HASH_STRING_SEPARATOR
+                                    "4logtable" HASH_STRING_SEPARATOR
+                                    "84" HASH_STRING_SEPARATOR "1" ||
+             key_list_to_hash[0] ==
+                 "PRIMARY" HASH_STRING_SEPARATOR "test" HASH_STRING_SEPARATOR
+                 "4t1" HASH_STRING_SEPARATOR "250" HASH_STRING_SEPARATOR "2" ||
+             key_list_to_hash[0] ==
+                 "PRIMARY" HASH_STRING_SEPARATOR "test" HASH_STRING_SEPARATOR
+                 "4t1" HASH_STRING_SEPARATOR "220" HASH_STRING_SEPARATOR "2" ||
+             key_list_to_hash[0] == "PRIMARY" HASH_STRING_SEPARATOR
+                                    "test" HASH_STRING_SEPARATOR
+                                    "4logtable" HASH_STRING_SEPARATOR
+                                    "83" HASH_STRING_SEPARATOR "1");
+      assert(hash_list.size() == 1);
+      assert(hash_list[0] == 6418948306172450623ULL ||
+             hash_list[0] == 4095169591811485578ULL ||
+             hash_list[0] == 1170882435250004574ULL ||
+             hash_list[0] == 10028646423122624262ULL ||
+             hash_list[0] == 12873958579142614636ULL ||
+             hash_list[0] == 2363781099630741395ULL););
+
+  DBUG_EXECUTE_IF(
+      "PKE_assert_single_primary_key_generated_delete_fk_sql_triggers",
+      assert(key_list_to_hash.size() == 1);
+      assert(key_list_to_hash[0] ==
+                 "PRIMARY" HASH_STRING_SEPARATOR "test" HASH_STRING_SEPARATOR
+                 "4t2" HASH_STRING_SEPARATOR "210" HASH_STRING_SEPARATOR "2" ||
+             key_list_to_hash[0] == "PRIMARY" HASH_STRING_SEPARATOR
+                                    "test" HASH_STRING_SEPARATOR
+                                    "4logtable" HASH_STRING_SEPARATOR
+                                    "82" HASH_STRING_SEPARATOR "1" ||
+             key_list_to_hash[0] ==
+                 "PRIMARY" HASH_STRING_SEPARATOR "test" HASH_STRING_SEPARATOR
+                 "4t1" HASH_STRING_SEPARATOR "210" HASH_STRING_SEPARATOR "2" ||
+             key_list_to_hash[0] == "PRIMARY" HASH_STRING_SEPARATOR
+                                    "test" HASH_STRING_SEPARATOR
+                                    "4logtable" HASH_STRING_SEPARATOR
+                                    "81" HASH_STRING_SEPARATOR "1");
+      assert(hash_list.size() == 1);
+      assert(hash_list[0] == 16338251575733756774ULL ||
+             hash_list[0] == 5624094497422207915ULL ||
+             hash_list[0] == 14338920484889756510ULL ||
+             hash_list[0] == 8824347876218701750ULL););
 }
 #endif
 
@@ -704,10 +789,8 @@ static bool generate_hash_pke(const std::string &pke, THD *thd
 #endif
 ) {
   DBUG_TRACE;
-  assert(thd->variables.transaction_write_set_extraction != HASH_ALGORITHM_OFF);
 
-  uint64 hash = calc_hash<const char *>(
-      thd->variables.transaction_write_set_extraction, pke.c_str(), pke.size());
+  uint64 hash = MY_XXH64(pke.c_str(), pke.size(), 0);
   if (thd->get_transaction()->get_transaction_write_set_ctx()->add_write_set(
           hash))
     return true;
@@ -1062,7 +1145,7 @@ bool add_pke(TABLE *table, THD *thd, const uchar *record) {
             if (field->is_null(ptrdiff)) continue;
 
             if (!my_strcasecmp(system_charset_info, field->field_name,
-                               fk[fk_number].column_name[c].str)) {
+                               fk[fk_number].referencing_column_names[c].str)) {
               /*
                 Update the field offset, since we may be operating on
                 table->record[0] or table->record[1] and both have

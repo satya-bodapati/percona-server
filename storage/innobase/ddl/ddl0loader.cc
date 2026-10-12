@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -269,7 +270,11 @@ Loader::~Loader() noexcept {
 
     for (auto &builder : m_builders) {
       auto stage = builder->stage();
-      ut_a(stage != nullptr);
+      /* A builder gets its stage when the scan sets it up, in index
+      order. When an earlier one refuses there, such as a vector index
+      with innodb_hnsw_max_memory already reached, the scan returns
+      before the later builders are set up, and they never start. */
+      ut_ad(stage != nullptr || builder->get_state() == Builder::State::INIT);
       if (stage) {
         alter_stages.push_back(stage);
       }

@@ -1,15 +1,16 @@
-/*  Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+/*  Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License, version 2.0,
     as published by the Free Software Foundation.
 
-    This program is also distributed with certain software (including
+    This program is designed to work with certain software (including
     but not limited to OpenSSL) that is licensed under separate terms,
     as designated in a particular file or component or in included license
     documentation.  The authors of MySQL hereby grant you an additional
     permission to link the program and your derivative works with the
-    separately licensed software that they have included with MySQL.
+    separately licensed software that they have either included with
+    the program or referenced in the documentation.
 
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,9 +23,9 @@
 
 #include <mysql/client_plugin.h>
 #include <mysql/plugin_auth.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include "my_compiler.h"
 
@@ -55,7 +56,7 @@ static int qa_auth_interface(MYSQL_PLUGIN_VIO *vio,
   info->password_used = PASSWORD_USED_YES;
 
   /* fail if the password is wrong */
-  if (strcmp((const char *)pkt, info->auth_string)) return CR_ERROR;
+  if (strcmp((const char *)pkt, info->auth_string) != 0) return CR_ERROR;
 
   /* Test of default_auth */
   if (strcmp(info->user_name, "qa_test_11_user") == 0) {

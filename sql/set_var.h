@@ -1,17 +1,18 @@
 #ifndef SET_VAR_INCLUDED
 #define SET_VAR_INCLUDED
-/* Copyright (c) 2002, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2002, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -40,6 +41,7 @@
 #include <string_view>
 #include <vector>
 
+#include <map>
 #include "lex_string.h"
 #include "my_getopt.h"    // get_opt_arg_type
 #include "my_hostname.h"  // HOSTNAME_LENGTH
@@ -162,6 +164,9 @@ class sys_var {
     SESSION_VARIABLE_IN_BINLOG
   } binlog_status;
 
+  ///< Global system variable attributes.
+  std::map<std::string, std::string> m_global_attributes;
+
  protected:
   typedef bool (*on_check_function)(sys_var *self, THD *thd, set_var *var);
   typedef bool (*pre_update_function)(sys_var *self, THD *thd, set_var *var);
@@ -279,6 +284,7 @@ class sys_var {
   bool is_persist_readonly() const { return flags & PERSIST_AS_READ_ONLY; }
   bool is_parse_early() const { return (m_parse_flag == PARSE_EARLY); }
   bool is_sensitive() const { return flags & SENSITIVE; }
+
   /**
     Check if the variable can be set using SET_VAR hint.
 
@@ -1122,10 +1128,25 @@ collation_unordered_map<std::string, sys_var *>
 collation_unordered_map<std::string, sys_var *>
     *get_dynamic_system_variable_hash(void);
 
+bool get_global_variable_attributes(
+    const char *variable_base, const char *variable_name,
+    std::vector<std::pair<std::string, std::string>> &attributes);
+bool get_global_variable_attribute(const char *variable_base,
+                                   const char *variable_name,
+                                   const char *attribute_name,
+                                   std::string &value);
+bool set_global_variable_attribute(const char *variable_base,
+                                   const char *variable_name,
+                                   const char *attribute_name,
+                                   const char *attribute_value);
+bool set_global_variable_attribute(const System_variable_tracker &var_tracker,
+                                   const char *attribute_name,
+                                   const char *attribute_value);
+
 extern bool get_sysvar_source(const char *name, uint length,
                               enum enum_variable_source *source);
 
-MY_NODISCARD
+[[nodiscard]]
 int sql_set_variables(THD *thd, List<set_var_base> *var_list, bool opened);
 bool keyring_access_test();
 bool fix_delay_key_write(sys_var *self, THD *thd, enum_var_type type);
@@ -1135,7 +1156,6 @@ bool sql_mode_string_representation(THD *thd, sql_mode_t sql_mode,
                                     LEX_STRING *ls);
 bool sql_mode_quoted_string_representation(THD *thd, sql_mode_t sql_mode,
                                            LEX_STRING *ls);
-void update_parser_max_mem_size();
 
 extern sys_var *Sys_autocommit_ptr;
 extern sys_var *Sys_gtid_next_ptr;

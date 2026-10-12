@@ -1,15 +1,16 @@
-/* Copyright (c) 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -34,7 +35,7 @@ void aggregated_stats_buffer::flush() {
   com_stmt_reset = 0ULL;
   com_stmt_reprepare = 0ULL;
   com_stmt_send_long_data = 0ULL;
-  for (std::size_t i = 0; i < (std::size_t)SQLCOM_END; i++) com_stat[i] = 0ULL;
+  for (auto &i : com_stat) i = 0ULL;
   table_open_cache_hits = 0ULL;
   table_open_cache_misses = 0ULL;
   table_open_cache_overflows = 0ULL;
@@ -95,6 +96,7 @@ void aggregated_stats_buffer::add_from(aggregated_stats_buffer &shard) {
   table_open_cache_overflows += shard.table_open_cache_overflows;
   created_tmp_disk_tables += shard.created_tmp_disk_tables;
   created_tmp_tables += shard.created_tmp_tables;
+  count_hit_tmp_table_size += shard.count_hit_tmp_table_size;
   max_execution_time_exceeded += shard.max_execution_time_exceeded;
   max_execution_time_set += shard.max_execution_time_set;
   max_execution_time_set_failed += shard.max_execution_time_set_failed;
@@ -135,7 +137,6 @@ void aggregated_stats_buffer::add_from(aggregated_stats_buffer &shard) {
 }
 
 uint64_t aggregated_stats_buffer::get_counter(std::size_t offset) {
-  std::atomic_uint64_t *counter =
-      pointer_cast<std::atomic_uint64_t *>((char *)this + offset);
+  auto *counter = pointer_cast<std::atomic_uint64_t *>((char *)this + offset);
   return counter->load();
 }

@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -39,7 +40,6 @@ using keyring::Keys_iterator;
 
 namespace keyring {
 /* Always defined. */
-extern PSI_memory_key key_memory_KEYRING;
 extern PSI_rwlock_key key_LOCK_keyring;
 }  // namespace keyring
 
@@ -74,7 +74,7 @@ void mysql_keyring_iterator_deinit(Keys_iterator *);
 bool mysql_keyring_iterator_get_key(Keys_iterator *, char *key_id,
                                     char *user_id);
 
-bool check_key_for_writing(IKey *key, std::string error_for);
+bool check_key_for_writing(IKey *key, const std::string &error_for);
 
 void log_operation_error(const char *failed_operation, const char *plugin_name);
 

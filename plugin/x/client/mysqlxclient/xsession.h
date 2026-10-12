@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -32,6 +33,7 @@
 #include "mysqlxclient/xargument.h"
 #include "mysqlxclient/xerror.h"
 #include "mysqlxclient/xprotocol.h"
+#include "mysqlxclient_export.h"
 
 namespace xcl {
 
@@ -45,7 +47,7 @@ namespace xcl {
   X Protocol specific features (or flows) may require manual sending of
   X Protocol messages (user needs to acquire XProtocol interface).
 */
-class XSession {
+class MYSQLXCLIENT_EXPORT XSession {
  public:
   /**
     Capabilities supported by client library.
@@ -193,9 +195,7 @@ class XSession {
       * "PREFERRED": Establish a secure (encrypted) connection if the server
         supports secure connections. Fall back to an unencrypted connection
         otherwise. This is the default value.
-      * "DISABLED": Establish an unencrypted connection. This is like the
-        "mysql" clients legacy --ssl=0 option or its synonyms (--skip-ssl,
-        --disable-ssl).
+      * "DISABLED": Establish an unencrypted connection.
       * "REQUIRED": Establish a secure connection if the server supports
         secure connections. The connection attempt fails if a secure
         connection cannot be established.
@@ -687,9 +687,9 @@ class XSession {
     @retval != nullptr     OK
     @retval == nullptr     error occurred
 */
-std::unique_ptr<XSession> create_session(const char *socket_file,
-                                         const char *user, const char *pass,
-                                         const char *schema, XError *out_error);
+std::unique_ptr<XSession> MYSQLXCLIENT_EXPORT
+create_session(const char *socket_file, const char *user, const char *pass,
+               const char *schema, XError *out_error);
 
 /**
   Create, connect and authenticate the session using TCP.
@@ -707,9 +707,9 @@ std::unique_ptr<XSession> create_session(const char *socket_file,
     @retval != nullptr     OK
     @retval == nullptr     error occurred
 */
-std::unique_ptr<XSession> create_session(const char *host, const uint16_t port,
-                                         const char *user, const char *pass,
-                                         const char *schema, XError *out_error);
+std::unique_ptr<XSession> MYSQLXCLIENT_EXPORT
+create_session(const char *host, const uint16_t port, const char *user,
+               const char *pass, const char *schema, XError *out_error);
 
 /**
   Create not connected session object.
@@ -718,7 +718,7 @@ std::unique_ptr<XSession> create_session(const char *host, const uint16_t port,
     @retval != nullptr     OK
     @retval == nullptr     error occurred
 */
-std::unique_ptr<XSession> create_session();
+std::unique_ptr<XSession> MYSQLXCLIENT_EXPORT create_session();
 
 }  // namespace xcl
 

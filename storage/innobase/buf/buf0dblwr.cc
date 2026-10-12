@@ -1,18 +1,19 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2026, Oracle and/or its affiliates.
 Copyright (c) 2016, Percona Inc. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -225,7 +226,7 @@ struct Page {
 
   // Disable copying
   Page(const Page &) = delete;
-  Page(const Page &&) = delete;
+  Page(Page &&) = delete;
   Page &operator=(Page &&) = delete;
   Page &operator=(const Page &) = delete;
 };
@@ -358,7 +359,7 @@ class Pages {
 
   // Disable copying
   Pages(const Pages &) = delete;
-  Pages(const Pages &&) = delete;
+  Pages(Pages &&) = delete;
   Pages &operator=(Pages &&) = delete;
   Pages &operator=(const Pages &) = delete;
 };
@@ -936,7 +937,7 @@ class Double_write {
 
   // Disable copying
   Double_write(const Double_write &) = delete;
-  Double_write(const Double_write &&) = delete;
+  Double_write(Double_write &&) = delete;
   Double_write &operator=(Double_write &&) = delete;
   Double_write &operator=(const Double_write &) = delete;
 
@@ -2026,7 +2027,7 @@ class Reduced_batch_deserializer {
   dberr_t deserialize(F &f) {
     auto page = m_buf->begin();
     for (uint32_t i = 0; i < m_n_pages; ++i) {
-      if (is_zeroes(page)) {
+      if (ut::is_zeros(page, REDUCED_BATCH_PAGE_SIZE)) {
         page += REDUCED_BATCH_PAGE_SIZE;
         continue;
       }
@@ -2107,17 +2108,6 @@ class Reduced_batch_deserializer {
 
     ut_ad(static_cast<uint32_t>(page_data - page_start) ==
           (expected_entries * REDUCED_ENTRY_SIZE));
-  }
-
-  /** @return true if dblwr page is an all-zero page
-  @param[in]   page    dblwr page in batch file (.bdblwr) */
-  bool is_zeroes(const byte *page) {
-    for (ulint i = 0; i < REDUCED_BATCH_PAGE_SIZE; i++) {
-      if (page[i] != 0) {
-        return (false);
-      }
-    }
-    return (true);
   }
 
  private:
@@ -2722,9 +2712,8 @@ static dberr_t dblwr_file_open(const std::string &dir_name, int id,
   }
 
   bool success;
-  file.m_pfs =
-      os_file_create(innodb_dblwr_file_key, file.m_name.c_str(), mode,
-                     OS_FILE_NORMAL, file_type, srv_read_only_mode, &success);
+  file.m_pfs = os_file_create(innodb_dblwr_file_key, file.m_name.c_str(), mode,
+                              file_type, srv_read_only_mode, &success);
 
   if (!success) {
     ib::error(ER_IB_MSG_DBLWR_1293, file.m_name.c_str());
@@ -2786,29 +2775,37 @@ dberr_t dblwr::open() noexcept {
   /* Batch segments per dblwr file. */
   uint32_t segments_per_file{};
 
-  if (dblwr::n_files == 0) {
-    dblwr::n_files = std::max(2UL, srv_buf_pool_instances * 2);
-  } else if (dblwr::n_files > srv_buf_pool_instances * 2) {
-    dblwr::n_files = srv_buf_pool_instances * 2;
-  }
-
-  ib::info(ER_IB_MSG_DBLWR_1324)
-      << "Double write buffer files: " << dblwr::n_files;
-
-  if (dblwr::n_pages == 0) {
-    dblwr::n_pages = srv_n_write_io_threads;
-  }
-
-  ib::info(ER_IB_MSG_DBLWR_1323)
-      << "Double write buffer pages per instance: " << dblwr::n_pages;
+  ut_a(dblwr::n_files != 0);
+  ut_a(dblwr::n_pages != 0);
 
   if (Double_write::s_n_instances <= dblwr::n_files) {
     segments_per_file = 1;
     Double_write::s_files.resize(Double_write::s_n_instances);
   } else {
     Double_write::s_files.resize(dblwr::n_files);
-    segments_per_file = (Double_write::s_n_instances / dblwr::n_files) + 1;
+    const ulong N = dblwr::n_files;
+    const ulong n_instances = Double_write::s_n_instances;
+
+    /* Calculate minimum number of batch segments in each dblwr file, so that
+    the total number of batch segments across all dblwr files is greater than
+    or equal to the Double_write instances. */
+    segments_per_file = ut::div_ceil(n_instances, N);
+
+    /* Confirm that if there is 1 less segment in each dblwr file, then there
+    is not enough batch segments to service the Double_write instances. */
+    ut_ad(segments_per_file > 1);
+    ut_ad(((segments_per_file - 1) * N) < n_instances);
   }
+
+  ib::info(ER_IB_MSG_DBLWR_1324)
+      << "Double write buffer files: " << Double_write::s_files.size()
+      << ", --innodb-doublewrite-files=" << dblwr::n_files
+      << ", segments_per_file=" << segments_per_file;
+
+  ib::info(ER_IB_MSG_DBLWR_1323)
+      << "Double write buffer pages per instance: " << dblwr::n_pages;
+
+  ut_ad(Double_write::s_n_instances >= Double_write::s_files.size());
 
   dberr_t err{DB_SUCCESS};
 

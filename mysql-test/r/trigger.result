@@ -541,10 +541,8 @@ drop table t1;
 create table t1 (id int);
 create trigger t1_ai after insert on t1 for each row reset binary logs and gtids;
 ERROR 0A000: RESET is not allowed in stored function or trigger
-create trigger t1_ai after insert on t1 for each row reset slave;
+create trigger t1_ai after insert on t1 for each row RESET REPLICA;
 ERROR 0A000: RESET is not allowed in stored function or trigger
-create trigger t1_ai after insert on t1 for each row flush hosts;
-ERROR 0A000: FLUSH is not allowed in stored function or trigger
 create trigger t1_ai after insert on t1 for each row flush tables with read lock;
 ERROR 0A000: FLUSH is not allowed in stored function or trigger
 create trigger t1_ai after insert on t1 for each row flush logs;
@@ -566,15 +564,9 @@ create procedure p1() reset binary logs and gtids;
 insert into t1 values (0);
 ERROR 0A000: RESET is not allowed in stored function or trigger
 drop procedure p1;
-create procedure p1() reset slave;
-Warnings:
-Warning	1287	'RESET SLAVE' is deprecated and will be removed in a future release. Please use RESET REPLICA instead
+create procedure p1() RESET REPLICA;
 insert into t1 values (0);
 ERROR 0A000: RESET is not allowed in stored function or trigger
-drop procedure p1;
-create procedure p1() flush hosts;
-insert into t1 values (0);
-ERROR 0A000: FLUSH is not allowed in stored function or trigger
 drop procedure p1;
 create procedure p1() flush privileges;
 insert into t1 values (0);
@@ -2134,9 +2126,9 @@ DROP TEMPORARY TABLE t2;
 #                                    commands in triggers
 #
 CREATE TABLE t1(a INT);
-CREATE TRIGGER t1_au AFTER UPDATE ON t1 FOR EACH ROW START SLAVE;
+CREATE TRIGGER t1_au AFTER UPDATE ON t1 FOR EACH ROW START REPLICA;
 ERROR HY000: Explicit or implicit commit is not allowed in stored function or trigger.
-CREATE TRIGGER t1_au AFTER UPDATE ON t1 FOR EACH ROW STOP SLAVE;
+CREATE TRIGGER t1_au AFTER UPDATE ON t1 FOR EACH ROW STOP REPLICA;
 ERROR HY000: Explicit or implicit commit is not allowed in stored function or trigger.
 CREATE TRIGGER t1_au AFTER UPDATE ON t1 FOR EACH ROW
 CREATE SERVER s FOREIGN DATA WRAPPER mysql OPTIONS (USER 'Remote',
@@ -2585,6 +2577,8 @@ DELETE FROM mysql.db WHERE User LIKE 'mysqltest_%';
 DELETE FROM mysql.tables_priv WHERE User LIKE 'mysqltest_%';
 DELETE FROM mysql.columns_priv WHERE User LIKE 'mysqltest_%';
 FLUSH PRIVILEGES;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 DROP DATABASE IF EXISTS mysqltest_db1;
 CREATE DATABASE mysqltest_db1;
 CREATE USER mysqltest_dfn@localhost;
@@ -2702,7 +2696,7 @@ CREATE DEFINER='mysqltest_inv'@'localhost'
   TRIGGER trg1 BEFORE INSERT ON t1
 FOR EACH ROW
 SET @new_sum = 0;
-ERROR 42000: Access denied; you need (at least one of) the SUPER, SET_USER_ID or SET_ANY_DEFINER privilege(s) for this operation
+ERROR 42000: Access denied; you need (at least one of) the SUPER or SET_ANY_DEFINER privilege(s) for this operation
 
 ---> connection: default
 use mysqltest_db1;
@@ -2739,6 +2733,8 @@ DELETE FROM mysql.db WHERE User LIKE 'mysqltest_%';
 DELETE FROM mysql.tables_priv WHERE User LIKE 'mysqltest_%';
 DELETE FROM mysql.columns_priv WHERE User LIKE 'mysqltest_%';
 FLUSH PRIVILEGES;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 DROP DATABASE IF EXISTS mysqltest_db1;
 CREATE DATABASE mysqltest_db1;
 use mysqltest_db1;
@@ -2919,6 +2915,8 @@ DELETE FROM mysql.db WHERE User LIKE 'mysqltest_%';
 DELETE FROM mysql.tables_priv WHERE User LIKE 'mysqltest_%';
 DELETE FROM mysql.columns_priv WHERE User LIKE 'mysqltest_%';
 FLUSH PRIVILEGES;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 DROP DATABASE IF EXISTS mysqltest_db1;
 CREATE DATABASE mysqltest_db1;
 USE mysqltest_db1;
@@ -3019,6 +3017,8 @@ INSERT INTO db1.t1 VALUES('Some very sensitive data goes here');
 CREATE USER 'no_rights'@'localhost';
 REVOKE ALL ON *.* FROM 'no_rights'@'localhost';
 FLUSH PRIVILEGES;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 SELECT trigger_name FROM INFORMATION_SCHEMA.TRIGGERS
 WHERE trigger_schema = 'db1';
 TRIGGER_NAME
@@ -3383,9 +3383,9 @@ DROP TABLE t1;
 #                Even trigger names are case and accent insensitive. Test case to
 #                verify the same.
 #
-SET NAMES utf8;
+SET NAMES utf8mb3;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 CREATE TABLE t1 (f1 INT, f2 INT);
 #
 # Test case to verify triggers with case and accent insensitive names.
@@ -3417,3 +3417,18 @@ Trigger	sql_mode	SQL Original Statement	character_set_client	collation_connectio
 DROP TRIGGER очень_очень_очень_очень_очень_очень_очень_очень_длинная_строка_é;
 DROP TABLE t1;
 SET NAMES default;
+#
+# Bug#37337527 >= 8.0.27 Error 1048 when updating row with empty_sql mode
+#
+CREATE TABLE t1 (c1 INT, c2 INT NOT NULL);
+CREATE TRIGGER t_t1 BEFORE INSERT ON t1 FOR EACH ROW BEGIN END;
+SET SESSION sql_mode = '';
+INSERT INTO t1(c1) VALUES (1);
+Warnings:
+Warning	1364	Field 'c2' doesn't have a default value
+SELECT * FROM t1;
+c1	c2
+1	0
+UPDATE t1 SET c2=3 WHERE c1=1;
+DROP TABLE t1;
+SET sql_mode=default;

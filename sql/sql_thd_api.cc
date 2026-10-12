@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -45,10 +46,10 @@
 #include "sql/conn_handler/connection_handler_manager.h"
 #include "sql/current_thd.h"  // current_thd
 #include "sql/handler.h"
-#include "sql/mysqld.h"  // key_thread_one_connection
+#include "sql/mysqld.h"              // key_thread_one_connection
+#include "sql/mysqld_thd_manager.h"  // Global_THD_manager
 #include "sql/protocol_classic.h"
 #include "sql/query_options.h"
-#include "sql/resourcegroups/platform/thread_attrs_api.h"  // num_vcpus
 #include "sql/rpl_replica_commit_order_manager.h"  // check_and_report_deadlock
 #include "sql/rpl_rli.h"                           // is_mts_worker
 #include "sql/sql_alter.h"
@@ -254,6 +255,7 @@ uint thd_get_net_read_write(THD *thd) {
 
 void thd_set_net_read_write(THD *thd, uint val) {
   thd->get_protocol_classic()->get_net()->reading_or_writing = val;
+  thd->store_cached_properties(THD::cached_properties::RW_STATUS);
 }
 
 /**
@@ -274,6 +276,17 @@ void thd_set_not_killable(THD *thd) { thd->set_is_killable(false); }
 
 my_socket thd_get_fd(THD *thd) {
   return thd->get_protocol_classic()->get_socket();
+}
+
+/**
+  Get MYSQL_SOCKET struct for this connection
+
+  @param thd            THD object
+
+  @retval               MYSQL_SOCKET struct of the connection
+*/
+MYSQL_SOCKET thd_get_mysql_socket(THD *thd) {
+  return thd->get_protocol_classic()->get_vio()->mysql_socket;
 }
 
 /**
@@ -299,6 +312,14 @@ my_thread_attr_t *get_connection_attrib() { return &connection_attrib; }
 */
 
 ulong get_max_connections() { return max_connections; }
+
+longlong get_incoming_connects() {
+  return Connection_handler_manager::get_incoming_connects();
+}
+
+longlong get_aborted_connects() {
+  return Connection_handler_manager::get_instance()->aborted_connects();
+}
 
 //////////////////////////////////////////////////////////
 //
@@ -712,10 +733,6 @@ void remove_ssl_err_thread_state() {
 #if !defined(HAVE_OPENSSL11)
   ERR_remove_thread_state(nullptr);
 #endif
-}
-
-unsigned int thd_get_num_vcpus() {
-  return resourcegroups::platform::num_vcpus();
 }
 
 bool thd_check_connection_admin_privilege(MYSQL_THD thd) {

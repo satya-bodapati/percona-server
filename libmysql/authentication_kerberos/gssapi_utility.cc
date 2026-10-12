@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,11 +23,9 @@
 
 #include "gssapi_utility.h"
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
-extern Logger_client *g_logger_client;
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 static void gssapi_errmsg(OM_uint32 major, OM_uint32 minor, char *buf,
                           size_t size) {
@@ -37,15 +36,15 @@ static void gssapi_errmsg(OM_uint32 major, OM_uint32 minor, char *buf,
   gss_buffer_desc status{0, nullptr};
   char *t_message = buf;
   char *end = t_message + size - 1;
-  int types[] = {GSS_C_GSS_CODE, GSS_C_MECH_CODE};
+  int const types[] = {GSS_C_GSS_CODE, GSS_C_MECH_CODE};
 
-  for (int i = 0; i < 2; i++) {
+  for (int type : types) {
     message_context = 0;
-    status_code = types[i] == GSS_C_GSS_CODE ? major : minor;
+    status_code = type == GSS_C_GSS_CODE ? major : minor;
 
     if (!status_code) continue;
     do {
-      maj_status = gss_display_status(&min_status, status_code, types[i],
+      maj_status = gss_display_status(&min_status, status_code, type,
                                       GSS_C_NO_OID, &message_context, &status);
       if (maj_status) break;
 

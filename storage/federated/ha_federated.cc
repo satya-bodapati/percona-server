@@ -1,15 +1,16 @@
-/* Copyright (c) 2004, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2004, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -257,7 +258,7 @@
     gdb ./mysqld
 
     Then, withn the (gdb) prompt:
-    (gdb) run --gdb --port=5554 --socket=/tmp/mysqld.5554 --skip-innodb --debug
+    (gdb) run --gdb --port=5554 --socket=/tmp/mysqld.5554 --debug
 
     Next, I open several windows for each:
 
@@ -552,8 +553,8 @@ static int federated_done(void *) {
   @retval false OK
   @retval true  There was an error appending to the string.
 
-  @note This function is based upon the append_identifier() function
-        in sql_show.cc except that quoting always occurs.
+  @note See similar function append_identifier()
+  in sql_show.cc that always quotes based on sql mode.
 */
 
 static bool append_ident(String *string, const char *name, size_t length,
@@ -1269,7 +1270,11 @@ bool ha_federated::create_where_from_key(String *to, KEY *key_info,
   const bool both_not_null =
       (start_key != nullptr && end_key != nullptr) ? true : false;
   uchar *ptr;
-  uint remainder, length;
+  // 'remainder' is only consumed by DBUG_PRINT and assert, both compiled out
+  // in release builds; mark as [[maybe_unused]] so GCC 16 doesn't warn under
+  // -Werror=unused-but-set-variable.
+  [[maybe_unused]] uint remainder;
+  uint length;
   char tmpbuff[FEDERATED_QUERY_BUFFER_SIZE];
   String tmp(tmpbuff, sizeof(tmpbuff), system_charset_info);
   const key_range *ranges[2] = {start_key, end_key};
@@ -1594,9 +1599,11 @@ int ha_federated::close(void) {
   THD *thd = current_thd;
   DBUG_TRACE;
 
-  free_result();
-
+  for (MYSQL_RES *result : results) {
+    mysql_free_result(result);
+  }
   results.clear();
+  stored_result = nullptr;
 
   /*
     Check to verify whether the connection is still alive or not.
@@ -2836,9 +2843,8 @@ int ha_federated::reset(void) {
   replace_duplicates = false;
 
   /* Free stored result sets. */
-  for (MYSQL_RES **result = results.begin(); result != results.end();
-       ++result) {
-    mysql_free_result(*result);
+  for (MYSQL_RES *result : results) {
+    mysql_free_result(result);
   }
   results.clear();
 
@@ -3056,13 +3062,6 @@ int ha_federated::real_connect() {
   /* Just throw away the result, no rows anyways but need to keep in sync */
   mysql_free_result(mysql_store_result(mysql));
 
-  /*
-    Since we do not support transactions at this version, we can let the client
-    API silently reconnect. For future versions, we will need more logic to
-    deal with transactions
-  */
-
-  mysql->reconnect = true;
   return 0;
 }
 

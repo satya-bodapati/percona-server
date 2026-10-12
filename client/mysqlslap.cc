@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2005, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2005, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -87,27 +88,27 @@ TODO:
 
 #include "my_config.h"
 
-#include <ctype.h>
 #include <fcntl.h>
 #include <mysqld_error.h>
-#include <signal.h>
-#include <stdarg.h>
-#include <stdlib.h>
 #include <sys/types.h>
+#include <cctype>
+#include <csignal>
+#include <cstdarg>
+#include <cstdlib>
 
-#include "caching_sha2_passwordopt-vars.h"
+#include "client/include/caching_sha2_passwordopt-vars.h"
+#include "client/include/sslopt-vars.h"
 #include "my_dir.h"
-#include "sslopt-vars.h"
 #ifdef HAVE_SYS_WAIT_H
 #include <sys/wait.h>
 #endif
 #ifdef HAVE_SYS_TIME_H
 #include <sys/time.h>
 #endif
-#include <stdio.h>
-#include <time.h>
+#include <cstdio>
+#include <ctime>
 
-#include "client/client_priv.h"
+#include "client/include/client_priv.h"
 #include "compression.h"
 #include "m_string.h"
 #include "my_alloc.h"
@@ -120,6 +121,7 @@ TODO:
 #include "nulls.h"
 #include "print_version.h"
 #include "thr_cond.h"
+#include "thr_mutex.h"
 #include "typelib.h"
 #include "welcome_copyright_notice.h" /* ORACLE_WELCOME_COPYRIGHT_NOTICE */
 
@@ -206,10 +208,12 @@ File csv_file;
 
 static uint opt_protocol = 0;
 
-#include "multi_factor_passwordopt-vars.h"
+#include "client/include/multi_factor_passwordopt-vars.h"
 
 static int get_options(int *argc, char ***argv);
 static uint opt_mysql_port = 0;
+
+static int set_mysql_options(MYSQL *mysql);
 
 static const char *load_default_groups[] = {"mysqlslap", "client", nullptr};
 
@@ -277,12 +281,12 @@ uint parse_delimiter(const char *script, statement **stmt, char delm);
 int parse_option(const char *origin, option_string **stmt, char delm);
 static int drop_schema(MYSQL *mysql, const char *db);
 size_t get_random_string(char *buf);
-static statement *build_table_string(void);
-static statement *build_insert_string(void);
-static statement *build_update_string(void);
+static statement *build_table_string();
+static statement *build_insert_string();
+static statement *build_update_string();
 static statement *build_select_string(bool key);
 static int generate_primary_key_list(MYSQL *mysql, option_string *engine_stmt);
-static int drop_primary_key_list(void);
+static int drop_primary_key_list();
 static int create_schema(MYSQL *mysql, const char *db, statement *stmt,
                          option_string *engine_stmt);
 static void set_sql_mode(MYSQL *mysql);
@@ -348,44 +352,21 @@ int main(int argc, char **argv) {
     my_end(0);
     return EXIT_FAILURE;
   }
-  mysql_init(&mysql);
-  if (opt_compress) mysql_options(&mysql, MYSQL_OPT_COMPRESS, NullS);
 
-  if (opt_compress_algorithm)
-    mysql_options(&mysql, MYSQL_OPT_COMPRESSION_ALGORITHMS,
-                  opt_compress_algorithm);
-
-  mysql_options(&mysql, MYSQL_OPT_ZSTD_COMPRESSION_LEVEL,
-                &opt_zstd_compress_level);
-
-  if (SSL_SET_OPTIONS(&mysql)) {
-    fprintf(stderr, "%s", SSL_SET_OPTIONS_ERROR);
+  if (!(mysql_init(&mysql))) {
+    fprintf(stderr, "%s: mysql_init() failed ERROR : %s\n", my_progname,
+            mysql_error(&mysql));
+    my_end(0);
     return EXIT_FAILURE;
   }
-  if (opt_protocol)
-    mysql_options(&mysql, MYSQL_OPT_PROTOCOL, (char *)&opt_protocol);
-#if defined(_WIN32)
-  if (shared_memory_base_name)
-    mysql_options(&mysql, MYSQL_SHARED_MEMORY_BASE_NAME,
-                  shared_memory_base_name);
-#endif
-  mysql_options(&mysql, MYSQL_SET_CHARSET_NAME, default_charset);
 
-  if (opt_plugin_dir && *opt_plugin_dir)
-    mysql_options(&mysql, MYSQL_PLUGIN_DIR, opt_plugin_dir);
+  if (set_mysql_options(&mysql) != 0) {
+    fprintf(stderr, "%s: set_mysql_options() failed\n", my_progname);
+    mysql_close(&mysql);
+    my_end(0);
+    return EXIT_FAILURE;
+  }
 
-  if (opt_default_auth && *opt_default_auth)
-    mysql_options(&mysql, MYSQL_DEFAULT_AUTH, opt_default_auth);
-
-  mysql_options(&mysql, MYSQL_OPT_CONNECT_ATTR_RESET, nullptr);
-  mysql_options4(&mysql, MYSQL_OPT_CONNECT_ATTR_ADD, "program_name",
-                 "mysqlslap");
-  if (using_opt_enable_cleartext_plugin)
-    mysql_options(&mysql, MYSQL_ENABLE_CLEARTEXT_PLUGIN,
-                  (char *)&opt_enable_cleartext_plugin);
-  set_server_public_key(&mysql);
-  set_get_server_public_key_option(&mysql);
-  set_password_options(&mysql);
   if (!opt_only_print) {
     if (!(mysql_real_connect(&mysql, host, user, nullptr, nullptr,
                              opt_mysql_port, opt_mysql_unix_port,
@@ -472,7 +453,7 @@ void concurrency_loop(MYSQL *mysql, uint current, option_string *eptr) {
 
   memset(&conclusion, 0, sizeof(conclusions));
 
-  if (auto_actual_queries)
+  if (auto_actual_queries && auto_generate_sql)
     client_limit = auto_actual_queries;
   else if (num_of_query)
     client_limit = num_of_query / current;
@@ -668,7 +649,7 @@ static struct my_option my_long_options[] = {
      "been done.",
      &opt_only_print, &opt_only_print, nullptr, GET_BOOL, NO_ARG, 0, 0, 0,
      nullptr, 0, nullptr},
-#include "multi_factor_passwordopt-longopts.h"
+#include "client/include/multi_factor_passwordopt-longopts.h"
 #ifdef _WIN32
     {"pipe", 'W', "Use named pipes to connect to server.", nullptr, nullptr,
      nullptr, GET_NO_ARG, NO_ARG, 0, 0, 0, nullptr, 0, nullptr},
@@ -714,8 +695,8 @@ static struct my_option my_long_options[] = {
      0, 0, 0, nullptr, 0, nullptr},
     {"sql_mode", 0, "Specify sql-mode to run mysqlslap tool.", &sql_mode,
      &sql_mode, nullptr, GET_STR, REQUIRED_ARG, 0, 0, 0, nullptr, 0, nullptr},
-#include "caching_sha2_passwordopt-longopts.h"
-#include "sslopt-longopts.h"
+#include "client/include/caching_sha2_passwordopt-longopts.h"
+#include "client/include/sslopt-longopts.h"
 
     {"user", 'u', "User for login if not current user.", &user, &user, nullptr,
      GET_STR, REQUIRED_ARG, 0, 0, 0, nullptr, 0, nullptr},
@@ -740,7 +721,7 @@ static struct my_option my_long_options[] = {
     {nullptr, 0, nullptr, nullptr, nullptr, nullptr, GET_NO_ARG, NO_ARG, 0, 0,
      0, nullptr, 0, nullptr}};
 
-static void usage(void) {
+static void usage() {
   print_version();
   puts(ORACLE_WELCOME_COPYRIGHT_NOTICE("2005"));
   puts("Run a query multiple times against the server.\n");
@@ -775,7 +756,7 @@ static bool get_one_option(int optid, const struct my_option *opt,
       if (!argument) argument = const_cast<char *>("-"); /* use stdout */
       opt_csv_str = argument;
       break;
-#include "sslopt-case.h"
+#include "client/include/sslopt-case.h"
 
     case 'V':
       print_version();
@@ -811,7 +792,7 @@ size_t get_random_string(char *buf) {
   This function builds a create table query if the user opts to not supply
   a file or string containing a create table statement
 */
-static statement *build_table_string(void) {
+static statement *build_table_string() {
   char buf[HUGE_STRING_LENGTH];
   unsigned int col_count;
   statement *ptr;
@@ -917,7 +898,7 @@ static statement *build_table_string(void) {
   This function builds insert statements when the user opts to not supply
   an insert file or string containing insert data
 */
-static statement *build_update_string(void) {
+static statement *build_update_string() {
   char buf[HUGE_STRING_LENGTH];
   unsigned int col_count;
   statement *ptr;
@@ -981,7 +962,7 @@ static statement *build_update_string(void) {
   This function builds insert statements when the user opts to not supply
   an insert file or string containing insert data
 */
-static statement *build_insert_string(void) {
+static statement *build_insert_string() {
   char buf[HUGE_STRING_LENGTH];
   unsigned int col_count;
   statement *ptr;
@@ -1140,6 +1121,36 @@ static int get_options(int *argc, char ***argv) {
     exit(1);
   }
 
+  if (!auto_generate_sql && auto_actual_queries) {
+    fprintf(stderr,
+            "Warning: %s: --auto-generate-sql not specified but "
+            "--auto-generate-sql-execute-number options is. Turning "
+            "--auto-generate-sql on!\n",
+            my_progname);
+    auto_generate_sql = true;
+  }
+  if (!auto_generate_sql && auto_generate_sql_guid_primary) {
+    fprintf(stderr,
+            "Warning: %s: --auto-generate-sql not specified but "
+            "--auto-generate-sql-guid-primary options is. Turning "
+            "--auto-generate-sql on!\n",
+            my_progname);
+    auto_generate_sql = true;
+  }
+  // we don't do --auto-generate-sql-write-number since it's non-0 by default
+  if (!auto_generate_sql && auto_generate_sql_secondary_indexes) {
+    fprintf(stderr,
+            "Warning: %s: --auto-generate-sql not specified but "
+            "--auto-generate-sql-secondary-indexes options is. Turning "
+            "--auto-generate-sql on!\n",
+            my_progname);
+    auto_generate_sql = true;
+  }
+  // we don't do --auto-generate-sql-load-type since it's non-null by default
+  // we don't do --auto-generate-sql-unique-query-number since it's non-0 by
+  // default we don't do --auto-generate-sql-unique-write-number as it's ON by
+  // default
+
   if (auto_generate_sql && auto_generate_sql_guid_primary &&
       auto_generate_sql_autoincrement) {
     fprintf(stderr,
@@ -1154,8 +1165,7 @@ static int get_options(int *argc, char ***argv) {
     that we actually added a key!
   */
   if (auto_generate_sql && auto_generate_sql_type[0] == 'k')
-    if (auto_generate_sql_autoincrement == false &&
-        auto_generate_sql_guid_primary == false) {
+    if (!auto_generate_sql_autoincrement && !auto_generate_sql_guid_primary) {
       fprintf(stderr, "%s: Can't perform key test without a primary key!\n",
               my_progname);
       exit(1);
@@ -1414,6 +1424,47 @@ static int get_options(int *argc, char ***argv) {
   return 0;
 }
 
+static int set_mysql_options(MYSQL *mysql) {
+  if (opt_compress) mysql_options(mysql, MYSQL_OPT_COMPRESS, NullS);
+
+  if (opt_compress_algorithm)
+    mysql_options(mysql, MYSQL_OPT_COMPRESSION_ALGORITHMS,
+                  opt_compress_algorithm);
+
+  mysql_options(mysql, MYSQL_OPT_ZSTD_COMPRESSION_LEVEL,
+                &opt_zstd_compress_level);
+
+  if (SSL_SET_OPTIONS(mysql)) {
+    fprintf(stderr, "%s", SSL_SET_OPTIONS_ERROR);
+    return EXIT_FAILURE;
+  }
+  if (opt_protocol)
+    mysql_options(mysql, MYSQL_OPT_PROTOCOL, (char *)&opt_protocol);
+#if defined(_WIN32)
+  if (shared_memory_base_name)
+    mysql_options(mysql, MYSQL_SHARED_MEMORY_BASE_NAME,
+                  shared_memory_base_name);
+#endif
+  mysql_options(mysql, MYSQL_SET_CHARSET_NAME, default_charset);
+
+  if (opt_plugin_dir && *opt_plugin_dir)
+    mysql_options(mysql, MYSQL_PLUGIN_DIR, opt_plugin_dir);
+
+  if (opt_default_auth && *opt_default_auth)
+    mysql_options(mysql, MYSQL_DEFAULT_AUTH, opt_default_auth);
+
+  mysql_options(mysql, MYSQL_OPT_CONNECT_ATTR_RESET, nullptr);
+  mysql_options4(mysql, MYSQL_OPT_CONNECT_ATTR_ADD, "program_name",
+                 "mysqlslap");
+  if (using_opt_enable_cleartext_plugin)
+    mysql_options(mysql, MYSQL_ENABLE_CLEARTEXT_PLUGIN,
+                  (char *)&opt_enable_cleartext_plugin);
+  set_server_public_key(mysql);
+  set_get_server_public_key_option(mysql);
+  set_password_options(mysql);
+  return 0;
+}
+
 static int run_query(MYSQL *mysql, const char *query, size_t len) {
   if (opt_only_print) {
     printf("%.*s;\n", (int)len, query);
@@ -1477,7 +1528,7 @@ static int generate_primary_key_list(MYSQL *mysql, option_string *engine_stmt) {
   return 0;
 }
 
-static int drop_primary_key_list(void) {
+static int drop_primary_key_list() {
   unsigned long long counter;
 
   if (primary_keys_number_of) {
@@ -1681,7 +1732,7 @@ extern "C" void *run_task(void *p) {
   MYSQL *mysql;
   MYSQL_RES *result;
   statement *ptr;
-  thread_context *con = (thread_context *)p;
+  auto *con = (thread_context *)p;
 
   {
     DBUG_TRACE;
@@ -1694,15 +1745,20 @@ extern "C" void *run_task(void *p) {
     }
     native_mutex_unlock(&sleeper_mutex);
 
+    if (mysql_thread_init()) {
+      fprintf(stderr, "%s: mysql_thread_init() failed ERROR : %s\n",
+              my_progname, mysql_error(nullptr));
+      exit(0);
+    }
+
     if (!(mysql = mysql_init(nullptr))) {
       fprintf(stderr, "%s: mysql_init() failed ERROR : %s\n", my_progname,
               mysql_error(mysql));
       exit(0);
     }
 
-    if (mysql_thread_init()) {
-      fprintf(stderr, "%s: mysql_thread_init() failed ERROR : %s\n",
-              my_progname, mysql_error(mysql));
+    if (set_mysql_options(mysql) != 0) {
+      fprintf(stderr, "%s: set_mysql_options() failed\n", my_progname);
       mysql_close(mysql);
       exit(0);
     }
@@ -1730,6 +1786,11 @@ extern "C" void *run_task(void *p) {
         if (!(mysql = mysql_init(nullptr))) {
           fprintf(stderr, "%s: mysql_init() failed ERROR : %s\n", my_progname,
                   mysql_error(mysql));
+          goto end;
+        }
+
+        if (set_mysql_options(mysql) != 0) {
+          fprintf(stderr, "%s: set_mysql_options() failed\n", my_progname);
           goto end;
         }
 
@@ -1800,7 +1861,8 @@ extern "C" void *run_task(void *p) {
       if (con->limit && queries == con->limit) goto end;
     }
 
-    if (con->limit && queries < con->limit) goto limit_not_met;
+    if (con->stmt && con->stmt->length && con->limit && queries < con->limit)
+      goto limit_not_met;
 
   end:
     if (commit_rate) run_query(mysql, "COMMIT", strlen("COMMIT"));
@@ -2048,11 +2110,6 @@ int slap_connect(MYSQL *mysql) {
   /* Connect to server */
   static const ulong connection_retry_sleep = 100000; /* Microseconds */
   int x, connect_error = 1;
-  /* mysql options should be set to worker threads too */
-  set_password_options(mysql);
-  if (using_opt_enable_cleartext_plugin)
-    mysql_options(mysql, MYSQL_ENABLE_CLEARTEXT_PLUGIN,
-                  (char *)&opt_enable_cleartext_plugin);
   for (x = 0; x < 10; x++) {
     if (mysql_real_connect(mysql, host, user, nullptr, create_schema_string,
                            opt_mysql_port, opt_mysql_unix_port,

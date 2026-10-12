@@ -1,15 +1,16 @@
-/* Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -57,6 +58,7 @@ namespace dd {
 class Foreign_key;
 class Schema;
 class Table;
+class View;
 }  // namespace dd
 
 struct HA_CHECK_OPT;
@@ -122,13 +124,31 @@ bool mysql_discard_or_import_tablespace(THD *thd, Table_ref *table_list);
   data-dictionary cache entries and performing such invalidation.
 */
 class Foreign_key_parents_invalidator {
+ public:
+  enum enum_invalidation_type {
+    INVALIDATE_AND_CLOSE_TABLE,
+    INVALIDATE_AND_MARK_FOR_REOPEN
+  };
+
  private:
-  typedef std::map<std::pair<dd::String_type, dd::String_type>, handlerton *>
+  typedef std::map<std::pair<dd::String_type, dd::String_type>,
+                   std::pair<handlerton *, enum_invalidation_type>>
       Parent_map;
   Parent_map m_parent_map;
 
  public:
-  void add(const char *db_name, const char *table_name, handlerton *hton);
+  void add(
+      const char *db_name, const char *table_name, handlerton *hton,
+      enum_invalidation_type invalidation_type = INVALIDATE_AND_CLOSE_TABLE);
+  // Usually tables added to a Foreign_key_parents_invalidator instance are
+  // closed by the invalidate member function.  However, occasionally tables
+  // are added that we subsequently discover should only be invalidated and
+  // not closed by the invalidate member function as they will be closed
+  // elsewhere.
+  // See bool Query_result_create::send_eof(THD *thd) for an example.
+  // The mark_for_reopen_if_added member function updates the
+  // corresponding Parent_map entry if necessary in this situation.
+  void mark_for_reopen_if_added(const char *db_name, const char *table_name);
   void invalidate(THD *thd);
   const Parent_map &parents() const { return m_parent_map; }
   bool is_empty() const { return m_parent_map.empty(); }
@@ -390,6 +410,7 @@ bool collect_fk_names_for_new_fks(THD *thd, const char *db_name,
 
   @sa prepare_fk_parent_key(THD, handlerton, FOREIGN_KEY)
 
+  @param  thd                   Thread handle.
   @param  hton                  Handlerton for tables' storage engine.
   @param  parent_table_def      Object describing new version of parent table.
   @param  old_child_table_def   Object describing old version of child table.
@@ -406,7 +427,7 @@ bool collect_fk_names_for_new_fks(THD *thd, const char *db_name,
 
   @retval Operation result. False if success.
 */
-[[nodiscard]] bool prepare_fk_parent_key(handlerton *hton,
+[[nodiscard]] bool prepare_fk_parent_key(THD *thd, handlerton *hton,
                                          const dd::Table *parent_table_def,
                                          const dd::Table *old_parent_table_def,
                                          const dd::Table *old_child_table_def,
@@ -457,7 +478,8 @@ bool mysql_compare_tables(THD *thd, TABLE *table, Alter_info *alter_info,
                           HA_CREATE_INFO *create_info, bool *metadata_equal);
 bool mysql_recreate_table(THD *thd, Table_ref *table_list, bool table_copy);
 bool mysql_create_like_table(THD *thd, Table_ref *table, Table_ref *src_table,
-                             HA_CREATE_INFO *create_info);
+                             HA_CREATE_INFO *create_info, uint open_flags = 0,
+                             bool skip_post_ddl_operations = false);
 bool mysql_rename_table(THD *thd, handlerton *base, const char *old_db,
                         const char *old_name, const char *old_fk_db,
                         const char *old_fk_name, const dd::Schema &new_schema,
@@ -469,6 +491,8 @@ bool mysql_rm_table(THD *thd, Table_ref *tables, bool if_exists,
                     bool drop_temporary);
 bool mysql_rm_table_no_locks(THD *thd, Table_ref *tables, bool if_exists,
                              bool drop_temporary, bool drop_database,
+                             const char *database_name,
+                             const bool should_drop_schema_ddl_log,
                              bool *dropped_non_atomic_flag,
                              std::set<handlerton *> *post_ddl_htons,
                              Foreign_key_parents_invalidator *fk_invalidator,
@@ -643,4 +667,34 @@ bool lock_check_constraint_names_for_rename(THD *thd, const char *db,
 bool prepare_check_constraints_for_create(THD *thd, const char *db_name,
                                           const char *table_name,
                                           Alter_info *alter_info);
+
+extern std::atomic_ulong deprecated_use_fk_on_non_standard_key_count;
+extern std::atomic_ullong deprecated_use_fk_on_non_standard_key_last_timestamp;
+
+/**
+  Unloads the materialized view from a secondary engine, where it might be
+  materialized.
+ */
+bool secondary_engine_unload_materialized_view(THD *thd, const Table_ref *view,
+                                               const dd::View *view_def);
+
+/**
+  Resolves the secondary engine handled via its name and calls the unload
+  table function
+*/
+bool secondary_engine_unload_table_inner(THD *thd, const char *db_name,
+                                         const char *table_name,
+                                         LEX_CSTRING secondary_engine,
+                                         bool is_partitioned,
+                                         bool error_if_not_loaded);
+
+/**
+  Validation on create temporary table statements with secondary engine defined:
+  1. Check that the create table statement contains a query.
+  2. Set the lex state indicating that the query can execute only
+  on the secondary engine.
+*/
+bool validate_secondary_engine_temporary_table(THD *thd,
+                                               HA_CREATE_INFO *create_info);
+
 #endif /* SQL_TABLE_INCLUDED */

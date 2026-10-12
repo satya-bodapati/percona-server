@@ -122,8 +122,8 @@ insert into t2 values (11),(12),(13),(14),(15);
 (select * from t1 limit 2) union (select * from t2 limit 20,3);
 set SQL_SELECT_LIMIT=2;
 (select * from t1 limit 1) union (select * from t2 limit 3);
-(select * from t1 limit 3) intersect (select * from t1 limit 3);
-(select * from t1 limit 4) except (select * from t1 limit 1);
+(select * from t1 limit 3) intersect (select * from t1 limit 3) order by a;
+(select * from t1 limit 4) except (select * from t1 limit 1) order by a;
 set SQL_SELECT_LIMIT=DEFAULT;
 drop table t1,t2;
 
@@ -329,6 +329,7 @@ analyze table t1;
 
 explain (select * from t1 where a=1) union (select * from t2 where a=1);
 --skip_if_hypergraph  # No support for const tables.
+--replace_regex $elide_costs
 explain format=tree (select * from t1 where a=5) union (select * from t2 where a=1);  # Tests printing of ZeroRowsIterator.
 (select * from t1 where a=5) union (select * from t2 where a=1);
 (select * from t1 where a=5 and a=6) union (select * from t2 where a=1);
@@ -459,7 +460,7 @@ create table t1 select 1 union select -1;
 select * from t1;
 show create table t1;
 drop table t1;
--- error 1267
+-- error ER_CANT_AGGREGATE_2COLLATIONS
 create table t1 select _latin1"test" union select _latin2"testt" ;
 create table t1 select _latin2"test" union select _latin2"testt" ;
 show create table t1;
@@ -494,24 +495,18 @@ insert t1 select a+1, a+b from t1;
 insert t1 select a+1, a+b from t1;
 insert t1 select a+1, a+b from t1;
 FLUSH STATUS;
---skip_if_hypergraph  # Depends on the query plan; all queries use table scans.
 show status like 'Slow_queries';
 select count(*) from t1 where a=7;
---skip_if_hypergraph  # Depends on the query plan; all queries use table scans.
 show status like 'Slow_queries';
 select count(*) from t1 where b=13;
---skip_if_hypergraph  # Depends on the query plan; all queries use table scans.
 show status like 'Slow_queries';
 select count(*) from t1 where b=13 union select count(*) from t1 where a=7;
---skip_if_hypergraph  # Depends on the query plan; all queries use table scans.
 show status like 'Slow_queries';
 select count(*) from t1 where a=7 union select count(*) from t1 where b=13;
---skip_if_hypergraph  # Depends on the query plan; all queries use table scans.
 show status like 'Slow_queries';
 # additional test for examined rows
 flush status;
 select a from t1 where b not in (1,2,3) union select a from t1 where b not in (4,5,6);
---skip_if_hypergraph  # Depends on the query plan; all queries use table scans.
 show status like 'Slow_queries';
 drop table t1;
 
@@ -665,7 +660,7 @@ drop table t1;
 create table t2 (
 a char character set latin1 collate latin1_swedish_ci,
 b char character set latin1 collate latin1_german1_ci);
---error 1271
+--error ER_CANT_AGGREGATE_NCOLLATIONS
 create table t1 as
 (select a from t2) union
 (select b from t2);
@@ -754,8 +749,8 @@ drop table t1;
 # Enum merging test
 #
 CREATE TABLE t1 (
-  a ENUM('ä','ö','ü') character set utf8 not null default 'ü',
-  b ENUM("one", "two") character set utf8,
+  a ENUM('ä','ö','ü') character set utf8mb3 not null default 'ü',
+  b ENUM("one", "two") character set utf8mb3,
   c ENUM("one", "two")
 );
 show create table t1;
@@ -884,7 +879,7 @@ drop table t1;
 # Bug#12185: Data type aggregation may produce wrong result
 #
 SET sql_mode = 'NO_ENGINE_SUBSTITUTION';
-create table t1(f1 char(1), f2 char(5), f3 binary(1), f4 binary(5), f5 timestamp NOT NULL DEFAULT '0000-00-00 00:00:00', f6 varchar(1) character set utf8 collate utf8_general_ci, f7 text);
+create table t1(f1 char(1), f2 char(5), f3 binary(1), f4 binary(5), f5 timestamp NOT NULL DEFAULT '0000-00-00 00:00:00', f6 varchar(1) character set utf8mb3 COLLATE utf8mb3_general_ci, f7 text);
 create table t2 as select *, f6 as f8 from t1 union select *, f7 from t1;
 show create table t2;
 drop table t1, t2;
@@ -941,7 +936,7 @@ SET sql_mode = default;
 # Bug #16881: password() and union select
 # (The issue was poor handling of character set aggregation.)
 #
-select _utf8'12' union select _latin1'12345';
+select _utf8mb3'12' union select _latin1'12345';
 
 #
 # Bug #26661: UNION with ORDER BY undefined column in FROM list
@@ -1330,6 +1325,7 @@ INSERT INTO t2 VALUES (1);
 
 --source include/turn_off_only_full_group_by.inc
 --skip_if_hypergraph  # Depends on the query plan.
+--replace_regex $elide_costs
 EXPLAIN FORMAT=tree SELECT a, SUM(a) FROM t2 UNION ALL SELECT a, MIN(a) FROM t1 ;  # Tests printing of ZeroRowsAggregatedIterator.
 SELECT a, SUM(a) FROM t2 UNION ALL SELECT a, MIN(a) FROM t1 ;
 
@@ -1448,10 +1444,10 @@ let $query=
 SELECT (SELECT 1 AS foo
         UNION
         SELECT 2
-        ORDER BY COUNT(a)) AS x
+        ORDER BY COUNT(a)
+        LIMIT 1) AS x
 FROM t1;
 
---error ER_AGGREGATE_ORDER_FOR_UNION
 eval $query;
 
 --echo # Subquery, ORDER BY contains set function with outer reference
@@ -2117,10 +2113,11 @@ SELECT * FROM (SELECT NULL) AS a;
 --echo # Bug#28237675: ASSERTION IN UNION QUERY WHEN MIXING CHARACTER SETS
 --echo #
 CREATE TABLE t(a VARCHAR(10) CHARSET ASCII);
+
 # When the literal was convertible to ASCII, the query was successful.
 SELECT _utf8mb4 'a' UNION SELECT a FROM t;
 # When the literal was not convertible to ASCII, it hit an assertion.
---error ER_CANT_AGGREGATE_2COLLATIONS
+--error ER_CANNOT_CONVERT_STRING
 SELECT _utf8mb4 0xC3A6 UNION SELECT a FROM t;
 DROP TABLE t;
 
@@ -2213,15 +2210,12 @@ INSERT INTO t1 SELECT a+1 FROM t1;
 SELECT COUNT(*) FROM t1;
 FLUSH STATUS;
 SELECT * FROM t1 LIMIT 1;
---skip_if_hypergraph  # Depends on the query plan.
 SHOW STATUS LIKE "HANDLER_READ%";
 FLUSH STATUS;
 SELECT * FROM t1 UNION ALL SELECT * FROM t1 LIMIT 1;
---skip_if_hypergraph  # Depends on the query plan.
 SHOW STATUS LIKE "HANDLER_READ%";
 FLUSH STATUS;
 SELECT * FROM t1 UNION DISTINCT SELECT * FROM t1 LIMIT 1;
---skip_if_hypergraph  # Depends on the query plan.
 SHOW STATUS LIKE "HANDLER_READ%";
 
 let $query=
@@ -2231,7 +2225,6 @@ let $query=
 eval EXPLAIN FORMAT=TREE $query;
 FLUSH STATUS;
 eval $query;
---skip_if_hypergraph  # Depends on the query plan.
 SHOW STATUS LIKE "HANDLER_READ%";
 
 DROP TABLE t1;
@@ -2679,7 +2672,7 @@ let $query =
       (SELECT * FROM t UNION DISTINCT
        (SELECT a FROM r UNION ALL SELECT * FROM s ORDER BY a LIMIT 10))) UNION DISTINCT
      (VALUES ROW(1), ROW(2) UNION DISTINCT
-      SELECT * FROM s ORDER BY a LIMIT 3)) ORDER BY a LIMIT 3) UNION DISTINCT
+      SELECT * FROM s ORDER BY column_0 LIMIT 3)) ORDER BY a LIMIT 3) UNION DISTINCT
    (SELECT * FROM r UNION DISTINCT SELECT * FROM t) ORDER BY a LIMIT 5;
 eval $query;
 --replace_regex $elide_costs
@@ -2816,3 +2809,58 @@ eval $query;
 eval EXPLAIN format = tree $query;
 
 DROP TABLE r, s, t;
+
+--echo #
+--echo # Bug#35590128 Wrong first-row cost for 'Append'.
+--echo #
+
+CREATE TABLE t1 (
+  a INT,
+  b INT,
+  KEY(a)
+);
+
+INSERT INTO t1 VALUES (0,0), (1,1), (2,2);
+ANALYZE TABLE t1;
+
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE (SELECT b FROM t1 UNION SELECT b FROM t1)
+UNION ALL SELECT b FROM t1;
+
+DROP TABLE t1;
+
+--echo # Bug#35736158: Insert on duplicate assertion error
+
+CREATE TABLE t1 (c1 INTEGER);
+
+INSERT INTO t1 (c1)
+SELECT 2 UNION SELECT 1
+ON DUPLICATE KEY UPDATE c1 = 1 IN (SELECT 1);
+
+DROP TABLE t1;
+
+--echo # Bug#36112585: Data type is changed from VAR_STRING to STRING by UNION
+--echo #               if all values are empty string
+
+CREATE TABLE t
+SELECT 'AAA' AS a, '' AS b, '' AS c
+UNION ALL
+SELECT 'BBB', 'b', '';
+
+DESCRIBE t;
+
+DROP TABLE t;
+
+--echo #
+--echo # Bug#36838373: Failure in Item::convert_charset()
+--echo #
+
+CREATE TABLE t (c0 TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_romanian_ci);
+
+CREATE TABLE r (c0 TEXT CHARACTER SET utf16 COLLATE utf16_bin);
+
+CREATE TABLE e (c0 INTEGER);
+
+TABLE t EXCEPT TABLE r INTERSECT DISTINCT TABLE e;
+
+DROP TABLE t, r, e;

@@ -1,15 +1,16 @@
-/* Copyright (c) 2008, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,60 +25,60 @@
 #define NdbDir_HPP
 
 #ifdef _WIN32
-typedef int mode_t; // Only dummy usage on Windows
+typedef int mode_t;  // Only dummy usage on Windows
 #else
 #include <sys/types.h>  // mode_t
 #endif
 
 class NdbDir {
-public:
+ public:
   class Iterator {
-    class DirIteratorImpl& m_impl;
-    Iterator(const Iterator&);  // not impl
-    Iterator& operator=(const Iterator&); // not impl
-  public:
+    class DirIteratorImpl &m_impl;
+    Iterator(const Iterator &);             // not impl
+    Iterator &operator=(const Iterator &);  // not impl
+   public:
     Iterator();
     ~Iterator();
 
-    int open(const char* path);
-    void close(void);
+    int open(const char *path);
+    void close();
 
     /*
       Return the next regular file or NULL if no more file found
     */
-    const char* next_file(void);
+    const char *next_file();
 
     /*
       Return the next entry(file, dir, symlink etc.) or NULL if no
       more entries found
     */
-    const char* next_entry(void);
+    const char *next_entry();
   };
 
   class Temp {
-    const char* m_path;
-    Temp(const Temp&);  // not impl
-    Temp& operator=(const Temp&); // not impl
-  public:
+    const char *m_path;
+    Temp(const Temp &);             // not impl
+    Temp &operator=(const Temp &);  // not impl
+   public:
     Temp();
     ~Temp();
-    const char* path(void) const;
+    const char *path() const;
   };
 
-  static mode_t u_r(void);
-  static mode_t u_w(void);
-  static mode_t u_x(void);
-  static mode_t u_rwx(void) { return (u_r() | u_w() | u_x()); }
+  static mode_t u_r();
+  static mode_t u_w();
+  static mode_t u_x();
+  static mode_t u_rwx() { return (u_r() | u_w() | u_x()); }
 
-  static mode_t g_r(void);
-  static mode_t g_w(void);
-  static mode_t g_x(void);
-  static mode_t g_rwx(void) { return (g_r() | g_w() | g_x()); }
+  static mode_t g_r();
+  static mode_t g_w();
+  static mode_t g_x();
+  static mode_t g_rwx() { return (g_r() | g_w() | g_x()); }
 
-  static mode_t o_r(void);
-  static mode_t o_w(void);
-  static mode_t o_x(void);
-  static mode_t o_rwx(void) { return (o_r() | o_w() | o_x()); }
+  static mode_t o_r();
+  static mode_t o_w();
+  static mode_t o_x();
+  static mode_t o_rwx() { return (o_r() | o_w() | o_x()); }
 
   /*
     Create directory
@@ -86,8 +87,7 @@ public:
      ignore_existing - don't print or return error if directory
                        already exist
   */
-  static bool create(const char *path,
-                     mode_t mode = u_rwx(),
+  static bool create(const char *path, mode_t mode = u_rwx(),
                      bool ignore_existing = false);
 
   /*
@@ -96,18 +96,17 @@ public:
       only_contents - only remove the contents of the directory
 
   */
-  static bool remove_recursive(const char* path, bool only_contents = false);
+  static bool remove_recursive(const char *path, bool only_contents = false);
 
   /*
     Remove empty directory
   */
-  static bool remove(const char* path);
+  static bool remove(const char *path);
 
   /*
     Change working directory
   */
-  static int chdir(const char* path);
-
+  static int chdir(const char *path);
 };
 
 #endif

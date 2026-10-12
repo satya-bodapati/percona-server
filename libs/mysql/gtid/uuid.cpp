@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,7 +21,7 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
-#include <stddef.h>
+#include <cstddef>
 
 #include "mysql/gtid/uuid.h"
 
@@ -32,7 +33,7 @@ const size_t Uuid::BIT_LENGTH;
 namespace mysql::gtid {
 
 int Uuid::parse(const char *string, size_t len) {
-  return parse(string, len, bytes);
+  return parse(string, len, bytes.data());
 }
 
 int Uuid::parse(const char *in_string, size_t len,
@@ -70,17 +71,17 @@ int Uuid::parse(const char *in_string, size_t len,
 
 bool Uuid::read_section(int section_len, const char **section_str,
                         const unsigned char **out_binary_str) {
-  const unsigned char **section_string =
+  const auto **section_string =
       reinterpret_cast<const unsigned char **>(section_str);
   for (int j = 0; j < section_len; j++) {
-    int hi = hex_to_byte[**section_string];
+    int const hi = hex_to_byte[**section_string];
     if (hi == -1) return true;
     (*section_string)++;
-    int lo = hex_to_byte[**section_string];
+    int const lo = hex_to_byte[**section_string];
     if (lo == -1) return true;
     (*section_string)++;
     if (out_binary_str) {
-      unsigned char *u = const_cast<unsigned char *>(*out_binary_str);
+      auto *u = const_cast<unsigned char *>(*out_binary_str);
       *u = ((hi << 4) + lo);
       (*out_binary_str)++;
     }
@@ -101,7 +102,7 @@ size_t Uuid::to_string(const unsigned char *bytes_arg, char *buf) {
       buf++;
     }
     for (int j = 0; j < bytes_per_section[i]; j++) {
-      int byte = *u;
+      int const byte = *u;
       *buf = byte_to_hex[byte >> 4];
       buf++;
       *buf = byte_to_hex[byte & 0xf];
@@ -113,5 +114,5 @@ size_t Uuid::to_string(const unsigned char *bytes_arg, char *buf) {
   return TEXT_LENGTH;
 }
 
-size_t Uuid::to_string(char *buf) const { return to_string(bytes, buf); }
+size_t Uuid::to_string(char *buf) const { return to_string(bytes.data(), buf); }
 }  // namespace mysql::gtid

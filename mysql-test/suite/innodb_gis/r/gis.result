@@ -1110,7 +1110,7 @@ ERROR HY000: Geometry byte string must be little endian.
 # BUG#12537203 - CRASH WHEN SUBSELECTING GLOBAL VARIABLES IN
 # GEOMETRY FUNCTION ARGUMENTS
 #
-SELECT GEOMETRYCOLLECTION((SELECT @@OLD));
+SELECT GEOMETRYCOLLECTION((SELECT @@CORE_FILE));
 ERROR 22007: Illegal non geometric '' value found during parsing
 End of 5.1 tests
 #
@@ -1495,5 +1495,5 @@ DROP DATABASE gis_ogs;
 #
 # Bug#13362660 ASSERTION `FIELD_POS < FIELD_COUNT' FAILED. IN PROTOCOL_TEXT::STORE
 #
-SELECT ST_Union('', ''), md5(1);
+SELECT ST_Union('', ''), SHA2(1,256);
 ERROR 22023: Invalid GIS data provided to function st_union.

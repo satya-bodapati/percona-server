@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -319,8 +320,8 @@ void Session_holder::setup_msg_callbacks() {
       });
 
   protocol.add_received_message_handler(
-      [this](xcl::XProtocol *protocol,
-             const xcl::XProtocol::Server_message_type_id msg_id,
+      [this](xcl::XProtocol * /*protocol*/,
+             const xcl::XProtocol::Server_message_type_id /*msg_id*/,
              const xcl::XProtocol::Message &msg) -> xcl::Handler_result {
         print_message_to_consoles("<<<< RECEIVE ", msg);
 
@@ -330,8 +331,8 @@ void Session_holder::setup_msg_callbacks() {
       });
 
   protocol.add_send_message_handler(
-      [this](xcl::XProtocol *protocol,
-             const xcl::XProtocol::Client_message_type_id msg_id,
+      [this](xcl::XProtocol * /*protocol*/,
+             const xcl::XProtocol::Client_message_type_id /*msg_id*/,
              const xcl::XProtocol::Message &msg) -> xcl::Handler_result {
         print_message_to_consoles(">>>> SEND ", msg);
 
@@ -349,16 +350,16 @@ void Session_holder::remove_notice_handler() {
 }
 
 xcl::Handler_result Session_holder::count_received_messages(
-    xcl::XProtocol *protocol,
+    xcl::XProtocol * /*protocol*/,
     const xcl::XProtocol::Server_message_type_id msg_id,
     const xcl::XProtocol::Message &msg) {
   const auto protobuf_message_name = msg.GetDescriptor()->full_name();
   const auto server_message_name =
       Mysqlx::ServerMessages::descriptor()->full_name();
   const bool is_empty_message = (protobuf_message_name == server_message_name);
-  const std::string &msg_name = !is_empty_message
-                                    ? msg.GetDescriptor()->full_name()
-                                    : server_msgs_by_id[msg_id].second;
+  const std::string &msg_name =
+      !is_empty_message ? std::string(msg.GetDescriptor()->full_name())
+                        : server_msgs_by_id[msg_id].second;
 
   ++m_received_msg_counters[msg_name];
 
@@ -366,11 +367,14 @@ xcl::Handler_result Session_holder::count_received_messages(
     return xcl::Handler_result::Continue;
 
   static const std::array<std::string, 5> k_notice_type_id = {
-      Mysqlx::Notice::Warning::descriptor()->full_name(),
-      Mysqlx::Notice::SessionVariableChanged::descriptor()->full_name(),
-      Mysqlx::Notice::SessionStateChanged::descriptor()->full_name(),
-      Mysqlx::Notice::GroupReplicationStateChanged::descriptor()->full_name(),
-      Mysqlx::Notice::ServerHello::descriptor()->full_name(),
+      std::string(Mysqlx::Notice::Warning::descriptor()->full_name()),
+      std::string(
+          Mysqlx::Notice::SessionVariableChanged::descriptor()->full_name()),
+      std::string(
+          Mysqlx::Notice::SessionStateChanged::descriptor()->full_name()),
+      std::string(Mysqlx::Notice::GroupReplicationStateChanged::descriptor()
+                      ->full_name()),
+      std::string(Mysqlx::Notice::ServerHello::descriptor()->full_name()),
   };
 
   const auto notice_type =
@@ -382,11 +386,9 @@ xcl::Handler_result Session_holder::count_received_messages(
   return xcl::Handler_result::Continue;
 }
 
-xcl::Handler_result Session_holder::dump_notices(const xcl::XProtocol *protocol,
-                                                 const bool is_global,
-                                                 const Frame_type type,
-                                                 const char *data,
-                                                 const uint32_t data_length) {
+xcl::Handler_result Session_holder::dump_notices(
+    const xcl::XProtocol * /*protocol*/, const bool /*is_global*/,
+    const Frame_type type, const char *data, const uint32_t data_length) {
   if (type == Frame_type::Frame_Type_SESSION_STATE_CHANGED) {
     Mysqlx::Notice::SessionStateChanged change;
 

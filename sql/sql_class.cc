@@ -1,17 +1,18 @@
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2026, Oracle and/or its affiliates.
    Copyright (c) 2016, Percona Inc. All Rights Reserved.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -60,6 +61,7 @@
 #include "rpl_source.h"  // unregister_slave
 #include "scope_guard.h"
 #include "server_component/mysql_server_event_tracking_bridge_imp.h"
+#include "server_component/mysql_thd_kill_handler_imp.h"
 #include "sql/auth/sql_security_ctx.h"
 #include "sql/binlog.h"
 #include "sql/check_stack.h"
@@ -193,6 +195,16 @@ void Thd_mem_cnt::alloc_cnt(size_t size) {
   }
 #endif
 
+  ulonglong conn_mem_status_limit_save = conn_memory_status_limit;
+  if (!m_thd->lex->is_crossed_connection_memory_status_limit() &&
+      (mem_counter - size) <= conn_mem_status_limit_save &&
+      mem_counter > conn_mem_status_limit_save) {
+    // update status variables
+    // count_hit_query_past_connection_memory_status_limit
+    atomic_count_hit_query_past_conn_mem_status_limit++;
+    m_thd->lex->set_crossed_connection_memory_status_limit();
+  }
+
   if (mem_counter > m_thd->variables.conn_mem_limit) {
 #ifndef NDEBUG
     // Used for testing the entering to idle state
@@ -213,14 +225,27 @@ void Thd_mem_cnt::alloc_cnt(size_t size) {
     const ulonglong delta = curr_mem - glob_mem_counter;
     ulonglong global_conn_mem_counter_save;
     ulonglong global_conn_mem_limit_save;
+    ulonglong global_conn_mem_status_limit_save;
     {
       MUTEX_LOCK(lock, &LOCK_global_conn_mem_limit);
       global_conn_mem_counter += delta;
       global_conn_mem_counter_save = global_conn_mem_counter;
       global_conn_mem_limit_save = global_conn_mem_limit;
+      global_conn_mem_status_limit_save = global_conn_memory_status_limit;
     }
     glob_mem_counter = curr_mem;
     max_conn_mem = std::max(max_conn_mem, glob_mem_counter);
+
+    if (!m_thd->lex->is_crossed_global_connection_memory_status_limit() &&
+        (global_conn_mem_counter_save - delta) <=
+            global_conn_mem_status_limit_save &&
+        global_conn_mem_counter_save > global_conn_mem_status_limit_save) {
+      // update status variables
+      // count_hit_query_past_global_connection_memory_status_limit
+      atomic_count_hit_query_past_global_conn_mem_status_limit++;
+      m_thd->lex->set_crossed_global_connection_memory_status_limit();
+    }
+
     if (global_conn_mem_counter_save > global_conn_mem_limit_save) {
 #ifndef NDEBUG
       // Used for testing the entering to idle state
@@ -261,6 +286,7 @@ int Thd_mem_cnt::reset() {
     ulonglong delta;
     ulonglong global_conn_mem_counter_save;
     ulonglong global_conn_mem_limit_save;
+    ulonglong global_conn_mem_status_limit_save;
     if (glob_mem_counter > mem_counter) {
       delta = glob_mem_counter - mem_counter;
       MUTEX_LOCK(lock, &LOCK_global_conn_mem_limit);
@@ -268,22 +294,43 @@ int Thd_mem_cnt::reset() {
       global_conn_mem_counter -= delta;
       global_conn_mem_counter_save = global_conn_mem_counter;
       global_conn_mem_limit_save = global_conn_mem_limit;
+      global_conn_mem_status_limit_save = global_conn_memory_status_limit;
     } else {
       delta = mem_counter - glob_mem_counter;
       MUTEX_LOCK(lock, &LOCK_global_conn_mem_limit);
       global_conn_mem_counter += delta;
       global_conn_mem_counter_save = global_conn_mem_counter;
       global_conn_mem_limit_save = global_conn_mem_limit;
+      global_conn_mem_status_limit_save = global_conn_memory_status_limit;
     }
     glob_mem_counter = mem_counter;
-    if (is_connection_stage &&
-        (global_conn_mem_counter_save > global_conn_mem_limit_save))
-      return generate_error(ER_DA_GLOBAL_CONN_LIMIT, global_conn_mem_limit_save,
-                            global_conn_mem_counter_save);
+    if (is_connection_stage) {
+      if (!m_thd->lex->is_crossed_global_connection_memory_status_limit() &&
+          global_conn_mem_counter_save > global_conn_mem_status_limit_save) {
+        // update status variables
+        // count_hit_query_past_global_connection_memory_status_limit
+        atomic_count_hit_query_past_global_conn_mem_status_limit++;
+        m_thd->lex->set_crossed_global_connection_memory_status_limit();
+      }
+
+      if (global_conn_mem_counter_save > global_conn_mem_limit_save)
+        return generate_error(ER_DA_GLOBAL_CONN_LIMIT,
+                              global_conn_mem_limit_save,
+                              global_conn_mem_counter_save);
+    }
   }
-  if (is_connection_stage && (mem_counter > m_thd->variables.conn_mem_limit))
-    return generate_error(ER_DA_CONN_LIMIT, m_thd->variables.conn_mem_limit,
-                          mem_counter);
+  if (is_connection_stage) {
+    if (!m_thd->lex->is_crossed_connection_memory_status_limit() &&
+        mem_counter > conn_memory_status_limit) {
+      // update status variables
+      // count_hit_query_past_connection_memory_status_limit
+      atomic_count_hit_query_past_conn_mem_status_limit++;
+      m_thd->lex->set_crossed_connection_memory_status_limit();
+    }
+    if (mem_counter > m_thd->variables.conn_mem_limit)
+      return generate_error(ER_DA_CONN_LIMIT, m_thd->variables.conn_mem_limit,
+                            mem_counter);
+  }
   is_connection_stage = false;
   return 0;
 }
@@ -567,6 +614,7 @@ void THD::enter_stage(const PSI_stage_info *new_stage,
 
     m_current_stage_key = new_stage->m_key;
     set_proc_info(msg);
+    store_cached_properties(cached_properties::RW_STATUS);
 
     m_stage_progress_psi =
         MYSQL_SET_STAGE(m_current_stage_key, calling_file, calling_line);
@@ -640,6 +688,7 @@ THD::THD(bool enable_plugins)
       m_dd_client(new dd::cache::Dictionary_client(this)),
       m_query_string(NULL_CSTR),
       m_db(NULL_CSTR),
+      m_eligible_secondary_engine_handlerton(nullptr),
       rli_fake(nullptr),
       rli_slave(nullptr),
       copy_status_var_ptr(nullptr),
@@ -707,7 +756,7 @@ THD::THD(bool enable_plugins)
       m_enable_plugins(enable_plugins),
       m_audited(true),
 #ifdef HAVE_GTID_NEXT_LIST
-      owned_gtid_set(global_sid_map),
+      owned_gtid_set(global_tsid_map),
 #endif
       rpl_thd_ctx(key_memory_rpl_thd_context),
       skip_gtid_rollback(false),
@@ -730,6 +779,7 @@ THD::THD(bool enable_plugins)
       external_store_(),
       events_cache_(nullptr),
       audit_plugins_present(false) {
+  has_incremented_gtid_automatic_count = false;
   main_lex->reset();
   set_psi(nullptr);
   mdl_context.init(this);
@@ -831,6 +881,7 @@ THD::THD(bool enable_plugins)
   protocol_text->init(this);
   protocol_binary->init(this);
   protocol_text->set_client_capabilities(0);  // minimalistic client
+  store_cached_properties();
 
   /*
     Make sure thr_lock_info_init() is called for threads which do not get
@@ -865,6 +916,26 @@ THD::THD(bool enable_plugins)
   if (events_cache_ == nullptr || !events_cache_->valid()) {
     /*ToDo: Raise warning */
   }
+
+  // Initialize based on the global system startup variable
+  if (!innodb_native_foreign_keys)
+    variables.option_bits |= OPTION_USE_SQL_FOREIGN_KEY_HANDLING;
+}
+
+void THD::store_cached_properties(cached_properties prop_mask) {
+  DBUG_EXECUTE_IF("assert_only_current_thd_protocol_access",
+                  { assert(current_thd == this); });
+
+  auto is_selected = [this, prop_mask](cached_properties property) -> bool {
+    return (this->m_protocol != nullptr &&
+            static_cast<int>(prop_mask) & static_cast<int>(property));
+  };
+
+  if (is_selected(cached_properties::IS_ALIVE))
+    m_cached_is_connection_alive.store(m_protocol->connection_alive());
+
+  if (is_selected(cached_properties::RW_STATUS))
+    m_cached_rw_status.store(m_protocol->get_rw_status());
 }
 
 void THD::copy_table_access_properties(THD *thd) {
@@ -879,6 +950,19 @@ void THD::set_transaction(Transaction_ctx *transaction_ctx) {
 
   delete m_transaction.release();
   m_transaction.reset(transaction_ctx);
+}
+
+void THD::set_secondary_engine_statement_context(
+    std::unique_ptr<Secondary_engine_statement_context> context) {
+  m_secondary_engine_statement_context = std::move(context);
+}
+
+void THD::set_eligible_secondary_engine_handlerton(handlerton *hton) {
+  m_eligible_secondary_engine_handlerton = hton;
+}
+
+void THD::cleanup_after_statement_execution() {
+  set_secondary_engine_statement_context(nullptr);
 }
 
 bool THD::set_db(const LEX_CSTRING &new_db) {
@@ -1140,7 +1224,7 @@ void THD::init(void) {
   session_tracker.enable(this);
 
   owned_gtid.clear();
-  owned_sid.clear();
+  owned_tsid.clear();
   m_se_gtid_flags.reset();
   owned_gtid.dbug_print(nullptr, "set owned_gtid (clear) in THD::init");
 
@@ -1172,6 +1256,15 @@ void THD::set_new_thread_id() {
   thr_lock_info_init(&lock_info, m_thread_id, &COND_thr_lock);
 }
 
+void THD::set_protocol_dependent_variables(Protocol *proto) {
+  assert(proto != nullptr);
+
+  if (proto->has_client_capability(CLIENT_INTERACTIVE))
+    variables.net_wait_timeout = variables.net_interactive_timeout;
+  if (proto->has_client_capability(CLIENT_IGNORE_SPACE))
+    variables.sql_mode |= MODE_IGNORE_SPACE;
+}
+
 /*
   Do what's needed when one invokes change user
 
@@ -1201,6 +1294,7 @@ void THD::cleanup_connection(void) {
   running_explain_analyze = false;
   m_thd_life_cycle_stage = enum_thd_life_cycle_stages::ACTIVE;
   init();
+  set_protocol_dependent_variables(m_protocol);
   stmt_map.reset();
   user_vars.clear();
   sp_cache_clear(&sp_proc_cache);
@@ -1386,6 +1480,7 @@ void THD::release_resources() {
   if (is_classic_protocol() && get_protocol_classic()->get_vio()) {
     vio_delete(get_protocol_classic()->get_vio());
     get_protocol_classic()->end_net();
+    store_cached_properties();
   }
 
   /* modification plan for UPDATE/DELETE should be freed. */
@@ -1455,6 +1550,12 @@ THD::~THD() {
   THD_CHECK_SENTRY(this);
   DBUG_TRACE;
   DBUG_PRINT("info", ("THD dtor, this %p", this));
+  assert(m_eligible_secondary_engine_handlerton == nullptr);
+  assert(m_secondary_engine_statement_context == nullptr);
+
+  if (has_incremented_gtid_automatic_count) {
+    gtid_state->decrease_gtid_automatic_tagged_count();
+  }
 
   if (!release_resources_done()) release_resources();
 
@@ -1618,6 +1719,17 @@ void THD::awake(THD::killed_state state_to_set) {
   /* Interrupt target waiting inside a storage engine. */
   if (state_to_set != THD::NOT_KILLED) ha_kill_connection(this);
 
+  /*
+    If present invoke handler in a component to abort long-running or
+    blocking operation it might be executing.
+  */
+  if (state_to_set != THD::NOT_KILLED) {
+    if (m_kill_handler_fn != nullptr) {
+      Mysql_thd_kill_handler_imp::call_handler(this, m_kill_handler_fn,
+                                               m_kill_handler_data);
+    }
+  }
+
   if (state_to_set == THD::KILL_TIMEOUT) {
     assert(!status_var_aggregated);
     status_var.max_execution_time_exceeded++;
@@ -1732,6 +1844,8 @@ void THD::disconnect(bool server_shutdown) {
     /* Disconnect even if a active vio is not associated. */
     if (is_classic_protocol() && get_protocol_classic()->get_vio() != vio &&
         get_protocol_classic()->connection_alive()) {
+      DBUG_EXECUTE_IF("assert_only_current_thd_protocol_access",
+                      { assert(current_thd == this); });
       m_protocol->shutdown(server_shutdown);
     }
   }
@@ -1801,7 +1915,7 @@ void THD::store_globals() {
 */
 void THD::restore_globals() {
   // Remove reference to specific OS thread.
-  real_id = 0;
+  real_id = null_thread_initializer;
   /*
     Assert that thread_stack is initialized: it's necessary to be able
     to track stack overrun.
@@ -1971,6 +2085,8 @@ void THD::cleanup_after_query() {
   // Cleanup and free items that were created during this execution
   cleanup_items(item_list());
   free_items();
+  m_eligible_secondary_engine_handlerton = nullptr;
+
   /* Reset where. */
   where = THD::DEFAULT_WHERE;
   /* reset table map for multi-table update */
@@ -1980,7 +2096,9 @@ void THD::cleanup_after_query() {
   if (lex) {
     lex->mi.repl_ignore_server_ids.clear();
   }
-  if (rli_slave) rli_slave->cleanup_after_query();
+  if (rli_slave) {
+    rli_slave->cleanup_after_query();
+  }
   // Set the default "cute" mode for the execution environment:
   check_for_truncated_fields = CHECK_FIELD_IGNORE;
 }
@@ -2180,6 +2298,7 @@ void THD::rollback_item_tree_changes() {
 }
 
 void Query_arena::add_item(Item *item) {
+  assert(item->next_free == nullptr);
   item->next_free = m_item_list;
   m_item_list = item;
 }
@@ -2440,6 +2559,8 @@ void THD::reset_sub_statement_state(Sub_statement_state *backup,
   backup->examined_row_count = m_examined_row_count;
   backup->sent_row_count = m_sent_row_count;
   backup->num_truncated_fields = num_truncated_fields;
+  DBUG_EXECUTE_IF("assert_only_current_thd_protocol_access",
+                  { assert(current_thd == this); });
   backup->client_capabilities = m_protocol->get_client_capabilities();
   backup->savepoints = get_transaction()->m_savepoints;
   backup->first_successful_insert_id_in_prev_stmt =
@@ -2648,6 +2769,11 @@ void THD::inc_status_created_tmp_tables() {
 #ifdef HAVE_PSI_STATEMENT_INTERFACE
   PSI_STATEMENT_CALL(inc_statement_created_tmp_tables)(m_statement_psi, 1);
 #endif
+}
+
+void THD::inc_status_count_hit_tmp_table_size() {
+  assert(!status_var_aggregated);
+  status_var.count_hit_tmp_table_size++;
 }
 
 void THD::inc_status_select_full_join() {
@@ -3089,6 +3215,8 @@ bool THD::send_result_metadata(const mem_root_deque<Item *> &list, uint flags) {
   DBUG_TRACE;
   uchar buff[MAX_FIELD_WIDTH];
   String tmp((char *)buff, sizeof(buff), &my_charset_bin);
+  DBUG_EXECUTE_IF("assert_only_current_thd_protocol_access",
+                  { assert(current_thd == this); });
 
   if (m_protocol->start_result_metadata(CountVisibleFields(list), flags,
                                         variables.character_set_results))
@@ -3129,6 +3257,8 @@ bool THD::send_result_set_row(const mem_root_deque<Item *> &row_items) {
   String str_buffer(buffer, sizeof(buffer), &my_charset_bin);
 
   DBUG_TRACE;
+  DBUG_EXECUTE_IF("assert_only_current_thd_protocol_access",
+                  { assert(current_thd == this); });
 
   for (Item *item : VisibleFields(row_items)) {
     if (item->send(m_protocol, &str_buffer) || is_error()) return true;
@@ -3146,6 +3276,8 @@ void THD::send_statement_status() {
   assert(!get_stmt_da()->is_sent());
   bool error = false;
   Diagnostics_area *da = get_stmt_da();
+  DBUG_EXECUTE_IF("assert_only_current_thd_protocol_access",
+                  { assert(current_thd == this); });
 
   /* Can not be true, but do not take chances in production. */
   if (da->is_sent()) return;
@@ -3252,8 +3384,7 @@ bool THD::is_current_stmt_binlog_enabled_and_caches_empty() const {
 }
 
 bool THD::is_current_stmt_binlog_row_enabled_with_write_set_extraction() const {
-  return ((variables.transaction_write_set_extraction != HASH_ALGORITHM_OFF) &&
-          is_current_stmt_binlog_format_row() &&
+  return (is_current_stmt_binlog_format_row() &&
           !is_current_stmt_binlog_disabled());
 }
 
@@ -3416,8 +3547,19 @@ void THD::cleanup_after_parse_error() {
 
   if (sp) {
     sp->m_parser_data.finish_parsing_sp_body(this);
-    //  Do not delete sp_head if is invoked in the context of sp execution.
-    if (sp_runtime_ctx == nullptr) {
+    // Do not delete sp_head if is invoked in the context of sp execution,
+    // unless the parsing happens as part of preparing.
+    // If parsing of a prepared statement fails, thd->lex can be left
+    // referencing a LEX created on the sp_head mem_root, (currently the
+    // only preparable statements which create an sp_head are CREATE
+    // and ALTER EVENT).
+    // It is important to clean up the lex objects belonging to the sp_head
+    // mem_root before returning to Prepared_statement::prepare().
+    // Otherwise, such a LEX will be swapped into m_lex by
+    // stmt_backup.restore_thd(). This would lead to reads of freed memory in
+    // ~Prepared_statement() (when m_lex was accessed after calling
+    // sp_head::destroy() there).
+    if (sp_runtime_ctx == nullptr || m_parser_state->m_lip.stmt_prepare_mode) {
       sp_head::destroy(sp);
       lex->sphead = nullptr;
     }
@@ -3429,13 +3571,22 @@ bool THD::is_classic_protocol() const {
          get_protocol()->type() == Protocol::PROTOCOL_TEXT;
 }
 
-bool THD::is_connected() {
+bool THD::is_connected(bool use_cached_connection_alive) {
   /*
     All system threads (e.g., the slave IO thread) are connected but
     not using vio. So this function always returns true for all
     system threads.
   */
   if (system_thread) return true;
+
+  /*
+    In some situations, e.g. when generating information_schema.processlist,
+    we can live with a cached value to avoid introducing mutex usage.
+  */
+  if (use_cached_connection_alive) {
+    DEBUG_SYNC(current_thd, "wait_before_checking_alive");
+    return m_cached_is_connection_alive.load();
+  }
 
   if (is_classic_protocol())
     return get_protocol()->connection_alive() &&
@@ -3444,17 +3595,32 @@ bool THD::is_connected() {
   return get_protocol()->connection_alive();
 }
 
+uint THD::get_protocol_rw_status() { return m_cached_rw_status.load(); }
+
+Protocol *THD::get_protocol() {
+  store_cached_properties();
+  return m_protocol;
+}
+
+Protocol_classic *THD::get_protocol_classic() {
+  assert(is_classic_protocol());
+  store_cached_properties();
+  return pointer_cast<Protocol_classic *>(m_protocol);
+}
+
 void THD::push_protocol(Protocol *protocol) {
   assert(m_protocol != nullptr);
   assert(protocol != nullptr);
   m_protocol->push_protocol(protocol);
   m_protocol = protocol;
+  store_cached_properties();
 }
 
 void THD::pop_protocol() {
   assert(m_protocol != nullptr);
   m_protocol = m_protocol->pop_protocol();
   assert(m_protocol != nullptr);
+  store_cached_properties();
 }
 
 void THD::set_time() {
@@ -3503,6 +3669,19 @@ void *THD::fetch_external(unsigned int slot) {
   return external_store_.at(slot) ? external_store_.at(slot) : nullptr;
 }
 
+/**
+  @brief Check if there are event subscribers for the event
+
+  Subscribers can be one of the following:
+     * audit plugins subscribing via the component->plugin bridge
+     * reference cache registered components
+
+  @param event the class to check for
+  @param subevent the even in the class to check for
+  @param check_audited  true if we should skip non-audited users
+  @retval true : no subscribers present
+  @retval false: subscribers present
+*/
 bool THD::check_event_subscribers(Event_tracking_class event,
                                   unsigned long subevent, bool check_audited) {
   audit_plugins_present = false;
@@ -3592,7 +3771,6 @@ bool THD::event_notify(struct st_mysql_event_generic *event_data) {
       create_scope_guard([&] { this->pop_event_tracking_data(); });
 
   bool retval = false;
-
   if (audit_plugins_present) {
     /* Notify all plugins first */
     switch (event_data->event_class) {
@@ -3695,12 +3873,12 @@ bool THD::event_notify(struct st_mysql_event_generic *event_data) {
         break;
     };
   }
-
-  if (events_cache_ == nullptr || !events_cache_->valid()) return retval;
+  if (retval || events_cache_ == nullptr || !events_cache_->valid())
+    return retval;
 
   const my_h_service *refs{nullptr};
 
-  if (events_cache_->get(event_data->event_class, &refs)) return retval;
+  if (events_cache_->get(event_data->event_class, &refs)) return false;
 
   switch (event_data->event_class) {
     case Event_tracking_class::AUTHENTICATION: {
@@ -3889,6 +4067,11 @@ void Transactional_ddl_context::init(dd::String_type db,
                                      dd::String_type tablename,
                                      const handlerton *hton) {
   assert(m_hton == nullptr);
+  /*
+    Currently, Transactional_ddl_context is used only for CREATE TABLE ... START
+    TRANSACTION statement.
+  */
+  assert(m_thd->lex->sql_command == SQLCOM_CREATE_TABLE);
   m_db = db;
   m_tablename = tablename;
   m_hton = hton;
@@ -3900,7 +4083,15 @@ void Transactional_ddl_context::init(dd::String_type db,
 */
 void Transactional_ddl_context::rollback() {
   if (!inited()) return;
+  /*
+    Since the transaction is being rolledback, We need to unlock and close the
+    table belonging to this transaction.
+  */
+  if (m_thd->lock) mysql_unlock_tables(m_thd, m_thd->lock);
+  m_thd->lock = nullptr;
+  if (m_thd->open_tables) close_thread_table(m_thd, &m_thd->open_tables);
   table_cache_manager.lock_all_and_tdc();
+
   TABLE_SHARE *share =
       get_cached_table_share(m_db.c_str(), m_tablename.c_str());
   if (share) {
@@ -3953,9 +4144,14 @@ void THD::init_cost_model() {
 }
 
 const Cost_model_server *THD::cost_model() const {
-  if (lex->using_hypergraph_optimizer) {
+  if (lex->using_hypergraph_optimizer()) {
     return &m_cost_model_hypergraph;
   } else {
     return &m_cost_model;
   }
+}
+
+bool use_sql_fk_checks_for_table(THD *thd, TABLE *table) {
+  return ((table->s->db_type()->flags & HTON_SUPPORTS_SQL_FK) &&
+          is_sql_fk_checks_enabled(thd));
 }

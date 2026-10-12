@@ -1,15 +1,16 @@
-/* Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -325,8 +326,8 @@ Item_func *OptRangeTest::create_item(Item_func::Functype type, Field *fld,
     case Item_func::LT_FUNC:
       result = new Item_func_lt(new Item_field(fld), new Item_int(value));
       break;
-    case Item_func::MULT_EQUAL_FUNC:
-      result = new Item_equal(new Item_int(value), new Item_field(fld));
+    case Item_func::MULTI_EQ_FUNC:
+      result = new Item_multi_eq(new Item_int(value), new Item_field(fld));
       break;
     case Item_func::XOR_FUNC:
       result = new Item_func_xor(new Item_field(fld), new Item_int(value));

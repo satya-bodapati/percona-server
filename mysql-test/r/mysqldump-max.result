@@ -1,3 +1,4 @@
+include/rpl/set_gtid_mode_off.inc
 create table t1 (id int(8), name varchar(32));
 Warnings:
 Warning	1681	Integer display width is deprecated and will be removed in a future release.
@@ -123,7 +124,7 @@ CREATE TABLE `t1` (
 
 LOCK TABLES `t1` WRITE;
 /*!40000 ALTER TABLE `t1` DISABLE KEYS */;
-INSERT  IGNORE INTO `t1` VALUES (1,'first value'),(2,'first value'),(3,'first value'),(4,'first value'),(5,'first value');
+INSERT IGNORE INTO `t1` VALUES (1,'first value'),(2,'first value'),(3,'first value'),(4,'first value'),(5,'first value');
 /*!40000 ALTER TABLE `t1` ENABLE KEYS */;
 UNLOCK TABLES;
 DROP TABLE IF EXISTS `t2`;
@@ -137,7 +138,7 @@ CREATE TABLE `t2` (
 
 LOCK TABLES `t2` WRITE;
 /*!40000 ALTER TABLE `t2` DISABLE KEYS */;
-INSERT  IGNORE INTO `t2` VALUES (1,'first value'),(2,'first value'),(3,'first value'),(4,'first value'),(5,'first value');
+INSERT IGNORE INTO `t2` VALUES (1,'first value'),(2,'first value'),(3,'first value'),(4,'first value'),(5,'first value');
 /*!40000 ALTER TABLE `t2` ENABLE KEYS */;
 UNLOCK TABLES;
 DROP TABLE IF EXISTS `t3`;
@@ -151,7 +152,7 @@ CREATE TABLE `t3` (
 
 LOCK TABLES `t3` WRITE;
 /*!40000 ALTER TABLE `t3` DISABLE KEYS */;
-INSERT  IGNORE INTO `t3` VALUES (1,'first value'),(2,'first value'),(3,'first value'),(4,'first value'),(5,'first value');
+INSERT IGNORE INTO `t3` VALUES (1,'first value'),(2,'first value'),(3,'first value'),(4,'first value'),(5,'first value');
 /*!40000 ALTER TABLE `t3` ENABLE KEYS */;
 UNLOCK TABLES;
 DROP TABLE IF EXISTS `t4`;
@@ -165,7 +166,7 @@ CREATE TABLE `t4` (
 
 LOCK TABLES `t4` WRITE;
 /*!40000 ALTER TABLE `t4` DISABLE KEYS */;
-INSERT  IGNORE INTO `t4` VALUES (1,'first value'),(2,'first value'),(3,'first value'),(4,'first value'),(5,'first value');
+INSERT IGNORE INTO `t4` VALUES (1,'first value'),(2,'first value'),(3,'first value'),(4,'first value'),(5,'first value');
 /*!40000 ALTER TABLE `t4` ENABLE KEYS */;
 UNLOCK TABLES;
 DROP TABLE IF EXISTS `t5`;
@@ -179,7 +180,7 @@ CREATE TABLE `t5` (
 
 LOCK TABLES `t5` WRITE;
 /*!40000 ALTER TABLE `t5` DISABLE KEYS */;
-INSERT  IGNORE INTO `t5` VALUES (1,'first value'),(2,'first value'),(3,'first value'),(4,'first value'),(5,'first value');
+INSERT IGNORE INTO `t5` VALUES (1,'first value'),(2,'first value'),(3,'first value'),(4,'first value'),(5,'first value');
 /*!40000 ALTER TABLE `t5` ENABLE KEYS */;
 UNLOCK TABLES;
 DROP TABLE IF EXISTS `t6`;
@@ -193,7 +194,7 @@ CREATE TABLE `t6` (
 
 LOCK TABLES `t6` WRITE;
 /*!40000 ALTER TABLE `t6` DISABLE KEYS */;
-INSERT  IGNORE INTO `t6` VALUES (1,'first value'),(2,'first value'),(3,'first value'),(4,'first value'),(5,'first value');
+INSERT IGNORE INTO `t6` VALUES (1,'first value'),(2,'first value'),(3,'first value'),(4,'first value'),(5,'first value');
 /*!40000 ALTER TABLE `t6` ENABLE KEYS */;
 UNLOCK TABLES;
 /*!50112 SET @disable_bulk_load = IF (@is_rocksdb_supported, 'SET SESSION rocksdb_bulk_load = @old_rocksdb_bulk_load', 'SET @dummy_rocksdb_bulk_load = 0') */;
@@ -1425,10 +1426,10 @@ DROP TABLE t1;
 DROP TABLE t2;
 SHOW BINLOG EVENTS LIMIT 12,4;
 Log_name	Pos	Event_type	Server_id	End_log_pos	Info
-binlog.000001	1051	Query	1	1162	use `test`; INSERT INTO t2 VALUES (1,0), (2,0)
-binlog.000001	1162	Xid	1	1193	COMMIT /* XID */
-binlog.000001	1193	Anonymous_Gtid	1	1272	SET @@SESSION.GTID_NEXT= 'ANONYMOUS'
-binlog.000001	1272	Query	1	1356	BEGIN
+binlog.000001	1054	Query	1	1167	use `test`; INSERT INTO t2 VALUES (1,0), (2,0)
+binlog.000001	1167	Xid	1	1198	COMMIT /* XID */
+binlog.000001	1198	Anonymous_Gtid	1	1277	SET @@SESSION.GTID_NEXT= 'ANONYMOUS'
+binlog.000001	1277	Query	1	1361	BEGIN
 SELECT * FROM t1 ORDER BY a;
 a
 1
@@ -1438,3 +1439,4 @@ a	b
 1	0
 2	0
 DROP TABLE t1,t2;
+include/rpl/set_gtid_mode_on.inc

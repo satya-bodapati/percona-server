@@ -1,3 +1,4 @@
+include/rpl/set_gtid_mode_off.inc
 set optimizer_trace_max_mem_size=1048576;
 SET end_markers_in_json=on;
 SET optimizer_trace="enabled=on,one_line=off";
@@ -1764,10 +1765,10 @@ SELECT 1 FROM t1 WHERE 1 LIKE
                                         } /* best_covering_index_scan */,
                                         "setup_range_conditions": [
                                         ] /* setup_range_conditions */,
-                                        "group_index_range": {
+                                        "group_index_skip_scan": {
                                           "chosen": false,
                                           "cause": "not_group_by_or_distinct"
-                                        } /* group_index_range */,
+                                        } /* group_index_skip_scan */,
                                         "skip_scan_range": {
                                           "potential_skip_scan_indexes": [
                                             {
@@ -2375,3 +2376,4 @@ OR t1.i1 IS NULL AND t1.pk >= 9;
 pk	i1	vc	vc2	vc	pk
 10	NULL	what	there	NULL	NULL
 DROP TABLE t1, t2;
+include/rpl/set_gtid_mode_on.inc

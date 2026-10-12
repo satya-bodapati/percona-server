@@ -1,15 +1,16 @@
-# Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -19,6 +20,10 @@
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+
+IF(NOT TARGET mysql_server_mock)
+  RETURN()
+ENDIF()
 
 ADD_HARNESS_PLUGIN(routertestplugin_logger NO_INSTALL
   DESTINATION harness
@@ -54,11 +59,14 @@ FOREACH(test_file
     test_config_overwrites.cc
     test_connection_pool.cc
     test_gr_notifications.cc
+    test_host_cache.cc
+    test_host_cache_config.cc
     test_http_server.cc
     test_logging.cc
     test_logging_eventlog.cc
     test_master_key_reader_writer.cc
     test_metadata_ttl.cc
+    test_mrs_config.cc
     test_cluster_metadata.cc
     test_node_attributes.cc
     test_gr_state.cc
@@ -77,6 +85,7 @@ FOREACH(test_file
     test_routing_connection.cc
     test_routing_connection_errors.cc
     test_routing_retry.cc
+    test_routing_router_require.cc
     test_routing_strategy.cc
     test_routing_sharing.cc
     test_routing_splitting.cc
@@ -88,24 +97,27 @@ FOREACH(test_file
     test_socket_close.cc
     test_stacktrace.cc
     test_destination_status.cc
+    test_routing_guidelines_invalid_document.cc
+    test_routing_guidelines_invalid_match.cc
+    test_routing_guidelines_routing.cc
+    test_routing_guidelines_adapter.cc
     )
 add_test_file(${CMAKE_CURRENT_SOURCE_DIR}/${test_file}
   MODULE "component"
   INCLUDE_DIRS
-    ${PROJECT_SOURCE_DIR}/src/harness/shared/include/
-    ${PROJECT_SOURCE_DIR}/src/http/include/
     ${PROJECT_SOURCE_DIR}/src/mock_server/include/mysqlrouter/
-    ${CMAKE_SOURCE_DIR}/plugin/x/client
-  SYSTEM_INCLUDE_DIRS ${GMOCK_INCLUDE_DIRS} ${LIBEVENT_INCLUDE_DIRS}
-                      ${PROTOBUF_INCLUDE_DIR} ${MYSQLX_GENERATE_DIR}
+    ${PROJECT_SOURCE_DIR}/src/host_cache/include/
+    ${PROJECT_SOURCE_DIR}/tests/
+  SYSTEM_INCLUDE_DIRS ${GMOCK_INCLUDE_DIRS}
+                      ${PROTOBUF_INCLUDE_DIR}
   LIB_DEPENDS
   http_client
   http_common
   mock_server_rest_client
   mysql_protocol
-  mysqlxclient_lite
-  mysqlxmessages_lite
-  ext::libprotobuf-lite
+  router_mysqlxclient
+  router_mysqlxmessages
+  router_cluster
 
   DEPENDS
   http_auth_backend
@@ -121,12 +133,15 @@ add_test_file(${CMAKE_CURRENT_SOURCE_DIR}/${test_file}
   rest_metadata_cache
   rest_router
   rest_routing
-  router_openssl
-  router_protobuf
   routing
   routertestplugin_logger
   signal_me
   )
+  ROUTERTEST_GET_TARGET(ttt ${test_file} "component")
+  DOWNGRADE_STRINGOP_WARNINGS(${ttt})
+  IF(MY_COMPILER_IS_GNU AND (WITH_LTO OR CMAKE_COMPILER_FLAG_WITH_LTO))
+    TARGET_LINK_OPTIONS(${ttt} PRIVATE -Wno-error=stringop-overflow)
+  ENDIF()
 ENDFOREACH()
 
 FOREACH(test_file
@@ -135,13 +150,15 @@ FOREACH(test_file
     )
 add_router_test_file(${CMAKE_CURRENT_SOURCE_DIR}/${test_file}
   MODULE "component"
-  SYSTEM_INCLUDE_DIRS ${GMOCK_INCLUDE_DIRS} ${LIBEVENT_INCLUDE_DIRS}
-                      ${PROTOBUF_INCLUDE_DIR} ${MYSQLX_GENERATE_DIR}
-  INCLUDE_DIRS ${CMAKE_SOURCE_DIR}/plugin/x/client/
+  SYSTEM_INCLUDE_DIRS ${GMOCK_INCLUDE_DIRS}
+                      ${PROTOBUF_INCLUDE_DIR}
+  INCLUDE_DIRS
+  ${CMAKE_SOURCE_DIR}/plugin/x/client/
+  $<TARGET_PROPERTY:routing_connections,INCLUDE_DIRECTORIES>
+
   LIB_DEPENDS
-  mysqlxclient_lite
-  mysqlxmessages_lite
-  ext::libprotobuf-lite
+  router_mysqlxclient
+  router_mysqlxmessages
 
   DEPENDS
   http_auth_backend
@@ -162,6 +179,16 @@ add_router_test_file(${CMAKE_CURRENT_SOURCE_DIR}/${test_file}
   )
 ENDFOREACH()
 
+# the mock-server test needs the mysql_native_password client plugin,
+# if it built (depends on WITH_AUTHENTICATION_CLIENT_PLUGINS)
+IF(TARGET mysql_native_password)
+  ADD_DEPENDENCIES(routertest_component_mock_server
+    mysql_native_password)
+ELSE()
+  ADD_DEFINITIONS(-DSKIP_MYSQL_NATIVE_PASSWORD_TESTS)
+ENDIF()
+
+
 # When system deployment bootstrap is executed, files are
 # created in locations specified by deployment layout.
 # Since component tests may not have access to directories defined
@@ -170,3 +197,6 @@ ENDFOREACH()
 IF(WIN32 OR NOT INSTALL_LAYOUT STREQUAL "STANDALONE")
   ADD_DEFINITIONS(-DSKIP_BOOTSTRAP_SYSTEM_DEPLOYMENT_TESTS)
 ENDIF()
+
+ADD_DEFINITIONS(
+  -DROUTER_SRC_DIR="${CMAKE_SOURCE_DIR}/router")

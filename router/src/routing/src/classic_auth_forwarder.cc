@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -34,10 +35,13 @@
 #include "auth_digest.h"
 #include "classic_auth_caching_sha2_forwarder.h"
 #include "classic_auth_caching_sha2_sender.h"
+#include "classic_auth_cleartext.h"
 #include "classic_auth_cleartext_forwarder.h"
 #include "classic_auth_cleartext_sender.h"
 #include "classic_auth_native_forwarder.h"
 #include "classic_auth_native_sender.h"
+#include "classic_auth_openid_connect_forwarder.h"
+#include "classic_auth_openid_connect_sender.h"
 #include "classic_auth_sha256_password_forwarder.h"
 #include "classic_auth_sha256_password_sender.h"
 #include "classic_frame.h"
@@ -123,9 +127,7 @@ AuthGenericForwarder::process() {
 
 stdx::expected<Processor::Result, std::error_code>
 AuthGenericForwarder::init() {
-  auto *socket_splicer = connection()->socket_splicer();
-  auto dst_channel = socket_splicer->client_channel();
-  auto dst_protocol = connection()->client_protocol();
+  auto &dst_conn = connection()->client_conn();
 
   if (auto &tr = tracer()) {
     tr.trace(
@@ -135,8 +137,7 @@ AuthGenericForwarder::init() {
 
   auto send_res = ClassicFrame::send_msg<
       classic_protocol::borrowed::message::server::AuthMethodSwitch>(
-      dst_channel, dst_protocol,
-      {auth_method_name_, initial_server_auth_data_});
+      dst_conn, {auth_method_name_, initial_server_auth_data_});
   if (!send_res) return send_client_failed(send_res.error());
 
   stage(Stage::ClientData);
@@ -145,13 +146,10 @@ AuthGenericForwarder::init() {
 
 stdx::expected<Processor::Result, std::error_code>
 AuthGenericForwarder::client_data() {
-  auto *socket_splicer = connection()->socket_splicer();
-  auto src_channel = socket_splicer->client_channel();
-  auto src_protocol = connection()->client_protocol();
+  auto &src_conn = connection()->client_conn();
 
   auto msg_res = ClassicFrame::recv_msg<
-      classic_protocol::borrowed::message::client::AuthMethodData>(
-      src_channel, src_protocol);
+      classic_protocol::borrowed::message::client::AuthMethodData>(src_conn);
   if (!msg_res) return recv_client_failed(msg_res.error());
 
   if (auto &tr = tracer()) {
@@ -169,16 +167,15 @@ AuthGenericForwarder::client_data() {
 stdx::expected<Processor::Result, std::error_code>
 AuthGenericForwarder::response() {
   // ERR|OK|EOF|other
-  auto *socket_splicer = connection()->socket_splicer();
-  auto src_channel = socket_splicer->server_channel();
-  auto src_protocol = connection()->server_protocol();
+  auto &src_conn = connection()->server_conn();
+  auto &src_channel = src_conn.channel();
+  auto &src_protocol = src_conn.protocol();
 
   // ensure the recv_buf has at last frame-header (+ msg-byte)
-  auto read_res =
-      ClassicFrame::ensure_has_msg_prefix(src_channel, src_protocol);
+  auto read_res = ClassicFrame::ensure_has_msg_prefix(src_conn);
   if (!read_res) return recv_server_failed(read_res.error());
 
-  const uint8_t msg_type = src_protocol->current_msg_type().value();
+  const uint8_t msg_type = src_protocol.current_msg_type().value();
 
   enum class Msg {
     Ok = ClassicFrame::cmd_byte<classic_protocol::message::server::Ok>(),
@@ -200,10 +197,10 @@ AuthGenericForwarder::response() {
   }
 
   // if there is another packet, dump its payload for now.
-  auto &recv_buf = src_channel->recv_plain_view();
+  const auto &recv_buf = src_channel.recv_plain_view();
 
   // get as much data of the current frame from the recv-buffers to log it.
-  (void)ClassicFrame::ensure_has_full_frame(src_channel, src_protocol);
+  (void)ClassicFrame::ensure_has_full_frame(src_conn);
 
   log_debug("received unexpected message from server in %s:\n%s",
             auth_method_name_.c_str(), hexify(recv_buf).c_str());
@@ -213,13 +210,10 @@ AuthGenericForwarder::response() {
 
 stdx::expected<Processor::Result, std::error_code>
 AuthGenericForwarder::auth_data() {
-  auto *socket_splicer = connection()->socket_splicer();
-  auto dst_channel = socket_splicer->server_channel();
-  auto dst_protocol = connection()->server_protocol();
+  auto &src_conn = connection()->server_conn();
 
   auto msg_res = ClassicFrame::recv_msg<
-      classic_protocol::borrowed::message::server::AuthMethodData>(
-      dst_channel, dst_protocol);
+      classic_protocol::borrowed::message::server::AuthMethodData>(src_conn);
   if (!msg_res) return recv_server_failed(msg_res.error());
 
   if (auto &tr = tracer()) {
@@ -274,17 +268,17 @@ stdx::expected<Processor::Result, std::error_code> AuthForwarder::process() {
 }
 
 stdx::expected<Processor::Result, std::error_code> AuthForwarder::init() {
-  auto *socket_splicer = connection()->socket_splicer();
-  auto *src_channel = socket_splicer->server_channel();
-  auto *src_protocol = connection()->server_protocol();
-  auto *dst_protocol = connection()->client_protocol();
+  auto &src_conn = connection()->server_conn();
+  auto &src_protocol = src_conn.protocol();
+
+  auto &dst_conn = connection()->client_conn();
+  auto &dst_protocol = dst_conn.protocol();
 
   // ensure the recv_buf has at last frame-header (+ msg-byte)
-  auto read_res =
-      ClassicFrame::ensure_has_msg_prefix(src_channel, src_protocol);
+  auto read_res = ClassicFrame::ensure_has_msg_prefix(src_conn);
   if (!read_res) return recv_server_failed(read_res.error());
 
-  const uint8_t msg_type = src_protocol->current_msg_type().value();
+  const uint8_t msg_type = src_protocol.current_msg_type().value();
 
   if (msg_type == ClassicFrame::cmd_byte<
                       classic_protocol::message::server::AuthMethodSwitch>()) {
@@ -292,13 +286,13 @@ stdx::expected<Processor::Result, std::error_code> AuthForwarder::init() {
     return Result::Again;
   }
 
-  auto auth_method_name = dst_protocol->auth_method_name();
-  auto initial_auth_method_data = src_protocol->auth_method_data();
+  auto auth_method_name = dst_protocol.auth_method_name();
+  auto initial_auth_method_data = src_protocol.auth_method_data();
 
   // handle the pre-auth-plugin capabilities.
   if (auth_method_name.empty()) {
     auth_method_name =
-        src_protocol->shared_capabilities().test(
+        src_protocol.shared_capabilities().test(
             classic_protocol::capabilities::pos::secure_connection)
             ? AuthNativePassword::kName
             : "old_password";
@@ -322,6 +316,9 @@ stdx::expected<Processor::Result, std::error_code> AuthForwarder::init() {
   } else if (auth_method_name == AuthCleartextPassword::kName) {
     connection()->push_processor(std::make_unique<AuthCleartextForwarder>(
         connection(), initial_auth_method_data, true));
+  } else if (auth_method_name == AuthOpenidConnect::kName) {
+    connection()->push_processor(std::make_unique<AuthOpenidConnectForwarder>(
+        connection(), initial_auth_method_data, true));
   } else {
     connection()->push_processor(std::make_unique<AuthGenericForwarder>(
         connection(), auth_method_name, initial_auth_method_data, true));
@@ -334,14 +331,14 @@ stdx::expected<Processor::Result, std::error_code> AuthForwarder::init() {
 // server wants to switch to another auth-method.
 stdx::expected<Processor::Result, std::error_code>
 AuthForwarder::auth_method_switch() {
-  auto *socket_splicer = connection()->socket_splicer();
-  auto *src_channel = socket_splicer->server_channel();
-  auto *src_protocol = connection()->server_protocol();
-  auto *dst_protocol = connection()->client_protocol();
+  auto &src_conn = connection()->server_conn();
+  auto &src_protocol = src_conn.protocol();
+
+  auto &dst_conn = connection()->client_conn();
+  auto &dst_protocol = dst_conn.protocol();
 
   const auto msg_res = ClassicFrame::recv_msg<
-      classic_protocol::borrowed::message::server::AuthMethodSwitch>(
-      src_channel, src_protocol);
+      classic_protocol::borrowed::message::server::AuthMethodSwitch>(src_conn);
   if (!msg_res) return recv_server_failed(msg_res.error());
 
   const auto msg = *msg_res;
@@ -349,8 +346,8 @@ AuthForwarder::auth_method_switch() {
   const auto auth_method_name = std::string(msg.auth_method());
   const auto auth_method_data = std::string(msg.auth_method_data());
 
-  src_protocol->auth_method_name(auth_method_name);
-  src_protocol->auth_method_data(auth_method_data);
+  src_protocol.auth_method_name(auth_method_name);
+  src_protocol.auth_method_data(auth_method_data);
 
   if (auto &tr = tracer()) {
     tr.trace(
@@ -358,56 +355,67 @@ AuthForwarder::auth_method_switch() {
   }
 
   // invalidates 'msg'
-  discard_current_msg(src_channel, src_protocol);
+  discard_current_msg(src_conn);
 
   if (auth_method_name == AuthSha256Password::kName) {
-    dst_protocol->auth_method_name(auth_method_name);
-    dst_protocol->auth_method_data(auth_method_data);
+    dst_protocol.auth_method_name(auth_method_name);
+    dst_protocol.auth_method_data(auth_method_data);
 
-    if (dst_protocol->password().has_value()) {
+    if (auto creds = dst_protocol.credentials().get(auth_method_name)) {
       connection()->push_processor(std::make_unique<AuthSha256Sender>(
-          connection(), auth_method_data, dst_protocol->password().value()));
+          connection(), auth_method_data, *creds));
     } else {
       connection()->push_processor(std::make_unique<AuthSha256Forwarder>(
           connection(), auth_method_data, false));
     }
   } else if (auth_method_name == AuthCachingSha2Password::kName) {
-    dst_protocol->auth_method_name(auth_method_name);
-    dst_protocol->auth_method_data(auth_method_data);
+    dst_protocol.auth_method_name(auth_method_name);
+    dst_protocol.auth_method_data(auth_method_data);
 
-    if (dst_protocol->password().has_value()) {
+    if (auto creds = dst_protocol.credentials().get(auth_method_name)) {
       connection()->push_processor(std::make_unique<AuthCachingSha2Sender>(
-          connection(), auth_method_data, dst_protocol->password().value()));
+          connection(), auth_method_data, *creds));
     } else {
       // trigger a switch
       connection()->push_processor(std::make_unique<AuthCachingSha2Forwarder>(
           connection(), auth_method_data, false));
     }
   } else if (auth_method_name == AuthNativePassword::kName) {
-    if (dst_protocol->password().has_value()) {
-      dst_protocol->auth_method_name(auth_method_name);
-      dst_protocol->auth_method_data(auth_method_data);
+    if (auto creds = dst_protocol.credentials().get(auth_method_name)) {
+      dst_protocol.auth_method_name(auth_method_name);
+      dst_protocol.auth_method_data(auth_method_data);
 
       connection()->push_processor(std::make_unique<AuthNativeSender>(
-          connection(), auth_method_data, dst_protocol->password().value()));
+          connection(), auth_method_data, *creds));
     } else {
       connection()->push_processor(std::make_unique<AuthNativeForwarder>(
           connection(), auth_method_data, false));
     }
   } else if (auth_method_name == AuthCleartextPassword::kName) {
-    dst_protocol->auth_method_name(auth_method_name);
-    dst_protocol->auth_method_data(auth_method_data);
+    dst_protocol.auth_method_name(auth_method_name);
+    dst_protocol.auth_method_data(auth_method_data);
 
-    if (dst_protocol->password().has_value()) {
+    if (auto creds = dst_protocol.credentials().get(auth_method_name)) {
       connection()->push_processor(std::make_unique<AuthCleartextSender>(
-          connection(), auth_method_data, dst_protocol->password().value()));
+          connection(), auth_method_data, *creds));
     } else {
       connection()->push_processor(std::make_unique<AuthCleartextForwarder>(
           connection(), auth_method_data, false));
     }
+  } else if (auth_method_name == AuthOpenidConnect::kName) {
+    dst_protocol.auth_method_name(auth_method_name);
+    dst_protocol.auth_method_data(auth_method_data);
+
+    if (auto creds = dst_protocol.credentials().get(auth_method_name)) {
+      connection()->push_processor(std::make_unique<AuthOpenidConnectSender>(
+          connection(), auth_method_data, *creds));
+    } else {
+      connection()->push_processor(std::make_unique<AuthOpenidConnectForwarder>(
+          connection(), auth_method_data, false));
+    }
   } else {
-    dst_protocol->auth_method_name(auth_method_name);
-    dst_protocol->auth_method_data(auth_method_data);
+    dst_protocol.auth_method_name(auth_method_name);
+    dst_protocol.auth_method_data(auth_method_data);
 
     connection()->push_processor(std::make_unique<AuthGenericForwarder>(
         connection(), auth_method_name, auth_method_data));
@@ -419,16 +427,15 @@ AuthForwarder::auth_method_switch() {
 
 stdx::expected<Processor::Result, std::error_code> AuthForwarder::response() {
   // ERR|OK|EOF|other
-  auto *socket_splicer = connection()->socket_splicer();
-  auto src_channel = socket_splicer->server_channel();
-  auto src_protocol = connection()->server_protocol();
+  auto &src_conn = connection()->server_conn();
+  auto &src_channel = src_conn.channel();
+  auto &src_protocol = src_conn.protocol();
 
   // ensure the recv_buf has at last frame-header (+ msg-byte)
-  auto read_res =
-      ClassicFrame::ensure_has_msg_prefix(src_channel, src_protocol);
+  auto read_res = ClassicFrame::ensure_has_msg_prefix(src_conn);
   if (!read_res) return recv_server_failed(read_res.error());
 
-  const uint8_t msg_type = src_protocol->current_msg_type().value();
+  const uint8_t msg_type = src_protocol.current_msg_type().value();
 
   enum class Msg {
     Ok = ClassicFrame::cmd_byte<classic_protocol::message::server::Ok>(),
@@ -449,10 +456,10 @@ stdx::expected<Processor::Result, std::error_code> AuthForwarder::response() {
   }
 
   // if there is another packet, dump its payload for now.
-  auto &recv_buf = src_channel->recv_plain_view();
+  const auto &recv_buf = src_channel.recv_plain_view();
 
   // get as much data of the current frame from the recv-buffers to log it.
-  (void)ClassicFrame::ensure_has_full_frame(src_channel, src_protocol);
+  (void)ClassicFrame::ensure_has_full_frame(src_conn);
 
   log_debug("received unexpected message from server in auth:\n%s",
             hexify(recv_buf).c_str());

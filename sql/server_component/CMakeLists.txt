@@ -1,15 +1,16 @@
-# Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -19,6 +20,10 @@
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+
+IF (WITH_MYSQL_AI)
+  ADD_COMPILE_DEFINITIONS(MYSQL_AI)
+ENDIF()
 
 SET(MYSQL_SERVER_COMPONENT_SOURCES
   audit_api_message_service_imp.cc
@@ -41,9 +46,12 @@ SET(MYSQL_SERVER_COMPONENT_SOURCES
   mysql_cond_service.cc
   mysql_connection_attributes_iterator_imp.cc
   mysql_current_thread_reader_imp.cc
+  mysql_global_variable_attributes_service_imp.cc
   mysql_mutex_service.cc
   mysql_psi_system_service.cc
   mysql_runtime_error.cc
+  mysql_runtime_warning.cc
+  mysql_timestamp_imp.cc
   mysql_rwlock_service.cc
   mysql_server_runnable_imp.cc
   mysql_string_service.cc
@@ -61,6 +69,7 @@ SET(MYSQL_SERVER_COMPONENT_SOURCES
   mysql_query_attributes_imp.cc
   mysql_server_keyring_lockable_imp.cc
   mysql_system_variable_update_imp.cc
+  mysql_system_variable_reader_imp.cc
   mysql_thd_attributes_imp.cc
   transaction_delegate_control_imp.cc
   mysql_audit_print_service_longlong_data_source_imp.cc
@@ -79,6 +88,16 @@ SET(MYSQL_SERVER_COMPONENT_SOURCES
   event_tracking_information.cc
   mysql_stored_program_imp.cc
   mysql_simple_error_log_imp.cc
+  mysql_statement_service_imp.cc
+  mysql_signal_handler_imp.cc
+  applier_metrics_service_imp.cc
+  mysql_library_imp.cc
+  mysql_thd_kill_handler_imp.cc
+  mysql_json_encode_imp.cc
+  mysql_my_thread_imp.cc
+  mysql_file_imp.cc
+  mysql_server_attributes_imp.cc
+  mysql_lock_free_hash_imp.cc
   )
 
 # This static library is used to build mysqld binary and in some unit test cases
@@ -86,6 +105,10 @@ ADD_LIBRARY(mysql_server_component_services STATIC
   ${MYSQL_SERVER_COMPONENT_SOURCES})
 TARGET_COMPILE_DEFINITIONS(mysql_server_component_services
   PRIVATE WITH_MYSQL_COMPONENTS_TEST_DRIVER)
-TARGET_LINK_LIBRARIES(mysql_server_component_services PRIVATE extra::rapidjson)
-TARGET_LINK_LIBRARIES(mysql_server_component_services PRIVATE ext::zlib)
+TARGET_LINK_LIBRARIES(mysql_server_component_services
+  PRIVATE
+  extra::rapidjson
+  ext::zlib
+  extra::unordered_dense
+  )
 ADD_DEPENDENCIES(mysql_server_component_services GenError)

@@ -1,15 +1,16 @@
-/* Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,13 +25,13 @@
 
 static unsigned int gcs(unsigned int a, unsigned int b) {
   if (b > a) {
-    unsigned int t = a;
+    unsigned int const t = a;
     a = b;
     b = t;
   }
 
   while (b != 0) {
-    unsigned int m = a % b;
+    unsigned int const m = a % b;
     a = b;
     b = m;
   }
@@ -45,7 +46,7 @@ int main() {
   failed = 0;
   for (a = 1; a < 2000; ++a)
     for (b = 1; b < 2000; ++b) {
-      unsigned int d = gcs(a, b);
+      unsigned int const d = gcs(a, b);
       if (a % d != 0 || b % d != 0) {
         ++failed;
         diag("Failed for gcs(%4u,%4u)", a, b);

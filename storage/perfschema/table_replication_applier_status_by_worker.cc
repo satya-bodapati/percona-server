@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -66,7 +67,7 @@ Plugin_table table_replication_applier_status_by_worker::m_table_def(
     "  LAST_ERROR_TIMESTAMP TIMESTAMP(6) not null,\n"
     "  PRIMARY KEY (CHANNEL_NAME, WORKER_ID) USING HASH,\n"
     "  KEY (THREAD_ID) USING HASH,\n"
-    "  LAST_APPLIED_TRANSACTION CHAR(57),\n"
+    "  LAST_APPLIED_TRANSACTION CHAR(90),\n"
     "  LAST_APPLIED_TRANSACTION_ORIGINAL_COMMIT_TIMESTAMP TIMESTAMP(6)\n"
     "                                                     not null,\n"
     "  LAST_APPLIED_TRANSACTION_IMMEDIATE_COMMIT_TIMESTAMP TIMESTAMP(6)\n"
@@ -75,7 +76,7 @@ Plugin_table table_replication_applier_status_by_worker::m_table_def(
     "                                                 not null,\n"
     "  LAST_APPLIED_TRANSACTION_END_APPLY_TIMESTAMP TIMESTAMP(6)\n"
     "                                               not null,\n"
-    "  APPLYING_TRANSACTION CHAR(57),\n"
+    "  APPLYING_TRANSACTION CHAR(90),\n"
     "  APPLYING_TRANSACTION_ORIGINAL_COMMIT_TIMESTAMP TIMESTAMP(6)\n"
     "                                                 not null,\n"
     "  APPLYING_TRANSACTION_IMMEDIATE_COMMIT_TIMESTAMP TIMESTAMP(6)\n"
@@ -165,19 +166,19 @@ bool PFS_index_rpl_applier_status_by_worker_by_thread::match(Master_info *mi) {
     /* NULL THREAD_ID is represented by 0 */
     row.thread_id = 0;
 
+#ifdef HAVE_PSI_THREAD_INTERFACE
     mysql_mutex_assert_owner(&mi->rli->data_lock);
 
     if (mi->rli->slave_running) {
       /* STS will use SQL thread as workers on this table */
       if (mi->rli->get_worker_count() == 0) {
-        PSI_thread *psi [[maybe_unused]] = thd_get_psi(mi->rli->info_thd);
-#ifdef HAVE_PSI_THREAD_INTERFACE
+        PSI_thread *psi = thd_get_psi(mi->rli->info_thd);
         if (psi != nullptr) {
           row.thread_id = PSI_THREAD_CALL(get_thread_internal_id)(psi);
         }
-#endif /* HAVE_PSI_THREAD_INTERFACE */
       }
     }
+#endif /* HAVE_PSI_THREAD_INTERFACE */
 
     if (!m_key.match(row.thread_id)) {
       return false;
@@ -194,18 +195,18 @@ bool PFS_index_rpl_applier_status_by_worker_by_thread::match(
     /* NULL THREAD_ID is represented by 0 */
     row.thread_id = 0;
 
+#ifdef HAVE_PSI_THREAD_INTERFACE
     mysql_mutex_assert_owner(&mi->rli->data_lock);
 
     if (mi->rli->slave_running) {
       if (worker) {
-        PSI_thread *psi [[maybe_unused]] = thd_get_psi(worker->info_thd);
-#ifdef HAVE_PSI_THREAD_INTERFACE
+        PSI_thread *psi = thd_get_psi(worker->info_thd);
         if (psi != nullptr) {
           row.thread_id = PSI_THREAD_CALL(get_thread_internal_id)(psi);
         }
-#endif /* HAVE_PSI_THREAD_INTERFACE */
       }
     }
+#endif /* HAVE_PSI_THREAD_INTERFACE */
 
     if (!m_key.match(row.thread_id)) {
       return false;
@@ -222,7 +223,7 @@ PFS_engine_table *table_replication_applier_status_by_worker::create(
 
 table_replication_applier_status_by_worker::
     table_replication_applier_status_by_worker()
-    : PFS_engine_table(&m_share, &m_pos), m_pos(), m_next_pos() {}
+    : PFS_engine_table(&m_share, &m_pos), m_opened_index(nullptr) {}
 
 table_replication_applier_status_by_worker::
     ~table_replication_applier_status_by_worker() = default;
@@ -290,7 +291,6 @@ int table_replication_applier_status_by_worker::rnd_next() {
 int table_replication_applier_status_by_worker::rnd_pos(const void *pos) {
   int res = HA_ERR_RECORD_DELETED;
 
-  Slave_worker *worker;
   Master_info *mi;
   size_t wc;
 
@@ -316,7 +316,7 @@ int table_replication_applier_status_by_worker::rnd_pos(const void *pos) {
   } else {
     /* Multi Thread Slave */
     if (m_pos.m_index_2 < wc) {
-      worker = mi->rli->get_worker(m_pos.m_index_2);
+      Slave_worker *worker = mi->rli->get_worker(m_pos.m_index_2);
       if (worker != nullptr) {
         make_row(worker);
         res = 0;
@@ -432,15 +432,15 @@ int table_replication_applier_status_by_worker::make_row(Master_info *mi) {
   memcpy(m_row.channel_name, (char *)mi->get_channel(),
          m_row.channel_name_length);
 
-  if (mi->rli->slave_running) {
-    PSI_thread *psi [[maybe_unused]] = thd_get_psi(mi->rli->info_thd);
 #ifdef HAVE_PSI_THREAD_INTERFACE
+  if (mi->rli->slave_running) {
+    PSI_thread *psi = thd_get_psi(mi->rli->info_thd);
     if (psi != nullptr) {
       m_row.thread_id = PSI_THREAD_CALL(get_thread_internal_id)(psi);
       m_row.thread_id_is_null = false;
     }
-#endif /* HAVE_PSI_THREAD_INTERFACE */
   }
+#endif /* HAVE_PSI_THREAD_INTERFACE */
 
   if (mi->rli->slave_running) {
     m_row.service_state = PS_RPL_YES;
@@ -495,15 +495,15 @@ int table_replication_applier_status_by_worker::make_row(Slave_worker *w) {
   {
     MUTEX_LOCK(lock, &w->jobs_lock);
 
-    if (w->running_status == Slave_worker::RUNNING) {
-      PSI_thread *psi [[maybe_unused]] = thd_get_psi(w->info_thd);
 #ifdef HAVE_PSI_THREAD_INTERFACE
+    if (w->running_status == Slave_worker::RUNNING) {
+      PSI_thread *psi = thd_get_psi(w->info_thd);
       if (psi != nullptr) {
         m_row.thread_id = PSI_THREAD_CALL(get_thread_internal_id)(psi);
         m_row.thread_id_is_null = false;
       }
-#endif /* HAVE_PSI_THREAD_INTERFACE */
     }
+#endif /* HAVE_PSI_THREAD_INTERFACE */
 
     if (w->running_status == Slave_worker::RUNNING) {
       m_row.service_state = PS_RPL_YES;
@@ -545,7 +545,7 @@ void table_replication_applier_status_by_worker::populate_trx_info(
     Trx_monitoring_info const &applying_trx,
     Trx_monitoring_info const &last_applied_trx) {
   // The processing info is always visible
-  applying_trx.copy_to_ps_table(global_sid_map, m_row.applying_trx,
+  applying_trx.copy_to_ps_table(global_tsid_map, m_row.applying_trx,
                                 &m_row.applying_trx_length,
                                 &m_row.applying_trx_original_commit_timestamp,
                                 &m_row.applying_trx_immediate_commit_timestamp,
@@ -557,7 +557,7 @@ void table_replication_applier_status_by_worker::populate_trx_info(
                                 &m_row.applying_trx_retries_count);
 
   last_applied_trx.copy_to_ps_table(
-      global_sid_map, m_row.last_applied_trx, &m_row.last_applied_trx_length,
+      global_tsid_map, m_row.last_applied_trx, &m_row.last_applied_trx_length,
       &m_row.last_applied_trx_original_commit_timestamp,
       &m_row.last_applied_trx_immediate_commit_timestamp,
       &m_row.last_applied_trx_start_apply_timestamp,

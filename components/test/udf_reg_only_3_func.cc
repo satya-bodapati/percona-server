@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,14 +25,14 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
    don't unregister it. The unregister can be done by calling the test component
    udf_unreg_3_func.cc, doing it in init (install). */
 
-#include <ctype.h>
 #include <mysql/components/component_implementation.h>
 #include <mysql/components/service_implementation.h>
 #include <mysql/components/services/udf_registration.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/types.h>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 
 REQUIRES_SERVICE_PLACEHOLDER(udf_registration);
@@ -187,14 +188,14 @@ bool avgcost_init(UDF_INIT *initid, UDF_ARGS *args, char *message) {
 
 void avgcost_deinit(UDF_INIT *initid) {
   void *void_ptr = initid->ptr;
-  avgcost_data *data = static_cast<avgcost_data *>(void_ptr);
+  auto *data = static_cast<avgcost_data *>(void_ptr);
   delete data;
 }
 
 /* This is needed to get things to work in MySQL 4.1.1 and above */
 
 void avgcost_clear(UDF_INIT *initid, unsigned char *, unsigned char *) {
-  struct avgcost_data *data = (struct avgcost_data *)initid->ptr;
+  auto *data = (struct avgcost_data *)initid->ptr;
   data->totalprice = 0.0;
   data->totalquantity = 0;
   data->count = 0;
@@ -203,9 +204,9 @@ void avgcost_clear(UDF_INIT *initid, unsigned char *, unsigned char *) {
 void avgcost_add(UDF_INIT *initid, UDF_ARGS *args, unsigned char *,
                  unsigned char *) {
   if (args->args[0] && args->args[1]) {
-    struct avgcost_data *data = (struct avgcost_data *)initid->ptr;
-    long long quantity = *((long long *)args->args[0]);
-    long long newquantity = data->totalquantity + quantity;
+    auto *data = (struct avgcost_data *)initid->ptr;
+    long long const quantity = *((long long *)args->args[0]);
+    long long const newquantity = data->totalquantity + quantity;
     double price = *((double *)args->args[1]);
 
     data->count++;
@@ -239,7 +240,7 @@ void avgcost_add(UDF_INIT *initid, UDF_ARGS *args, unsigned char *,
 
 double avgcost(UDF_INIT *initid, UDF_ARGS *, unsigned char *is_null,
                unsigned char *) {
-  struct avgcost_data *data = (struct avgcost_data *)initid->ptr;
+  auto *data = (struct avgcost_data *)initid->ptr;
   if (!data->count || !data->totalquantity) {
     *is_null = 1;
     return 0.0;

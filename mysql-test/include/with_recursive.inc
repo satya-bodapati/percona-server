@@ -1,3 +1,4 @@
+--source include/elide_costs.inc
 set cte_max_recursion_depth=50000;
 select @@cte_max_recursion_depth;
 
@@ -48,7 +49,7 @@ with recursive qn as
    select 1 from qn)
 select * from qn;
 
---replace_regex /  \(cost=.*//
+--replace_regex $elide_metrics
 eval EXPLAIN FORMAT=tree $query;
 eval $query;
 
@@ -280,7 +281,6 @@ with recursive qn as (
 select 123 as a union all
 select 1+a from qn where a<125)
 select * from qn;
---skip_if_hypergraph  # Fails due to previous query being skipped.
 show status like "handler_write";
 flush status;
 --sorted_result
@@ -288,9 +288,7 @@ with recursive qn as (
 select 123 as a union all
 select 1+a from qn where a<125)
 select * from qn, qn as qn1;
---skip_if_hypergraph  # Fails due to previous query being skipped.
 show status like "handler_write";
---skip_if_hypergraph  # Fails due to previous query being skipped.
 show status like 'Created_tmp%table%';
 
 --echo # Also works if references are nested inside other query names:
@@ -301,7 +299,6 @@ select 123 as a union all
 select 1+a from inner_ where a<125),
 outer_ as (select * from inner_ limit 10)
 select * from outer_, outer_ as outer1;
---skip_if_hypergraph  # Fails due to previous query being skipped.
 show status like "handler_write";
 
 flush status;
@@ -313,7 +310,6 @@ outer_ as
 (select inner_.a, inner1.a as a1
 from inner_, inner_ as inner1 limit 10)
 select * from outer_;
---skip_if_hypergraph  # Fails due to previous query being skipped.
 show status like "handler_write";
 
 --echo # Even if the two query names are recursive:
@@ -326,7 +322,6 @@ outer_ as
 (select a from inner_ union all
 select a*2 from outer_ where a<1000)
 select a from outer_;
---skip_if_hypergraph  # Fails due to previous query being skipped.
 show status like "handler_write";
 
 --echo # Optimizer must be allowed to put the recursive reference first
@@ -342,6 +337,14 @@ union all
 select 1 from t1 straight_join qn
 )
 select * from qn;
+
+WITH RECURSIVE qn(n) AS
+(
+SELECT 1 FROM t1
+UNION ALL
+SELECT n+1 FROM qn STRAIGHT_JOIN t1 WHERE n < 3
+)
+SELECT COUNT(*) FROM qn;
 
 --error ER_CTE_RECURSIVE_FORBIDDEN_JOIN_ORDER
 WITH RECURSIVE qn AS
@@ -539,7 +542,6 @@ SELECT * FROM employees_extended ORDER BY PATH;
 
 --echo # Breadth-first is likely what we get, if no ordering
 
---skip_if_hypergraph  # Chooses a different plan, gets different ordering.
 WITH RECURSIVE employees_extended
 AS
 (
@@ -570,7 +572,6 @@ SELECT * FROM employees_extended ORDER BY SEQ, NAME;
 
 --echo # Or, use a user variable, then all rows have different number:
 
---skip_if_hypergraph  # Chooses a different plan, gets different ordering.
 WITH RECURSIVE employees_extended
 AS
 (
@@ -798,7 +799,7 @@ eval $query order by path;
 
 --echo # Also demonstrates EXPLAIN FORMAT=TREE of recursive CTEs with joins.
 --skip_if_hypergraph  # Chooses different plan (hash join a few places).
---replace_regex /  \(cost=.*//
+--replace_regex $elide_metrics
 eval EXPLAIN FORMAT=tree $query order by path;
 
 --echo # Without ORDER BY order is different; it is deterministic as
@@ -933,7 +934,6 @@ with recursive cte as
   from cte where n<100)
 select sum(n) from cte;
 
---skip_if_hypergraph  # Fails due to previous query being skipped.
 show status like 'Created_tmp_disk_tables';
 
 --echo # Too long key (>3000 bytes in latin1)
@@ -976,5 +976,4 @@ explain with recursive qn as
 select * from qn;
 drop table t1;
 
---skip_if_hypergraph  # Fails due to previous query being skipped.
 show status like 'Created_tmp_disk_tables';

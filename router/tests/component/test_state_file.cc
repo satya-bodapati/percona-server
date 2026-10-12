@@ -1,16 +1,17 @@
 /*
-Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -76,6 +77,9 @@ constexpr auto kTTL = 100ms;
 }  // namespace
 
 class StateFileTest : public RouterComponentBootstrapTest {
+ public:
+  StateFileTest() : RouterComponentBootstrapTest(false) {}
+
  protected:
   void SetUp() override {
     RouterComponentTest::SetUp();
@@ -84,32 +88,24 @@ class StateFileTest : public RouterComponentBootstrapTest {
   }
 
   std::pair<std::string, std::map<std::string, std::string>>
-  metadata_cache_section(uint16_t metadata_server_port = 0,
-                         const std::chrono::milliseconds ttl = kTTL,
+  metadata_cache_section(const std::chrono::milliseconds ttl = kTTL,
                          ClusterType cluster_type = ClusterType::GR_V2) {
     std::map<std::string, std::string> options{
         {"cluster_type", (cluster_type == ClusterType::RS_V2) ? "rs" : "gr"},
         {"router_id", "1"},
         {"user", "mysql_router1_user"},
-        {"metadata_cluster", "test"},
+        {"metadata_cluster", "my-cluster"},
         {"connect_timeout", "1"},
         {"ttl", std::to_string(std::chrono::duration<double>(ttl).count())},
-    };
-
-    if (metadata_server_port != 0) {
-      options["bootstrap_server_addresses"] =
-          "mysql://localhost:" + std::to_string(metadata_server_port);
     };
 
     return {"metadata_cache:test", options};
   }
 
   std::string get_metadata_cache_section(
-      uint16_t metadata_server_port = 0,
       const std::chrono::milliseconds ttl = kTTL,
       ClusterType cluster_type = ClusterType::GR_V2) {
-    auto section =
-        metadata_cache_section(metadata_server_port, ttl, cluster_type);
+    auto section = metadata_cache_section(ttl, cluster_type);
     return mysql_harness::ConfigBuilder::build_section(section.first,
                                                        section.second) +
            "\n";
@@ -117,8 +113,7 @@ class StateFileTest : public RouterComponentBootstrapTest {
 
   std::pair<std::string, std::map<std::string, std::string>>
   metadata_cache_routing_section(uint16_t router_port, const std::string &role,
-                                 const std::string &strategy,
-                                 const std::string &mode = "") {
+                                 const std::string &strategy) {
     std::map<std::string, std::string> options{
         {"bind_port", std::to_string(router_port)},
         {"destinations", "metadata-cache://test/default?role=" + role},
@@ -126,20 +121,17 @@ class StateFileTest : public RouterComponentBootstrapTest {
     };
 
     if (!strategy.empty()) options["routing_strategy"] = strategy;
-    if (!mode.empty()) options["mode"] = mode;
 
     return {"routing:test_default", options};
   }
 
   std::string get_metadata_cache_routing_section(uint16_t router_port,
                                                  const std::string &role,
-                                                 const std::string &strategy,
-                                                 const std::string &mode = "") {
-    auto section =
-        metadata_cache_routing_section(router_port, role, strategy, mode);
+                                                 const std::string &strategy) {
+    const auto section =
+        metadata_cache_routing_section(router_port, role, strategy);
     return mysql_harness::ConfigBuilder::build_section(section.first,
-                                                       section.second) +
-           "\n";
+                                                       section.second);
   }
 
   auto &launch_router(const std::string &temp_test_dir,
@@ -260,16 +252,19 @@ TEST_P(StateFileMetadataServersChangedInRuntimeTest,
     cluster_http_ports.push_back(port_pool_.get_next_available());
   }
 
-  const std::string node_host = param.ipv6 ? "[::1]" : "127.0.0.1";
-  const std::string bind_address = param.ipv6 ? "::" : "0.0.0.0";
+  const std::string node_host = param.ipv6 ? "::1" : "127.0.0.1";
+  const std::string node_host_pretty = param.ipv6 ? "[::1]" : "127.0.0.1";
+  const std::string bind_address = param.ipv6 ? "::" : "127.0.0.1";
 
   SCOPED_TRACE(
       "// Launch 3 server mocks that will act as our metadata servers");
-  const auto trace_file = get_data_dir().join(param.trace_file).str();
   for (unsigned i = 0; i < CLUSTER_NODES; ++i) {
-    cluster_nodes.push_back(&ProcessManager::launch_mysql_server_mock(
-        trace_file, cluster_nodes_ports[i], EXIT_SUCCESS, false,
-        cluster_http_ports[i], 0, "", bind_address));
+    cluster_nodes.push_back(
+        &mock_server_spawner().spawn(mock_server_cmdline(param.trace_file)
+                                         .port(cluster_nodes_ports[i])
+                                         .http_port(cluster_http_ports[i])
+                                         .bind_address(bind_address)
+                                         .args()));
     try {
       ASSERT_NO_FATAL_FAILURE(check_port_ready(
           *cluster_nodes[i], cluster_nodes_ports[i], kDefaultPortReadyTimeout,
@@ -287,50 +282,59 @@ TEST_P(StateFileMetadataServersChangedInRuntimeTest,
       std::this_thread::sleep_for(100ms);
       return;
     }
-    ASSERT_TRUE(MockServerRestClient(cluster_http_ports[i])
+    ASSERT_TRUE(MockServerRestClient(cluster_http_ports[i], node_host)
                     .wait_for_rest_endpoint_ready());
 
     SCOPED_TRACE(
         "// Make our metadata server to return single node as a cluster "
         "member (meaning single metadata server)");
-    set_mock_metadata(cluster_http_ports[i], kGroupId, {cluster_nodes_ports[i]},
-                      i, {cluster_nodes_ports[i]}, 0, 0, false, node_host);
+    MockGrMetadata()
+        .gr_id(kGroupId)
+        .gr_nodes(classic_ports_to_gr_nodes({cluster_nodes_ports[i]}))
+        .gr_node_host(node_host_pretty)
+        .cluster_nodes({cluster_nodes_ports[i]})
+        .gr_pos(i)
+        .send(cluster_http_ports[i], node_host);
   }
 
   SCOPED_TRACE("// Create a router state file with a single metadata server");
   const std::string state_file = create_state_file(
       temp_test_dir.name(),
-      create_state_file_content(kGroupId, {cluster_nodes_ports[0]}, node_host));
+      create_state_file_content(kGroupId, {cluster_nodes_ports[0]},
+                                node_host_pretty));
 
   SCOPED_TRACE(
       "// Create a configuration file sections with low ttl so that any "
       "changes we make in the mock server via http port were refreshed "
       "quickly");
   const std::string metadata_cache_section =
-      get_metadata_cache_section(0, kTTL, param.cluster_type);
+      get_metadata_cache_section(kTTL, param.cluster_type);
   const uint16_t router_port = port_pool_.get_next_available();
   const std::string routing_section = get_metadata_cache_routing_section(
       router_port, "PRIMARY", "first-available");
 
   SCOPED_TRACE("// Launch ther router with the initial state file");
-  launch_router(temp_test_dir.name(), metadata_cache_section, routing_section,
-                state_file);
+  auto &router = launch_router(temp_test_dir.name(), metadata_cache_section,
+                               routing_section, state_file);
 
   SCOPED_TRACE(
       "// Check our state file content, it should not change yet, there is "
       "single metadata server reported as initially");
 
   check_state_file(state_file, param.cluster_type, kGroupId,
-                   {cluster_nodes_ports[0]}, 0, node_host);
+                   {cluster_nodes_ports[0]}, 0, node_host_pretty);
 
   SCOPED_TRACE(
       "// Now change the response from the metadata server to return 3 gr "
       "nodes (metadata servers)");
   for (unsigned i = 0; i < CLUSTER_NODES; ++i) {
-    set_mock_metadata(cluster_http_ports[i], kGroupId,
-                      classic_ports_to_gr_nodes(cluster_nodes_ports), i,
-                      classic_ports_to_cluster_nodes(cluster_nodes_ports), 0, 0,
-                      false, node_host);
+    MockGrMetadata()
+        .gr_id(kGroupId)
+        .gr_nodes(classic_ports_to_gr_nodes({cluster_nodes_ports}))
+        .gr_node_host(node_host_pretty)
+        .cluster_nodes(classic_ports_to_cluster_nodes(cluster_nodes_ports))
+        .gr_pos(i)
+        .send(cluster_http_ports[i], node_host);
   }
 
   SCOPED_TRACE(
@@ -340,7 +344,7 @@ TEST_P(StateFileMetadataServersChangedInRuntimeTest,
   check_state_file(
       state_file, param.cluster_type, kGroupId,
       {cluster_nodes_ports[0], cluster_nodes_ports[1], cluster_nodes_ports[2]},
-      0, node_host);
+      0, node_host_pretty);
 
   ///////////////////////////////////////////////////
 
@@ -359,14 +363,16 @@ TEST_P(StateFileMetadataServersChangedInRuntimeTest,
   SCOPED_TRACE(
       "// Instrument the second and third metadata servers to return 2 "
       "servers: second and third");
-  set_mock_metadata(cluster_http_ports[1], kGroupId,
-                    {cluster_nodes_ports[1], cluster_nodes_ports[2]}, 1,
-                    {cluster_nodes_ports[1], cluster_nodes_ports[2]}, 0, 0,
-                    false, node_host);
-  set_mock_metadata(cluster_http_ports[2], kGroupId,
-                    {cluster_nodes_ports[1], cluster_nodes_ports[2]}, 2,
-                    {cluster_nodes_ports[1], cluster_nodes_ports[2]}, 0, 0,
-                    false, node_host);
+  for (unsigned i = 1; i <= 2; i++) {
+    MockGrMetadata()
+        .gr_id(kGroupId)
+        .gr_nodes(classic_ports_to_gr_nodes(
+            {cluster_nodes_ports[1], cluster_nodes_ports[2]}))
+        .gr_node_host(node_host_pretty)
+        .cluster_nodes({cluster_nodes_ports[1], cluster_nodes_ports[2]})
+        .gr_pos(i)
+        .send(cluster_http_ports[i], node_host);
+  }
 
   SCOPED_TRACE("// Kill first metada server");
   kill_server(cluster_nodes[0]);
@@ -376,21 +382,27 @@ TEST_P(StateFileMetadataServersChangedInRuntimeTest,
       "servers reported by the second metadata server");
   check_state_file(state_file, param.cluster_type, kGroupId,
                    {cluster_nodes_ports[1], cluster_nodes_ports[2]}, 0,
-                   node_host, 10000ms);
+                   node_host_pretty, 10000ms);
+
+  router.kill();
+  check_exit_code(router, EXIT_SUCCESS, 5s);
+
+  // check that the state.json.tmp was not left behind
+  Path tmp_file(temp_test_dir.file("state.json.tmp"));
+  EXPECT_FALSE(tmp_file.exists());
+
+  Path dynamic_state_file(temp_test_dir.file("state.json"));
+  EXPECT_TRUE(dynamic_state_file.exists());
 }
 
 INSTANTIATE_TEST_SUITE_P(
     MetadataServersChangedInRuntime,
     StateFileMetadataServersChangedInRuntimeTest,
     ::testing::Values(
-        StateFileTestParam{"gr", "metadata_dynamic_nodes.js",
-                           ClusterType::GR_V1},
         StateFileTestParam{"gr_v2", "metadata_dynamic_nodes_v2_gr.js",
                            ClusterType::GR_V2},
         StateFileTestParam{"ar_v2", "metadata_dynamic_nodes_v2_ar.js",
                            ClusterType::RS_V2},
-        StateFileTestParam{"gr_ipv6", "metadata_dynamic_nodes.js",
-                           ClusterType::GR_V1, /*ipv6=*/true},
         StateFileTestParam{"gr_v2_ipv6", "metadata_dynamic_nodes_v2_gr.js",
                            ClusterType::GR_V2, /*ipv6=*/true},
         StateFileTestParam{"ar_v2_ipv6", "metadata_dynamic_nodes_v2_ar.js",
@@ -416,9 +428,12 @@ TEST_P(StateFileMetadataServersInaccessibleTest, MetadataServersInaccessible) {
 
   SCOPED_TRACE(
       "// Launch single server mock that will act as our metadata server");
-  const auto trace_file = get_data_dir().join(param.trace_file).str();
-  auto &cluster_node(ProcessManager::launch_mysql_server_mock(
-      trace_file, cluster_node_port, EXIT_SUCCESS, false, cluster_http_port));
+  auto &cluster_node =
+      mock_server_spawner().spawn(mock_server_cmdline(param.trace_file)
+                                      .port(cluster_node_port)
+                                      .http_port(cluster_http_port)
+                                      .args());
+
   ASSERT_NO_FATAL_FAILURE(check_port_ready(cluster_node, cluster_node_port));
   ASSERT_TRUE(
       MockServerRestClient(cluster_http_port).wait_for_rest_endpoint_ready());
@@ -427,8 +442,9 @@ TEST_P(StateFileMetadataServersInaccessibleTest, MetadataServersInaccessible) {
       "// Make our metadata server return single node as a cluster "
       "member (meaning single metadata server)");
 
-  set_mock_metadata(cluster_http_port, kGroupId, {cluster_node_port}, 0,
-                    {cluster_node_port});
+  set_mock_metadata(cluster_http_port, kGroupId,
+                    classic_ports_to_gr_nodes({cluster_node_port}), 0,
+                    classic_ports_to_cluster_nodes({cluster_node_port}));
 
   SCOPED_TRACE("// Create a router state file with a single metadata server");
   const std::string state_file = create_state_file(
@@ -437,7 +453,7 @@ TEST_P(StateFileMetadataServersInaccessibleTest, MetadataServersInaccessible) {
 
   SCOPED_TRACE("// Create a configuration file with low ttl");
   const std::string metadata_cache_section =
-      get_metadata_cache_section(0, kTTL, param.cluster_type);
+      get_metadata_cache_section(kTTL, param.cluster_type);
   const uint16_t router_port = port_pool_.get_next_available();
   const std::string routing_section = get_metadata_cache_routing_section(
       router_port, "PRIMARY", "first-available");
@@ -464,9 +480,7 @@ TEST_P(StateFileMetadataServersInaccessibleTest, MetadataServersInaccessible) {
 
 INSTANTIATE_TEST_SUITE_P(
     MetadataServersInaccessible, StateFileMetadataServersInaccessibleTest,
-    ::testing::Values(StateFileTestParam{"gr", "metadata_dynamic_nodes.js",
-                                         ClusterType::GR_V1},
-                      StateFileTestParam{"gr_v2",
+    ::testing::Values(StateFileTestParam{"gr_v2",
                                          "metadata_dynamic_nodes_v2_gr.js",
                                          ClusterType::GR_V2},
                       StateFileTestParam{"ar_v2",
@@ -498,16 +512,20 @@ TEST_P(StateFileGroupReplicationIdDiffersTest, GroupReplicationIdDiffers) {
   auto cluster_http_port = port_pool_.get_next_available();
 
   SCOPED_TRACE("// Launch server mock that will act as our metadata server");
-  const auto trace_file = get_data_dir().join(param.trace_file).str();
-  /*auto &cluster_node =*/ProcessManager::launch_mysql_server_mock(
-      trace_file, cluster_node_port, EXIT_SUCCESS, false, cluster_http_port);
+
+  /*auto &cluster_node =*/mock_server_spawner().spawn(
+      mock_server_cmdline(param.trace_file)
+          .port(cluster_node_port)
+          .http_port(cluster_http_port)
+          .args());
 
   SCOPED_TRACE(
       "// Make our metadata server to return single node as a cluster "
       "member (meaning single metadata server)");
 
-  set_mock_metadata(cluster_http_port, kClusterFileGroupId, {cluster_node_port},
-                    0, {cluster_node_port});
+  set_mock_metadata(cluster_http_port, kClusterFileGroupId,
+                    classic_ports_to_gr_nodes({cluster_node_port}), 0,
+                    {cluster_node_port});
 
   SCOPED_TRACE(
       "// Create a router state file with a single metadata server and "
@@ -522,12 +540,12 @@ TEST_P(StateFileGroupReplicationIdDiffersTest, GroupReplicationIdDiffers) {
       "changes we make in the mock server via http port were refreshed "
       "quickly");
   const std::string metadata_cache_section =
-      get_metadata_cache_section(0, kTTL, param.cluster_type);
+      get_metadata_cache_section(kTTL, param.cluster_type);
   const uint16_t router_port = port_pool_.get_next_available();
   const std::string routing_section = get_metadata_cache_routing_section(
       router_port, "PRIMARY", "first-available");
 
-  SCOPED_TRACE("// Launch ther router with the initial state file");
+  SCOPED_TRACE("// Launch the router with the initial state file");
   auto &router = launch_router(temp_test_dir.name(), metadata_cache_section,
                                routing_section, state_file, EXIT_SUCCESS, -1s);
 
@@ -552,9 +570,7 @@ TEST_P(StateFileGroupReplicationIdDiffersTest, GroupReplicationIdDiffers) {
 
 INSTANTIATE_TEST_SUITE_P(
     GroupReplicationIdDiffers, StateFileGroupReplicationIdDiffersTest,
-    ::testing::Values(StateFileTestParam{"gr", "metadata_dynamic_nodes.js",
-                                         ClusterType::GR_V1},
-                      StateFileTestParam{"gr_v2",
+    ::testing::Values(StateFileTestParam{"gr_v2",
                                          "metadata_dynamic_nodes_v2_gr.js",
                                          ClusterType::GR_V2},
                       StateFileTestParam{"ar_v2",
@@ -590,12 +606,15 @@ TEST_P(StateFileSplitBrainScenarioTest, SplitBrainScenario) {
   }
 
   SCOPED_TRACE("// Launch  server mocks that play as our split brain cluster");
-  const auto trace_file = get_data_dir().join(param.trace_file).str();
   for (unsigned i = 0; i < kNodesNum; i++) {
-    const auto port_connect = cluster_node_ports[i].first;
-    const auto port_http = cluster_node_ports[i].second;
-    cluster_nodes.push_back(&ProcessManager::launch_mysql_server_mock(
-        trace_file, port_connect, EXIT_SUCCESS, false, port_http));
+    const auto [port_connect, port_http] = cluster_node_ports[i];
+
+    cluster_nodes.push_back(
+        &mock_server_spawner().spawn(mock_server_cmdline(param.trace_file)
+                                         .port(port_connect)
+                                         .http_port(port_http)
+                                         .args()));
+
     ASSERT_NO_FATAL_FAILURE(check_port_ready(*cluster_nodes[i], port_connect));
     ASSERT_TRUE(MockServerRestClient(port_http).wait_for_rest_endpoint_ready());
   }
@@ -636,7 +655,7 @@ TEST_P(StateFileSplitBrainScenarioTest, SplitBrainScenario) {
       "changes we make in the mock server via http port were refreshed "
       "quickly");
   const std::string metadata_cache_section =
-      get_metadata_cache_section(0, kTTL, param.cluster_type);
+      get_metadata_cache_section(kTTL, param.cluster_type);
   const uint16_t router_port = port_pool_.get_next_available();
   const std::string routing_section = get_metadata_cache_routing_section(
       router_port, "PRIMARY", "first-available");
@@ -664,14 +683,11 @@ TEST_P(StateFileSplitBrainScenarioTest, SplitBrainScenario) {
                port_connected.c_str());
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    SplitBrainScenario, StateFileSplitBrainScenarioTest,
-    ::testing::Values(StateFileTestParam{"gr", "metadata_dynamic_nodes.js",
-                                         ClusterType::GR_V1},
-                      StateFileTestParam{"gr_v2",
-                                         "metadata_dynamic_nodes_v2_gr.js",
-                                         ClusterType::GR_V2}),
-    get_test_description);
+INSTANTIATE_TEST_SUITE_P(SplitBrainScenario, StateFileSplitBrainScenarioTest,
+                         ::testing::Values(StateFileTestParam{
+                             "gr_v2", "metadata_dynamic_nodes_v2_gr.js",
+                             ClusterType::GR_V2}),
+                         get_test_description);
 
 /**
  * @test
@@ -691,8 +707,7 @@ TEST_F(StateFileDynamicChangesTest, EmptyMetadataServersList) {
       "// Create a configuration file sections with low ttl so that any "
       "changes we make in the mock server via http port were refreshed "
       "quickly");
-  const std::string metadata_cache_section =
-      get_metadata_cache_section(0, kTTL);
+  const std::string metadata_cache_section = get_metadata_cache_section(kTTL);
   const uint16_t router_port = port_pool_.get_next_available();
   const std::string routing_section = get_metadata_cache_routing_section(
       router_port, "PRIMARY", "first-available");
@@ -707,9 +722,7 @@ TEST_F(StateFileDynamicChangesTest, EmptyMetadataServersList) {
   // proper error should get logged
   EXPECT_TRUE(wait_log_file_contains(
       router,
-      "'bootstrap_server_addresses' in the configuration file is empty "
-      "or not set and list of 'cluster-metadata-servers' in "
-      "'dynamic_config'-file is empty, too.",
+      "list of 'cluster-metadata-servers' in 'dynamic_config'-file is empty.",
       3 * kTTL));
 }
 
@@ -720,7 +733,6 @@ struct StateFileSchemaTestParams {
   std::vector<std::string> expected_errors_in_log;
   bool create_state_file_from_content{true};
   std::string state_file_path{""};
-  bool use_static_server_list{false};
   ClusterType cluster_type{ClusterType::GR_V2};
 };
 
@@ -764,10 +776,7 @@ TEST_P(StateFileSchemaTest, ParametrizedStateFileSchemaTest) {
 
   auto writer =
       config_writer(temp_test_dir.name())
-          .section(metadata_cache_section(test_params.use_static_server_list
-                                              ? port_pool_.get_next_available()
-                                              : 0,
-                                          kTTL, test_params.cluster_type))
+          .section(metadata_cache_section(kTTL, test_params.cluster_type))
           .section(metadata_cache_routing_section(router_port, "PRIMARY",
                                                   "first-available"));
 
@@ -799,15 +808,15 @@ INSTANTIATE_TEST_SUITE_P(
         // state file does not exits
         StateFileSchemaTestParams{
             "",
-            {"Could not open dynamic state file 'non-existing.json' "
-             "for "
+            {"Could not open dynamic state file 'non-existing.json' for "
              "reading"},
             false, /* = don't create state file, use the path given */
             "non-existing.json"},
 
         // state file path empty
         StateFileSchemaTestParams{
-            "", {"Could not open dynamic state file '' for reading"},
+            "",
+            {"Could not open dynamic state file '' for reading"},
             false, /* = don't create state file, use the empty path given */
             ""},
 
@@ -820,9 +829,9 @@ INSTANTIATE_TEST_SUITE_P(
         StateFileSchemaTestParams{"[]",
                                   {"Invalid json structure: not an object"}},
 
+        // clang-format off
         // version field missing
         StateFileSchemaTestParams{
-            // clang-format off
             "{"
               "\"metadata-cache\": {"
                 "\"group-replication-id\": \"3a0be5af-994c-11e8-9655-0800279e6a88\","
@@ -832,12 +841,10 @@ INSTANTIATE_TEST_SUITE_P(
                 "]"
               "}"
             "}",
-            // clang-format on
             {"Invalid json structure: missing field: version"}},
 
         // version field is not a string
         StateFileSchemaTestParams{
-            // clang-format off
             "{"
               "\"version\": 1,"
               "\"metadata-cache\": {"
@@ -848,13 +855,11 @@ INSTANTIATE_TEST_SUITE_P(
                 "]"
               "}"
             "}",
-            // clang-format on
             {"Invalid json structure: field version "
              "should be a string type"}},
 
         // version field is non numeric string
         StateFileSchemaTestParams{
-            // clang-format off
             "{"
               "\"version\": \"str\","
               "\"metadata-cache\": {"
@@ -865,13 +870,11 @@ INSTANTIATE_TEST_SUITE_P(
                 "]"
               "}"
             "}",
-            // clang-format on
             {"Invalid version field format, expected MAJOR.MINOR.PATCH, "
              "found: str"}},
 
         // version field has wrong number of numeric values
         StateFileSchemaTestParams{
-            // clang-format off
             "{"
               "\"version\": \"1.0\","
               "\"metadata-cache\": {"
@@ -882,13 +885,11 @@ INSTANTIATE_TEST_SUITE_P(
                 "]"
               "}"
             "}",
-            // clang-format on
             {"Invalid version field format, expected MAJOR.MINOR.PATCH, "
              "found: 1.0"}},
 
         // major version does not match (GR cluster)
         StateFileSchemaTestParams{
-            // clang-format off
             "{"
               "\"version\": \"2.0.0\","
               "\"metadata-cache\": {"
@@ -899,13 +900,10 @@ INSTANTIATE_TEST_SUITE_P(
                 "]"
               "}"
             "}",
-            // clang-format on
             {"Unsupported state file version, "
              "expected: 1.1.0, found: 2.0.0"}},
-
         // major version does not match (AR cluster)
         StateFileSchemaTestParams{
-            // clang-format off
             "{"
               "\"version\": \"2.0.0\","
               "\"metadata-cache\": {"
@@ -916,13 +914,10 @@ INSTANTIATE_TEST_SUITE_P(
                 "]"
               "}"
             "}",
-            // clang-format on
-            {"Unsupported state file version, "
-             "expected: 1.1.0, found: 2.0.0"}, true, "", false,
-             ClusterType::RS_V2},
-
+            {"Unsupported state file version, expected: 1.1.0, found: 2.0.0"},
+              true, "", ClusterType::RS_V2},
         // minor version does not match
-        StateFileSchemaTestParams{            // clang-format off
+        StateFileSchemaTestParams{
         "{"
           "\"version\": \"1.2.0\","
           "\"metadata-cache\": {"
@@ -933,33 +928,11 @@ INSTANTIATE_TEST_SUITE_P(
             "]"
           "}"
         "}",
-        // clang-format on
         {"Unsupported state file version, "
          "expected: 1.1.0, found: 1.2.0"}},
-
-        // both bootstrap_server_addresses and dynamic_state configured
-        StateFileSchemaTestParams{
-        // clang-format off
-        "{"
-          "\"version\": \"1.0.0\","
-          "\"metadata-cache\": {"
-            "\"group-replication-id\": \"3a0be5af-994c-11e8-9655-0800279e6a88\","
-            "\"cluster-metadata-servers\": ["
-              "\"mysql://localhost:5000\","
-              "\"mysql://127.0.0.1:5001\""
-            "]"
-          "}"
-        "}",
-        // clang-format on
-        {"bootstrap_server_addresses is not allowed when dynamic "
-         "state file is used"},
-        true, "",
-        true /*use static bootstrap_server_addresses in static conf. file*/},
-
         // group-replication-id filed missing
         // no longer required
 //        StateFileSchemaTestParams{
-//        // clang-format off
 //        "{"
 //          "\"version\": \"1.0.0\","
 //          "\"metadata-cache\": {"
@@ -969,51 +942,36 @@ INSTANTIATE_TEST_SUITE_P(
 //            "]"
 //          "}"
 //        "}",
-//        // clang-format on
 //        {"JSON file failed validation against JSON schema: Failed schema "
 //         "directive: #/properties/metadata-cache",
 //         "Failed schema keyword:   required",
 //         "Failure location in validated document: #/metadata-cache"}},
-
         // cluster-metadata-servers filed missing (GR cluster)
         StateFileSchemaTestParams{
-        // clang-format off
         "{"
           "\"version\": \"1.0.0\","
           "\"metadata-cache\": {"
             "\"group-replication-id\": \"3a0be5af-994c-11e8-9655-0800279e6a88\""
           "}"
         "}",
-        // clang-format on
         {"JSON file failed validation against JSON schema: Failed schema "
          "directive: #/properties/metadata-cache",
          "Failed schema keyword:   required",
          "Failure location in validated document: #/metadata-cache"}},
-
          // cluster-metadata-servers filed missing (AR cluster)
          StateFileSchemaTestParams{
-            // clang-format off
             "{"
               "\"version\": \"1.0.0\","
               "\"metadata-cache\": {"
                 "\"group-replication-id\": \"3a0be5af-994c-11e8-9655-0800279e6a88\""
               "}"
             "}",
-            // clang-format on
             {"JSON file failed validation against JSON schema: Failed schema "
              "directive: #/properties/metadata-cache",
              "Failed schema keyword:   required",
-             "Failure location in validated document: #/metadata-cache"}},
-
-        // both bootstrap_server_addresses and dynamic_state configured
-        // dynamic_state file not existing
-            StateFileSchemaTestParams{
-            "",
-            {"bootstrap_server_addresses is not allowed when dynamic "
-             "state file is used"},
-            false, /* = don't create state file, use the path given */
-            "non-existing.json",
-            true /*use static bootstrap_server_addresses in static conf. file*/}));
+             "Failure location in validated document: #/metadata-cache"
+                // clang-format on
+            }}));
 
 ////////////////////////////////////////////
 // Test for state file right access
@@ -1022,14 +980,18 @@ INSTANTIATE_TEST_SUITE_P(
 #ifndef _WIN32
 
 struct StateFileAccessRightsTestParams {
-  bool read_access;
-  bool write_access;
+  bool read_access;             // read access to state file
+  bool write_access_tmp_file;   // write access to tmp state file
+  bool write_access_directory;  // write access to the state file dir
   std::string expected_error;
 
-  StateFileAccessRightsTestParams(bool read_access_, bool write_access_,
+  StateFileAccessRightsTestParams(bool read_access_,
+                                  bool write_access_tmp_file_,
+                                  bool write_access_directory_,
                                   const std::string &expected_error_)
       : read_access(read_access_),
-        write_access(write_access_),
+        write_access_tmp_file(write_access_tmp_file_),
+        write_access_directory(write_access_directory_),
         expected_error(expected_error_) {}
 };
 
@@ -1049,6 +1011,7 @@ TEST_P(StateFileAccessRightsTest, ParametrizedStateFileSchemaTest) {
   auto test_params = GetParam();
 
   TempDirectory temp_test_dir;
+  TempDirectory temp_test_dir_data;
 
   const uint16_t router_port = port_pool_.get_next_available();
 
@@ -1056,11 +1019,25 @@ TEST_P(StateFileAccessRightsTest, ParametrizedStateFileSchemaTest) {
   // dynamic state file configured via test parameter
 
   const std::string state_file = create_state_file(
-      temp_test_dir.name(), create_state_file_content("000-000", {10000}));
+      temp_test_dir_data.name(), create_state_file_content("000-000", {10000}));
   mode_t file_mode = 0;
   if (test_params.read_access) file_mode |= S_IRUSR;
-  if (test_params.write_access) file_mode |= S_IWUSR;
   chmod(state_file.c_str(), file_mode);
+
+  // create empty temp state file with no write access
+  if (!test_params.write_access_tmp_file) {
+    const std::string tmp_state_file = [&]() {
+      Path file_path = Path(temp_test_dir_data.name()).join("state.json.tmp");
+      std::ofstream ofs_config(file_path.str());
+
+      return file_path.str();
+    }();
+    chmod(tmp_state_file.c_str(), S_IRUSR);
+  }
+
+  if (!test_params.write_access_directory) {
+    chmod(temp_test_dir_data.name().c_str(), S_IRUSR | S_IXUSR);
+  }
 
   auto writer = config_writer(temp_test_dir.name())
                     .section(metadata_cache_section())
@@ -1089,12 +1066,17 @@ TEST_P(StateFileAccessRightsTest, ParametrizedStateFileSchemaTest) {
 INSTANTIATE_TEST_SUITE_P(
     StateFileTests, StateFileAccessRightsTest,
     ::testing::Values(
-        // no read, nor write access
-        StateFileAccessRightsTestParams(false, false,
+        // no read for state file
+        StateFileAccessRightsTestParams(false, true, true,
                                         "Could not open dynamic state file"),
-        // read access, no write access
-        StateFileAccessRightsTestParams(true, false,
-                                        "Could not open dynamic state file")));
+
+        // read access, no write access to temporary file
+        StateFileAccessRightsTestParams(
+            true, false, true, "Could not open temporary dynamic state file"),
+
+        // read access, no write access to directory
+        StateFileAccessRightsTestParams(
+            true, true, false, "Could not open temporary dynamic state file")));
 
 #endif
 
@@ -1114,18 +1096,25 @@ class StateFileDirectoryBootstrapTest : public StateFileTest {
 TEST_F(StateFileDirectoryBootstrapTest, DirectoryBootstrapTest) {
   TempDirectory temp_test_dir;
 
-  SCOPED_TRACE("// Launch our metadata server we bootsrtap against");
+  prepare_config_dir_with_default_certs(temp_test_dir.name());
 
-  const auto trace_file = get_data_dir().join("bootstrap_gr.js").str();
+  SCOPED_TRACE("// Launch our metadata server we bootstrap against");
+
   const auto metadata_server_port = port_pool_.get_next_available();
-  auto &md_server = ProcessManager::launch_mysql_server_mock(
-      trace_file, metadata_server_port, EXIT_SUCCESS, false);
-  ASSERT_NO_FATAL_FAILURE(check_port_ready(md_server, metadata_server_port));
+  const auto http_port = port_pool_.get_next_available();
+
+  mock_server_spawner().spawn(mock_server_cmdline("bootstrap_gr.js")
+                                  .port(metadata_server_port)
+                                  .http_port(http_port)
+                                  .args());
+  set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
+                    classic_ports_to_gr_nodes({metadata_server_port}), 0,
+                    {metadata_server_port});
 
   SCOPED_TRACE("// Bootstrap against our metadata server");
   std::vector<std::string> router_cmdline{
       "--bootstrap=localhost:" + std::to_string(metadata_server_port), "-d",
-      temp_test_dir.name()};
+      temp_test_dir.name(), "--logger.level=debug"};
   auto &router = launch_router_for_bootstrap(router_cmdline, EXIT_SUCCESS);
 
   ASSERT_NO_FATAL_FAILURE(check_exit_code(router, EXIT_SUCCESS));
@@ -1133,8 +1122,9 @@ TEST_F(StateFileDirectoryBootstrapTest, DirectoryBootstrapTest) {
   // check the state file that was produced, if it contains
   // what the bootstrap server has reported
   const std::string state_file = temp_test_dir.name() + "/data/state.json";
-  check_state_file(state_file, ClusterType::GR_V1, "cluster-specific-id",
-                   {5500, 5510, 5520});
+  check_state_file(state_file, ClusterType::GR_V2,
+                   "00000000-0000-0000-0000-0000000000g1",
+                   {metadata_server_port});
 
   // check that static file has a proper reference to the dynamic file
   const std::string conf_content =
@@ -1172,15 +1162,22 @@ class StateFileSystemBootstrapTest : public StateFileTest,
  * in case of system (non-directory) bootstrap.
  */
 TEST_F(StateFileSystemBootstrapTest, SystemBootstrapTest) {
-  SCOPED_TRACE("// Launch our metadata server we bootsrtap against");
+  SCOPED_TRACE("// Launch our metadata server we bootstrap against");
 
-  const auto trace_file = get_data_dir().join("bootstrap_gr.js").str();
   const auto metadata_server_port = port_pool_.get_next_available();
-  auto &md_server = ProcessManager::launch_mysql_server_mock(
-      trace_file, metadata_server_port, EXIT_SUCCESS, false);
-  ASSERT_NO_FATAL_FAILURE(check_port_ready(md_server, metadata_server_port));
+  const auto http_port = port_pool_.get_next_available();
+
+  mock_server_spawner().spawn(mock_server_cmdline("bootstrap_gr.js")
+                                  .port(metadata_server_port)
+                                  .http_port(http_port)
+                                  .args());
+
+  set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
+                    classic_ports_to_gr_nodes({metadata_server_port}), 0,
+                    {metadata_server_port});
 
   SCOPED_TRACE("// Bootstrap against our metadata server");
+
   std::vector<std::string> router_cmdline{"--bootstrap=localhost:" +
                                           std::to_string(metadata_server_port)};
   auto &router = launch_router_for_bootstrap(router_cmdline, EXIT_SUCCESS);
@@ -1192,8 +1189,9 @@ TEST_F(StateFileSystemBootstrapTest, SystemBootstrapTest) {
   const std::string state_file =
       RouterSystemLayout::tmp_dir_ + "/stage/var/lib/mysqlrouter/state.json";
 
-  check_state_file(state_file, ClusterType::GR_V1, "cluster-specific-id",
-                   {5500, 5510, 5520});
+  check_state_file(state_file, ClusterType::GR_V2,
+                   "00000000-0000-0000-0000-0000000000g1",
+                   {metadata_server_port});
 }
 
 #endif  // SKIP_BOOTSTRAP_SYSTEM_DEPLOYMENT_TESTS

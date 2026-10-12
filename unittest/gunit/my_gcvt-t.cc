@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -53,21 +54,21 @@ TEST_P(GcvtTest, Convert) {
   bool error{false};
 
   char *to = &buff[0];
-  size_t len = my_gcvt(test_input, MY_GCVT_ARG_DOUBLE, width, to, &error);
+  size_t const len = my_gcvt(test_input, MY_GCVT_ARG_DOUBLE, width, to, &error);
   EXPECT_LE(len, width);
   EXPECT_FALSE(error);
 
   int int_error{0};
   const char *str_start = to;
   const char *str_end = to + width;
-  double result = my_strtod(str_start, &str_end, &int_error);
+  double const result = my_strtod(str_start, &str_end, &int_error);
   EXPECT_EQ(0, int_error) << "buff[" << buff << "]" << std::endl;
   EXPECT_EQ(test_input, result) << "buff[" << buff << "]" << std::endl;
 
   CHARSET_INFO *cs = init_collation("utf8mb4_0900_as_ci");
   const char *end;
   int conv_error;
-  double nr = my_strntod(cs, str_start, width, &end, &conv_error);
+  double const nr = my_strntod(cs, str_start, width, &end, &conv_error);
   EXPECT_EQ(0, conv_error) << "buff[" << buff << "]" << std::endl;
   EXPECT_EQ(test_input, nr) << "buff[" << buff << "]" << std::endl;
 }

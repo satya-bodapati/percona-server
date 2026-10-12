@@ -1,7 +1,7 @@
 --source include/not_group_replication_plugin.inc
-source include/set_privilege_checks_user_as_system_user.inc;
+source include/rpl/set_privilege_checks_user_as_system_user.inc;
 let $rpl_privilege_checks_user_grant_option = 1;
-source include/master-slave.inc;
+source include/rpl/init_source_replica.inc;
 
 #
 # BUG#16487
@@ -171,8 +171,8 @@ connection master;
 DROP TABLE IF EXISTS t5;
 --enable_warnings
 CREATE TABLE t5 (
- word varchar(50) collate utf8_unicode_ci NOT NULL default ''
-) DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
+ word varchar(50) COLLATE utf8mb3_unicode_ci NOT NULL default ''
+) DEFAULT CHARSET=utf8mb3 COLLATE utf8mb3_unicode_ci;
 SET @@session.character_set_client=33,@@session.collation_connection=192;
 CREATE TEMPORARY TABLE tmptbl504451f4258$1 (id INT NOT NULL) ENGINE=MEMORY;
 INSERT INTO t5 (word)  VALUES ('TEST’');
@@ -187,5 +187,5 @@ connection master;
 DROP TABLE t5;
 sync_slave_with_master;
 
---source include/rpl_end.inc
+--source include/rpl/deinit.inc
 --source include/force_restart.inc

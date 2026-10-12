@@ -54,7 +54,8 @@ select user();
 set optimizer_trace="enabled=on";
 # SHOW GRANTS scans a hash, which gives a random order
 --sorted_result
-show grants;
+--let $user = 0
+--source include/show_grants.inc
 
 --echo
 --echo # ==========================================================
@@ -67,16 +68,20 @@ show grants;
 --echo # Because invoker has all global privileges, all traces are visible:
 set optimizer_trace_offset=0,optimizer_trace_limit=100;
 call p1();
+--skip_if_hypergraph  # Length of trace is different.
 select QUERY, length(TRACE), INSUFFICIENT_PRIVILEGES from information_schema.OPTIMIZER_TRACE;
 --echo # this SET always purges all remembered traces
 set optimizer_trace_offset=0,optimizer_trace_limit=100;
 select f1();
+--skip_if_hypergraph  # Length of trace is different.
 select QUERY, length(TRACE), INSUFFICIENT_PRIVILEGES from information_schema.OPTIMIZER_TRACE;
 set optimizer_trace_offset=0,optimizer_trace_limit=100;
 select * from v1;
+--skip_if_hypergraph  # Length of trace is different.
 select QUERY, length(TRACE), INSUFFICIENT_PRIVILEGES from information_schema.OPTIMIZER_TRACE;
 set optimizer_trace_offset=0,optimizer_trace_limit=100;
 insert into t2 values(current_user());
+--skip_if_hypergraph  # Length of trace is different.
 select QUERY, length(TRACE), INSUFFICIENT_PRIVILEGES from information_schema.OPTIMIZER_TRACE;
 --echo
 --echo # Show that really all global privileges are needed: let root
@@ -97,7 +102,8 @@ connection con_user1;
 select user();
 set optimizer_trace="enabled=on";
 --sorted_result
-show grants;
+--let $user = 0
+--source include/show_grants.inc
 
 set optimizer_trace_offset=0,optimizer_trace_limit=100;
 call p1();
@@ -114,9 +120,11 @@ select f1();
 select QUERY, TRACE, INSUFFICIENT_PRIVILEGES from information_schema.OPTIMIZER_TRACE;
 set optimizer_trace_offset=0,optimizer_trace_limit=100;
 select * from v1;
+--skip_if_hypergraph  # Length of trace is different.
 select QUERY, length(TRACE), INSUFFICIENT_PRIVILEGES from information_schema.OPTIMIZER_TRACE;
 set optimizer_trace_offset=0,optimizer_trace_limit=100;
 insert into t2 values(current_user());
+--skip_if_hypergraph  # Length of trace is different.
 select QUERY, TRACE, INSUFFICIENT_PRIVILEGES from information_schema.OPTIMIZER_TRACE;
 
 --echo
@@ -187,12 +195,15 @@ select user();
 
 set optimizer_trace_offset=0,optimizer_trace_limit=100;
 call p1();
+--skip_if_hypergraph  # Length of trace is different.
 select QUERY, length(TRACE), INSUFFICIENT_PRIVILEGES from information_schema.OPTIMIZER_TRACE;
 set optimizer_trace_offset=0,optimizer_trace_limit=100;
 select f1();
+--skip_if_hypergraph  # Length of trace is different.
 select QUERY, length(TRACE), INSUFFICIENT_PRIVILEGES from information_schema.OPTIMIZER_TRACE;
 set optimizer_trace_offset=0,optimizer_trace_limit=100;
 select * from v1;
+--skip_if_hypergraph  # Length of trace is different.
 select QUERY, length(TRACE), INSUFFICIENT_PRIVILEGES from information_schema.OPTIMIZER_TRACE;
 set optimizer_trace_offset=2,optimizer_trace_limit=1;
 call p1();
@@ -288,6 +299,7 @@ select QUERY, length(TRACE), INSUFFICIENT_PRIVILEGES from information_schema.OPT
 show create function f1;
 set optimizer_trace_offset=0,optimizer_trace_limit=100;
 select * from v1;
+--skip_if_hypergraph  # Length of trace is different.
 select QUERY, length(TRACE), INSUFFICIENT_PRIVILEGES from information_schema.OPTIMIZER_TRACE;
 --echo # Trace exposed body of view, and content of t1, which we
 --echo # could see anyway:
@@ -496,6 +508,7 @@ select user();
 
 set optimizer_trace_offset=0,optimizer_trace_limit=100;
 call p1();
+--skip_if_hypergraph  # Length of trace is different.
 select QUERY, length(TRACE), INSUFFICIENT_PRIVILEGES from information_schema.OPTIMIZER_TRACE;
 --echo # Trace exposed body of routine, and content of t1, which we
 --echo # could see anyway:
@@ -503,18 +516,21 @@ show create procedure p1;
 select * from t1 limit 1;
 set optimizer_trace_offset=0,optimizer_trace_limit=100;
 select f1();
+--skip_if_hypergraph  # Length of trace is different.
 select QUERY, length(TRACE), INSUFFICIENT_PRIVILEGES from information_schema.OPTIMIZER_TRACE;
 --echo # Trace exposed body of routine, and content of t1, which we
 --echo # could see anyway:
 show create function f1;
 set optimizer_trace_offset=0,optimizer_trace_limit=100;
 select * from v1;
+--skip_if_hypergraph  # Length of trace is different.
 select QUERY, length(TRACE), INSUFFICIENT_PRIVILEGES from information_schema.OPTIMIZER_TRACE;
 --echo # Trace exposed body of view, and content of t1, which we
 --echo # could see anyway:
 show create view v1;
 set optimizer_trace_offset=0,optimizer_trace_limit=100;
 insert into t2 values(current_user());
+--skip_if_hypergraph  # Length of trace is different.
 select QUERY, length(TRACE), INSUFFICIENT_PRIVILEGES from information_schema.OPTIMIZER_TRACE;
 --echo # Trace exposed body of trigger, and content of t2/t3, which we
 --echo # could see anyway:
@@ -524,6 +540,7 @@ select * from t2, t3 order by t2.a, t3.a limit 1;
 --echo # Trace exposed content of t1 which we could see anyway:
 set optimizer_trace_offset=0,optimizer_trace_limit=100;
 select a from (select a from t1 where a like "f%") as tt where a like "fi%";
+--skip_if_hypergraph  # Length of trace is different.
 select QUERY, length(TRACE), INSUFFICIENT_PRIVILEGES from information_schema.OPTIMIZER_TRACE;
 
 --echo

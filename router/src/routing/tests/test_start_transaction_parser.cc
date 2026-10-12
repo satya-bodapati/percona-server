@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,32 +22,22 @@
   along with this program; if not, write to the Free Software
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
-#include "mysql/harness/stdx/expected.h"
 #include "start_transaction_parser.h"
 
 #include <gtest/gtest.h>
+
 #include <optional>
 #include <variant>
 
+#include "mysql/harness/stdx/expected.h"
 #include "mysql/harness/stdx/expected_ostream.h"
 #include "mysql/harness/tls_context.h"
-#include "sql_parser.h"
+#include "sql_parser_state.h"
 
 static stdx::expected<std::variant<std::monostate, StartTransaction>,
                       std::string>
-start_transaction(std::string_view stmt) {
-  MEM_ROOT mem_root;
-  THD session;
-  session.mem_root = &mem_root;
-
-  {
-    Parser_state parser_state;
-    parser_state.init(&session, stmt.data(), stmt.size());
-    session.m_parser_state = &parser_state;
-    SqlLexer lexer{&session};
-
-    return StartTransactionParser(lexer.begin(), lexer.end()).parse();
-  }
+start_transaction(SqlLexer &&lexer) {
+  return StartTransactionParser(lexer.begin(), lexer.end()).parse();
 }
 
 struct StartTransactionParam {
@@ -109,7 +100,17 @@ class StartTransactionTest
       public ::testing::WithParamInterface<StartTransactionParam> {};
 
 TEST_P(StartTransactionTest, works) {
-  ASSERT_EQ(start_transaction(GetParam().stmt), GetParam().expected_result)
+  SqlParserState sql_parser_state;
+
+  // check the charset's are properly initialized
+  ASSERT_NE(sql_parser_state.thd()->charset(), nullptr);
+  // 8 is laitn1
+  ASSERT_EQ(sql_parser_state.thd()->charset()->number, 8);
+
+  sql_parser_state.statement(GetParam().stmt);
+
+  ASSERT_EQ(start_transaction(sql_parser_state.lexer()),
+            GetParam().expected_result)
       << GetParam().stmt << "\n"
       << GetParam().expected_result;
 }
@@ -153,6 +154,8 @@ INSTANTIATE_TEST_SUITE_P(Ddl, StartTransactionTest,
 
 int main(int argc, char *argv[]) {
   TlsLibraryContext lib_ctx;
+
+  SqlLexer::init_library();
 
   ::testing::InitGoogleTest(&argc, argv);
 

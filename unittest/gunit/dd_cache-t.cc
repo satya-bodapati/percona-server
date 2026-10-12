@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -43,6 +44,7 @@
 #include "sql/dd/impl/types/collation_impl.h"
 #include "sql/dd/impl/types/column_statistics_impl.h"
 #include "sql/dd/impl/types/event_impl.h"
+#include "sql/dd/impl/types/library_impl.h"
 #include "sql/dd/impl/types/procedure_impl.h"
 #include "sql/dd/impl/types/schema_impl.h"
 #include "sql/dd/impl/types/table_impl.h"
@@ -195,7 +197,7 @@ class CacheTest : public ::testing::Test {
 typedef ::testing::Types<dd::Charset_impl, dd::Collation_impl,
                          dd::Column_statistics_impl, dd::Schema_impl,
                          dd::Table_impl, dd::Tablespace_impl, dd::View_impl,
-                         dd::Event_impl, dd::Procedure_impl>
+                         dd::Event_impl, dd::Procedure_impl, dd::Library_impl>
     DDTypes;
 TYPED_TEST_SUITE(CacheTest, DDTypes);
 
@@ -467,6 +469,11 @@ TEST_F(CacheStorageTest, BasicStoreAndGetRoutine) {
       this, thd());
 }
 
+TEST_F(CacheStorageTest, BasicStoreAndGetLibrary) {
+  test_basic_store_and_get_with_schema<dd::Library, dd::Library_impl>(this,
+                                                                      thd());
+}
+
 template <typename Intrfc_type, typename Impl_type>
 void test_acquire_for_modification(CacheStorageTest *tst, THD *thd) {
   dd::cache::Dictionary_client *dc = thd->dd_client();
@@ -595,6 +602,11 @@ TEST_F(CacheStorageTest, AcquireForModificationEvent) {
 
 TEST_F(CacheStorageTest, AcquireForModificationProcedure) {
   test_acquire_for_modification_with_schema<dd::Procedure, dd::Procedure_impl>(
+      this, thd());
+}
+
+TEST_F(CacheStorageTest, AcquireForModificationLibrary) {
+  test_acquire_for_modification_with_schema<dd::Library, dd::Library_impl>(
       this, thd());
 }
 
@@ -737,6 +749,11 @@ TEST_F(CacheStorageTest, AcquireAndRenameProcedure) {
                                                                          thd());
 }
 
+TEST_F(CacheStorageTest, AcquireAndRenameLibrary) {
+  test_acquire_and_rename_with_schema<dd::Library, dd::Library_impl>(this,
+                                                                     thd());
+}
+
 template <typename Intrfc_type, typename Impl_type>
 void test_acquire_and_move(CacheStorageTest *tst, THD *thd) {
   dd::cache::Dictionary_client *dc = thd->dd_client();
@@ -814,6 +831,10 @@ TEST_F(CacheStorageTest, AcquireAndMoveEvent) {
 
 TEST_F(CacheStorageTest, AcquireAndMoveProcedure) {
   test_acquire_and_move<dd::Procedure, dd::Procedure_impl>(this, thd());
+}
+
+TEST_F(CacheStorageTest, AcquireAndMoveLibrary) {
+  test_acquire_and_move<dd::Library, dd::Library_impl>(this, thd());
 }
 
 template <typename Intrfc_type, typename Impl_type>
@@ -915,6 +936,10 @@ TEST_F(CacheStorageTest, AcquireAndDropEvent) {
 TEST_F(CacheStorageTest, AcquireAndDropProcedure) {
   test_acquire_and_drop_with_schema<dd::Procedure, dd::Procedure_impl>(this,
                                                                        thd());
+}
+
+TEST_F(CacheStorageTest, AcquireAndDropLibrary) {
+  test_acquire_and_drop_with_schema<dd::Library, dd::Library_impl>(this, thd());
 }
 
 TEST_F(CacheStorageTest, CommitNewObject) {

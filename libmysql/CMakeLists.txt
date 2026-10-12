@@ -1,15 +1,16 @@
-# Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -69,6 +70,7 @@ SET(CLIENT_API_FUNCTIONS
   mysql_query
   mysql_set_server_option
   mysql_stmt_bind_param
+  mysql_stmt_bind_named_param
   mysql_stmt_bind_result
   mysql_stmt_execute
   mysql_stmt_fetch
@@ -206,12 +208,6 @@ IF (WIN32 AND OPENSSL_APPLINK_C)
   )
 ENDIF()
 
-IF ((NOT WITHOUT_MYSQL_NATIVE_PASSWORD)
-  OR (WITHOUT_MYSQL_NATIVE_PASSWORD EQUAL 0))
-  LIST(APPEND CLIENT_SOURCES
-    ../sql-common/mysql_native_authentication_client.cc)
-ENDIF()
-
 #
 # Include protocol tracing infrastructure and the test
 # trace plugin if enabled by build options.
@@ -253,6 +249,10 @@ ELSE()
 ENDIF()
 
 LIST(APPEND LIBS_TO_LINK OpenSSL::SSL OpenSSL::Crypto)
+
+IF(WITH_EXT_BACKTRACE)
+  LIST(APPEND LIBS_TO_MERGE backtrace)
+ENDIF()
 
 UNSET(HAVE_WIN32_DNS_SRV)
 UNSET(HAVE_UNIX_DNS_SRV)
@@ -300,6 +300,12 @@ ADD_SUBDIRECTORY(authentication_oci_client)
 
 # Fido and Webauthn clients
 ADD_SUBDIRECTORY(fido_client)
+
+# authentication mysql_native_password client plug-in
+ADD_SUBDIRECTORY(authentication_native_password)
+
+# authentication openid connect client plug-in
+ADD_SUBDIRECTORY(authentication_openid_connect_client)
 
 # Merge several convenience libraries into one big perconaserverclient
 MERGE_CONVENIENCE_LIBRARIES(perconaserverclient ${LIBS_TO_MERGE}
@@ -366,7 +372,7 @@ MERGE_LIBRARIES_SHARED(libmysql ${LIBS_TO_MERGE}
 
 # Downgrade warning for strncat in my_crypt_genhash.
 IF((WITH_LTO OR CMAKE_COMPILER_FLAG_WITH_LTO) AND MY_COMPILER_IS_GNU)
-  MY_TARGET_LINK_OPTIONS(libmysql "-Wno-error=stringop-truncation")
+  TARGET_LINK_OPTIONS(libmysql PRIVATE -Wno-error=stringop-truncation)
 ENDIF()
 
 IF(LINUX_STANDALONE AND KERBEROS_CUSTOM_LIBRARY)
@@ -376,13 +382,13 @@ ENDIF()
 
 IF(UNIX)
   IF(LINK_FLAG_Z_DEFS)
-    MY_TARGET_LINK_OPTIONS(libmysql "LINKER:${LINK_FLAG_Z_DEFS}")
+    TARGET_LINK_OPTIONS(libmysql PRIVATE LINKER:${LINK_FLAG_Z_DEFS})
   ENDIF()
 
   IF(LINUX)
     CONFIGURE_FILE(libmysql.ver.in ${CMAKE_CURRENT_BINARY_DIR}/libmysql.ver)
-    MY_TARGET_LINK_OPTIONS(libmysql
-      "LINKER:--version-script=${CMAKE_CURRENT_BINARY_DIR}/libmysql.ver")
+    TARGET_LINK_OPTIONS(libmysql PRIVATE
+      LINKER:--version-script=${CMAKE_CURRENT_BINARY_DIR}/libmysql.ver)
   ENDIF()
 
   # clean direct output needs to be set several targets have the same name

@@ -1,15 +1,16 @@
-# Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -40,11 +41,11 @@ ENDFUNCTION()
 
 # ADD_ROUTER_TEST_FILE(FILE)
 #
-# add a test that depends on the 'router_lib', 'harness-library' and 'gtest'
+# add a test that depends on the 'router_utils', 'harness-library' and 'gtest'
 FUNCTION(ADD_ROUTER_TEST_FILE FILE)
   SET(DEFAULT_LIB_DEPENDS
     harness-library
-    router_lib
+    router_utils
     routertest_helpers
     ${CMAKE_THREAD_LIBS_INIT}
     ${GTEST_LIBRARIES})
@@ -118,9 +119,13 @@ FUNCTION(_ADD_TEST_FILE FILE)
   SET(test_name "${test_target}")
   MYSQL_ADD_EXECUTABLE(${test_target}
     ${FILE} ${TEST_EXTRA_SOURCES}
+    COMPONENT Router
     ADD_TEST ${test_name})
 
   ADD_DEPENDENCIES(mysqlrouter_all ${test_target})
+
+  # ZSTD_generateSequences generates -Werror=alloc-size-larger-than=
+  DOWNGRADE_STRINGOP_WARNINGS(${test_target})
 
   FOREACH(libtarget ${TEST_LIB_DEPENDS})
     #add_dependencies(${test_target} ${libtarget})
@@ -148,7 +153,9 @@ FUNCTION(_ADD_TEST_FILE FILE)
     STRING_APPEND(TEST_ENV_PREFIX ";WITH_VALGRIND=1;VALGRIND_EXE=${VALGRIND}")
   ENDIF()
 
-  IF(WITH_ASAN)
+  # For Visual Studio: AddressSanitizer: ERROR: expected '=' in ASAN_OPTIONS
+  # Our asan.supp is empty anyways, and LSAN is not supported on Windows.
+  IF(WITH_ASAN AND NOT WIN32_VS)
     STRING_APPEND(TEST_ENV_PREFIX
       ";ASAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/mysql-test/asan.supp")
     STRING_APPEND(TEST_ENV_PREFIX
@@ -264,7 +271,9 @@ FUNCTION(STATICLIB_FROM_TARGET TO FROM)
 
   SET(_LIB_SOURCES)
   FOREACH(F ${_SOURCES})
-    LIST(APPEND _LIB_SOURCES ${_SOURCE_DIR}/${F})
+    IF(NOT ${F} MATCHES ".*\\.rc")
+      LIST(APPEND _LIB_SOURCES ${_SOURCE_DIR}/${F})
+    ENDIF()
   ENDFOREACH()
 
   ADD_LIBRARY(${TO}

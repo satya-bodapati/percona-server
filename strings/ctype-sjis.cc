@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -31,7 +32,6 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "my_compiler.h"
 #include "mysql/strings/m_ctype.h"
 #include "strings/m_ctype_internals.h"
 #include "template_utils.h"
@@ -1380,8 +1380,8 @@ static int my_strnncoll_sjis_internal(const CHARSET_INFO *cs,
                       pointer_cast<const char *>(a_end)) &&
         ismbchar_sjis(cs, pointer_cast<const char *>(b),
                       pointer_cast<const char *>(b_end))) {
-      unsigned a_char = sjiscode(*a, *(a + 1));
-      unsigned b_char = sjiscode(*b, *(b + 1));
+      unsigned const a_char = sjiscode(*a, *(a + 1));
+      unsigned const b_char = sjiscode(*b, *(b + 1));
       if (a_char != b_char) return (int)a_char - (int)b_char;
       a += 2;
       b += 2;
@@ -1401,7 +1401,7 @@ extern "C" {
 static int my_strnncoll_sjis(const CHARSET_INFO *cs, const uint8_t *a,
                              size_t a_length, const uint8_t *b, size_t b_length,
                              bool b_is_prefix) {
-  int res = my_strnncoll_sjis_internal(cs, &a, a_length, &b, b_length);
+  int const res = my_strnncoll_sjis_internal(cs, &a, a_length, &b, b_length);
   if (b_is_prefix && a_length > b_length) a_length = b_length;
   return res ? res : (int)(a_length - b_length);
 }
@@ -17937,8 +17937,8 @@ mb:
 static size_t my_numcells_sjis(const CHARSET_INFO *cs [[maybe_unused]],
                                const char *str, const char *str_end) {
   size_t clen;
-  const uint8_t *b = pointer_cast<const uint8_t *>(str);
-  const uint8_t *e = pointer_cast<const uint8_t *>(str_end);
+  const auto *b = pointer_cast<const uint8_t *>(str);
+  const auto *e = pointer_cast<const uint8_t *>(str_end);
 
   for (clen = 0; b < e;) {
     if (*b >= 0xA1 && *b <= 0xDF) {

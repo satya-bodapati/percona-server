@@ -1,15 +1,16 @@
-/* Copyright (c) 2002, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2002, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -68,6 +69,7 @@ This file contains the implementation of error and warnings related
 #include "mysql/strings/m_ctype.h"
 #include "mysql_time.h"
 #include "mysqld_error.h"
+#include "mysys_err.h"
 #include "sql-common/my_decimal.h"
 #include "sql/derror.h"  // ER_THD
 #include "sql/item.h"
@@ -107,7 +109,7 @@ using std::min;
   In both cases, the message is retrieved from ER(ER_XXX), which in turn
   is read from the resource file errmsg.sys at server startup.
   The strings stored in the errmsg.sys file are expressed in the character set
-  that corresponds to the server --language start option
+  that corresponds to the server --lc-messages start option
   (see error_message_charset_info).
 
   When executing:
@@ -352,6 +354,7 @@ Diagnostics_area::Diagnostics_area(bool allow_unlimited_conditions)
   memset(m_current_statement_cond_count_by_qb, 0,
          sizeof(m_current_statement_cond_count_by_qb));
   m_message_text[0] = '\0';
+  m_message_text_length = 0;
 }
 
 Diagnostics_area::~Diagnostics_area() {}
@@ -362,6 +365,7 @@ void Diagnostics_area::reset_diagnostics_area() {
   set_overwrite_status(false);
   // Don't take chances in production.
   m_message_text[0] = '\0';
+  m_message_text_length = 0;
   m_mysql_errno = 0;
   m_affected_rows = 0;
   m_last_insert_id = 0;
@@ -372,11 +376,60 @@ void Diagnostics_area::reset_diagnostics_area() {
   m_status = DA_EMPTY;
 }
 
+#ifndef NDEBUG
+namespace {
+const char *status_text(Diagnostics_area::enum_diagnostics_status status) {
+  switch (status) {
+    case Diagnostics_area::DA_EMPTY:
+      return "empty";
+    case Diagnostics_area::DA_OK:
+      return "ok";
+    case Diagnostics_area::DA_EOF:
+      return "eof";
+    case Diagnostics_area::DA_ERROR:
+      return "error";
+    case Diagnostics_area::DA_DISABLED:
+      return "disabled";
+    default:
+      return "<invalid>";
+  }
+}
+}  // namespace
+#endif
+
+void Diagnostics_area::assert_not_set(
+    Diagnostics_area::enum_diagnostics_status new_status [[maybe_unused]],
+    int new_errno [[maybe_unused]]) {
+#ifndef NDEBUG
+  // We have earlier reported a status, and are now reporting a status again.
+  // This is allowed only if we are reporting an error and
+  // m_can_overwrite_status is set; otherwise it is a bug. The reason for the
+  // bug is likely that we reported an error but missed to propagate the error
+  // status up the call stack, so that either it tries to report ok, or a second
+  // error is detected and reported.
+  //
+  // We handle it by raising an assertion. Before crashing, we write the
+  // previous status, the requested status, the previous message, and the new
+  // message to the error log.
+  if (is_set()) {
+    if (new_status == Diagnostics_area::DA_ERROR && m_can_overwrite_status)
+      return;
+    LogErr(ERROR_LEVEL, ER_INVALID_PREVIOUS_DIAGNOSTICS_AREA_STATUS,
+           status_text(status()), status_text(new_status),
+           m_mysql_errno != 0 ? mysql_errno_to_symbol(m_mysql_errno) : "",
+           new_errno != 0 ? mysql_errno_to_symbol(new_errno) : "");
+    bool invalid_da_status__check_error_log = true;
+    assert(!invalid_da_status__check_error_log);
+  }
+#endif
+}
+
 void Diagnostics_area::set_ok_status(ulonglong affected_rows,
                                      ulonglong last_insert_id,
                                      const char *message_text) {
   DBUG_TRACE;
-  assert(!is_set());
+  assert_not_set(DA_OK);
+
   /*
     In production, refuse to overwrite an error or a custom response
     with an OK packet.
@@ -386,17 +439,20 @@ void Diagnostics_area::set_ok_status(ulonglong affected_rows,
   m_last_statement_cond_count = current_statement_cond_count();
   m_affected_rows = affected_rows;
   m_last_insert_id = last_insert_id;
-  if (message_text)
+  if (message_text) {
     strmake(m_message_text, message_text, sizeof(m_message_text) - 1);
-  else
+    m_message_text_length = strlen(m_message_text);
+  } else {
     m_message_text[0] = '\0';
+    m_message_text_length = 0;
+  }
   m_status = DA_OK;
 }
 
 void Diagnostics_area::set_eof_status(THD *thd) {
   DBUG_TRACE;
-  /* Only allowed to report eof if has not yet reported an error */
-  assert(!is_set());
+  assert_not_set(DA_EOF);
+
   /*
     In production, refuse to overwrite an error or a custom response
     with an EOF packet.
@@ -423,12 +479,7 @@ void Diagnostics_area::set_error_status(uint mysql_errno,
                                         const char *message_text,
                                         const char *returned_sqlstate) {
   DBUG_TRACE;
-  /*
-    Only allowed to report error if has not yet reported a success
-    The only exception is when we flush the message to the client,
-    an error can happen during the flush.
-  */
-  assert(!is_set() || m_can_overwrite_status);
+  assert_not_set(DA_ERROR, mysql_errno);
 
   // message must be set properly by the caller.
   assert(message_text);
@@ -448,6 +499,7 @@ void Diagnostics_area::set_error_status(uint mysql_errno,
   memcpy(m_returned_sqlstate, returned_sqlstate, SQLSTATE_LENGTH);
   m_returned_sqlstate[SQLSTATE_LENGTH] = '\0';
   strmake(m_message_text, message_text, sizeof(m_message_text) - 1);
+  m_message_text_length = strlen(m_message_text);
 
   m_status = DA_ERROR;
 }
@@ -696,6 +748,34 @@ void push_warning_printf(THD *thd, Sql_condition::enum_severity_level severity,
   push_warning(thd, severity, code, warning);
 }
 
+/**
+  Push the warning to error list if there is still room in the list
+
+  @param thd      Thread handle
+  @param severity Severity of warning (note, warning)
+  @param code     Error number
+  @param format   Error message printf format, or nullptr to go by the error
+                  code.
+  @param args     Variadic argument list.
+*/
+void push_warning_vprintf(THD *thd, Sql_condition::enum_severity_level severity,
+                          uint code, const char *format, va_list args) {
+  char warning[MYSQL_ERRMSG_SIZE];
+  DBUG_TRACE;
+  DBUG_PRINT("enter", ("warning: %u", code));
+
+  assert(code != 0);
+  if (format == nullptr) {
+    if (code >= EE_ERROR_FIRST && code < EE_ERROR_LAST)
+      format = get_global_errmsg(code);
+    else
+      format = ER_THD_NONCONST(thd, code);
+  }
+
+  vsnprintf(warning, sizeof(warning), format, args);
+  push_warning(thd, severity, code, warning);
+}
+
 void push_deprecated_warn(THD *thd, const char *old_syntax,
                           const char *new_syntax) {
   if (thd != nullptr)
@@ -825,6 +905,15 @@ ErrConvString::ErrConvString(const MYSQL_TIME *ltime, uint dec) {
       my_TIME_to_str(*ltime, err_buffer, min(dec, uint{DATETIME_MAX_DECIMALS}));
 }
 
+ErrConvString::ErrConvString(const Time_val time, uint dec) {
+  buf_length = time.to_string(err_buffer, dec);
+  err_buffer[buf_length] = 0;
+}
+
+ErrConvString::ErrConvString(const Date_val date) {
+  buf_length = date.to_string(err_buffer);
+  err_buffer[buf_length] = 0;
+}
 /**
    Convert value for dispatch to error message(see WL#751).
 

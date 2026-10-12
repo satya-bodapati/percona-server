@@ -1,3 +1,5 @@
+--source include/elide_costs.inc
+
 #
 # Initialization
 --disable_warnings
@@ -719,7 +721,7 @@ flush status;
 select * from t1, t2, t3 where t3.a=t1.a and t2.a=t1.b;
 explain select * from t1, t2, t3 where t3.a=t1.a and t2.a=t1.b;
 --echo We expect rnd_next=5, and read_key must be 0 because of short-cutting:
---skip_if_hypergraph  # Does not support this access method yet.
+--skip_if_hypergraph # Hypergraph uses hash join instead.
 show status like 'Handler_read%'; 
 drop table t1, t2, t3;
 
@@ -1158,7 +1160,7 @@ CREATE TABLE t1
 (pk INT,
  col_int_key INT DEFAULT NULL,
  col_varchar_10_latin1_key VARCHAR(10) DEFAULT NULL,
- col_varchar_255_utf8 VARCHAR(255) CHARACTER SET utf8 DEFAULT NULL,
+ col_varchar_255_utf8 VARCHAR(255) CHARACTER SET utf8mb3 DEFAULT NULL,
  col_int INT DEFAULT NULL,
  col_datetime_key datetime DEFAULT NULL,
  col_varchar_255_latin1_key VARCHAR(255) DEFAULT NULL,
@@ -1236,6 +1238,7 @@ insert into parent values (1,1,1,1);
 insert into eq_child select * from parent;
 
 # Need JSON explain format in order to make the where condition visible.
+SET explain_json_format_version = 1;
 --skip_if_hypergraph  # Depends on the query plan.
 explain format=json select straight_join count(*) from parent
  join eq_child as c1 on c1.a = parent.b and c1.b = parent.b
@@ -1243,6 +1246,7 @@ explain format=json select straight_join count(*) from parent
  join eq_child as c3 on c3.a = parent.b and c3.b = parent.b
  join eq_child as c4 on c4.a = parent.b and c4.b = parent.b
 ;
+SET explain_json_format_version = DEFAULT;
 
 drop table parent, eq_child;
 
@@ -1267,7 +1271,7 @@ INSERT INTO t SELECT NULL, NULL FROM t;
 ANALYZE TABLE t;
 
 # Verify that we indeed get a backwards index scan.
---skip_if_hypergraph  # Does not support this access method yet.
+--replace_regex $elide_costs
 EXPLAIN FORMAT=tree SELECT t1.i AS a, (SELECT t2.i FROM t t2 WHERE t1.j = t2.j ORDER BY j DESC, i DESC LIMIT 1) AS b FROM t t1;
 
 FLUSH STATUS;
@@ -1276,7 +1280,6 @@ SELECT t1.i AS a, (SELECT t2.i FROM t t2 WHERE t1.j = t2.j ORDER BY j DESC, i DE
 --enable_result_log
 
 # Check that we skipped nearly all of the key lookups.
---skip_if_hypergraph  # Does not support this access method yet.
 SHOW STATUS LIKE 'Handler_read_key';
 
 DROP TABLE t;
@@ -1316,6 +1319,7 @@ let query=
                left join t t3 on t3.a>t2.a-t1.a)
  from t t1;
 --skip_if_hypergraph  # Depends on the query plan.
+--replace_regex $elide_costs
 eval explain format=tree $query;
 eval $query;
 
@@ -1327,6 +1331,7 @@ let query=
  from t t1
  group by t1.a;
 --skip_if_hypergraph  # Depends on the query plan.
+--replace_regex $elide_costs
 eval explain format=tree $query;
 eval $query;
 
@@ -1338,6 +1343,7 @@ let query=
                left join t t3 on t3.a>t2.a-v1.a)
  from v1;
 --skip_if_hypergraph  # Depends on the query plan.
+--replace_regex $elide_costs
 eval explain format=tree $query;
 eval $query;
 drop view v1;
@@ -1351,6 +1357,7 @@ let query=
                  left join t t3 on t3.a>t2.a-t1.a) as dt)
  from t t1;
 --skip_if_hypergraph  # Depends on the query plan.
+--replace_regex $elide_costs
 eval explain format=tree $query;
 eval $query;
 
@@ -1375,6 +1382,7 @@ let query=
   from t t2
   left join t t3 on t3.a>t2.a-t1.a) as dt;
 --skip_if_hypergraph  # Depends on the query plan.
+--replace_regex $elide_costs
 eval explain format=tree $query;
 eval $query;
 
@@ -1388,6 +1396,7 @@ let query=
   from t t2
   left join t t3 on t3.a>t2.a-t1.a) as dt;
 --skip_if_hypergraph  # Depends on the query plan.
+--replace_regex $elide_costs
 eval explain format=tree $query;
 eval $query;
 
@@ -1400,6 +1409,7 @@ let query=
   left join t t3 on t3.a>t2.a-t1.a) as dt
  on true;
 --skip_if_hypergraph  # Depends on the query plan.
+--replace_regex $elide_costs
 eval explain format=tree $query;
 eval $query;
 
@@ -1448,6 +1458,7 @@ let query=
                 left join (select * from t t3 where t3.a>t1.a) dt
                 on true);
 --skip_if_hypergraph  # Depends on the query plan.
+--replace_regex $elide_costs
 eval explain format=tree $query;
 eval $query;
 
@@ -2133,7 +2144,7 @@ INSERT INTO t1 VALUES (1);
 --error ER_INVALID_JSON_TEXT_IN_PARAM
 SELECT ra1.k
 FROM t1 AS ra1 LEFT JOIN t1 AS ra2
-     ON CAST(SHA(ra2.k >> 'fixme') AS JSON) = ra2.k
+     ON CAST(SHA2(ra2.k >> 'fixme', 256) AS JSON) = ra2.k
      LEFT JOIN
        t1 AS ra3 LEFT JOIN t1 AS ra4
        ON ra3.k = ra4.k
@@ -2141,3 +2152,27 @@ FROM t1 AS ra1 LEFT JOIN t1 AS ra2
 WHERE ra3.k <= ra1.k;
 
 DROP TABLE t1;
+
+--echo #
+--echo # Bug#35049440: Mysqld assert in Item_typecast_signed::val_int
+--echo #
+
+CREATE TABLE t1 (pk INTEGER AUTO_INCREMENT, col_int INT, col_date DATE,
+                 PRIMARY KEY (pk));
+INSERT INTO t1 (pk, col_int, col_date) VALUES (1, NULL, '1997-04-21');
+
+CREATE TABLE t2(pk INTEGER AUTO_INCREMENT, PRIMARY KEY (pk));
+INSERT INTO t2 (pk) VALUES (1);
+
+# The assertion was seen with the old optimizer in this query.
+SELECT DISTINCT t1.col_int
+FROM t2 LEFT OUTER JOIN t1 ON t2.pk = t1.col_int
+WHERE CAST(t2.pk AS SIGNED INTEGER) <> t1.col_date;
+
+# The assertion was seen with the hypergraph optimizer in this query.
+SELECT DISTINCT t1.col_int
+FROM t2 LEFT OUTER JOIN t1 ON t1.col_int = t2.pk
+WHERE CAST(t2.pk AS SIGNED INTEGER) <> t1.col_date;
+
+DROP TABLE t1;
+DROP TABLE t2;

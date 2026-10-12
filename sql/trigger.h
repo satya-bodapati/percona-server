@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -49,24 +50,26 @@ using sql_mode_t = uint64_t;
 
 /**
   This class represents a trigger object.
-  Trigger can be created, initialized, parsed and executed.
+  Trigger can be created, initialized, parsed, and executed.
 
-  Trigger attributes are usually stored on the memory root of the subject table
-  TABLE object or its TABLE_SHARE (depending on whether it is something specific
-  to the TABLE instance, e.g. sp_head, or static metadata that can be shared by
-  all TABLE instances, e.g. subject table name).
-  Trigger object however can exist when the subject table does not. In this
-  case, trigger attributes are stored on a separate memory root.
+  Trigger attributes are usually stored on the memory root
+  of the subject table TABLE object or its TABLE_SHARE
+  (depending on whether it is something specific to the TABLE
+  instance (e.g. sp_head), or static metadata that can be shared by
+  all TABLE instances (e.g. subject table name).
 
-  @note We create separate sets of Trigger objects for both TABLE_SHARE and
+  A Trigger object however can exist when the subject table does not.
+  In this case, trigger attributes are stored on a separate memory root.
+
+  @note We create separate sets of Trigger objects for TABLE_SHARE and
         TABLE instances. The set for the former is used to store static
-        information about table's triggers and is directly associated with
-        TABLE_SHARE object. The set for the latter is used primarily for
-        trigger execution, and is asssociated with TABLE object with the help
-        of Table_triggers_dispatcher class. Attributes representing static
-        properties in Trigger instances of the latter type reference
-        attributes/memory belonging to attributes of Trigger objects associated
-        with the TABLE_SHARE.
+        information about table's triggers and is directly associated
+        with TABLE_SHARE object. The set for the latter is used primarily
+        for trigger execution, and is asssociated with TABLE object with
+        the help of Table_triggers_dispatcher class. Attributes representing
+        static properties in Trigger instances of the latter type reference
+        attributes/memory belonging to attributes of Trigger objects
+        associated with the TABLE_SHARE.
 
   Trigger objects are created in two ways:
 
@@ -359,7 +362,7 @@ class Trigger {
   sp_head *m_sp;
 
   /**
-    Parse error for trigger, if it has one, nullptr - if not.
+    Parse error message for trigger if it has one, nullptr otherwise.
 
     This error will be displayed when the user tries to manipulate or invoke
     triggers on a table that has broken triggers. It will get set only once

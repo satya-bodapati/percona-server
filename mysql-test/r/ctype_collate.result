@@ -768,7 +768,7 @@ a	b	c	d	e
 3	4	100	1	2
 4	100	1	2	3
 100	1	2	3	4
-SELECT * FROM t1 ORDER BY a COLLATE utf8_bin;
+SELECT * FROM t1 ORDER BY a COLLATE utf8mb3_bin;
 a	b	c	d	e
 1	2	3	4	100
 100	1	2	3	4
@@ -848,7 +848,7 @@ a	b
 100.49	1.01
 1.01	2.99
 2.99	100.49
-SELECT * FROM t3 ORDER BY b COLLATE utf8_general_ci;
+SELECT * FROM t3 ORDER BY b COLLATE utf8mb3_general_ci;
 a	b
 100.49	1.01
 2.99	100.49
@@ -856,3 +856,12 @@ a	b
 DROP TABLE t1;
 DROP TABLE t2;
 DROP TABLE t3;
+#
+# Bug#37412963 Use cs->m_coll_name when reporting SQL errors
+#
+CREATE TABLE t1 (
+mb4_f CHAR(32) NOT NULL
+) CHARSET utf8mb4;
+SELECT mb4_f FROM t1 ORDER BY mb4_f COLLATE utf8mb3_bin;
+ERROR 42000: COLLATION 'utf8mb3_bin' is not valid for CHARACTER SET 'utf8mb4'
+DROP TABLE t1;

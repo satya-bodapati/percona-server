@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,8 +21,8 @@
   along with this program; if not, write to the Free Software
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
-#ifndef _TERMINOLOGY_USE_PREVIOUS_H_
-#define _TERMINOLOGY_USE_PREVIOUS_H_
+#ifndef TERMINOLOGY_USE_PREVIOUS_H_
+#define TERMINOLOGY_USE_PREVIOUS_H_
 
 #include "storage/perfschema/pfs_instr_class.h"  // PFS_class_type
 
@@ -82,7 +83,7 @@ struct compatible_name_t {
   was introduced.  If there is no alternative name, 'old_name' is
   nullptr and version is 0.
 */
-compatible_name_t lookup(PFS_class_type class_type, std::string str,
+compatible_name_t lookup(PFS_class_type class_type, const std::string &str,
                          bool use_prefix = true);
 
 /**
@@ -102,4 +103,4 @@ bool is_older_required(enum_compatibility_version version);
 
 }  // namespace terminology_use_previous
 
-#endif  // ifndef _TERMINOLOGY_USE_PREVIOUS_H_
+#endif  // ifndef TERMINOLOGY_USE_PREVIOUS_H_

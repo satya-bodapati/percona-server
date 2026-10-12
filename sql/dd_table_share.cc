@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,6 +27,7 @@
 
 #include <string.h>
 #include <algorithm>
+#include <memory>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -51,7 +53,9 @@
 #include "mysql_com.h"
 #include "mysqld_error.h"
 #include "sql/aggregated_stats.h"
+#include "sql/dd/cache/dictionary_client.h"
 #include "sql/dd/collection.h"
+#include "sql/dd/dd.h"             // dd::get_dictionary
 #include "sql/dd/dd_table.h"       // dd::FIELD_NAME_SEPARATOR_CHAR
 #include "sql/dd/dd_tablespace.h"  // dd::get_tablespace_name
 #include "sql/dd/dd_trigger.h"     // dd::load_triggers
@@ -59,6 +63,7 @@
 #include "sql/dd/impl/utils.h"  // dd::eat_str
 #include "sql/dd/properties.h"  // dd::Properties
 #include "sql/dd/string_type.h"
+#include "sql/dd/types/abstract_table.h"
 #include "sql/dd/types/check_constraint.h"     // dd::Check_constraint
 #include "sql/dd/types/column.h"               // dd::enum_column_types
 #include "sql/dd/types/column_type_element.h"  // dd::Column_type_element
@@ -69,6 +74,7 @@
 #include "sql/dd/types/partition.h"            // dd::Partition
 #include "sql/dd/types/partition_value.h"      // dd::Partition_value
 #include "sql/dd/types/table.h"                // dd::Table
+#include "sql/dd/types/view.h"
 #include "sql/default_values.h"  // prepare_default_value_buffer...
 #include "sql/error_handler.h"   // Internal_error_handler
 #include "sql/field.h"
@@ -178,6 +184,9 @@ enum_field_types dd_get_old_field_type(dd::enum_column_types type) {
     case dd::enum_column_types::LONG_BLOB:
       return MYSQL_TYPE_LONG_BLOB;
 
+    case dd::enum_column_types::VECTOR:
+      return MYSQL_TYPE_VECTOR;
+
     case dd::enum_column_types::BLOB:
       return MYSQL_TYPE_BLOB;
 
@@ -224,6 +233,21 @@ static enum ha_key_alg dd_get_old_index_algorithm_type(
   }
 
   return HA_KEY_ALG_SE_SPECIFIC;
+}
+
+/**
+  Check whether this index is marked as vector.
+
+  @param[in] idx_obj Index metadata object.
+
+  @return Whether the index is a vector index.
+*/
+bool is_vector_index(const dd::Index &idx_obj) {
+  if (!idx_obj.options().exists(dd::PERCONA_VECTOR_INDEX_MARKER_KEY))
+    return false;
+  bool marker_value = false;
+  idx_obj.options().get(dd::PERCONA_VECTOR_INDEX_MARKER_KEY, &marker_value);
+  return marker_value;
 }
 
 /*
@@ -275,7 +299,7 @@ static bool prepare_share(THD *thd, TABLE_SHARE *share,
 
   // Setup other fields =====================================================
 
-  if (share->tmp_table == NO_TMP_TABLE) {
+  if (share->tmp_table == NO_TMP_TABLE && share->is_primary_engine()) {
     share->m_histograms = new (&share->mem_root) Table_histograms_collection();
     if (share->m_histograms == nullptr) return true;  // OOM.
   }
@@ -298,8 +322,9 @@ static bool prepare_share(THD *thd, TABLE_SHARE *share,
   if (share->keys) {
     KEY *keyinfo;
     KEY_PART_INFO *key_part;
-    uint primary_key = (uint)(
-        find_type(primary_key_name, &share->keynames, FIND_TYPE_NO_PREFIX) - 1);
+    uint primary_key = (uint)(find_type(primary_key_name, &share->keynames,
+                                        FIND_TYPE_NO_PREFIX) -
+                              1);
 
     /*
       The following if-else is here for MyRocks:
@@ -337,6 +362,8 @@ static bool prepare_share(THD *thd, TABLE_SHARE *share,
              share->key_info[key].algorithm == HA_KEY_ALG_FULLTEXT);
       assert(!(share->key_info[key].flags & HA_SPATIAL) ||
              share->key_info[key].algorithm == HA_KEY_ALG_RTREE);
+      assert(!(share->key_info[key].flags & HA_VECTOR) ||
+             share->key_info[key].algorithm == HA_KEY_ALG_VECTOR);
 
       if (primary_key >= MAX_KEY && (keyinfo->flags & HA_NOSAME)) {
         /*
@@ -500,7 +527,7 @@ static bool prepare_share(THD *thd, TABLE_SHARE *share,
       share->primary_key = MAX_KEY;  // we do not have a primary key
   } else
     share->primary_key = MAX_KEY;
-  destroy(handler_file);
+  ::destroy_at(handler_file);
 
   if (share->found_next_number_field) {
     Field *reg_field = *share->found_next_number_field;
@@ -576,6 +603,31 @@ static row_type dd_get_old_row_format(dd::Table::enum_row_format new_format) {
   return ROW_TYPE_FIXED;
 }
 
+static bool set_table_share_db_plugin(THD *thd, TABLE_SHARE *share,
+                                      LEX_CSTRING engine_name, bool is_table) {
+  plugin_ref tmp_plugin = ha_resolve_by_name_raw(thd, engine_name);
+  if (tmp_plugin != nullptr) {
+#ifndef NDEBUG
+    auto *hton = plugin_data<handlerton *>(tmp_plugin);
+#endif
+
+    assert(hton && ha_storage_engine_is_enabled(hton));
+    assert(!ha_check_storage_engine_flag(hton, HTON_NOT_USER_SELECTABLE));
+
+    plugin_unlock(nullptr, share->db_plugin);
+    share->db_plugin = my_plugin_lock(nullptr, &tmp_plugin);
+  } else {
+    if (is_table) {
+      my_error(ER_UNKNOWN_STORAGE_ENGINE, MYF(0), engine_name.str);
+      return true;
+    } else {
+      share->db_plugin = nullptr;
+    }
+  }
+
+  return false;
+}
+
 /** Fill TABLE_SHARE from dd::Table object */
 static bool fill_share_from_dd(THD *thd, TABLE_SHARE *share,
                                const dd::Table *tab_obj) {
@@ -593,22 +645,12 @@ static bool fill_share_from_dd(THD *thd, TABLE_SHARE *share,
 
   // Read table engine type
   LEX_CSTRING engine_name = lex_cstring_handle(tab_obj->engine());
-  if (share->is_secondary_engine())
-    engine_name = {share->secondary_engine.str, share->secondary_engine.length};
+  if (share->is_secondary_engine()) {
+    engine_name = {.str = share->secondary_engine.str,
+                   .length = share->secondary_engine.length};
+  }
 
-  plugin_ref tmp_plugin = ha_resolve_by_name_raw(thd, engine_name);
-  if (tmp_plugin) {
-#ifndef NDEBUG
-    handlerton *hton = plugin_data<handlerton *>(tmp_plugin);
-#endif
-
-    assert(hton && ha_storage_engine_is_enabled(hton));
-    assert(!ha_check_storage_engine_flag(hton, HTON_NOT_USER_SELECTABLE));
-
-    plugin_unlock(nullptr, share->db_plugin);
-    share->db_plugin = my_plugin_lock(nullptr, &tmp_plugin);
-  } else {
-    my_error(ER_UNKNOWN_STORAGE_ENGINE, MYF(0), engine_name.str);
+  if (set_table_share_db_plugin(thd, share, engine_name, true)) {
     return true;
   }
 
@@ -654,6 +696,13 @@ static bool fill_share_from_dd(THD *thd, TABLE_SHARE *share,
     table_options.get("stats_persistent", &bool_opt);
     share->db_create_options |=
         bool_opt ? HA_OPTION_STATS_PERSISTENT : HA_OPTION_NO_STATS_PERSISTENT;
+  }
+
+  if (table_options.exists("create_external_table")) {
+    table_options.get("create_external_table", &bool_opt);
+    if (bool_opt) {
+      share->db_create_options |= HA_OPTION_CREATE_EXTERNAL_TABLE;
+    }
   }
 
   share->db_options_in_use = share->db_create_options;
@@ -709,8 +758,9 @@ static bool fill_share_from_dd(THD *thd, TABLE_SHARE *share,
   table_options.get("key_block_size", &share->key_block_size);
 
   // Prepare the default_value buffer.
-  if (prepare_default_value_buffer_and_table_share(thd, *tab_obj, share))
+  if (prepare_default_value_buffer_and_table_share(thd, tab_obj, share)) {
     return true;
+  }
 
   // Storage media flags
   if (table_options.exists("storage")) {
@@ -1046,6 +1096,16 @@ static bool fill_column_from_dd(THD *thd, TABLE_SHARE *share,
     reg_field->stored_in_db = gcol_info->get_field_stored();
   }
 
+  // Handle masking policy
+  if (column_options->exists("masking_policy")) {
+    LEX_CSTRING policy_name;
+    column_options->get("masking_policy", &policy_name, &share->mem_root);
+    assert(policy_name.length > 0);
+    assert(policy_name.str != nullptr);
+    reg_field->set_masking_policy(policy_name);
+    ++share->masking_policy_field_count;
+  }
+
   // Handle default values generated from expression
   if (auto_flags & Field::GENERATED_FROM_EXPRESSION) {
     Value_generator *default_val_expr =
@@ -1152,17 +1212,18 @@ static bool fill_column_from_dd(THD *thd, TABLE_SHARE *share,
 
 /**
   Populate TABLE_SHARE::field array according to column metadata
-  from dd::Table object.
+  from dd::Abstract_table object.
 */
 
 static bool fill_columns_from_dd(THD *thd, TABLE_SHARE *share,
-                                 const dd::Table *tab_obj) {
+                                 const dd::Abstract_table *tab_obj) {
   // Allocate space for fields in TABLE_SHARE.
   const uint fields_size = ((share->fields + 1) * sizeof(Field *));
   share->field = (Field **)share->mem_root.Alloc((uint)fields_size);
   memset(share->field, 0, fields_size);
   share->vfields = 0;
   share->gen_def_field_count = 0;
+  share->masking_policy_field_count = 0;
 
   // Iterate through all the columns.
   uchar *null_flags [[maybe_unused]];
@@ -1189,19 +1250,20 @@ static bool fill_columns_from_dd(THD *thd, TABLE_SHARE *share,
                               rec_pos, field_nr))
         return true;
 
+      /*
+        Account for NULL bits if it's a regular column.
+        If it's a generated column, we do it below so the NULL
+        bits end up in the expected order.
+      */
+      if ((null_bit_pos += column_preamble_bits(col_obj)) > 7) {
+        null_pos++;
+        null_bit_pos -= 8;
+      }
+
       rec_pos += share->field[field_nr]->pack_length_in_rec();
     } else
       has_vgc = true;
 
-    /*
-      Virtual generated columns still need to be accounted in null bits and
-      field_nr calculations, since they reside at the normal place in record
-      preamble and TABLE_SHARE::field array.
-    */
-    if ((null_bit_pos += column_preamble_bits(col_obj)) > 7) {
-      null_pos++;
-      null_bit_pos -= 8;
-    }
     field_nr++;
   }
 
@@ -1214,8 +1276,6 @@ static bool fill_columns_from_dd(THD *thd, TABLE_SHARE *share,
         static_cast<ulong>(rec_pos - share->default_values))
       share->stored_rec_length = (rec_pos - share->default_values);
 
-    null_pos = share->default_values;
-    null_bit_pos = (share->db_create_options & HA_OPTION_PACK_RECORD) ? 0 : 1;
     field_nr = 0;
 
     for (const dd::Column *col_obj2 : tab_obj->columns()) {
@@ -1228,17 +1288,18 @@ static bool fill_columns_from_dd(THD *thd, TABLE_SHARE *share,
                                 rec_pos, field_nr))
           return true;
 
+        /*
+          Account for generated columns -- we do this separately here
+          so the NULL bits end up in the expected order.
+        */
+        if ((null_bit_pos += column_preamble_bits(col_obj2)) > 7) {
+          null_pos++;
+          null_bit_pos -= 8;
+        }
+
         rec_pos += share->field[field_nr]->pack_length_in_rec();
       }
 
-      /*
-        Account for all columns while evaluating null_pos/null_bit_pos and
-        field_nr.
-      */
-      if ((null_bit_pos += column_preamble_bits(col_obj2)) > 7) {
-        null_pos++;
-        null_bit_pos -= 8;
-      }
       field_nr++;
     }
   }
@@ -1312,6 +1373,27 @@ static void fill_index_elements_from_dd(TABLE_SHARE *share,
 }
 
 /**
+  Parse vector_index_params stored in index options using
+  dd::Properties (semicolon-separated, escaped).
+*/
+static bool fill_vector_index_params_from_dd(MEM_ROOT *mem_root,
+                                             const dd::String_type &s,
+                                             Vector_index_params_YY *params) {
+  std::unique_ptr<dd::Properties> params_props(
+      dd::Properties::parse_properties(s));
+  if (params_props == nullptr) return true;
+  params->init(mem_root);
+  for (const auto &it : *params_props) {
+    LEX_CSTRING k = {strmake_root(mem_root, it.first.data(), it.first.size()),
+                     it.first.size()};
+    LEX_CSTRING v = {strmake_root(mem_root, it.second.data(), it.second.size()),
+                     it.second.size()};
+    if (params->push_back({k, v})) return true;
+  }
+  return false;
+}
+
+/**
   Add KEY constructed according to index metadata from dd::Index object to
   the TABLE_SHARE.
 */
@@ -1340,6 +1422,14 @@ static bool fill_index_from_dd(THD *thd, TABLE_SHARE *share,
   // Index algorithm
   keyinfo->algorithm = dd_get_old_index_algorithm_type(idx_obj->algorithm());
   keyinfo->is_algorithm_explicit = idx_obj->is_algorithm_explicit();
+
+  const bool is_vi = is_vector_index(*idx_obj);
+  if (is_vi) {
+    // We store SE_SPECIFIC algorithm for vector indexes in DD for
+    // compatibility reasons. Hence we need to override it here.
+    keyinfo->algorithm = HA_KEY_ALG_VECTOR;
+    keyinfo->is_algorithm_explicit = false;
+  }
 
   // Visibility
   keyinfo->is_visible = idx_obj->is_visible();
@@ -1372,14 +1462,11 @@ static bool fill_index_from_dd(THD *thd, TABLE_SHARE *share,
       break;
   }
 
-  /* Check if this index is of clustering key type. Used by TokuDB */
-  const dd::Properties &index_options = idx_obj->options();
-  bool has_clustering = false;
-  if (index_options.exists("clustering_key")) {
-    index_options.get("clustering_key", &has_clustering);
-  }
-  if (has_clustering) {
-    keyinfo->flags |= HA_CLUSTERING;
+  if (is_vi) {
+    // We use MULTIPLE index type for vector indexes in the DD for
+    // compatibility reasons.
+    assert(keyinfo->flags == 0);
+    keyinfo->flags |= HA_VECTOR;
   }
 
   if (idx_obj->is_generated()) keyinfo->flags |= HA_GENERATED_KEY;
@@ -1478,6 +1565,25 @@ static bool fill_index_from_dd(THD *thd, TABLE_SHARE *share,
       &share->mem_root, idx_obj->secondary_engine_attribute());
   if (keyinfo->secondary_engine_attribute.length > 0)
     keyinfo->flags |= HA_INDEX_USES_SECONDARY_ENGINE_ATTRIBUTE;
+
+  if (idx_options.exists(dd::PERCONA_VECTOR_INDEX_TYPE_KEY)) {
+    assert(is_vi);
+    if (idx_options.get(dd::PERCONA_VECTOR_INDEX_TYPE_KEY,
+                        &keyinfo->vector_index_type, &share->mem_root))
+      assert(false);
+  }
+
+  if (idx_options.exists(dd::PERCONA_VECTOR_INDEX_PARAMS_KEY)) {
+    assert(is_vi);
+    dd::String_type s;
+    if (idx_options.get(dd::PERCONA_VECTOR_INDEX_PARAMS_KEY, &s)) assert(false);
+    if (!s.empty()) {
+      if (fill_vector_index_params_from_dd(&share->mem_root, s,
+                                           &keyinfo->vector_index_params))
+        return true;
+    }
+  }
+
   return (false);
 }
 
@@ -1683,6 +1789,10 @@ static void get_partition_options(MEM_ROOT *mem_root,
 
   if (part_options.exists("min_rows"))
     part_options.get("min_rows", &part_elem->part_min_rows);
+
+  if (part_options.exists("secondary_load")) {
+    part_options.get("secondary_load", &part_elem->secondary_load);
+  }
 
   part_elem->data_file_name =
       copy_option_string(mem_root, part_options, "data_file_name");
@@ -1962,11 +2072,6 @@ static bool fill_partitioning_from_dd(THD *thd, TABLE_SHARE *share,
                                       const dd::Table *tab_obj) {
   if (tab_obj->partition_type() == dd::Table::PT_NONE) return false;
 
-  // The DD only has information about how the table is partitioned in
-  // the primary storage engine, so don't use this information for
-  // tables in a secondary storage engine.
-  if (share->is_secondary_engine()) return false;
-
   partition_info *part_info;
   part_info = new (&share->mem_root) partition_info;
 
@@ -2095,7 +2200,6 @@ static bool fill_partitioning_from_dd(THD *thd, TABLE_SHARE *share,
   //
 
   partition_element *curr_part_elem;
-  List_iterator<partition_element> part_elem_it;
 
   /* Partitions are sorted first on level and then on number. */
 
@@ -2233,6 +2337,9 @@ static bool fill_foreign_keys_from_dd(TABLE_SHARE *share,
                              fk->referenced_table_name().c_str(),
                              fk->referenced_table_name().length()))
         return true;
+      if (lex_string_strmake(&share->mem_root, &share->foreign_key[i].fk_name,
+                             fk->name().c_str(), fk->name().length()))
+        return true;
       if (lex_string_strmake(&share->mem_root,
                              &share->foreign_key[i].unique_constraint_name,
                              fk->unique_constraint_name().c_str(),
@@ -2243,7 +2350,11 @@ static bool fill_foreign_keys_from_dd(TABLE_SHARE *share,
       share->foreign_key[i].delete_rule = fk->delete_rule();
 
       share->foreign_key[i].columns = fk->elements().size();
-      if (!(share->foreign_key[i].column_name =
+      if (!(share->foreign_key[i].referencing_column_names =
+                (LEX_CSTRING *)share->mem_root.Alloc(
+                    share->foreign_key[i].columns * sizeof(LEX_CSTRING))))
+        return true;
+      if (!(share->foreign_key[i].referenced_column_names =
                 (LEX_CSTRING *)share->mem_root.Alloc(
                     share->foreign_key[i].columns * sizeof(LEX_CSTRING))))
         return true;
@@ -2251,15 +2362,22 @@ static bool fill_foreign_keys_from_dd(TABLE_SHARE *share,
       uint j = 0;
 
       for (const dd::Foreign_key_element *fk_el : fk->elements()) {
-        if (lex_string_strmake(&share->mem_root,
-                               &share->foreign_key[i].column_name[j],
-                               fk_el->column().name().c_str(),
-                               fk_el->column().name().length()))
+        if (lex_string_strmake(
+                &share->mem_root,
+                &share->foreign_key[i].referencing_column_names[j],
+                fk_el->column().name().c_str(),
+                fk_el->column().name().length()))
+          return true;
+        if (lex_string_strmake(
+                &share->mem_root,
+                &share->foreign_key[i].referenced_column_names[j],
+                fk_el->referenced_column_name().c_str(),
+                fk_el->referenced_column_name().length()))
+
           return true;
 
         ++j;
       }
-
       ++i;
     }
   }
@@ -2287,6 +2405,10 @@ static bool fill_foreign_keys_from_dd(TABLE_SHARE *share,
         return true;
       share->foreign_key_parent[i].update_rule = fk_p->update_rule();
       share->foreign_key_parent[i].delete_rule = fk_p->delete_rule();
+      if (lex_string_strmake(&share->mem_root,
+                             &share->foreign_key_parent[i].fk_name,
+                             fk_p->fk_name().c_str(), fk_p->fk_name().length()))
+        return true;
       ++i;
     }
   }
@@ -2342,7 +2464,8 @@ static bool fill_check_constraints_from_dd(TABLE_SHARE *share,
 }
 
 /**
-  Fill information about triggers from dd::Table object to the TABLE_SHARE.
+  Add sharable information about triggers to the TABLE_SHARE
+  from a dd::Table object.
 */
 static bool fill_triggers_from_dd(THD *thd, TABLE_SHARE *share,
                                   const dd::Table *tab_obj) {
@@ -2386,6 +2509,42 @@ bool open_table_def(THD *thd, TABLE_SHARE *share, const dd::Table &table_def) {
     return false;
   }
   return true;
+}
+
+bool open_view_def(THD *thd, TABLE_SHARE *share,
+                   const dd::Abstract_table *abstract_table) {
+  share->is_mv_se_materialized =
+      abstract_table->options().exists("materialization_engine");
+  if (share->is_mv_se_materialized) {
+    MEM_ROOT *old_root = thd->mem_root;
+    thd->mem_root = &share->mem_root;  // Needed for make_field()++
+    share->blob_fields = 0;
+
+    LEX_CSTRING engine_name{};
+    abstract_table->options().get("materialization_engine", &engine_name,
+                                  thd->mem_root);
+    share->secondary_engine = engine_name;
+    bool error = set_table_share_db_plugin(thd, share, engine_name, false) ||
+                 prepare_default_value_buffer_and_table_share(
+                     thd, abstract_table, share) ||
+                 fill_columns_from_dd(thd, share, abstract_table);
+    thd->mem_root = old_root;
+    if (error || prepare_share(thd, share, nullptr)) {
+      return true;
+    }
+  }
+
+  //  Clone the view reference object and hold it in
+  //  TABLE_SHARE member view_object.
+  share->is_view = true;
+  const auto *tmp_view = dynamic_cast<const dd::View *>(abstract_table);
+  share->view_object = tmp_view->clone();
+
+  share->table_category = get_table_category(share->db, share->table_name);
+  thd->status_var.opened_shares++;
+  global_aggregated_stats.get_shard(thd->thread_id()).opened_shares++;
+
+  return false;
 }
 
 /*

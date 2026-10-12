@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1994, 2023, Oracle and/or its affiliates.
+Copyright (c) 1994, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -38,6 +39,21 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 /* We define the physical record simply as an array of bytes */
 typedef byte rec_t;
+
+/* Maximum number of rows version allowed when columns are added/dropped
+INSTANTly. After this limit is reached, any attempt to do ADD/DROP INSTANT
+column will result in error. */
+const uint8_t MAX_ROW_VERSION = 255;
+
+/* Type of Row version which is stamped on rows inserted/updated after an
+INSTANT ADD/DROP column is done. Maximum allowed row version is MAX_ROW_VERSION
+which is 255. This is stamped on rows header on disk in 1 byte. But in-memory,
+we use uint16_t to represent a row version to accommodate invalid row versions
+which is defined as INVALID_ROW_VERSION. */
+using row_version_t = uint16_t;
+
+/* Invalid row version */
+const row_version_t INVALID_ROW_VERSION = UINT16_UNDEFINED;
 
 /* Maximum values for various fields (for non-blob tuples) */
 constexpr uint32_t REC_MAX_N_FIELDS = 1024 - 1;

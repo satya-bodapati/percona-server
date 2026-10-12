@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -50,7 +51,7 @@
 static void set_channel_name(void *const context, const char &value,
                              size_t length) {
   auto *row = static_cast<struct st_row_group_members *>(context);
-  const size_t max = CHANNEL_NAME_LENGTH;
+  constexpr size_t max = CHANNEL_NAME_LENGTH;
   length = std::min(length, max);
 
   row->channel_name_length = length;
@@ -60,7 +61,7 @@ static void set_channel_name(void *const context, const char &value,
 static void set_member_id(void *const context, const char &value,
                           size_t length) {
   auto *row = static_cast<struct st_row_group_members *>(context);
-  const size_t max = UUID_LENGTH;
+  constexpr size_t max = UUID_LENGTH;
   length = std::min(length, max);
 
   row->member_id_length = length;
@@ -70,7 +71,7 @@ static void set_member_id(void *const context, const char &value,
 static void set_member_host(void *const context, const char &value,
                             size_t length) {
   auto *row = static_cast<struct st_row_group_members *>(context);
-  const size_t max = HOSTNAME_LENGTH;
+  constexpr size_t max = HOSTNAME_LENGTH;
   length = std::min(length, max);
 
   row->member_host_length = length;
@@ -85,7 +86,7 @@ static void set_member_port(void *const context, unsigned int value) {
 static void set_member_state(void *const context, const char &value,
                              size_t length) {
   auto *row = static_cast<struct st_row_group_members *>(context);
-  const size_t max = NAME_LEN;
+  constexpr size_t max = NAME_LEN;
   length = std::min(length, max);
 
   row->member_state_length = length;
@@ -95,7 +96,7 @@ static void set_member_state(void *const context, const char &value,
 static void set_member_version(void *const context, const char &value,
                                size_t length) {
   auto *row = static_cast<struct st_row_group_members *>(context);
-  const size_t max = NAME_LEN;
+  constexpr size_t max = NAME_LEN;
   length = std::min(length, max);
 
   row->member_version_length = length;
@@ -105,7 +106,7 @@ static void set_member_version(void *const context, const char &value,
 static void set_member_role(void *const context, const char &value,
                             size_t length) {
   auto *row = static_cast<struct st_row_group_members *>(context);
-  const size_t max = NAME_LEN;
+  constexpr size_t max = NAME_LEN;
   length = std::min(length, max);
 
   row->member_role_length = length;
@@ -115,7 +116,7 @@ static void set_member_role(void *const context, const char &value,
 static void set_member_communication_stack(void *const context,
                                            const char &value, size_t length) {
   auto *row = static_cast<struct st_row_group_members *>(context);
-  const size_t max = NAME_LEN;
+  constexpr size_t max = NAME_LEN;
   length = std::min(length, max);
 
   row->member_communication_stack_length = length;

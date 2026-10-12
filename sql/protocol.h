@@ -1,18 +1,19 @@
 #ifndef PROTOCOL_INCLUDED
 #define PROTOCOL_INCLUDED
 
-/* Copyright (c) 2002, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2002, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,7 +26,8 @@
 
 #include <assert.h>
 
-#include "mysql/com_data.h"
+#include "my_temporal.h"             // Time_val
+#include "mysql/com_data.h"          // Protocol data
 #include "mysql/mysql_lex_string.h"  // LEX_STRING
 #include "mysql_com.h"               // mysql_enum_shutdown_level
 #include "mysql_time.h"              // MYSQL_TIME
@@ -128,8 +130,8 @@ class Protocol {
   virtual bool store_float(float from, uint32 decimals, uint32 zerofill) = 0;
   virtual bool store_double(double from, uint32 decimals, uint32 zerofill) = 0;
   virtual bool store_datetime(const MYSQL_TIME &time, uint precision) = 0;
-  virtual bool store_date(const MYSQL_TIME &time) = 0;
-  virtual bool store_time(const MYSQL_TIME &time, uint precision) = 0;
+  virtual bool store_date(const Date_val date) = 0;
+  virtual bool store_time(const Time_val time, uint precision) = 0;
   virtual bool store_field(const Field *field) = 0;
   // Convenience wrappers
   bool store(int from) { return store_long(longlong{from}, 0); }

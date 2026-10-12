@@ -1,14 +1,15 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,6 +27,8 @@
 
 #include "mysql/components/services/log_builtins.h"
 #include "mysql/plugin_auth.h"
+#include "sql/auth/auth_plugin_shutdown.h"
+#include "sql/auth/authentication_policy.h"
 #include "sql/auth/sql_mfa.h"
 #include "sql/derror.h" /* ER_THD */
 #include "sql/mysqld.h"
@@ -306,42 +309,41 @@ void Multi_factor_auth_list::alter_mfa(I_multi_factor_auth *m) {
   This method checks the modified Multi factor authentication interface methods
   based on ALTER USER sql against authentication policy.
 
-  @param thd          connection handle
+  @param [in]  thd              Connection handle
+  @param [in]  policy_factors   Authentication policy factors
 
   @returns status of the validation
     @retval false Success (modified mfa methods match policy)
     @retval true  Failure (authentication policy is vioalted)
 */
-bool Multi_factor_auth_list::validate_against_authentication_policy(THD *thd) {
+bool Multi_factor_auth_list::validate_against_authentication_policy(
+    THD *thd, const authentication_policy::Factors &policy_factors) {
   bool policy_priv_exist =
       thd->security_context()
           ->has_global_grant(STRING_WITH_LEN("AUTHENTICATION_POLICY_ADMIN"))
           .first;
   uint nth_factor = 1;
-  mysql_mutex_lock(&LOCK_authentication_policy);
-  std::vector<std::string> &list = authentication_policy_list;
-  mysql_mutex_unlock(&LOCK_authentication_policy);
   auto acl_it = m_factor.begin();
-  auto policy_list = list.begin();
+  auto factors_it = policy_factors.begin();
   /* skip first factor plugin name in policy list */
-  policy_list++;
-  for (; (acl_it != m_factor.end() && policy_list != list.end());
-       ++policy_list, ++acl_it) {
+  factors_it++;
+  for (; (acl_it != m_factor.end() && factors_it != policy_factors.end());
+       ++factors_it, ++acl_it) {
     Multi_factor_auth_info *acl_factor =
         (*acl_it)->get_multi_factor_auth_info();
     nth_factor = acl_factor->get_nth_factor();
-    /* mfa plugin method is optional so allow */
-    if (policy_list->length() == 0) continue;
-    /* mfa plugin method can be anything so allow */
-    if (policy_list->compare("*") == 0) continue;
+    /* mfa plugin method is not mandatory so allow */
+    if (!factors_it->is_mandatory_specified()) continue;
     /* mfa plugin method does not match against policy */
-    if (policy_list->compare(acl_factor->get_plugin_str())) goto error;
+    if (factors_it->get_mandatory_plugin().compare(
+            acl_factor->get_plugin_str()))
+      goto error;
   }
   nth_factor++;
   /* if more plugin exists in policy check that its optional only */
-  while (policy_list != list.end()) {
-    if (policy_list->length()) goto error;
-    policy_list++;
+  while (factors_it != policy_factors.end()) {
+    if (!factors_it->is_optional()) goto error;
+    factors_it++;
   }
   return false;
 error:
@@ -375,14 +377,16 @@ void Multi_factor_auth_list::sort_mfa() {
   the user_attributes in mysql.user table.
 
   @param [in]  thd              Connection handler
+  @param [in]  policy_factors   Authentication policy factors
 
   @returns status of the validation
     @retval false Success
     @retval true  Failure
 */
-bool Multi_factor_auth_list::validate_plugins_in_auth_chain(THD *thd) {
+bool Multi_factor_auth_list::validate_plugins_in_auth_chain(
+    THD *thd, const authentication_policy::Factors &policy_factors) {
   for (auto m : m_factor) {
-    if (m->validate_plugins_in_auth_chain(thd)) return true;
+    if (m->validate_plugins_in_auth_chain(thd, policy_factors)) return true;
   }
   return false;
 }
@@ -554,19 +558,20 @@ Multi_factor_auth_info::Multi_factor_auth_info(MEM_ROOT *mem_root, LEX_MFA *m)
   ALTER/CREATE USER sql.
 
   @param [in]  thd              Connection handler
+  @param [in]  policy_factors   Authentication policy factors
 
   @returns status of the validation
     @retval false Success
     @retval true  Failure
 */
-bool Multi_factor_auth_info::validate_plugins_in_auth_chain(THD *thd) {
+bool Multi_factor_auth_info::validate_plugins_in_auth_chain(
+    THD *thd, const authentication_policy::Factors &policy_factors) {
   if (is_identified_by() && !is_identified_with()) {
-    /* get plugin name from @@authentication_policy */
-    mysql_mutex_lock(&LOCK_authentication_policy);
-    std::vector<std::string> &list = authentication_policy_list;
-    mysql_mutex_unlock(&LOCK_authentication_policy);
-    auto s = list[get_nth_factor() - 1];
-    set_plugin_str(s.c_str(), s.length());
+    if (policy_factors.size() < get_nth_factor()) return true;
+    auto policy_factor = policy_factors[get_nth_factor() - 1];
+    const std::string &plugin_name(
+        policy_factor.get_mandatory_or_default_plugin());
+    set_plugin_str(plugin_name.c_str(), plugin_name.length());
   }
   plugin_ref plugin = my_plugin_lock_by_name(nullptr, plugin_name(),
                                              MYSQL_AUTHENTICATION_PLUGIN);
@@ -639,8 +644,10 @@ bool Multi_factor_auth_info::validate_plugins_in_auth_chain(THD *thd) {
       inbuflen = gen_password.length();
       set_generated_password(gen_password.c_str(), gen_password.length());
     }
-    if (auth->generate_authentication_string(outbuf, &buflen, inbuf,
-                                             inbuflen)) {
+    Auth_plugin_operation_guard op_guard;
+    if (!op_guard || auth->generate_authentication_string(outbuf, &buflen,
+                                                          inbuf, inbuflen)) {
+      if (!op_guard) my_error(ER_SERVER_SHUTDOWN, MYF(0));
       plugin_unlock(nullptr, plugin);
       return (true);
     }
@@ -849,20 +856,22 @@ bool Multi_factor_auth_info::init_registration(THD *thd, uint nth_factor) {
   my_h_service h_reg_svc = nullptr;
   SERVICE_TYPE(mysql_authentication_registration) * mysql_auth_reg_service;
 
-  if (!srv_registry->acquire(service_name.c_str(), &h_reg_svc)) {
-    mysql_auth_reg_service =
-        reinterpret_cast<SERVICE_TYPE(mysql_authentication_registration) *>(
-            h_reg_svc);
+  if (srv_registry->acquire(service_name.c_str(), &h_reg_svc)) return true;
 
-    mysql_auth_reg_service->get_challenge_length(&plugin_buf_len);
-    /* buffer allocated by server before passing to component service */
-    plugin_buf = new unsigned char[plugin_buf_len];
-    if (mysql_auth_reg_service->init(&plugin_buf, plugin_buf_len)) {
-      delete[] plugin_buf;
-      srv_registry->release(h_reg_svc);
-      return true;
-    }
+  mysql_auth_reg_service =
+      reinterpret_cast<SERVICE_TYPE(mysql_authentication_registration) *>(
+          h_reg_svc);
+
+  mysql_auth_reg_service->get_challenge_length(&plugin_buf_len);
+  /* buffer allocated by server before passing to component service */
+  plugin_buf = new (std::nothrow) unsigned char[plugin_buf_len];
+  if (plugin_buf == nullptr) return true;
+  if (mysql_auth_reg_service->init(&plugin_buf, plugin_buf_len)) {
+    delete[] plugin_buf;
+    srv_registry->release(h_reg_svc);
+    return true;
   }
+
   srv_registry->release(h_reg_svc);
 
   /* `user name` + '@' + `host name` */
@@ -873,13 +882,17 @@ bool Multi_factor_auth_info::init_registration(THD *thd, uint nth_factor) {
 
   /* append user name to random challenge(32bit salt + RP id). */
   size_t buflen = plugin_buf_len + user_str_len + net_length_size(user_str_len);
-  unsigned char *buf = new unsigned char[buflen];
+  unsigned char *buf = new (std::nothrow) unsigned char[buflen];
+  if (buf == nullptr) {
+    delete[] plugin_buf;
+    return true;
+  }
   unsigned char *pos = buf;
 
   memcpy(pos, plugin_buf, plugin_buf_len);
   pos += plugin_buf_len;
 
-  if (plugin_buf) delete[] plugin_buf;
+  delete[] plugin_buf;
 
   pos = net_store_length(pos, user_str_len);
   memcpy(pos, user_str.c_str(), user_str_len);
@@ -890,8 +903,11 @@ bool Multi_factor_auth_info::init_registration(THD *thd, uint nth_factor) {
   /* convert auth string to base64 to be stored in mysql.user table */
   char outbuf[MAX_FIELD_WIDTH] = {0};
   unsigned int outbuflen = MAX_FIELD_WIDTH;
-  if (auth->generate_authentication_string(
+  Auth_plugin_operation_guard op_guard;
+  if (!op_guard ||
+      auth->generate_authentication_string(
           outbuf, &outbuflen, reinterpret_cast<char *>(buf), buflen)) {
+    if (!op_guard) my_error(ER_SERVER_SHUTDOWN, MYF(0));
     if (buf) delete[] buf;
     plugin_unlock(nullptr, plugin);
     return (true);
@@ -978,9 +994,12 @@ bool Multi_factor_auth_info::finish_registration(THD *thd, LEX_USER *user_name,
   /* convert auth string to base64 to be stored in mysql.user table */
   char outbuf[MAX_FIELD_WIDTH] = {0};
   unsigned int outbuflen = MAX_FIELD_WIDTH;
-  if (auth->generate_authentication_string(
+  Auth_plugin_operation_guard op_guard;
+  if (!op_guard ||
+      auth->generate_authentication_string(
           outbuf, &outbuflen, reinterpret_cast<char *>(challenge_response),
           challenge_response_len)) {
+    if (!op_guard) my_error(ER_SERVER_SHUTDOWN, MYF(0));
     plugin_unlock(nullptr, plugin);
     return (true);
   }
@@ -989,7 +1008,7 @@ bool Multi_factor_auth_info::finish_registration(THD *thd, LEX_USER *user_name,
   if (is_passwordless()) {
     /*
       In below case:
-      CREATE USER u1 IDENTIFIED WITH authentication_fido INITIAL
+      CREATE USER u1 IDENTIFIED WITH authentication_webauthn INITIAL
           AUTHENTICATION BY 'pass';
       server for above ddl will interchange 1FA and 2FA so that user,
       for first time is expected to authenticate with an initial
@@ -1002,7 +1021,7 @@ bool Multi_factor_auth_info::finish_registration(THD *thd, LEX_USER *user_name,
       user: u1
       plugin: caching_sha2_password
       user_attributes: {"Multi_factor_authentication": [{"plugin":
-          "authentication_fido", "passwordless": 1,
+          "authentication_webauthn", "passwordless": 1,
       "authentication_string":
           "", "requires_registration": 1}]}
 
@@ -1011,7 +1030,7 @@ bool Multi_factor_auth_info::finish_registration(THD *thd, LEX_USER *user_name,
       mysql.user WHERE user='u1'\G
       *************************** 1. row ***************************
       user: u1
-      plugin: authentication_fido
+      plugin: authentication_webauthn
       authentication_string: <fido credentials>
       user_attributes: NULL
     */

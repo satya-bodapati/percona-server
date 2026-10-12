@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -37,6 +38,7 @@
 #include "mysql/components/services/bits/my_io_bits.h"  // File
 #include "mysql/strings/m_ctype.h"
 #include "mysqld_error.h"  // ER_*
+#include "sql/sql_exchange.h"
 #include "sql/sql_list.h"
 
 class Item;
@@ -49,6 +51,7 @@ class THD;
 struct CHARSET_INFO;
 template <class Element_type>
 class mem_root_deque;
+class Table_ref;
 
 /*
   This is used to get result from a query
@@ -74,6 +77,11 @@ class Query_result {
   virtual ~Query_result() = default;
 
   virtual bool needs_file_privilege() const { return false; }
+
+  /**
+    Returns true if the data has to be exported to object store.
+  */
+  virtual bool export_result_to_object_storage() const { return false; }
 
   /**
     Change wrapped Query_result.
@@ -150,13 +158,16 @@ class Query_result {
   */
   virtual void cleanup() { /* do nothing */
   }
-
   /**
-    Checks if this Query_result intercepts and transforms the result set.
-
-    @return true if it is an interceptor, false otherwise
+    @returns true if an alternative implementation may replace this with
+    a protocol adapter.
   */
-  virtual bool is_interceptor() const { return false; }
+  virtual bool use_protocol_adapter() const { return false; }
+  /**
+    @returns true if an alternative implementation may replace this with
+    a protocol wrapper.
+  */
+  virtual bool use_protocol_wrapper() const { return false; }
 
   /// Only overridden (and non-empty) for Query_result_union, q.v.
   virtual void set_limit(ha_rows) {}
@@ -166,6 +177,9 @@ class Query_result {
     assert(false);
     return nullptr;
   }
+
+  /// @returns create_info object if available.
+  [[nodiscard]] virtual Table_ref *get_create_table() const { return nullptr; }
 };
 
 /*
@@ -182,7 +196,6 @@ class Query_result_interceptor : public Query_result {
                                 uint) override {
     return false;
   }
-  bool is_interceptor() const final { return true; }
 };
 
 class Query_result_send : public Query_result {
@@ -202,6 +215,11 @@ class Query_result_send : public Query_result {
   bool check_supports_cursor() const override { return false; }
   void abort_result_set(THD *thd) override;
   void cleanup() override { is_result_set_started = false; }
+  /**
+    An alternative implementation may provide an optimized protocol adapter
+    for this object.
+  */
+  bool use_protocol_adapter() const override { return true; }
 };
 
 class sql_exchange;
@@ -225,6 +243,24 @@ class Query_result_to_file : public Query_result_interceptor {
   bool check_supports_cursor() const override;
   bool send_eof(THD *thd) override;
   void cleanup() override;
+};
+
+class Query_result_to_object_store : public Query_result_interceptor {
+ protected:
+  sql_exchange *exchange;
+
+ public:
+  explicit Query_result_to_object_store(sql_exchange *ex)
+      : Query_result_interceptor(), exchange(ex) {}
+
+  bool send_data(THD *, const mem_root_deque<Item *> &) override {
+    return false;
+  }
+  bool send_eof(THD *thd) override;
+  void cleanup() override;
+  bool export_result_to_object_storage() const override { return true; }
+  bool use_protocol_adapter() const override { return true; }
+  sql_exchange *get_sql_exchange() { return exchange; }
 };
 
 #define ESCAPE_CHARS "ntrb0ZN"  // keep synchronous with READ_INFO::unescape
@@ -290,6 +326,11 @@ class Query_dumpvar final : public Query_result_interceptor {
   bool send_eof(THD *thd) override;
   bool check_supports_cursor() const override;
   void cleanup() override { row_count = 0; }
+  /**
+    An alternative implementation may provide an optimized protocol wrapper
+    for this object.
+  */
+  bool use_protocol_wrapper() const override { return true; }
 };
 
 /**

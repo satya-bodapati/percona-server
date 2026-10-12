@@ -1,6 +1,9 @@
 --source include/force_myisam_default.inc
 --source include/have_myisam.inc
 
+# This test doesn't support GTID
+--source include/rpl/set_gtid_mode_off.inc
+
 # Use MyISAM for this table since we are only interested in checking syntax.
 --error ER_WRONG_FK_DEF
 create table t1 (
@@ -27,7 +30,7 @@ create table t1 (
         foreign key (a,b) references t3 (c,d) on update set null) engine=myisam;
 
 create index a on t1 (a);
-create unique index b on t1 (a,b);
+create unique index a_b on t1 (a,b);
 drop table t1;
 
 --echo #
@@ -121,6 +124,7 @@ SET FOREIGN_KEY_CHECKS=1;
 --echo # table to previously orphan foreign key by changing table storage
 --echo # engine.
 SET FOREIGN_KEY_CHECKS=0;
+SET restrict_fk_on_non_standard_key = OFF;
 CREATE TABLE child (fk INT, FOREIGN KEY(fk) REFERENCES parent (pk)) ENGINE=InnoDB;
 CREATE TABLE parent (pk INT) ENGINE=MyISAM;
 --error ER_FK_NO_INDEX_PARENT
@@ -153,6 +157,7 @@ CREATE TABLE parent (pk INT) ENGINE=MyISAM;
 --error ER_FK_NO_INDEX_PARENT
 ALTER TABLE parent ENGINE=InnoDB, RENAME TO parent0;
 DROP TABLE parent;
+SET restrict_fk_on_non_standard_key = ON;
 
 --echo #
 --echo # Check that unique constraint name is correctly updated when parent
@@ -212,3 +217,5 @@ CREATE TABLE myisam_table (fk INT) ENGINE=MyISAM;
 ALTER TABLE myisam_table DROP FOREIGN KEY no_such_fk;
 ALTER TABLE myisam_table DROP FOREIGN KEY c;
 DROP TABLES myisam_table, child, parent;
+# Restore the default for gtid_mode which is ON
+--source include/rpl/set_gtid_mode_on.inc

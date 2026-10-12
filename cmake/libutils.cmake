@@ -1,15 +1,16 @@
-# Copyright (c) 2009, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2009, 2026, Oracle and/or its affiliates.
 # 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -82,23 +83,18 @@ FUNCTION(ADD_STATIC_LIBRARY TARGET)
   )
 
   IF(ARG_EXCLUDE_FROM_PGO)
-    IF(FPROFILE_GENERATE OR FPROFILE_USE)
+    IF(FPROFILE_GENERATE)
       RETURN()
     ENDIF()
   ENDIF()
 
   ADD_LIBRARY(${TARGET} STATIC)
   TARGET_SOURCES(${TARGET} PRIVATE ${ARG_UNPARSED_ARGUMENTS})
+  TARGET_COMPILE_FEATURES(${TARGET} PUBLIC cxx_std_20)
 
   # Collect all static libraries in the same directory
   SET_TARGET_PROPERTIES(${TARGET} PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/archive_output_directory)
-
-  IF(ARG_EXCLUDE_FROM_PGO)
-    IF(FPROFILE_GENERATE OR FPROFILE_USE)
-      SET(ARG_EXCLUDE_FROM_ALL TRUE)
-    ENDIF()
-  ENDIF()
 
   IF(ARG_EXCLUDE_FROM_ALL)
     SET_PROPERTY(TARGET ${TARGET} PROPERTY EXCLUDE_FROM_ALL TRUE)
@@ -193,7 +189,7 @@ MACRO(ADD_CONVENIENCE_LIBRARY TARGET_ARG)
     ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/archive_output_directory)
 
   IF(ARG_EXCLUDE_FROM_PGO)
-    IF(FPROFILE_GENERATE OR FPROFILE_USE)
+    IF(FPROFILE_GENERATE)
       SET(ARG_EXCLUDE_FROM_ALL TRUE)
     ENDIF()
   ENDIF()
@@ -258,7 +254,7 @@ ENDMACRO()
 MACRO(MERGE_LIBRARIES_SHARED TARGET_ARG)
   SET(SHLIB_OPTIONS
     EXCLUDE_FROM_ALL
-    EXCLUDE_FROM_PGO # add target, but do not build for PGO
+    EXCLUDE_FROM_PGO # add target, but do not build for FPROFILE_GENERATE
     LINK_PUBLIC # All source libs become part of the PUBLIC interface of target.
                 # See documentation for INTERFACE_LINK_LIBRARIES
                 # The default is STATIC, i.e. the property
@@ -298,22 +294,22 @@ MACRO(MERGE_LIBRARIES_SHARED TARGET_ARG)
     # --Wl,--no-whole-archive, but is more focused.
     FOREACH(SYMBOL ${ARG_EXPORTS})
       IF(APPLE)
-        SET(export_link_flags "${export_link_flags} -Wl,-u,_${SYMBOL}")
+        LIST(APPEND export_link_flags "-Wl,-u,_${SYMBOL}")
       ELSE()
-        SET(export_link_flags "${export_link_flags} -Wl,-u,${SYMBOL}")
+        LIST(APPEND export_link_flags "-Wl,-u,${SYMBOL}")
       ENDIF()
     ENDFOREACH()
   ENDIF()
 
   IF(ARG_EXCLUDE_FROM_PGO)
-    IF(FPROFILE_GENERATE OR FPROFILE_USE)
+    IF(FPROFILE_GENERATE)
       SET(ARG_EXCLUDE_FROM_ALL TRUE)
       SET(ARG_SKIP_INSTALL TRUE)
     ENDIF()
   ENDIF()
 
   IF(NOT ARG_SKIP_INSTALL)
-    ADD_VERSION_INFO(${TARGET} SHARED SRC)
+    ADD_VERSION_INFO(SHARED SRC "${ARG_COMPONENT}")
   ENDIF()
   ADD_LIBRARY(${TARGET} SHARED ${SRC})
 
@@ -362,9 +358,10 @@ MACRO(MERGE_LIBRARIES_SHARED TARGET_ARG)
 
   IF(APPLE)
     SET_TARGET_PROPERTIES(${TARGET} PROPERTIES MACOSX_RPATH ON)
+    TARGET_LINK_OPTIONS(${TARGET} PRIVATE LINKER:-no_warn_duplicate_libraries)
   ENDIF()
 
-  MY_TARGET_LINK_OPTIONS(${TARGET} "${export_link_flags}")
+  TARGET_LINK_OPTIONS(${TARGET} PRIVATE ${export_link_flags})
 
   IF(APPLE_WITH_CUSTOM_SSL)
     SET_PATH_TO_CUSTOM_SSL_FOR_APPLE(${TARGET})
@@ -578,8 +575,10 @@ ENDMACRO(MERGE_CONVENIENCE_LIBRARIES)
 FUNCTION(ADD_SHARED_LIBRARY TARGET_ARG)
   SET(LIBRARY_OPTIONS
     EXCLUDE_FROM_ALL
+    EXCLUDE_FROM_PGO
     NO_UNDEFINED
     SKIP_INSTALL
+    NAMELINK_SKIP
   )
   SET(LIBRARY_ONE_VALUE_KW
     COMPONENT
@@ -605,10 +604,22 @@ FUNCTION(ADD_SHARED_LIBRARY TARGET_ARG)
     ${ARGN}
     )
 
+  IF(ARG_EXCLUDE_FROM_PGO)
+    IF(FPROFILE_GENERATE)
+      RETURN()
+    ENDIF()
+  ENDIF()
+
   SET(TARGET ${TARGET_ARG})
   SET(SOURCES ${ARG_UNPARSED_ARGUMENTS})
 
+  IF(NOT ARG_SKIP_INSTALL AND ARG_COMPONENT STREQUAL "Router")
+    # add the version-info resource file to SOURCES
+    ADD_VERSION_INFO(SHARED SOURCES Router)
+  ENDIF()
+
   ADD_LIBRARY(${TARGET} SHARED ${SOURCES})
+  TARGET_COMPILE_FEATURES(${TARGET} PUBLIC cxx_std_20)
 
   # Collect all shared libraries in the same directory
   SET_TARGET_PROPERTIES(${TARGET} PROPERTIES
@@ -624,7 +635,7 @@ FUNCTION(ADD_SHARED_LIBRARY TARGET_ARG)
   ENDIF()
 
   IF(ARG_NO_UNDEFINED AND LINK_FLAG_NO_UNDEFINED)
-    MY_TARGET_LINK_OPTIONS(${TARGET} "${LINK_FLAG_NO_UNDEFINED}")
+    TARGET_LINK_OPTIONS(${TARGET} PRIVATE ${LINK_FLAG_NO_UNDEFINED})
   ENDIF()
 
   IF(NOT ARG_SKIP_INSTALL)
@@ -640,8 +651,11 @@ FUNCTION(ADD_SHARED_LIBRARY TARGET_ARG)
     ELSE()
       SET(COMP COMPONENT SharedLibraries)
     ENDIF()
-    MYSQL_INSTALL_TARGET(
-      ${TARGET} DESTINATION "${DESTINATION}" ${COMP})
+    IF(ARG_NAMELINK_SKIP)
+      SET(INSTALL_ARGS NAMELINK_SKIP)
+    ENDIF()
+    MYSQL_INSTALL_TARGET(${TARGET} DESTINATION "${DESTINATION}" ${COMP}
+      ${INSTALL_ARGS})
   ENDIF()
 
   IF(ARG_COMPILE_DEFINITIONS)
@@ -667,8 +681,8 @@ FUNCTION(ADD_SHARED_LIBRARY TARGET_ARG)
   ENDIF()
 
   IF(LINUX AND ARG_LINUX_VERSION_SCRIPT)
-    MY_TARGET_LINK_OPTIONS(${TARGET}
-      "LINKER:--version-script=${ARG_LINUX_VERSION_SCRIPT}")
+    TARGET_LINK_OPTIONS(${TARGET} PRIVATE
+      LINKER:--version-script=${ARG_LINUX_VERSION_SCRIPT})
     SET_TARGET_PROPERTIES(${TARGET}
       PROPERTIES LINK_DEPENDS ${ARG_LINUX_VERSION_SCRIPT}
       )
@@ -679,7 +693,7 @@ FUNCTION(ADD_SHARED_LIBRARY TARGET_ARG)
     # Bug in cmake Visual Studio generator:
     # https://gitlab.kitware.com/cmake/cmake/-/issues/19618
     IF(WIN32 AND CMAKE_GENERATOR MATCHES "Visual Studio")
-      MY_TARGET_LINK_OPTIONS(${TARGET} "/VERSION:${ARG_VERSION}")
+      TARGET_LINK_OPTIONS(${TARGET} PRIVATE /VERSION:${ARG_VERSION})
     ENDIF()
   ENDIF()
 
@@ -692,8 +706,12 @@ FUNCTION(ADD_SHARED_LIBRARY TARGET_ARG)
       "${RUNTIME_DIR}/${CMAKE_CFG_INTDIR}/$<TARGET_FILE_NAME:${TARGET}>"
       )
     IF(ARG_WIN_DEF_FILE)
-      MY_TARGET_LINK_OPTIONS(${TARGET} "/DEF:${ARG_WIN_DEF_FILE}")
+      TARGET_LINK_OPTIONS(${TARGET} PRIVATE /DEF:${ARG_WIN_DEF_FILE})
     ENDIF()
+  ENDIF()
+
+  IF(APPLE)
+    TARGET_LINK_OPTIONS(${TARGET} PRIVATE LINKER:-no_warn_duplicate_libraries)
   ENDIF()
 
   ADD_OBJDUMP_TARGET(show_${TARGET} "$<TARGET_FILE:${TARGET}>"

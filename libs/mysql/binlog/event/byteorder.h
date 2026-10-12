@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,7 +22,7 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 /**
-  @file mysql/binlog/event/byteorder.h
+  @file
 
   @brief The file contains functions to convert the byte encoding of integer
   values to and from little-endian and big-endian byte order.
@@ -33,6 +34,7 @@
 #include <stdint.h>
 #include "my_compiler.h"
 #include "my_config.h"
+#include "mysql/serialization/byte_order_helpers.h"
 #ifndef STANDALONE_BINLOG
 #define HAVE_MYSYS 1
 #endif
@@ -96,24 +98,6 @@ uint32_t inline be32toh(uint32_t x) {
           ((x << 24) & 0xff000000));
 #else
   return x;
-#endif
-}
-#endif
-
-#if !defined(le64toh)
-/**
-  Converting a 64 bit integer from little-endian byte order to host byteorder
-
-  @param x  64-bit integer in little endian byte order
-  @return  64-bit integer in host byte order
-*/
-uint64_t inline le64toh(uint64_t x) {
-#ifndef WORDS_BIGENDIAN
-  return x;
-#else
-  x = ((x << 8) & 0xff00ff00ff00ff00ULL) | ((x >> 8) & 0x00ff00ff00ff00ffULL);
-  x = ((x << 16) & 0xffff0000ffff0000ULL) | ((x >> 16) & 0x0000ffff0000ffffULL);
-  return (x << 32) | (x >> 32);
 #endif
 }
 #endif

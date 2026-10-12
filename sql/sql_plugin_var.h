@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -44,7 +45,6 @@
 class Item;
 class THD;
 struct MEM_ROOT;
-struct SYS_VAR;
 struct TYPELIB;
 struct st_plugin_int;
 
@@ -178,12 +178,27 @@ struct st_bookmark {
 
 st_bookmark *find_bookmark(const char *plugin, const char *name, int flags);
 
+extern MEM_ROOT plugin_mem_root;
+extern uint global_variables_dynamic_size;
+extern malloc_unordered_map<std::string, st_bookmark *> *bookmark_hash;
+/** Hash for system variables of string type with MEMALLOC flag. */
+extern malloc_unordered_map<std::string, st_bookmark *>
+    *malloced_string_type_sysvars_bookmark_hash;
+
 /*
-  skeleton of a plugin variable - portion of structure common to all.
+  returns a bookmark for thd-local variables, creating if necessary.
+  returns null for non thd-local variables.
+  Requires that a write lock is obtained on LOCK_system_variables_hash
 */
-struct SYS_VAR {
-  MYSQL_PLUGIN_VAR_HEADER;
-};
+st_bookmark *register_var(const char *plugin, const char *name, int flags);
+
+bool *mysql_sys_var_bool(THD *thd, int offset);
+int *mysql_sys_var_int(THD *thd, int offset);
+unsigned int *mysql_sys_var_uint(THD *thd, int offset);
+unsigned long *mysql_sys_var_ulong(THD *thd, int offset);
+unsigned long long *mysql_sys_var_ulonglong(THD *thd, int offset);
+char **mysql_sys_var_str(THD *thd, int offset);
+double *mysql_sys_var_double(THD *thd, int offset);
 
 inline void convert_underscore_to_dash(char *str, size_t len) {
   for (char *p = str; p <= str + len; p++)
@@ -291,7 +306,7 @@ class sys_var_pluginvar : public sys_var {
     @param[in]     var   Plugin variable.
     @param[in,out] dest  Destination string pointer.
   */
-  void persist_only_to_string(THD *, set_var *var, String *dest) override;
+  void persist_only_to_string(THD *thd, set_var *var, String *dest) override;
   void global_save_default(THD *, set_var *) override {}
   bool session_update(THD *thd, set_var *var) override;
   bool global_update(THD *thd, set_var *var) override;

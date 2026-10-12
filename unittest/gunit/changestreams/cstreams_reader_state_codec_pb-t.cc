@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -34,31 +35,39 @@ const std::string DEFAULT_UUID2 = "aaaaaaaa-aaaa-aaaa-aaaa-bbbbbbbbbbbb";
 
 class ReaderStateCodecTest : public ::testing::Test {
  protected:
-  mysql::gtid::Uuid valid_uuid1;
-  mysql::gtid::Uuid valid_uuid2;
+  mysql::uuids::Uuid valid_uuid1;
+  mysql::uuids::Uuid valid_uuid2;
   cs::reader::State state;
 
-  mysql::gtid::Gtid gtid1_1{valid_uuid1, 0};
-  mysql::gtid::Gtid gtid1_2{valid_uuid1, 0};
-  mysql::gtid::Gtid gtid2_1{valid_uuid1, 0};
-  mysql::gtid::Gtid gtid1_1_copy{valid_uuid1, 0};
+  mysql::gtids::Gtid gtid1_1 =
+      mysql::gtids::Gtid::throwing_make(valid_uuid1, 1);
+  mysql::gtids::Gtid gtid1_2 =
+      mysql::gtids::Gtid::throwing_make(valid_uuid1, 1);
+  mysql::gtids::Gtid gtid2_1 =
+      mysql::gtids::Gtid::throwing_make(valid_uuid1, 1);
+  mysql::gtids::Gtid gtid1_1_copy =
+      mysql::gtids::Gtid::throwing_make(valid_uuid1, 1);
 
   ReaderStateCodecTest() = default;
 
   void SetUp() override {
-    ASSERT_FALSE(
-        valid_uuid1.parse(DEFAULT_UUID1.c_str(), DEFAULT_UUID1.size()));
-    ASSERT_FALSE(
-        valid_uuid2.parse(DEFAULT_UUID2.c_str(), DEFAULT_UUID2.size()));
+    ASSERT_TRUE(
+        mysql::strconv::decode_text(DEFAULT_UUID1, valid_uuid1).is_ok());
+    ASSERT_TRUE(
+        mysql::strconv::decode_text(DEFAULT_UUID2, valid_uuid2).is_ok());
 
-    gtid1_1 = {valid_uuid1, 1};
-    gtid1_2 = {valid_uuid1, 2};
-    gtid2_1 = {valid_uuid2, 1};
-    gtid1_1_copy = {valid_uuid1, 1};
+    gtid1_1 = mysql::gtids::Gtid::throwing_make(valid_uuid1, 1);
+    gtid1_2 = mysql::gtids::Gtid::throwing_make(valid_uuid1, 2);
+    gtid2_1 = mysql::gtids::Gtid::throwing_make(valid_uuid2, 1);
+    gtid1_1_copy = mysql::gtids::Gtid::throwing_make(valid_uuid1, 1);
   }
 
   void TearDown() override {}
 };
+
+MY_COMPILER_DIAGNOSTIC_PUSH()
+// This tests a deprecated feature, so the deprecation warning is expected.
+MY_COMPILER_GCC_DIAGNOSTIC_IGNORE("-Wdeprecated-declarations")
 
 TEST_F(ReaderStateCodecTest, StateBasics) {
   state.add_gtid(gtid1_1);
@@ -66,9 +75,9 @@ TEST_F(ReaderStateCodecTest, StateBasics) {
   state.add_gtid(gtid2_1);
   state.add_gtid(gtid1_1_copy);
 
-  ASSERT_TRUE(state.get_gtids().contains(gtid1_1));
-  ASSERT_TRUE(state.get_gtids().contains(gtid1_2));
-  ASSERT_TRUE(state.get_gtids().contains(gtid2_1));
+  ASSERT_TRUE(mysql::sets::contains_element(state.get_gtids(), gtid1_1));
+  ASSERT_TRUE(mysql::sets::contains_element(state.get_gtids(), gtid1_2));
+  ASSERT_TRUE(mysql::sets::contains_element(state.get_gtids(), gtid2_1));
 
   // serialize to protobuf
   cs::reader::codec::pb::example::stringstream pb_ss;
@@ -78,9 +87,9 @@ TEST_F(ReaderStateCodecTest, StateBasics) {
   cs::reader::State state_copy;
   pb_ss >> state_copy;
 
-  ASSERT_TRUE(state_copy.get_gtids().contains(gtid1_1));
-  ASSERT_TRUE(state_copy.get_gtids().contains(gtid1_2));
-  ASSERT_TRUE(state_copy.get_gtids().contains(gtid2_1));
+  ASSERT_TRUE(mysql::sets::contains_element(state_copy.get_gtids(), gtid1_1));
+  ASSERT_TRUE(mysql::sets::contains_element(state_copy.get_gtids(), gtid1_2));
+  ASSERT_TRUE(mysql::sets::contains_element(state_copy.get_gtids(), gtid2_1));
 
   // compare string representation
   std::stringstream ss_state1;
@@ -91,5 +100,7 @@ TEST_F(ReaderStateCodecTest, StateBasics) {
 
   ASSERT_EQ(ss_state1.str(), ss_state2.str());
 }
+
+MY_COMPILER_DIAGNOSTIC_POP()
 
 }  // namespace cs::reader::unittests

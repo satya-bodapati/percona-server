@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -38,11 +39,11 @@ const std::string kAlphabetAll = kAlphabetDigits + kAlphabetLowercase +
 TEST(UtilsTests, generate_identifier_ok) {
   using RandGen = mysql_harness::RandomGenerator;
   RandGen generator;
-  const unsigned kTestLen = 100u;
+  const unsigned kTestLen = 100U;
 
   // digits only
   {
-    std::string s =
+    std::string const s =
         generator.generate_identifier(kTestLen, RandGen::AlphabetDigits);
     EXPECT_EQ(std::string::npos, s.find_first_not_of(kAlphabetDigits));
     EXPECT_EQ(kTestLen, s.size());
@@ -50,7 +51,7 @@ TEST(UtilsTests, generate_identifier_ok) {
 
   // lowercase letters only
   {
-    std::string s =
+    std::string const s =
         generator.generate_identifier(kTestLen, RandGen::AlphabetLowercase);
     EXPECT_EQ(std::string::npos, s.find_first_not_of(kAlphabetLowercase));
     EXPECT_EQ(kTestLen, s.size());
@@ -58,7 +59,7 @@ TEST(UtilsTests, generate_identifier_ok) {
 
   // uppercase letters only
   {
-    std::string s =
+    std::string const s =
         generator.generate_identifier(kTestLen, RandGen::AlphabetUppercase);
     EXPECT_EQ(std::string::npos, s.find_first_not_of(kAlphabetUppercase));
     EXPECT_EQ(kTestLen, s.size());
@@ -66,7 +67,7 @@ TEST(UtilsTests, generate_identifier_ok) {
 
   // special characters only
   {
-    std::string s =
+    std::string const s =
         generator.generate_identifier(kTestLen, RandGen::AlphabetSpecial);
     EXPECT_EQ(std::string::npos, s.find_first_not_of(kAlphabetSpecial));
     EXPECT_EQ(kTestLen, s.size());
@@ -74,7 +75,7 @@ TEST(UtilsTests, generate_identifier_ok) {
 
   // digits and lowercase only
   {
-    std::string s = generator.generate_identifier(
+    std::string const s = generator.generate_identifier(
         kTestLen, RandGen::AlphabetLowercase | RandGen::AlphabetDigits);
     EXPECT_EQ(std::string::npos,
               s.find_first_not_of(kAlphabetDigits + kAlphabetLowercase));
@@ -83,21 +84,21 @@ TEST(UtilsTests, generate_identifier_ok) {
 
   // length = 0
   {
-    std::string s = generator.generate_identifier(0);
-    EXPECT_EQ(0u, s.size());
+    std::string const s = generator.generate_identifier(0);
+    EXPECT_EQ(0U, s.size());
   }
 
   // length = 1
   {
-    std::string s = generator.generate_identifier(1);
-    EXPECT_EQ(1u, s.size());
+    std::string const s = generator.generate_identifier(1);
+    EXPECT_EQ(1U, s.size());
   }
 }
 
 TEST(UtilsTests, generate_identifier_wrong_alphabet_mask) {
   using RandGen = mysql_harness::RandomGenerator;
   RandGen generator;
-  const unsigned kTestLen = 100u;
+  const unsigned kTestLen = 100U;
 
   {
     try {
@@ -122,7 +123,7 @@ TEST(UtilsTests, generate_identifier_check_symbols_usage) {
   // unlikely.
   constexpr unsigned kBigNumber = 10 * 1000;
 
-  std::string s =
+  std::string const s =
       generator.generate_identifier(kBigNumber, RandGen::AlphabetAll);
   for (const char &c : kAlphabetAll) {
     EXPECT_NE(std::string::npos, s.find(c));
@@ -131,7 +132,7 @@ TEST(UtilsTests, generate_identifier_check_symbols_usage) {
 
 TEST(UtilsTests, generate_strong_password_ok) {
   mysql_harness::RandomGenerator generator;
-  const unsigned kTestLen = 8u;
+  const unsigned kTestLen = 8U;
 
   const std::string pass = generator.generate_strong_password(kTestLen);
 
@@ -152,7 +153,7 @@ TEST(UtilsTests, generate_strong_password_ok) {
 
 TEST(UtilsTests, generate_strong_password_too_short) {
   mysql_harness::RandomGenerator generator;
-  const unsigned kTestLen = 7u;
+  const unsigned kTestLen = 7U;
 
   try {
     generator.generate_strong_password(kTestLen);

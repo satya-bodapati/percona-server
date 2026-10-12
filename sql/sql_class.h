@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -43,6 +44,9 @@
 #include <sys/types.h>
 #include <atomic>
 #include <bitset>
+#include <concepts>    // invocable
+#include <functional>  // function
+#include <list>        // list
 #include <memory>
 #include <new>
 #include <stack>
@@ -69,6 +73,7 @@
 #include "mysql/components/services/bits/my_thread_bits.h"
 #include "mysql/components/services/bits/mysql_cond_bits.h"
 #include "mysql/components/services/bits/mysql_mutex_bits.h"
+#include "mysql/components/services/bits/mysql_thd_kill_handler_bits.h"
 #include "mysql/components/services/bits/psi_bits.h"
 #include "mysql/components/services/bits/psi_idle_bits.h"
 #include "mysql/components/services/bits/psi_stage_bits.h"
@@ -86,6 +91,7 @@
 #include "mysqld_error.h"
 #include "pfs_thread_provider.h"
 #include "prealloced_array.h"
+#include "scope_guard.h"                // Scope_guard
 #include "sql/auth/sql_security_ctx.h"  // Security_context
 #include "sql/current_thd.h"
 #include "sql/dd/string_type.h"      // dd::string_type
@@ -160,7 +166,7 @@ class Rows_log_event;
 class Time_zone;
 class sp_cache;
 struct Binlog_user_var_event;
-struct LOG_INFO;
+struct Log_info;
 
 extern bool opt_log_slow_admin_statements;
 extern ulong opt_log_slow_sp_statements;
@@ -792,6 +798,7 @@ enum class Secondary_engine_optimization {
 
 #define SUB_STMT_TRIGGER 1
 #define SUB_STMT_FUNCTION 2
+#define SUB_STMT_DUALITY_VIEW 3
 
 class Sub_statement_state {
  public:
@@ -918,12 +925,6 @@ class Global_read_lock {
   void unlock_global_read_lock(THD *thd);
 
   /**
-    Used by innodb memcached server to check if any connections
-    have global read lock
-  */
-  static bool global_read_lock_active() { return m_atomic_active_requests > 0; }
-
-  /**
     Check if this connection can acquire protection against GRL and
     emit error if otherwise.
   */
@@ -939,7 +940,6 @@ class Global_read_lock {
   void set_explicit_lock_duration(THD *thd);
 
  private:
-  static std::atomic<int32> m_atomic_active_requests;
   enum_grl_state m_state;
   /**
     In order to acquire the global read lock, the connection must
@@ -1038,10 +1038,7 @@ class Bloom_filter final {
   /**
      Check whether key is maybe a member of a set
 
-     @param[in, out]    mem_root        MEM_ROOT to allocate the bit set in, if
-      not allocated already
-     @param[in]         key             key whose presence to check
-
+     @param[in] key key whose presence to check
      @return if true, the key might be a member of the set. If false, the key
      is definitely not a member of the set.
   */
@@ -1102,6 +1099,24 @@ using Event_tracking_data =
 using Event_tracking_data_stack = std::stack<Event_tracking_data>;
 
 /**
+  Base class for secondary engine statement context objects. Secondary
+  storage engines may create classes derived from this one which
+  contain state they need to preserve in lifecycle of this query.
+*/
+class Secondary_engine_statement_context {
+ public:
+  /**
+    Destructs the secondary engine statement context object. It is
+    called after the query execution has completed. Secondary engines
+    may override the destructor in subclasses and add code that
+    performs cleanup tasks that are needed after query execution.
+  */
+  virtual ~Secondary_engine_statement_context() = default;
+
+  virtual bool is_primary_engine_optimal() const { return true; }
+};
+
+/**
   @class THD
   For each client connection we create a separate thread with THD serving as
   a thread/connection descriptor
@@ -1148,7 +1163,7 @@ class THD : public MDL_context_owner,
     call Item::check_column_privileges().
     After use, restore previous value as current value.
   */
-  ulong want_privilege;
+  Access_bitmask want_privilege;
 
  private:
   /**
@@ -1225,7 +1240,27 @@ class THD : public MDL_context_owner,
   */
   String m_rewritten_query;
 
+  /**
+    Current query's secondary engine statement context.
+  */
+  std::unique_ptr<Secondary_engine_statement_context>
+      m_secondary_engine_statement_context;
+
+  /* eligible secondary engine handlerton for this query */
+  handlerton *m_eligible_secondary_engine_handlerton;
+
  public:
+  /* Store a thread safe copy of protocol properties. */
+  enum class cached_properties : int {
+    NONE = 0,         // No properties
+    IS_ALIVE = 1,     // protocol->is_connection_alive()
+    RW_STATUS = 2,    // protocol->get_rw_status()
+    LAST = 4,         // Next unused power of 2.
+    ALL = (LAST - 1)  // Mask selecting all properties.
+  };
+  void store_cached_properties(
+      cached_properties prop_mask = cached_properties::ALL);
+
   /* Used to execute base64 coded binlog events in MySQL server */
   Relay_log_info *rli_fake;
   /* Slave applier execution context */
@@ -1250,6 +1285,24 @@ class THD : public MDL_context_owner,
   */
   void rpl_detach_engine_ha_data();
 
+  /*
+   Set secondary_engine_statement_context to new context.
+   This function assumes existing m_secondary_engine_statement_context is empty,
+   such that there's only context throughout the query's lifecycle.
+  */
+  void set_secondary_engine_statement_context(
+      std::unique_ptr<Secondary_engine_statement_context> context);
+
+  Secondary_engine_statement_context *secondary_engine_statement_context() {
+    return m_secondary_engine_statement_context.get();
+  }
+
+  void set_eligible_secondary_engine_handlerton(handlerton *hton);
+
+  handlerton *eligible_secondary_engine_handlerton() const {
+    return m_eligible_secondary_engine_handlerton;
+  }
+
   /**
     When the thread is a binlog or slave applier it reattaches the engine
     ha_data associated with it and memorizes the fact of that.
@@ -1264,6 +1317,11 @@ class THD : public MDL_context_owner,
           mark at once with this check.
   */
   bool is_engine_ha_data_detached() const;
+
+  /// Iterates over the table and call check_and_registered_engine
+  /// and emits error for non-composable engines
+  /// @param[in] table_ref Tables involved in the query
+  void check_and_emit_warning_for_non_composable_engines(Table_ref *table_ref);
 
   void reset_for_next_command();
   /*
@@ -1311,6 +1369,7 @@ class THD : public MDL_context_owner,
     @sa system_status_var::last_query_cost
   */
   double m_current_query_cost;
+
   /**
     Current query partial plans.
     @sa system_status_var::last_query_partial_plans
@@ -1437,6 +1496,15 @@ class THD : public MDL_context_owner,
  private:
   mysql_mutex_t LOCK_query_plan;
 
+  /**
+    Keep cached values of "connection alive" and "rw status". Update when
+    pushing, popping or getting the protocol. Used by
+    information_schema.processlist to avoid locking mutexes that might
+    affect performance.
+  */
+  std::atomic<bool> m_cached_is_connection_alive;
+  std::atomic<uint> m_cached_rw_status;
+
  public:
   /// Locks the query plan of this THD
   void lock_query_plan() { mysql_mutex_lock(&LOCK_query_plan); }
@@ -1467,7 +1535,18 @@ class THD : public MDL_context_owner,
   Security_context *m_security_ctx;
 
   Security_context *security_context() const { return m_security_ctx; }
-  void set_security_context(Security_context *sctx) { m_security_ctx = sctx; }
+  void set_security_context(Security_context *sctx) {
+    if (sctx == m_security_ctx) return;
+
+    /*
+      To prevent race conditions arising from concurrent threads executing
+      I_S.PROCESSLIST, a mutex LOCK_thd_security_ctx safeguards the security
+      context switch.
+    */
+    mysql_mutex_lock(&LOCK_thd_security_ctx);
+    m_security_ctx = sctx;
+    mysql_mutex_unlock(&LOCK_thd_security_ctx);
+  }
   List<Security_context> m_view_ctx_list;
 
   /**
@@ -1488,7 +1567,7 @@ class THD : public MDL_context_owner,
 
   const Protocol *get_protocol() const { return m_protocol; }
 
-  Protocol *get_protocol() { return m_protocol; }
+  Protocol *get_protocol();
 
   SSL_handle get_ssl() const {
 #ifndef NDEBUG
@@ -1516,10 +1595,7 @@ class THD : public MDL_context_owner,
     return pointer_cast<const Protocol_classic *>(m_protocol);
   }
 
-  Protocol_classic *get_protocol_classic() {
-    assert(is_classic_protocol());
-    return pointer_cast<Protocol_classic *>(m_protocol);
-  }
+  Protocol_classic *get_protocol_classic();
 
  private:
   Protocol *m_protocol;  // Current protocol
@@ -1559,8 +1635,7 @@ class THD : public MDL_context_owner,
     /// Asserts that current_thd has locked this plan, if it does not own it.
     void assert_plan_is_locked_if_other() const
 #ifdef NDEBUG
-    {
-    }
+        {}
 #else
         ;
 #endif
@@ -1570,7 +1645,8 @@ class THD : public MDL_context_owner,
           sql_command(SQLCOM_END),
           lex(nullptr),
           modification_plan(nullptr),
-          is_ps(false) {}
+          is_ps(false) {
+    }
 
     /**
       Set query plan.
@@ -1949,6 +2025,24 @@ class THD : public MDL_context_owner,
   uchar *binlog_row_event_extra_data;
 
   int binlog_setup_trx_data();
+
+  /**
+   * @brief Configure size of binlog transaction cache. Used to configure the
+   * size of an individual cache, normally to a value that differs from the
+   * default `binlog_cache_size` which controls the size otherwise.
+   *
+   * @note Assumes that the binlog cache manager already exist (i.e created
+   * by call to binlog_setup_trx_data()) and is empty.
+   *
+   * @param new_size The new size of cache. Value exceeding
+   * `max_binlog_cache_size` will be clamped and warning logged. Value must be
+   * a multiple of IO_SIZE which is the block size for all binlog cache size
+   * related variables.
+   *
+   * @return true if new cache size can't be configured, in that case the cache
+   * is not usable.
+   */
+  bool binlog_configure_trx_cache_size(ulong new_size);
 
   /*
     Public interface to write RBR events to the binlog
@@ -2685,6 +2779,7 @@ class THD : public MDL_context_owner,
 
   void inc_status_created_tmp_disk_tables();
   void inc_status_created_tmp_tables();
+  void inc_status_count_hit_tmp_table_size();
   void inc_status_select_full_join();
   void inc_status_select_full_range_join();
   void inc_status_select_range();
@@ -2768,6 +2863,7 @@ class THD : public MDL_context_owner,
   */
   void set_new_thread_id();
   my_thread_id thread_id() const { return m_thread_id; }
+
   uint tmp_table;
   uint server_status, open_options;
   enum enum_thread_type system_thread;
@@ -3036,6 +3132,8 @@ class THD : public MDL_context_owner,
   bool derived_tables_processing;
   // Set while parsing INFORMATION_SCHEMA system views.
   bool parsing_system_view;
+  // Set while parsing JSON duality view.
+  bool parsing_json_duality_view{false};
 
   /** Current SP-runtime context. */
   sp_rcontext *sp_runtime_ctx;
@@ -3249,6 +3347,17 @@ class THD : public MDL_context_owner,
   // ran_command is true when this is called immediately after a
   // command has been run.
   void update_stats(bool ran_command) noexcept;
+  /**
+    Sets the THD::variables values that depend on the protocol
+
+    Some THD::variable values take different default based on properties of the
+    protocol, e.g. capabilities etc. This function sets these values.
+
+    Called when:
+       1. A new connection is established
+       2. A reset connection or change_user is done
+   */
+  void set_protocol_dependent_variables(Protocol *proto);
   void cleanup_after_query();
   void store_globals();
   void restore_globals();
@@ -3444,6 +3553,10 @@ class THD : public MDL_context_owner,
     return (variables.sql_mode & MODE_TIME_TRUNCATE_FRACTIONAL);
   }
 
+  bool interpret_utf8_as_utf8mb4() const {
+    return (variables.sql_mode & MODE_INTERPRET_UTF8_AS_UTF8MB4);
+  }
+
   static inline ulonglong current_utime() noexcept { return my_micro_time(); }
 
   /**
@@ -3555,7 +3668,10 @@ class THD : public MDL_context_owner,
   bool is_classic_protocol() const;
 
   /** Return false if connection to client is broken. */
-  bool is_connected() final;
+  bool is_connected(bool use_cached_connection_alive = false) final;
+
+  /** Return the cached protocol rw status. */
+  uint get_protocol_rw_status();
 
   /**
     Mark the current error as fatal. Warning: this does not
@@ -3684,6 +3800,7 @@ class THD : public MDL_context_owner,
 
   /**
     Restore locations set by calls to nocheck_register_item_tree_change().
+    Note that this needs to happen before Item::cleanup is called.
   */
   void rollback_item_tree_changes();
 
@@ -4071,10 +4188,10 @@ class THD : public MDL_context_owner,
   static const int OWNED_SIDNO_ANONYMOUS = -2;
 
   /**
-    For convenience, this contains the SID component of the GTID
+    For convenience, this contains the TSID component of the GTID
     stored in owned_gtid.
   */
-  rpl_sid owned_sid;
+  mysql::gtid::Tsid owned_tsid;
 
   /** SE GTID persistence flag types. */
   enum Se_GTID_flag : size_t {
@@ -4097,10 +4214,10 @@ class THD : public MDL_context_owner,
   /** Flags for SE GTID persistence. */
   Se_GTID_flagset m_se_gtid_flags;
 
-  /** Defer freeing owned GTID and SID till unpinned. */
+  /** Defer freeing owned GTID and TSID till unpinned. */
   void pin_gtid() { m_se_gtid_flags.set(SE_GTID_PIN); }
 
-  /** Unpin and free GTID and SID. */
+  /** Unpin and free GTID and TSID. */
   void unpin_gtid() {
     m_se_gtid_flags.reset(SE_GTID_PIN);
     /* Do any deferred cleanup */
@@ -4192,7 +4309,7 @@ class THD : public MDL_context_owner,
 #endif
     }
     owned_gtid.clear();
-    owned_sid.clear();
+    owned_tsid.clear();
     owned_gtid.dbug_print(nullptr, "set owned_gtid in clear_owned_gtids");
   }
 
@@ -4214,6 +4331,32 @@ class THD : public MDL_context_owner,
     server). When this flag is set, a call to gtid_rollback() will do nothing.
   */
   bool skip_gtid_rollback;
+
+ private:
+  /// Callback functions that determine if GTID rollback shall be skipped.
+  std::list<std::function<bool(const THD &)>> m_skip_gtid_rollback_checkers;
+
+ public:
+  /// Invoke the callback functions that determine if GTID rollback shall be
+  /// skipped, and return true as soon as one of them returns true; otherwise
+  /// return false.
+  bool shall_skip_gtid_rollback() const {
+    for (const auto &func : m_skip_gtid_rollback_checkers)
+      if (func(*this)) return true;
+    return false;
+  }
+
+  /// Register a callback function that will determine if a subsequent GTID
+  /// rollback shall be skipped. Returns a (moveable, but not copyable) object
+  /// whose destructor will will unregister the callback.
+  [[nodiscard]] auto register_skip_gtid_rollback_checker(
+      const std::invocable<const THD &> auto &shall_skip) {
+    m_skip_gtid_rollback_checkers.emplace_back(shall_skip);
+    auto it = std::prev(m_skip_gtid_rollback_checkers.end());
+    return Scope_guard{
+        [this, it] { this->m_skip_gtid_rollback_checkers.erase(it); }};
+  }
+
   /*
     There are some statements (like DROP DATABASE that fails on rmdir
     and gets rewritten to multiple DROP TABLE statements) that may
@@ -4929,7 +5072,7 @@ class THD : public MDL_context_owner,
     This is used by replication to decide if the I/O thread should be
     killed or not when stopping the replication threads.
 
-    In ordinary STOP SLAVE case, the I/O thread will wait for disk space
+    In ordinary STOP REPLICA case, the I/O thread will wait for disk space
     or to be killed regardless of this flag value.
 
     In server shutdown case, if this flag is true, the I/O thread will be
@@ -4958,6 +5101,8 @@ class THD : public MDL_context_owner,
   void set_secondary_engine_optimization(Secondary_engine_optimization state) {
     m_secondary_engine_optimization = state;
   }
+  /// cleanup all secondary engine relevant members after statement execution.
+  void cleanup_after_statement_execution();
 
   /**
     Can secondary storage engines be used for query execution in
@@ -4999,6 +5144,7 @@ class THD : public MDL_context_owner,
   bool m_secondary_engine_forced{false};
 
   void cleanup_after_parse_error();
+
   /**
     Flag that indicates if the user of current session has SYSTEM_USER privilege
   */
@@ -5092,6 +5238,10 @@ class THD : public MDL_context_owner,
   std::unordered_map<unsigned int, void *> external_store_;
 
  public:
+  /* Indicates if we are inside loadable function */
+  bool in_loadable_function{false};
+
+ public:
   Event_tracking_data get_event_tracking_data() {
     if (!event_tracking_data_.empty()) return event_tracking_data_.top();
     return std::make_pair(Event_tracking_class::LAST, nullptr);
@@ -5114,7 +5264,92 @@ class THD : public MDL_context_owner,
   Event_reference_caching_cache *events_cache_{nullptr};
   Event_tracking_data_stack event_tracking_data_;
   bool audit_plugins_present;
-};  // End of class THD
+
+ public:
+  /// Flag indicating whether this session incremented the number of sessions
+  /// with GTID_NEXT set to AUTOMATIC:tag
+  bool has_incremented_gtid_automatic_count;
+
+  /// Count of Regular Statement Handles in use.
+  unsigned short m_regular_statement_handle_count{0};
+
+  /// Increment the owned temptable counter. This is used to find leaked
+  /// temptable handles during close_connection calls
+  void increment_temptable_count() { ++m_opened_temptable_count; }
+  /// Decrement the owned temptable counter.
+  void decrement_temptable_count() { --m_opened_temptable_count; }
+  /// Return currently owned temptable count.
+  size_t get_temptable_count() const { return m_opened_temptable_count; }
+
+ private:
+  /** Each THD can open multiple temptables, we create these temptable objects
+    in the temptable engine. These objects have their lifetime controlled with
+    create and delete_table calls in the temptable handler. The sql layer is
+    responsible for calling the create and delete_table functions. We increment
+    this counter in create, and decrement it in delete_table. This allows us to
+    detect any situation where we call close_connection which releases the
+    underlying memory in the temptable engine, before all temptable objects
+    have been deleted. This way we can react and clean up any temptable objects
+    before we free the underlying memory. So we can think of the THD as owning
+    multiple temptable objects in the temptable engine, and we tie the lifetime
+    of these objects to the lifetime of the THD. In normal operation they
+    should be deleted before the close_connection call but this enforces
+    defined behaviour when they aren't.
+  */
+  size_t m_opened_temptable_count{};
+
+ private:
+  bool m_sql_foreign_keys{1};
+  /// Member to store count of tables in foreign key cascade chains.
+  uint32_t m_fk_cascade_chain_tables{0};
+
+ public:
+  bool get_sql_foreign_keys() const;
+  void set_sql_foreign_keys(bool flag) { m_sql_foreign_keys = flag; }
+
+  uint32_t fk_cascade_chain_tables() { return m_fk_cascade_chain_tables; }
+  void inc_fk_cascade_chain_tables() { m_fk_cascade_chain_tables++; }
+  void dec_fk_cascade_chain_tables() { m_fk_cascade_chain_tables--; }
+  void reset_fk_cascade_chain_tables() { m_fk_cascade_chain_tables = 0; }
+
+ public:
+  /**
+    Install/remove handler to be invoked then this connection or statement
+    in it is killed.
+
+    @param fn     Pointer to handler function to install. Use NULL to remove
+                  installed handler.
+    @param data   Pointer to an auxiliary data to be passed to the handler.
+
+    @note The handler will be executed by a thread other than one handling
+          the connection/statement, so needs to be thread-safe.
+
+    @retval False - success.
+    @retval True -  failure (handler already installed).
+  */
+  bool set_kill_handler(kill_handler_fn fn, void *data) {
+    MUTEX_LOCK(lock, &LOCK_thd_data);
+    // Replacing one non-null handler with another is likely to be bug.
+    if (m_kill_handler_fn != nullptr && fn != nullptr) return true;
+    m_kill_handler_fn = fn;
+    m_kill_handler_data = data;
+    return false;
+  }
+
+ private:
+  /**
+    Handler to be invoked then this connection or statement in it is killed
+    (including timeout case). Components can use this functionality to allow
+    kill to abort some long running or blocking operation in them.
+    'nullptr' when no such callback is present/active for this connection.
+
+    We also store pointer to auxiliary data to be passed to the handler.
+
+    Protected by THD::LOCK_thd_data lock.
+  */
+  kill_handler_fn m_kill_handler_fn{nullptr};
+  void *m_kill_handler_data{nullptr};
+};
 
 /**
    Return lock_tables_mode for secondary engine.
@@ -5204,4 +5439,57 @@ inline bool is_xa_tran_detached_on_prepare(const THD *thd) {
   return thd->variables.xa_detach_on_prepare;
 }
 
+/**
+   Return if source replication node is older than the given version.
+   @param thd       thread context
+   @param version   version number to compare
+
+   @retval true     if source version is older
+   @retval false    otherwise
+ */
+inline bool is_rpl_source_older(const THD *thd, uint version) {
+  return thd->is_applier_thread() &&
+         (thd->variables.original_server_version == UNDEFINED_SERVER_VERSION ||
+          thd->variables.original_server_version < version);
+}
+
+/**
+ * @brief Check if foreign handling at SQL is enabled.
+ *
+ * @param thd        Thread Handle.
+ *
+ * @return true      If enabled.
+ * @return false     Otherwise.
+ */
+inline bool is_sql_fk_checks_enabled(THD *thd) {
+  DBUG_EXECUTE_IF("force_innodb_fk", return false;);
+  DBUG_EXECUTE_IF("force_sql_fk", return true;);
+  assert(thd != nullptr);
+  return thd->variables.option_bits & OPTION_USE_SQL_FOREIGN_KEY_HANDLING;
+}
+
+/**
+ * @brief Check if SQL foreign key handling can be used for a table.
+ *
+ * @param thd              Thread Handle.
+ * @param table            TABLE instance of a table.
+ *
+ * @return true            if SQL FK checks supported for SE.
+ * @return false           Otherwise.
+ */
+bool use_sql_fk_checks_for_table(THD *thd, TABLE *table);
+
+/**
+ *  @brief Check if SQL FK cascade should fire triggers.
+ *
+ *  @param thd        Thread Handle.
+ *
+ *  @return true      If enabled.
+ *  @return false     Otherwise.
+ */
+inline bool is_cascade_triggers_enabled(THD *thd) {
+  assert(thd != nullptr);
+  if (is_rpl_source_older(thd, 90700)) return false;
+  return thd->variables.enable_cascade_triggers;
+}
 #endif /* SQL_CLASS_INCLUDED */

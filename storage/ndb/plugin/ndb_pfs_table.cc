@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,37 +24,37 @@
 // Implements
 #include "storage/ndb/plugin/ndb_pfs_table.h"
 
-#include <assert.h>
+#include <cassert>
 // assert
 
 static int ndb_pfs_rnd_init(PSI_table_handle *handle, bool) {
-  Ndb_pfs_table *table = reinterpret_cast<Ndb_pfs_table *>(handle);
+  auto *table = reinterpret_cast<Ndb_pfs_table *>(handle);
   return (table->rnd_init());
 }
 
 static int ndb_pfs_rnd_next(PSI_table_handle *handle) {
-  Ndb_pfs_table *table = reinterpret_cast<Ndb_pfs_table *>(handle);
+  auto *table = reinterpret_cast<Ndb_pfs_table *>(handle);
   return (table->rnd_next());
 }
 
 static int ndb_pfs_rnd_pos(PSI_table_handle *handle) {
-  Ndb_pfs_table *table = reinterpret_cast<Ndb_pfs_table *>(handle);
+  auto *table = reinterpret_cast<Ndb_pfs_table *>(handle);
   return (table->rnd_pos());
 }
 
 static void ndb_pfs_reset_pos(PSI_table_handle *handle) {
-  Ndb_pfs_table *table = reinterpret_cast<Ndb_pfs_table *>(handle);
+  auto *table = reinterpret_cast<Ndb_pfs_table *>(handle);
   table->reset_pos();
 }
 
 static int ndb_pfs_read_column(PSI_table_handle *handle, PSI_field *field,
                                unsigned int index) {
-  Ndb_pfs_table *table = reinterpret_cast<Ndb_pfs_table *>(handle);
+  auto *table = reinterpret_cast<Ndb_pfs_table *>(handle);
   return (table->read_column_value(field, index));
 }
 
 static void ndb_pfs_close_table(PSI_table_handle *handle) {
-  Ndb_pfs_table *table = reinterpret_cast<Ndb_pfs_table *>(handle);
+  auto *table = reinterpret_cast<Ndb_pfs_table *>(handle);
   table->close();
   // Delete table which was allocated during table open
   delete table;

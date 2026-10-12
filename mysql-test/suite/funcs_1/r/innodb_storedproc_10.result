@@ -64,22 +64,22 @@ engine = <engine_to_be_tested>;
 load data infile '<MYSQLTEST_VARDIR>/std_data/funcs_1/t4.txt' into table t11;
 SET sql_mode = default;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 
 Section 3.1.10 - CALL checks:
 --------------------------------------------------------------------------------
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 USE db_storedproc;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 
 Testcase 3.1.10.2 + 3.1.10.5:
 -----------------------------
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 
 2. Ensure that a procedure cannot be called if the appropriate privileges do not
 exist.
@@ -87,7 +87,7 @@ exist.
 not exist.
 --------------------------------------------------------------------------------
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 DROP PROCEDURE IF EXISTS sp31102;
 DROP FUNCTION  IF EXISTS fn31105;
 create user 'user_1'@'localhost';
@@ -95,6 +95,8 @@ create user 'user_2'@'localhost';
 GRANT CREATE ROUTINE ON db_storedproc.* TO 'user_1'@'localhost';
 GRANT SELECT         ON db_storedproc.* TO 'user_2'@'localhost';
 FLUSH PRIVILEGES;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 	
 user_1@localhost	db_storedproc
 CREATE PROCEDURE sp31102 () SQL SECURITY INVOKER
@@ -125,6 +127,8 @@ fn31105( 9 )
 81
 GRANT EXECUTE ON db_storedproc.* TO 'user_2'@'localhost';
 FLUSH PRIVILEGES;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 	
 user_2@localhost	db_storedproc
 CALL sp31102();
@@ -139,6 +143,8 @@ USE db_storedproc;
 root@localhost	db_storedproc
 REVOKE EXECUTE ON db_storedproc.* FROM 'user_2'@'localhost';
 FLUSH PRIVILEGES;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 CALL sp31102();
 f1	f2	f3	f4	f5	f6
 a`	a`	1000-01-01	-5000	a`	-5000
@@ -159,19 +165,19 @@ DROP FUNCTION  fn31105;
 DROP USER 'user_1'@'localhost';
 DROP USER 'user_2'@'localhost';
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 
 Testcase 3.1.10.3:
 ------------------
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 
 Ensure that a function can never be called.
 --------------------------------------------------------------------------------
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 DROP FUNCTION IF EXISTS fn1;
 CREATE FUNCTION fn1(a int) returns int
 BEGIN
@@ -182,19 +188,19 @@ CALL fn1();
 ERROR 42000: PROCEDURE db_storedproc.fn1 does not exist
 DROP FUNCTION fn1;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 
 Testcase 3.1.10.6:
 ------------------
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 
 Ensure that a procedure can never be executed.
 --------------------------------------------------------------------------------
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 DROP PROCEDURE IF EXISTS sp1;
 DROP FUNCTION IF EXISTS sp1;
 CREATE PROCEDURE sp1()
@@ -205,20 +211,20 @@ SELECT sp1();
 ERROR 42000: FUNCTION db_storedproc.sp1 does not exist
 DROP PROCEDURE sp1;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 
 Testcase 3.1.10.7:
 ------------------
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 
 Ensure that the ROW_COUNT() SQL function always returns the correct number of
 rows affected by the execution of a stored procedure.
 --------------------------------------------------------------------------------
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 DROP PROCEDURE IF EXISTS sp_ins_1;
 DROP PROCEDURE IF EXISTS sp_ins_3;
 DROP PROCEDURE IF EXISTS sp_upd;
@@ -249,7 +255,7 @@ INSERT INTO temp VALUES  ('qwe', 'xyz', '1998-03-26', 100, 'uvw', 1000);
 INSERT INTO temp VALUES  ('qwe', 'abc', '2000-11-09', 100, 'uvw', 1000);
 INSERT INTO temp VALUES  ('qwe', 'abc', '2005-11-07', 100, 'uvw', 1000);
 END;
-SELECT COUNT( f1 ), f1 FROM temp GROUP BY f1;
+SELECT COUNT( f1 ), f1 FROM temp GROUP BY f1 ORDER BY f1;
 UPDATE temp SET temp.f1 = 'updated_2' WHERE temp.f1 ='qwe' AND temp.f2 = 'abc';
 END//
 CREATE PROCEDURE sp_del()
@@ -332,7 +338,9 @@ updated	xyz	1989-11-09	100	uvw	1000
 updated	xyz	2005-10-24	100	uvw	1000
 CALL sp_ins_upd();
 COUNT( f1 )	f1
+1	a_aaaaaaaaa
 1	a`
+1	a^aaaaaaaa
 1	aaa
 1	abaa
 1	acaaa
@@ -340,10 +348,8 @@ COUNT( f1 )	f1
 1	aeaaaaa
 1	afaaaaaa
 1	agaaaaaaa
-1	a^aaaaaaaa
-1	a_aaaaaaaaa
-4	updated
 4	qwe
+4	updated
 SELECT row_count();
 row_count()
 3
@@ -422,20 +428,20 @@ DROP PROCEDURE sp_del;
 DROP PROCEDURE sp_with_rowcount;
 DROP TABLE temp;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 
 Testcase 3.1.10.8:
 ------------------
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 
 Ensure that the mysql_affected_rows() C API function always returns the correct
 number of rows affected by the execution of a stored procedure.
 --------------------------------------------------------------------------------
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 
 --source suite/funcs_1/storedproc/cleanup_sp_tb.inc
 --------------------------------------------------------------------------------

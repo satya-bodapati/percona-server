@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -32,10 +33,11 @@
 
 /* TODO: check for overrun of memory for names. */
 
-#include <errno.h>
-#include <string.h>
 #include <sys/stat.h>
 #include <algorithm>
+#include <cassert>
+#include <cerrno>
+#include <cstring>
 #include <new>
 
 #include "m_string.h"
@@ -67,12 +69,13 @@ typedef Prealloced_array<FILEINFO, 100> Entries_array;
 
 void my_dirend(MY_DIR *buffer) {
   DBUG_TRACE;
-  if (buffer) {
-    Entries_array *array = pointer_cast<Entries_array *>(
-        (char *)buffer + ALIGN_SIZE(sizeof(MY_DIR)));
+  if (buffer != nullptr) {
+    auto *array = pointer_cast<Entries_array *>(pointer_cast<char *>(buffer) +
+                                                ALIGN_SIZE(sizeof(MY_DIR)));
     array->~Entries_array();
-    destroy((MEM_ROOT *)((char *)buffer + ALIGN_SIZE(sizeof(MY_DIR)) +
-                         ALIGN_SIZE(sizeof(Entries_array))));
+    ::destroy_at(pointer_cast<MEM_ROOT *>(pointer_cast<char *>(buffer) +
+                                          ALIGN_SIZE(sizeof(MY_DIR)) +
+                                          ALIGN_SIZE(sizeof(Entries_array))));
     my_free(buffer);
   }
 } /* my_dirend */
@@ -195,7 +198,7 @@ MY_DIR *my_dir(const char *path, myf MyFlags) {
   void *rawmem = nullptr;
 
   DBUG_TRACE;
-  DBUG_PRINT("my", ("path: '%s' stat: %d  MyFlags: %d", path, MyFlags));
+  DBUG_PRINT("my", ("path: '%s' MyFlags: %d", path, MyFlags));
 
   /* Put LIB-CHAR as last path-character if not there */
   tmp_file = tmp_path;

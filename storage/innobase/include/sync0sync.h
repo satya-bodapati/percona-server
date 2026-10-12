@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2026, Oracle and/or its affiliates.
 Copyright (c) 2008, Google Inc.
 Copyright (c) 2012, Facebook Inc.
 
@@ -14,12 +14,13 @@ This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -82,6 +83,7 @@ instrumentation due to their large number of instances. */
 
 #ifdef UNIV_PFS_MUTEX
 /* Key defines to register InnoDB mutexes with performance schema */
+extern mysql_pfs_key_t alter_stage_mutex_key;
 extern mysql_pfs_key_t autoinc_mutex_key;
 extern mysql_pfs_key_t autoinc_persisted_mutex_key;
 #ifndef PFS_SKIP_BUFFER_MUTEX_RWLOCK
@@ -133,13 +135,13 @@ extern mysql_pfs_key_t recalc_pool_mutex_key;
 extern mysql_pfs_key_t page_cleaner_mutex_key;
 extern mysql_pfs_key_t purge_sys_pq_mutex_key;
 extern mysql_pfs_key_t recv_sys_mutex_key;
+extern mysql_pfs_key_t recv_writer_mutex_key;
 extern mysql_pfs_key_t rtr_active_mutex_key;
 extern mysql_pfs_key_t rtr_match_mutex_key;
 extern mysql_pfs_key_t rtr_path_mutex_key;
 extern mysql_pfs_key_t rtr_ssn_mutex_key;
 extern mysql_pfs_key_t temp_space_rseg_mutex_key;
 extern mysql_pfs_key_t undo_space_rseg_mutex_key;
-extern mysql_pfs_key_t trx_sys_rseg_mutex_key;
 extern mysql_pfs_key_t page_zip_stat_per_index_mutex_key;
 #ifdef UNIV_DEBUG
 extern mysql_pfs_key_t rw_lock_debug_mutex_key;
@@ -180,6 +182,7 @@ extern mysql_pfs_key_t clone_snapshot_mutex_key;
 extern mysql_pfs_key_t parallel_read_mutex_key;
 extern mysql_pfs_key_t dblwr_mutex_key;
 extern mysql_pfs_key_t ahi_enabled_mutex_key;
+extern mysql_pfs_key_t dict_table_stats_compute_mutex_key;
 #endif /* UNIV_PFS_MUTEX */
 
 #ifdef UNIV_PFS_RWLOCK

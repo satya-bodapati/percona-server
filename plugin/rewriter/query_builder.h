@@ -1,17 +1,18 @@
 #ifndef QUERY_BUILDER_INCLUDED
 #define QUERY_BUILDER_INCLUDED
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -133,7 +134,7 @@ bool Query_builder::add_next_literal(MYSQL_ITEM item) {
                                             *m_slots_iter - m_previous_slot);
       m_built_query += query_literal;
 
-      m_previous_slot = *m_slots_iter++ + sizeof('?');
+      m_previous_slot = *m_slots_iter++ + 1;
     }
   } else if (pattern_literal.compare(query_literal) != 0) {
     // The literal does not match the pattern nor a parameter marker, we

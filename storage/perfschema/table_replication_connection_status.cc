@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -54,7 +55,7 @@ static void set_channel_name(void *const, const char &, size_t) {}
 static void set_group_name(void *const context, const char &value,
                            size_t length) {
   auto *row = static_cast<struct st_row_connect_status *>(context);
-  const size_t max = UUID_LENGTH;
+  constexpr size_t max = UUID_LENGTH;
   length = std::min(length, max);
 
   row->group_name_is_null = false;
@@ -64,7 +65,7 @@ static void set_group_name(void *const context, const char &value,
 static void set_source_uuid(void *const context, const char &value,
                             size_t length) {
   auto *row = static_cast<struct st_row_connect_status *>(context);
-  const size_t max = UUID_LENGTH;
+  constexpr size_t max = UUID_LENGTH;
   length = std::min(length, max);
 
   row->source_uuid_is_null = false;
@@ -100,14 +101,14 @@ Plugin_table table_replication_connection_status::m_table_def(
     "  LAST_ERROR_TIMESTAMP TIMESTAMP(6) not null,\n"
     "  PRIMARY KEY (CHANNEL_NAME) USING HASH,\n"
     "  KEY (THREAD_ID) USING HASH,\n"
-    "  LAST_QUEUED_TRANSACTION CHAR(57),\n"
+    "  LAST_QUEUED_TRANSACTION CHAR(90),\n"
     "  LAST_QUEUED_TRANSACTION_ORIGINAL_COMMIT_TIMESTAMP TIMESTAMP(6)\n"
     "                                                    not null,\n"
     "  LAST_QUEUED_TRANSACTION_IMMEDIATE_COMMIT_TIMESTAMP TIMESTAMP(6)\n"
     "                                                     not null,\n"
     "  LAST_QUEUED_TRANSACTION_START_QUEUE_TIMESTAMP TIMESTAMP(6) not null,\n"
     "  LAST_QUEUED_TRANSACTION_END_QUEUE_TIMESTAMP TIMESTAMP(6) not null,\n"
-    "  QUEUEING_TRANSACTION CHAR(57),\n"
+    "  QUEUEING_TRANSACTION CHAR(90),\n"
     "  QUEUEING_TRANSACTION_ORIGINAL_COMMIT_TIMESTAMP TIMESTAMP(6) not null,\n"
     "  QUEUEING_TRANSACTION_IMMEDIATE_COMMIT_TIMESTAMP TIMESTAMP(6)\n"
     "                                                  not null,\n"
@@ -155,14 +156,14 @@ bool PFS_index_rpl_connection_status_by_thread::match(Master_info *mi) {
     /* NULL THREAD_ID is represented by 0 */
     row.thread_id = 0;
 
-    if (mi->slave_running == MYSQL_SLAVE_RUN_CONNECT) {
-      PSI_thread *psi [[maybe_unused]] = thd_get_psi(mi->info_thd);
 #ifdef HAVE_PSI_THREAD_INTERFACE
+    if (mi->slave_running == MYSQL_SLAVE_RUN_CONNECT) {
+      PSI_thread *psi = thd_get_psi(mi->info_thd);
       if (psi != nullptr) {
         row.thread_id = PSI_THREAD_CALL(get_thread_internal_id)(psi);
       }
-#endif /* HAVE_PSI_THREAD_INTERFACE */
     }
+#endif /* HAVE_PSI_THREAD_INTERFACE */
 
     if (!m_key.match(row.thread_id)) {
       return false;
@@ -178,7 +179,10 @@ PFS_engine_table *table_replication_connection_status::create(
 }
 
 table_replication_connection_status::table_replication_connection_status()
-    : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {}
+    : PFS_engine_table(&m_share, &m_pos),
+      m_pos(0),
+      m_next_pos(0),
+      m_opened_index(nullptr) {}
 
 table_replication_connection_status::~table_replication_connection_status() =
     default;
@@ -194,13 +198,12 @@ ha_rows table_replication_connection_status::get_row_count() {
 }
 
 int table_replication_connection_status::rnd_next() {
-  Master_info *mi = nullptr;
   channel_map.rdlock();
 
   for (m_pos.set_at(&m_next_pos);
        m_pos.m_index < channel_map.get_max_channels(); m_pos.next()) {
-    mi = channel_map.get_mi_at_pos(m_pos.m_index);
-    if (mi && mi->host[0]) {
+    Master_info *mi = channel_map.get_mi_at_pos(m_pos.m_index);
+    if (channel_map.is_channel_configured(mi)) {
       make_row(mi);
       m_next_pos.set_after(&m_pos);
       channel_map.unlock();
@@ -251,15 +254,13 @@ int table_replication_connection_status::index_init(uint idx, bool) {
 }
 
 int table_replication_connection_status::index_next() {
-  Master_info *mi = nullptr;
-
   channel_map.rdlock();
 
   for (m_pos.set_at(&m_next_pos);
        m_pos.m_index < channel_map.get_max_channels(); m_pos.next()) {
-    mi = channel_map.get_mi_at_pos(m_pos.m_index);
+    Master_info *mi = channel_map.get_mi_at_pos(m_pos.m_index);
 
-    if (mi && mi->host[0]) {
+    if (channel_map.is_channel_configured(mi)) {
       if (m_opened_index->match(mi)) {
         if (!make_row(mi)) {
           m_next_pos.set_after(&m_pos);
@@ -296,7 +297,8 @@ int table_replication_connection_status::make_row(Master_info *mi) {
   memcpy(m_row.channel_name, mi->get_channel(), m_row.channel_name_length);
 
   if (is_group_replication_plugin_loaded() &&
-      channel_map.is_group_replication_channel_name(mi->get_channel(), true)) {
+      channel_map.is_group_replication_applier_channel_name(
+          mi->get_channel())) {
     /*
       Group Replication applier channel.
       Set callbacks on GROUP_REPLICATION_GROUP_MEMBER_STATS_CALLBACKS.
@@ -328,15 +330,15 @@ int table_replication_connection_status::make_row(Master_info *mi) {
     }
   }
 
-  if (mi->slave_running == MYSQL_SLAVE_RUN_CONNECT) {
-    PSI_thread *psi [[maybe_unused]] = thd_get_psi(mi->info_thd);
 #ifdef HAVE_PSI_THREAD_INTERFACE
+  if (mi->slave_running == MYSQL_SLAVE_RUN_CONNECT) {
+    PSI_thread *psi = thd_get_psi(mi->info_thd);
     if (psi != nullptr) {
       m_row.thread_id = PSI_THREAD_CALL(get_thread_internal_id)(psi);
       m_row.thread_id_is_null = false;
     }
-#endif /* HAVE_PSI_THREAD_INTERFACE */
   }
+#endif /* HAVE_PSI_THREAD_INTERFACE */
 
   m_row.count_received_heartbeats = mi->received_heartbeats;
   // Time in microseconds since epoch.
@@ -344,12 +346,12 @@ int table_replication_connection_status::make_row(Master_info *mi) {
 
   {
     const Gtid_set *io_gtid_set = mi->rli->get_gtid_set();
-    Checkable_rwlock *sid_lock = mi->rli->get_sid_lock();
+    Checkable_rwlock *tsid_lock = mi->rli->get_tsid_lock();
 
-    sid_lock->wrlock();
+    tsid_lock->wrlock();
     m_row.received_transaction_set_length =
         io_gtid_set->to_string(&m_row.received_transaction_set);
-    sid_lock->unlock();
+    tsid_lock->unlock();
 
     if (m_row.received_transaction_set_length < 0) {
       my_free(m_row.received_transaction_set);
@@ -382,14 +384,14 @@ int table_replication_connection_status::make_row(Master_info *mi) {
 
   mysql_mutex_unlock(&mi->data_lock);
 
-  queueing_trx.copy_to_ps_table(mi->rli->get_sid_map(), m_row.queueing_trx,
+  queueing_trx.copy_to_ps_table(mi->rli->get_tsid_map(), m_row.queueing_trx,
                                 &m_row.queueing_trx_length,
                                 &m_row.queueing_trx_original_commit_timestamp,
                                 &m_row.queueing_trx_immediate_commit_timestamp,
                                 &m_row.queueing_trx_start_queue_timestamp);
 
   last_queued_trx.copy_to_ps_table(
-      mi->rli->get_sid_map(), m_row.last_queued_trx,
+      mi->rli->get_tsid_map(), m_row.last_queued_trx,
       &m_row.last_queued_trx_length,
       &m_row.last_queued_trx_original_commit_timestamp,
       &m_row.last_queued_trx_immediate_commit_timestamp,

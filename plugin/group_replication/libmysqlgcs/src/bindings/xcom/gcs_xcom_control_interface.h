@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -107,10 +108,10 @@ class Gcs_suspicions_manager {
 
   void process_view(
       synode_no const config_id, Gcs_xcom_nodes *xcom_nodes,
-      std::vector<Gcs_member_identifier *> alive_nodes,
-      std::vector<Gcs_member_identifier *> left_nodes,
-      std::vector<Gcs_member_identifier *> member_suspect_nodes,
-      std::vector<Gcs_member_identifier *> non_member_suspect_nodes,
+      const std::vector<Gcs_member_identifier *> &alive_nodes,
+      const std::vector<Gcs_member_identifier *> &left_nodes,
+      const std::vector<Gcs_member_identifier *> &member_suspect_nodes,
+      const std::vector<Gcs_member_identifier *> &non_member_suspect_nodes,
       bool is_killer_node, synode_no max_synode);
 
   /**
@@ -394,7 +395,7 @@ class Gcs_xcom_control : public Gcs_control_interface {
   explicit Gcs_xcom_control(
       Gcs_xcom_node_address *xcom_node_address,
       std::vector<Gcs_xcom_node_address *> &xcom_peers,
-      Gcs_group_identifier group_identifier, Gcs_xcom_proxy *xcom_proxy,
+      const Gcs_group_identifier &group_identifier, Gcs_xcom_proxy *xcom_proxy,
       Gcs_xcom_group_management *xcom_group_management,
       Gcs_xcom_engine *gcs_engine,
       Gcs_xcom_state_exchange_interface *state_exchange,

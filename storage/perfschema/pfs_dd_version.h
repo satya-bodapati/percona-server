@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -237,12 +238,68 @@
    - WL#15059: PERFORMANCE_SCHEMA, OTEL TRACE INTERFACE
      New column TELEMETRY_ACTIVE added to performance_schema.threads
 
+  80040:
+
+   - Bug#31763497 PERFORMANCE DEGRADATION CAUSED BY MONITORING
+     SYS.INNODB_LOCK_WAITS IN MYSQL 8.0
+     - Table performance_schema.data_lock_waits, add PRIMARY KEY.
+
   80200:
 
    - WL#15199: PERFORMANCE_SCHEMA, OTEL METRICS INTERFACE
       New tables setup_meters, setup_metrics added to performance_schema
+
+  80300:
+
+   - WL#15294: Extending GTID with tags to identify group of transactions
+      Modified performance schema tables:
+      - replication_connection_status:
+        - LAST_QUEUED_TRANSACTION 57->90 bytes
+        - QUEUEING_TRANSACTION 57->90 bytes
+      - replication_applier_status_by_coordinator:
+        - LAST_PROCESSED_TRANSACTION 57->90 bytes
+        - PROCESSING_TRANSACTION  57->90 bytes
+      - replication_applier_status_by_worker
+        - APPLYING_TRANSACTION 57->90 bytes
+        - LAST_APPLIED_TRANSACTION 57->90 bytes
+      - events_transactions_current:
+        - GTID 64->90 bytes
+      - events_transactions_history:
+        - GTID 64->90 bytes
+      - events_transactions_history_long:
+        - GTID 64->90 bytes
+
+  80403:
+
+   - Bug#31763497 PERFORMANCE DEGRADATION CAUSED BY MONITORING
+     SYS.INNODB_LOCK_WAITS IN MYSQL 8.0
+     - Table performance_schema.data_lock_waits, add PRIMARY KEY.
+
+  80409:
+
+   - WL#15201 PERFORMANCE_SCHEMA, OTEL INTERFACE: LOG
+     - New table performance_schema.setup_logger.
+
+  90000:
+
+   - WL#15855: System variable metadata
+      New tables variable_metadata, global_variable_attributes added to
+  performance_schema
+
+  90100:
+
+   - Bug#31763497 PERFORMANCE DEGRADATION CAUSED BY MONITORING
+     SYS.INNODB_LOCK_WAITS IN MYSQL 8.0
+     - Table performance_schema.data_lock_waits, add PRIMARY KEY.
+
+  90600:
+
+   - WL#16803: Query Temporary Account Locking Status
+     - New table temporary_account_locks.
+     - New column host_cache.COUNT_ACCOUNT_LOCKED_ERRORS.
+     - New column host_cache.COUNT_TEMPORARY_ACCOUNT_LOCKED_ERRORS.
 */
 
-static const uint PFS_DD_VERSION = 80200;
+static const uint PFS_DD_VERSION = 90600;
 
 #endif /* PFS_DD_VERSION_H */

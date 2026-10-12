@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,9 +26,7 @@
 
 #include "data.h" /* data::Data */
 
-namespace keyring_common {
-
-namespace data {
+namespace keyring_common::data {
 /**
   Data wrapper to include backend specific extensions
 */
@@ -48,17 +47,18 @@ class Data_extension final : public Data {
 
   /** Assignment operator */
   Data_extension &operator=(const Data_extension &src) {
-    Data::operator=(src);
-    ext_ = src.ext_;
-
+    if (this != &src) {
+      Data::operator=(src);
+      ext_ = src.ext_;
+    }
     return *this;
   }
 
   /* Get data */
-  const data::Data get_data() const override { return Data::get_data(); }
+  data::Data get_data() const override { return Data::get_data(); }
 
   /* Get Metadata extension details */
-  const Extension get_extension() const { return ext_; }
+  Extension get_extension() const { return ext_; }
 
   /* Set data */
   void set_data(const data::Data &data) override { Data::operator=(data); }
@@ -70,8 +70,6 @@ class Data_extension final : public Data {
   Extension ext_;
 };
 
-}  // namespace data
-
-}  // namespace keyring_common
+}  // namespace keyring_common::data
 
 #endif  // !Data_extension_INCLUDED

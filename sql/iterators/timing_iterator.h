@@ -1,18 +1,19 @@
 #ifndef SQL_ITERATORS_TIMING_ITERATOR_H_
 #define SQL_ITERATORS_TIMING_ITERATOR_H_
 
-/* Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -158,10 +159,11 @@ template <class RealIterator>
 class TimingIterator final : public RowIterator {
  public:
   template <class... Args>
-  TimingIterator(THD *thd, Args &&... args)
+  TimingIterator(THD *thd, Args &&...args)
       : RowIterator(thd), m_iterator(thd, std::forward<Args>(args)...) {}
 
-  bool Init() override {
+ private:
+  bool DoInit() override {
     const IteratorProfilerImpl::TimeStamp start_time =
         IteratorProfilerImpl::Now();
     bool err = m_iterator.Init();
@@ -169,7 +171,7 @@ class TimingIterator final : public RowIterator {
     return err;
   }
 
-  int Read() override {
+  int DoRead() override {
     const IteratorProfilerImpl::TimeStamp start_time =
         IteratorProfilerImpl::Now();
     int err = m_iterator.Read();
@@ -177,6 +179,7 @@ class TimingIterator final : public RowIterator {
     return err;
   }
 
+ public:
   void SetNullRowFlag(bool is_null_row) override {
     m_iterator.SetNullRowFlag(is_null_row);
   }
@@ -219,7 +222,7 @@ class TimingIterator final : public RowIterator {
 
 template <class RealIterator, class... Args>
 unique_ptr_destroy_only<RowIterator> NewIterator(THD *thd, MEM_ROOT *mem_root,
-                                                 Args &&... args) {
+                                                 Args &&...args) {
   if (thd->lex->is_explain_analyze) {
     return unique_ptr_destroy_only<RowIterator>(
         new (mem_root)

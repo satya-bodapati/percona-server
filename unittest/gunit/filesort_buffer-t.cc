@@ -1,15 +1,16 @@
-/* Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,8 +22,8 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include <gtest/gtest.h>
-#include <stddef.h>
 #include <sys/types.h>
+#include <cstddef>
 #include <utility>
 
 #include "my_inttypes.h"
@@ -47,7 +48,7 @@ TEST_F(FileSortBufferTest, Basic) {
 
   fs_info.set_max_size(32768, 10);
   for (uint ix = 0; ix < 10; ++ix) {
-    Bounds_checked_array<uchar> buf = fs_info.get_next_record_pointer(10);
+    Bounds_checked_array<uchar> const buf = fs_info.get_next_record_pointer(10);
     ASSERT_GE(buf.size(), 10);
     memcpy(buf.array(), letters, 10);
     fs_info.commit_used_memory(10);
@@ -104,7 +105,7 @@ TEST_F(FileSortBufferTest, OneBigRecordFits) {
     implementation detail; if the record pointer allocation gets
     smarter in the future, the test will have to be adjusted.
   */
-  fs_info.set_max_size(10485760, 0xFFFFFFFFu);
+  fs_info.set_max_size(10485760, 0xFFFFFFFFU);
   Bounds_checked_array<uchar> buf;
   size_t min_size = 1;
   for (;;)  // Termination condition within loop.

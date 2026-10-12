@@ -1,15 +1,16 @@
-/* Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -406,7 +407,7 @@ static telemetry_locker_t *tm_stmt_start(telemetry_session_t * /* session */,
     *flags = TRACE_STATEMENTS;
 
     const Statement_Data info;
-    data->m_stmt_stack.push_back(std::move(info));
+    data->m_stmt_stack.push_back(info);
 
   } else {
     *flags = TRACE_NOTHING;
@@ -479,7 +480,7 @@ static telemetry_locker_t *tm_stmt_notify_qa(telemetry_locker_t *locker,
   }
 
   // dump all received query attributes as JSON
-  std::set<std::string> dummy_filter;
+  std::set<std::string> const dummy_filter;
   std::string all_qa;
   if (!query_attrs_to_json(thd, dummy_filter, all_qa, g_log)) {
     g_log.write("> tm_stmt_notify_qa: all query attributes [%s]\n",
@@ -707,12 +708,9 @@ static bool unregister_udf() {
 }
 
 static bool register_udf() {
-  if (udf_registration_srv->udf_register("test_component_trace_log", INT_RESULT,
-                                         (Udf_func_any)test_component_trace_log,
-                                         nullptr, nullptr)) {
-    return true;
-  }
-  return false;
+  return udf_registration_srv->udf_register(
+             "test_component_trace_log", INT_RESULT,
+             (Udf_func_any)test_component_trace_log, nullptr, nullptr) != 0;
 }
 
 /**

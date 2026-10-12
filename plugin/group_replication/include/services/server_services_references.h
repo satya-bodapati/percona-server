@@ -1,15 +1,16 @@
-/* Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,6 +25,7 @@
 #define GR_SERVER_SERVICES_REFERENCES
 
 #include <mysql/components/services/component_sys_var_service.h>
+#include <mysql/components/services/mysql_global_variable_attributes_service.h>
 #include <mysql/components/services/mysql_system_variable.h>
 #include <mysql/components/services/registry.h>
 #include <mysql/service_plugin_registry.h>
@@ -85,22 +87,26 @@ class Server_services_references {
 
   /* clang-format off */
   SERVICE_TYPE(registry) *registry_service{nullptr};
+  SERVICE_TYPE(registry_registration) *registry_registration_service{nullptr};
   SERVICE_TYPE(mysql_charset) *mysql_charset_service{nullptr};
   SERVICE_TYPE(mysql_string_factory) *mysql_string_factory_service{nullptr};
   SERVICE_TYPE(mysql_string_charset_converter) *mysql_string_charset_converter_service{nullptr};
   SERVICE_TYPE(mysql_system_variable_update_string) *mysql_system_variable_update_string_service{nullptr};
+  SERVICE_TYPE(mysql_global_variable_attributes) *mysql_global_variable_attributes_service{nullptr};
   SERVICE_TYPE(mysql_system_variable_update_integer) *mysql_system_variable_update_integer_service{nullptr};
-  SERVICE_TYPE(component_sys_variable_register) *component_sys_variable_register_service{nullptr};
+  SERVICE_TYPE(mysql_system_variable_reader) *component_sys_variable_reader_service{nullptr};
   /* clang-format on */
 
  private:
   /* clang-format off */
+  my_h_service m_registry_registration_handle{nullptr};
   my_h_service m_mysql_charset_handle{nullptr};
   my_h_service m_mysql_string_factory_handle{nullptr};
   my_h_service m_mysql_string_charset_converter_handle{nullptr};
   my_h_service m_mysql_system_variable_update_string_handle{nullptr};
+  my_h_service m_mysql_global_variable_attributes_handle{nullptr};
   my_h_service m_mysql_system_variable_update_integer_handle{nullptr};
-  my_h_service m_component_sys_variable_register_handle{nullptr};
+  my_h_service m_component_sys_variable_reader_handle{nullptr};
   /* clang-format on */
 };
 

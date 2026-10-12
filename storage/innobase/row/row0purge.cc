@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1997, 2023, Oracle and/or its affiliates.
+Copyright (c) 1997, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -533,7 +534,7 @@ if possible.
 
           page = btr_cur_get_page(btr_cur);
 
-          if (!lock_test_prdt_page_lock(trx, page_get_page_id(page)) &&
+          if (lock_other_has_prdt_page_lock(trx, page_get_page_id(page)) &&
               page_get_n_recs(page) < 2 &&
               page_get_page_no(page) != dict_index_get_page(index)) {
             /* this is the last record on page,
@@ -671,7 +672,7 @@ static inline void row_purge_remove_multi_sec_if_poss(purge_node_t *node,
       break;
     }
 
-    if (node->index->type != DICT_FTS) {
+    if (node->index->type != DICT_FTS && !node->index->is_vector()) {
       if (node->index->is_multi_value()) {
         row_purge_remove_multi_sec_if_poss(node, heap, false);
       } else {
@@ -756,7 +757,7 @@ skip_secondaries:
       byte *data_field;
       dict_index_t *index;
       bool is_insert;
-      ulint rseg_id;
+      ulint undo_num;
       page_no_t page_no;
       space_id_t undo_space_id;
       ulint offset;
@@ -773,14 +774,14 @@ skip_secondaries:
 
       ut_a(internal_offset < UNIV_PAGE_SIZE);
 
-      trx_undo_decode_roll_ptr(node->roll_ptr, &is_insert, &rseg_id, &page_no,
+      trx_undo_decode_roll_ptr(node->roll_ptr, &is_insert, &undo_num, &page_no,
                                &offset);
 
       /* If table is temp then it can't have its undo log
       residing in rollback segment with REDO log enabled. */
       bool is_temp = node->table->is_temporary();
 
-      undo_space_id = trx_rseg_id_to_space_id(rseg_id, is_temp);
+      undo_space_id = trx_undo_num_to_space_id(undo_num, is_temp);
 
       mtr_start(&mtr);
 
@@ -846,7 +847,7 @@ static bool row_purge_parse_undo_rec(purge_node_t *node,
                                      bool *updated_extern, THD *thd,
                                      que_thr_t *thr) {
   dict_index_t *clust_index;
-  byte *ptr;
+  const byte *ptr;
   undo_no_t undo_no;
   table_id_t table_id;
   trx_id_t trx_id;
@@ -878,22 +879,19 @@ try_again:
 #endif /* INNODB_DD_VC_SUPPORT */
 
   /* Cannot call dd_table_open_on_id() before server is fully up */
-  if (!srv_upgrade_old_undo_found && !dict_table_is_system(table_id)) {
-    while (!mysqld_server_started) {
-      if (srv_shutdown_state.load() >= SRV_SHUTDOWN_PURGE) {
-        return (false);
-      }
-      std::this_thread::sleep_for(std::chrono::seconds(1));
+  while (!mysqld_server_started) {
+    if (srv_shutdown_state.load() >= SRV_SHUTDOWN_PURGE) {
+      return (false);
     }
+    std::this_thread::sleep_for(std::chrono::seconds(1));
   }
 
   /* SDI tables are hidden tables and are not registered with global
   dictionary. Open the table internally. Also acquire shared MDL
   of SDI tables. Concurrent DROP TABLE/TABLESPACE would acquire
   exclusive MDL on SDI tables */
-  ut_ad(!dict_table_is_system(table_id));
 
-  if (dict_table_is_sdi(table_id) || srv_upgrade_old_undo_found) {
+  if (dict_table_is_sdi(table_id)) {
     if (dict_table_is_sdi(table_id)) {
       space_id_t space_id = dict_sdi_get_space_id(table_id);
 
@@ -931,7 +929,7 @@ try_again:
       dict_sys_mutex_exit();
 
       if (node->table != nullptr) {
-        if (node->table->is_fts_aux()) {
+        if (node->table->is_aux()) {
           table_id_t parent_id = node->table->parent_id;
 
           dd_table_close(node->table, thd, &node->mdl, false);
@@ -976,7 +974,7 @@ try_again:
         node->table = nullptr;
 
       } else {
-        bool is_aux = node->table->is_fts_aux();
+        bool is_aux = node->table->is_aux();
 
         dd_table_close(node->table, thd, &node->mdl, false);
         if (is_aux && node->parent) {
@@ -1008,7 +1006,7 @@ try_again:
       dd_table_close(node->table, thd, &node->mdl, false);
       node->table = nullptr;
     } else {
-      bool is_aux = node->table->is_fts_aux();
+      bool is_aux = node->table->is_aux();
       dd_table_close(node->table, thd, &node->mdl, false);
       if (is_aux && node->parent) {
         dd_table_close(node->parent, thd, &node->parent_mdl, false);
@@ -1028,7 +1026,7 @@ try_again:
     we do not have an index to call it with. */
   close_exit:
     /* Purge requires no changes to indexes: we may return */
-    if (dict_table_is_sdi(node->table->id) || srv_upgrade_old_undo_found) {
+    if (dict_table_is_sdi(node->table->id)) {
       if (dict_table_is_sdi(node->table->id)) {
         dd_table_close(node->table, thd, &node->mdl, false);
       } else {
@@ -1036,7 +1034,7 @@ try_again:
       }
       node->table = nullptr;
     } else {
-      bool is_aux = node->table->is_fts_aux();
+      bool is_aux = node->table->is_aux();
       dd_table_close(node->table, thd, &node->mdl, false);
       if (is_aux && node->parent) {
         dd_table_close(node->parent, thd, &node->parent_mdl, false);
@@ -1129,7 +1127,7 @@ try_again:
       dd_table_close(node->table, thd, &node->mdl, false);
       node->table = nullptr;
     } else {
-      bool is_aux = node->table->is_fts_aux();
+      bool is_aux = node->table->is_aux();
       dd_table_close(node->table, thd, &node->mdl, false);
       if (is_aux && node->parent) {
         dd_table_close(node->parent, thd, &node->parent_mdl, false);
@@ -1277,7 +1275,7 @@ bool purge_node_t::validate_pcur() {
     return (true);
   }
 
-  if (index->type == DICT_FTS) {
+  if (index->type == DICT_FTS || index->is_vector()) {
     return (true);
   }
 

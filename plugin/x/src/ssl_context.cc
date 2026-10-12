@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,6 +23,7 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
  */
 #include <cinttypes>
+#include <memory>
 #include <string>
 
 #include "violite.h"  // NOLINT(build/include_subdir)
@@ -61,8 +63,9 @@ bool Ssl_context::setup(const char *tls_version, const char *ssl_key,
                         const char *ssl_ca, const char *ssl_capath,
                         const char *ssl_cert, const char *ssl_cipher,
                         const char *ssl_crl, const char *ssl_crlpath) {
-  m_config.reset(new Config{tls_version, ssl_key, ssl_ca, ssl_capath, ssl_cert,
-                            ssl_cipher, ssl_crl, ssl_crlpath});
+  m_config = std::make_unique<Config>(Config{tls_version, ssl_key, ssl_ca,
+                                             ssl_capath, ssl_cert, ssl_cipher,
+                                             ssl_crl, ssl_crlpath});
   return setup(*m_config);
 }
 
@@ -81,7 +84,7 @@ bool Ssl_context::setup(const Config &config) {
     return false;
   }
 
-  m_options.reset(new Ssl_context_options(m_ssl_acceptor));
+  m_options = std::make_unique<Ssl_context_options>(m_ssl_acceptor);
 
   return true;
 }
@@ -95,7 +98,7 @@ Ssl_context::~Ssl_context() {
 bool Ssl_context::activate_tls(iface::Vio *conn,
                                const int32_t handshake_timeout) {
   unsigned long error = 0;  // NOLINT(runtime/int)
-  auto vio = conn->get_vio();
+  auto *vio = conn->get_vio();
   if (sslaccept(m_ssl_acceptor, vio, handshake_timeout, &error) != 0) {
     log_debug("Error during SSL handshake for client connection (%" PRIu64 ")",
               static_cast<uint64_t>(error));

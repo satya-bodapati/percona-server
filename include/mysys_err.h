@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -135,9 +136,10 @@ extern const char *globerrs[]; /* my_error_messages is here */
 #define EE_FAILED_TO_RESET_BEFORE_SECONDARY_IGNORABLE_CHAR 91
 #define EE_FAILED_PROCESSING_DIRECTIVE 92
 #define EE_PTHREAD_KILL_FAILED 93
-#define EE_SOCKET 94
-#define EE_TOOLONGFILENAME 95
-#define EE_ERROR_LAST 95 /* Copy last error nr */
+#define EE_COLLATION_ALIAS_ERROR 94
+#define EE_SOCKET 95
+#define EE_TOOLONGFILENAME 96
+#define EE_ERROR_LAST 96 /* Copy last error nr */
 /* Add error numbers before EE_ERROR_LAST and change it accordingly. */
 
 /* Exit codes for option processing. When exiting from server use the

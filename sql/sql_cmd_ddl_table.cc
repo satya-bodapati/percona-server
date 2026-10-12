@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -111,21 +112,19 @@ static bool populate_table(THD *thd, LEX *lex) {
 
   if (lock_tables(thd, lex->query_tables, lex->table_count, 0)) return true;
 
-  if (unit->optimize(thd, nullptr, true, /*finalize_access_paths=*/true))
-    return true;
+  if (unit->optimize(thd, nullptr, /*finalize_access_paths=*/true)) return true;
 
-  // Calculate the current statement cost.
-  accumulate_statement_cost(lex);
+  DBUG_EXECUTE_IF("ast", { unit->DebugPrintQueryPlan(thd, "ast"); });
 
   // Perform secondary engine optimizations, if needed.
   if (optimize_secondary_engine(thd)) return true;
 
+  // Create iterators for the chosen query plan before execution.
+  if (unit->create_iterators(thd)) return true;
+
   if (unit->execute(thd)) return true;
 
-  if (thd->m_current_query_cost >
-      thd->variables.secondary_engine_cost_threshold) {
-    notify_plugins_after_select(thd, lex->m_sql_cmd);
-  }
+  notify_plugins_after_select(thd, lex->m_sql_cmd);
 
   return false;
 }
@@ -176,10 +175,11 @@ bool Sql_cmd_create_table::execute(THD *thd) {
     If no engine type was given, work out the default now
     rather than at parse-time.
   */
-  if (!(create_info.used_fields & HA_CREATE_USED_ENGINE))
-    create_info.db_type = create_info.options & HA_LEX_CREATE_TMP_TABLE
-                              ? ha_default_temp_handlerton(thd)
-                              : ha_default_handlerton(thd);
+  if ((create_info.used_fields & HA_CREATE_USED_ENGINE) == 0U) {
+    if (create_info.set_db_type(thd)) {
+      return true;
+    }
+  }
 
   assert(create_info.db_type != nullptr);
   if ((m_alter_info->flags & Alter_info::ANY_ENGINE_ATTRIBUTE) != 0 &&
@@ -187,6 +187,10 @@ bool Sql_cmd_create_table::execute(THD *thd) {
        DBUG_EVALUATE_IF("simulate_engine_attribute_support", false, true))) {
     my_error(ER_ENGINE_ATTRIBUTE_NOT_SUPPORTED, MYF(0),
              ha_resolve_storage_engine_name(create_info.db_type));
+    return true;
+  }
+
+  if (validate_secondary_engine_temporary_table(thd, &create_info)) {
     return true;
   }
 
@@ -321,9 +325,37 @@ bool Sql_cmd_create_table::execute(THD *thd) {
     if (query_expression->is_prepared()) {
       cleanup(thd);
     }
+
+    const bool prepared_for_secondary_engine =
+        query_expression->is_prepared() && lex->using_secondary_engine();
+
     auto cleanup_se_guard = create_scope_guard(
         [lex] { lex->set_secondary_engine_execution_context(nullptr); });
     if (open_tables_for_query(thd, lex->query_tables, false)) return true;
+
+    // If the query was prepared for execution on a different engine than the
+    // engine chosen at execution, it must be reprepared.
+    if (is_prepared() &&
+        (prepared_for_secondary_engine != lex->using_secondary_engine()) &&
+        ask_to_reprepare(thd)) {
+      return true;
+    }
+    assert(!is_prepared() ||
+           prepared_for_secondary_engine == lex->using_secondary_engine());
+
+    // Use the hypergraph optimizer for the SELECT statement, if enabled.
+    const bool need_hypergraph_optimizer =
+        thd->optimizer_switch_flag(OPTIMIZER_SWITCH_HYPERGRAPH_OPTIMIZER);
+
+    if (!query_expression->is_prepared()) {
+      // Use the desired optimizer during following preparation
+      lex->set_using_hypergraph_optimizer(need_hypergraph_optimizer);
+    }
+    if (need_hypergraph_optimizer != lex->using_hypergraph_optimizer() &&
+        ask_to_reprepare(thd)) {
+      return true;
+    }
+    assert(need_hypergraph_optimizer == lex->using_hypergraph_optimizer());
 
     /* The table already exists */
     if (create_table->table || create_table->is_view()) {
@@ -335,7 +367,7 @@ bool Sql_cmd_create_table::execute(THD *thd) {
         return false;
       } else {
         my_error(ER_TABLE_EXISTS_ERROR, MYF(0), create_info.alias);
-        return false;
+        return true;
       }
     }
 
@@ -370,10 +402,6 @@ bool Sql_cmd_create_table::execute(THD *thd) {
         lex->link_first_table_back(create_table, link_to_local);
         return true;
       }
-
-      // Use the hypergraph optimizer for the SELECT statement, if enabled.
-      lex->using_hypergraph_optimizer =
-          thd->optimizer_switch_flag(OPTIMIZER_SWITCH_HYPERGRAPH_OPTIMIZER);
 
       if (query_expression->prepare(thd, result, nullptr, SELECT_NO_UNLOCK,
                                     0)) {
@@ -470,6 +498,18 @@ bool Sql_cmd_create_table::execute(THD *thd) {
   return res;
 }
 
+bool Sql_cmd_create_table::reprepare_on_execute_required() const {
+  // Expressions in key and partition clauses end up with being allocated on
+  // differing (incompatible) MEM_ROOTs and thus need to be reprepared. The
+  // incompatibility arises in the case of prepared statements as a parse tree
+  // MEM_ROOT whose lifetime is associated with the lifetime of the prepared
+  // statement ends up containing pointers to parse tree objects that have been
+  // allocated from a MEM_ROOT with a lifetime of the prepared statement's
+  // execution. It's benign (though wasteful) to reprepare other create table
+  // statements as well.
+  return true;
+}
+
 const MYSQL_LEX_CSTRING *
 Sql_cmd_create_table::eligible_secondary_storage_engine(THD *) const {
   // Now check if the opened tables are available in a secondary
@@ -553,6 +593,18 @@ bool Sql_cmd_create_or_drop_index_base::execute(THD *thd) {
   /* Pop Strict_error_handler */
   if (thd->is_strict_mode()) thd->pop_internal_handler();
   return res;
+}
+
+bool Sql_cmd_create_index::reprepare_on_execute_required() const {
+  // Expressions in index/key clauses end up with being allocated on
+  // differing (incompatible) MEM_ROOTs and thus need to be reprepared.
+  // The incompatibility arises in the case of prepared statements as a parse
+  // tree MEM_ROOT whose lifetime is associated with the lifetime of the
+  // prepared statement ends up containing pointers to parse tree objects that
+  // have been allocated from a MEM_ROOT with a lifetime of the prepared
+  // statement's execution. It's benign (though wasteful) to reprepare other
+  // create index statements as well.
+  return true;
 }
 
 bool Sql_cmd_cache_index::execute(THD *thd) {

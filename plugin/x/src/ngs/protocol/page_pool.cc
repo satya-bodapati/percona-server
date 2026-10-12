@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,9 +23,9 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
  */
 
-#include <stddef.h>
-#include <stdint.h>
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <list>
 #include <new>
 
@@ -42,7 +43,7 @@ Memory_block_pool::~Memory_block_pool() {
   MUTEX_LOCK(lock, m_mutex);
 
   while (m_page_cache) {
-    auto to_delete = reinterpret_cast<char *>(m_page_cache);
+    auto *to_delete = reinterpret_cast<char *>(m_page_cache);
     m_page_cache = m_page_cache->m_next;
 
     ngs::free_array<char>(to_delete);
@@ -54,7 +55,7 @@ char *Memory_block_pool::allocate() {
   char *object_data = get_page_from_cache();
 
   if (nullptr == object_data) {
-    size_t memory_to_allocate = m_config.m_page_size;
+    size_t const memory_to_allocate = m_config.m_page_size;
 
     ngs::allocate_array(object_data, memory_to_allocate,
                         KEY_memory_x_send_buffer);
@@ -91,7 +92,7 @@ char *Memory_block_pool::get_page_from_cache() {
 
     if (m_page_cache) {
       --m_number_of_cached_pages;
-      auto result = m_page_cache;
+      auto *result = m_page_cache;
 
       m_page_cache = m_page_cache->m_next;
       result->~Node_linked_list();

@@ -1,15 +1,16 @@
-/* Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -83,6 +84,14 @@ struct CHARSET_INFO;
 #define MYSQL_DIGEST_END(LOCKER, DIGEST) inline_mysql_digest_end(LOCKER, DIGEST)
 #else
 #define MYSQL_DIGEST_END(LOCKER, DIGEST) \
+  do {                                   \
+  } while (0)
+#endif
+
+#ifdef HAVE_PSI_STATEMENT_DIGEST_INTERFACE
+#define MYSQL_DIGEST_SET(LOCKER, DIGEST) inline_mysql_digest_set(LOCKER, DIGEST)
+#else
+#define MYSQL_DIGEST_SET(LOCKER, DIGEST) \
   do {                                   \
   } while (0)
 #endif
@@ -194,6 +203,15 @@ static inline void inline_mysql_digest_end(PSI_digest_locker *locker,
                                            const sql_digest_storage *digest) {
   if (likely(locker != nullptr)) {
     PSI_DIGEST_CALL(digest_end)(locker, digest);
+  }
+}
+#endif
+
+#ifdef HAVE_PSI_STATEMENT_DIGEST_INTERFACE
+static inline void inline_mysql_digest_set(PSI_statement_locker *locker,
+                                           const sql_digest_storage *digest) {
+  if (likely(locker != nullptr)) {
+    PSI_DIGEST_CALL(digest_set)(locker, digest);
   }
 }
 #endif

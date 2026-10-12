@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -33,10 +34,10 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #define ARCH_ARCH_INCLUDE
 
 #include <mysql/components/services/page_track_service.h>
-#include "buf0buf.h" /* buf_page_t */
-#include "ut0mutex.h"
-
 #include <list>
+#include "buf0buf.h" /* buf_page_t */
+#include "ut0mem.h"
+#include "ut0mutex.h"
 
 /** @name Archive file name prefix and constant length parameters. */
 /** @{ */
@@ -446,11 +447,6 @@ class Arch_Block {
   @return block state */
   Arch_Blk_State get_state() const { return (m_state); }
 
-  /** Check if the block contains only zeroes.
-  @param[in]  block   block data
-  @return true if block is filled with zeroes. */
-  static bool is_zeroes(const byte *block);
-
   /** Check if the block data is valid.
   @param[in]  block   block to be validated
   @return true if it's a valid block, else false */
@@ -697,7 +693,7 @@ class Arch_File_Ctx {
   @return true if both sets of information are the same
   @param[in]    group   group whose file is being validated
   @param[in]    file_index      index of the file which is being validated
-  @param[in]    start_lsn
+  @param[in]    start_lsn start LSN
   @param[in,out]        reset_count     count of files which has been validated
   @return true if both the sets of information are the same. */
   bool validate(Arch_Group *group, uint file_index, lsn_t start_lsn,
@@ -1114,6 +1110,11 @@ class Arch_Group {
   @return true if there is at least 1 client that requires durable archiving*/
   bool is_durable() const { return (m_dur_ref_count > 0); }
 
+  /** Make group durable, regardless of whether it has any clients requiring
+  durable archiving. One use is protecting page-tracking information files from
+  being deleted if group recovery fails. */
+  void set_durable() { ++m_dur_ref_count; }
+
   /** Purge archived files until the specified purge LSN.
   @param[in]    purge_lsn       LSN until which archived files needs to be
   purged
@@ -1314,7 +1315,11 @@ class Arch_log_consumer : public Log_consumer {
 
   lsn_t get_consumed_lsn() const override;
 
-  void consumption_requested() override;
+  void consumption_requested(lsn_t request_lsn) override;
+
+ private:
+  std::chrono::system_clock::time_point m_last_rushed_at;
+  std::chrono::system_clock::time_point m_problem_started_at;
 };
 
 /** Redo log archiving system */
@@ -1426,6 +1431,9 @@ class Arch_Log_Sys {
   /** Disable assignment */
   Arch_Log_Sys &operator=(Arch_Log_Sys const &) = delete;
 
+  /** Abort the archiver if it is lagging behind and unable to advance. */
+  void async_abort_if_below(lsn_t requested_lsn);
+
  private:
   /** Wait for archive system to come out of #ARCH_STATE_PREPARE_IDLE.
   If the system is preparing to idle, #start needs to wait
@@ -1505,6 +1513,13 @@ class Arch_Log_Sys {
   /** Redo log consumer that can be registered to prevent consumption
   of redo log files which still haven't been archived. */
   Arch_log_consumer m_log_consumer;
+
+  /** Non-zero if async_abort_if_below(request_lsn) was called, which sets it to
+  request_lsn. Used to notify the thread calling Arch_Log_Sys::archive(..) that
+  it should abort. Because this field is not cleared, and we don't want to
+  prevent future CLONE operations, the operation should only be aborted if
+  arch_lsn is below the value of this field */
+  std::atomic<lsn_t> m_abort_if_below_lsn{0};
 };
 
 /** Vector of page archive in memory blocks */

@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2007, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2007, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -672,13 +673,11 @@ bool thd_init_client_charset(THD *thd, uint cs_number) {
   CHARSET_INFO *cs;
   /*
    Use server character set and collation if
-   - opt_character_set_client_handshake is not set
    - client has not specified a character set
    - client character set is the same as the servers
    - client character set doesn't exists in server
   */
-  if (!opt_character_set_client_handshake ||
-      !(cs = get_charset(cs_number, MYF(0))) ||
+  if (!(cs = get_charset(cs_number, MYF(0))) ||
       !my_strcasecmp(&my_charset_latin1,
                      global_system_variables.character_set_client->m_coll_name,
                      cs->m_coll_name)) {
@@ -989,24 +988,23 @@ static bool login_connection(THD *thd) {
              ("login_connection called by thread %u", thd->thread_id()));
 
   /* Use "connect_timeout" value during connection phase */
-  thd->get_protocol_classic()->set_read_timeout(connect_timeout, true);
-  thd->get_protocol_classic()->set_write_timeout(connect_timeout);
+  Protocol_classic *protocol = thd->get_protocol_classic();
+  protocol->set_read_timeout(connect_timeout, true);
+  protocol->set_write_timeout(connect_timeout);
 
   error = check_connection(thd);
   thd->send_statement_status();
 
   if (error) {  // Wrong permissions
 #ifdef _WIN32
-    if (vio_type(thd->get_protocol_classic()->get_vio()) == VIO_TYPE_NAMEDPIPE)
+    if (vio_type(protocol->get_vio()) == VIO_TYPE_NAMEDPIPE)
       my_sleep(1000); /* must wait after eof() */
 #endif
     return true;
   }
   /* Connect completed, set read/write timeouts back to default */
-  thd->get_protocol_classic()->set_read_timeout(
-      thd->variables.net_read_timeout);
-  thd->get_protocol_classic()->set_write_timeout(
-      thd->variables.net_write_timeout);
+  protocol->set_read_timeout(thd->variables.net_read_timeout);
+  protocol->set_write_timeout(thd->variables.net_write_timeout);
 
   if (unlikely(opt_userstat)) {
     thd->reset_stats();
@@ -1074,16 +1072,16 @@ static void prepare_new_connection_state(THD *thd) {
   NET *net = thd->get_protocol_classic()->get_net();
   Security_context *sctx = thd->security_context();
 
-  if (thd->get_protocol()->has_client_capability(CLIENT_COMPRESS) ||
-      thd->get_protocol()->has_client_capability(
-          CLIENT_ZSTD_COMPRESSION_ALGORITHM)) {
+  Protocol *protocol = thd->get_protocol();
+  if (protocol->has_client_capability(CLIENT_COMPRESS) ||
+      protocol->has_client_capability(CLIENT_ZSTD_COMPRESSION_ALGORITHM)) {
     net->compress = true;  // Use compression
-    const enum enum_compression_algorithm algorithm = get_compression_algorithm(
-        thd->get_protocol()->get_compression_algorithm());
+    const enum enum_compression_algorithm algorithm =
+        get_compression_algorithm(protocol->get_compression_algorithm());
     NET_SERVER *server_extn = static_cast<NET_SERVER *>(net->extension);
     if (server_extn != nullptr)
       mysql_compress_context_init(&server_extn->compress_ctx, algorithm,
-                                  thd->get_protocol()->get_compression_level());
+                                  protocol->get_compression_level());
     if (net->extension == nullptr) {
       const LEX_CSTRING sctx_user = sctx->user();
       Host_errors errors;

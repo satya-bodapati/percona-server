@@ -1,15 +1,16 @@
-/* Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -163,6 +164,25 @@ void Commit_stage_manager::deinit() {
   mysql_mutex_destroy(&this->m_lock_wait_for_ticket_turn);
 }
 
+bool Commit_stage_manager::is_ticket_on_its_turn_and_back_ticket_incremented(
+    THD *thd) const {
+  if (!thd->is_applier_thread()) {
+    assert(false);
+    return false;
+  }
+
+  auto &ticket_manager = binlog::Bgc_ticket_manager::instance();
+  auto &ticket_ctx = thd->rpl_thd_ctx.binlog_group_commit_ctx();
+  binlog::BgcTicket ticket(ticket_ctx.get_session_ticket());
+
+  if (ticket == ticket_manager.get_front_ticket() &&
+      ticket < ticket_manager.get_back_ticket()) {
+    return true;
+  }
+
+  return false;
+}
+
 void Commit_stage_manager::wait_for_ticket_turn(THD *thd,
                                                 bool update_ticket_manager) {
   auto &ticket_ctx = thd->rpl_thd_ctx.binlog_group_commit_ctx();
@@ -281,19 +301,10 @@ bool Commit_stage_manager::enroll_for(StageID stage, THD *thd,
   }
 
   /*
-    We do not need to unlock the stage_mutex if it is LOCK_log when rotating
-    binlog caused by logging incident log event, since it should be held
-    always during rotation.
-  */
-  bool need_unlock_stage_mutex =
-      !(mysql_bin_log.is_rotating_caused_by_incident &&
-        stage_mutex == mysql_bin_log.get_log_lock());
-
-  /*
     The stage mutex can be nullptr if we are enrolling for the first
     stage.
   */
-  if (stage_mutex && need_unlock_stage_mutex) mysql_mutex_unlock(stage_mutex);
+  if (stage_mutex) mysql_mutex_unlock(stage_mutex);
 
 #ifndef NDEBUG
   DBUG_PRINT("info", ("This is a leader thread: %d (0=n 1=y)", leader));
@@ -365,19 +376,8 @@ bool Commit_stage_manager::enroll_for(StageID stage, THD *thd,
     DEBUG_SYNC(thd, "bgc_between_flush_and_sync");
 #endif
 
-  bool need_lock_enter_mutex = false;
   if (leader && enter_mutex != nullptr) {
-    /*
-      We do not lock the enter_mutex if it is LOCK_log when rotating binlog
-      caused by logging incident log event, since it is already locked.
-    */
-    need_lock_enter_mutex = !(mysql_bin_log.is_rotating_caused_by_incident &&
-                              enter_mutex == mysql_bin_log.get_log_lock());
-
-    if (need_lock_enter_mutex)
-      mysql_mutex_lock(enter_mutex);
-    else
-      mysql_mutex_assert_owner(enter_mutex);
+    mysql_mutex_lock(enter_mutex);
   }
 
   if (stage == COMMIT_ORDER_FLUSH_STAGE) {
@@ -386,7 +386,7 @@ bool Commit_stage_manager::enroll_for(StageID stage, THD *thd,
     lock_queue(stage);
 
     if (!m_queue[BINLOG_FLUSH_STAGE].is_empty()) {
-      if (need_lock_enter_mutex) mysql_mutex_unlock(enter_mutex);
+      mysql_mutex_unlock(enter_mutex);
 
       THD *binlog_leader = m_queue[BINLOG_FLUSH_STAGE].get_leader();
       binlog_leader->tx_commit_pending = false;
@@ -476,7 +476,14 @@ THD *Commit_stage_manager::fetch_queue_skip_acquire_lock(StageID stage) {
 void Commit_stage_manager::process_final_stage_for_ordered_commit_group(
     THD *first) {
   if (first != nullptr) {
+    /*
+      The below call to update_commit_group() function accesses the array
+      `commit_group_sidnos` and needs to be protected with
+      MYSQL_BIN_LOG::LOCK_commit.
+    */
+    mysql_mutex_lock(mysql_bin_log.get_commit_lock());
     gtid_state->update_commit_group(first);
+    mysql_mutex_unlock(mysql_bin_log.get_commit_lock());
     signal_done(first, Commit_stage_manager::COMMIT_ORDER_FLUSH_STAGE);
   }
 }

@@ -1,15 +1,16 @@
-/* Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -147,6 +148,20 @@ class Routine_event_context_guard {
   Routine_event_context_guard(THD *thd);
   ~Routine_event_context_guard();
 };
+
+/**
+  Maintain a file named "mysql_upgrade_history" in the data directory.
+
+  The file will contain one entry for each upgrade. The format is structured
+  text on JSON format.
+
+  Errors will be written as warnings to the error log; if we e.g. fail to
+  open the upgrade history file, we will not abort the server since this file
+  is not considered a critical feature of the server.
+
+  @param initialize   If this is the initialization of the data directory.
+*/
+void update_upgrade_history_file(bool initialize);
 
 /**
   Performs validation on server metadata.

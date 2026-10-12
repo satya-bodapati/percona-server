@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -30,13 +31,16 @@
 #include <string>
 
 #include "mysql/harness/config_parser.h"
+#include "mysql/harness/dynamic_config.h"
 #include "mysql/harness/loader.h"
 #include "mysql/harness/logging/logging.h"
 #include "mysql/harness/plugin.h"
 #include "mysql/harness/plugin_config.h"
+#include "mysql/harness/section_config_exposer.h"
 #include "mysql/harness/utility/string.h"  // ::join()
 
-#include "mysqlrouter/http_server_component.h"
+#include "mysqlrouter/component/http_server_component.h"
+#include "mysqlrouter/http_constants.h"
 #include "mysqlrouter/rest_api_component.h"
 #include "mysqlrouter/rest_routing_export.h"
 #include "mysqlrouter/supported_rest_options.h"
@@ -45,6 +49,8 @@
 #include "rest_routing_config.h"
 #include "rest_routing_connections.h"
 #include "rest_routing_destinations.h"
+#include "rest_routing_guidelines.h"
+#include "rest_routing_guidelines_schema.h"
 #include "rest_routing_health.h"
 #include "rest_routing_list.h"
 #include "rest_routing_routes_status.h"
@@ -61,9 +67,9 @@ std::string require_realm_routing;
 
 using StringOption = mysql_harness::StringOption;
 
-#define GET_OPTION_CHECKED(option, section, name, value)                      \
-  static_assert(                                                              \
-      mysql_harness::str_in_collection(rest_plugin_supported_options, name)); \
+#define GET_OPTION_CHECKED(option, section, name, value)                 \
+  static_assert(                                                         \
+      mysql_harness::str_in_collection(plugin_supported_options, name)); \
   option = get_option(section, name, value);
 
 class RestRoutingPluginConfig : public mysql_harness::BasePluginConfig {
@@ -75,11 +81,11 @@ class RestRoutingPluginConfig : public mysql_harness::BasePluginConfig {
     GET_OPTION_CHECKED(require_realm, section, "require_realm", StringOption{});
   }
 
-  std::string get_default(const std::string & /* option */) const override {
+  std::string get_default(std::string_view /* option */) const override {
     return {};
   }
 
-  bool is_required(const std::string &option) const override {
+  bool is_required(std::string_view option) const override {
     if (option == kRequireRealm) return true;
     return false;
   }
@@ -150,85 +156,131 @@ static void init(mysql_harness::PluginFuncEnv *env) {
 using JsonPointer = RestApiComponent::JsonPointer;
 using JsonValue = RestApiComponent::JsonValue;
 
-#define STR(s) \
-  { s, strlen(s), rapidjson::kPointerInvalidIndex }
+static JsonPointer::Token make_json_pointer_token(std::string_view token) {
+  return {token.data(), token.size(), rapidjson::kPointerInvalidIndex};
+}
 
-static const std::array<JsonPointer::Token, 2> routing_status_path_tokens{
-    {STR("paths"), STR("/routing/status")}};
+static const std::array routing_status_path_tokens{
+    make_json_pointer_token("paths"),
+    make_json_pointer_token("/routing/status"),
+};
 
-static const std::array<JsonPointer::Token, 2> routing_status_def_tokens{
-    {STR("definitions"), STR("RoutingGlobalStatus")}};
+static const std::array routing_status_def_tokens{
+    make_json_pointer_token("definitions"),
+    make_json_pointer_token("RoutingGlobalStatus"),
+};
 
-static const std::array<JsonPointer::Token, 2> route_name_param_tokens{
-    {STR("parameters"), STR("routeNameParam")}};
+static const std::array routing_guidelines_tokens{
+    make_json_pointer_token("paths"),
+    make_json_pointer_token("/routing/guidelines")};
 
-static const std::array<JsonPointer::Token, 2> routes_list_def_tokens{
-    {STR("definitions"), STR("RouteList")}};
+static const std::array routing_guidelines_schema_tokens{
+    make_json_pointer_token("paths"),
+    make_json_pointer_token("/routing/guidelines/schema")};
 
-static const std::array<JsonPointer::Token, 2>
-    routes_destination_list_def_tokens{
-        {STR("definitions"), STR("RouteDestinationList")}};
+static const std::array routing_guidelines_def{
+    make_json_pointer_token("definitions"),
+    make_json_pointer_token("RoutingGuidelinesDef")};
 
-static const std::array<JsonPointer::Token, 2>
-    routes_destination_summary_def_tokens{
-        {STR("definitions"), STR("RouteDestinationSummary")}};
+static const std::array route_name_param_tokens{
+    make_json_pointer_token("parameters"),
+    make_json_pointer_token("routeNameParam"),
+};
 
-static const std::array<JsonPointer::Token, 2>
-    routes_blockedhost_list_def_tokens{
-        {STR("definitions"), STR("RouteBlockedHostList")}};
+static const std::array routes_list_def_tokens{
+    make_json_pointer_token("definitions"),
+    make_json_pointer_token("RouteList"),
+};
 
-static const std::array<JsonPointer::Token, 2>
-    routes_blockedhost_summary_def_tokens{
-        {STR("definitions"), STR("RouteBlockedHostSummary")}};
+static const std::array routes_destination_list_def_tokens{
+    make_json_pointer_token("definitions"),
+    make_json_pointer_token("RouteDestinationList"),
+};
 
-static const std::array<JsonPointer::Token, 2>
-    routes_connection_list_def_tokens{
-        {STR("definitions"), STR("RouteConnectionsList")}};
+static const std::array routes_destination_summary_def_tokens{
+    make_json_pointer_token("definitions"),
+    make_json_pointer_token("RouteDestinationSummary"),
+};
 
-static const std::array<JsonPointer::Token, 2>
-    routes_connection_summary_def_tokens{
-        {STR("definitions"), STR("RouteConnectionsSummary")}};
+static const std::array routes_blockedhost_list_def_tokens{
+    make_json_pointer_token("definitions"),
+    make_json_pointer_token("RouteBlockedHostList"),
+};
 
-static const std::array<JsonPointer::Token, 2> routes_summary_def_tokens{
-    {STR("definitions"), STR("RouteSummary")}};
+static const std::array routes_blockedhost_summary_def_tokens{
+    make_json_pointer_token("definitions"),
+    make_json_pointer_token("RouteBlockedHostSummary"),
+};
 
-static const std::array<JsonPointer::Token, 2> routes_config_def_tokens{
-    {STR("definitions"), STR("RouteConfig")}};
+static const std::array routes_connection_list_def_tokens{
+    make_json_pointer_token("definitions"),
+    make_json_pointer_token("RouteConnectionsList"),
+};
 
-static const std::array<JsonPointer::Token, 2> routes_status_def_tokens{
-    {STR("definitions"), STR("RouteStatus")}};
+static const std::array routes_connection_summary_def_tokens{
+    make_json_pointer_token("definitions"),
+    make_json_pointer_token("RouteConnectionsSummary"),
+};
 
-static const std::array<JsonPointer::Token, 2> routes_health_def_tokens{
-    {STR("definitions"), STR("RouteHealth")}};
+static const std::array routes_summary_def_tokens{
+    make_json_pointer_token("definitions"),
+    make_json_pointer_token("RouteSummary"),
+};
 
-static const std::array<JsonPointer::Token, 2> routes_status_path_tokens{
-    {STR("paths"), STR("/routes/{routeName}/status")}};
+static const std::array routes_config_def_tokens{
+    make_json_pointer_token("definitions"),
+    make_json_pointer_token("RouteConfig"),
+};
 
-static const std::array<JsonPointer::Token, 2> routes_config_path_tokens{
-    {STR("paths"), STR("/routes/{routeName}/config")}};
+static const std::array routes_status_def_tokens{
+    make_json_pointer_token("definitions"),
+    make_json_pointer_token("RouteStatus"),
+};
 
-static const std::array<JsonPointer::Token, 2> routes_health_path_tokens{
-    {STR("paths"), STR("/routes/{routeName}/health")}};
+static const std::array routes_health_def_tokens{
+    make_json_pointer_token("definitions"),
+    make_json_pointer_token("RouteHealth"),
+};
 
-static const std::array<JsonPointer::Token, 2>
-    routes_connection_list_path_tokens{
-        {STR("paths"), STR("/routes/{routeName}/connections")}};
+static const std::array routes_status_path_tokens{
+    make_json_pointer_token("paths"),
+    make_json_pointer_token("/routes/{routeName}/status"),
+};
 
-static const std::array<JsonPointer::Token, 2>
-    routes_blockedhost_list_path_tokens{
-        {STR("paths"), STR("/routes/{routeName}/blockedHosts")}};
+static const std::array routes_config_path_tokens{
+    make_json_pointer_token("paths"),
+    make_json_pointer_token("/routes/{routeName}/config"),
+};
 
-static const std::array<JsonPointer::Token, 2>
-    routes_destination_list_path_tokens{
-        {STR("paths"), STR("/routes/{routeName}/destinations")}};
+static const std::array routes_health_path_tokens{
+    make_json_pointer_token("paths"),
+    make_json_pointer_token("/routes/{routeName}/health"),
+};
 
-static const std::array<JsonPointer::Token, 2> routes_list_path_tokens{
-    {STR("paths"), STR("/routes")}};
+static const std::array routes_connection_list_path_tokens{
+    make_json_pointer_token("paths"),
+    make_json_pointer_token("/routes/{routeName}/connections"),
+};
 
-static const std::array<JsonPointer::Token, 2> tags_append_tokens{
-    {STR("tags"), STR("-")}};
+static const std::array routes_blockedhost_list_path_tokens{
+    make_json_pointer_token("paths"),
+    make_json_pointer_token("/routes/{routeName}/blockedHosts"),
+};
 
-#undef STR
+static const std::array routes_destination_list_path_tokens{
+    make_json_pointer_token("paths"),
+    make_json_pointer_token("/routes/{routeName}/destinations"),
+};
+
+static const std::array routes_list_path_tokens{
+    make_json_pointer_token("paths"),
+    make_json_pointer_token("/routes"),
+};
+
+static const std::array tags_append_tokens{
+    make_json_pointer_token("tags"),
+    make_json_pointer_token("-"),
+};
 
 std::string json_pointer_stringfy(const JsonPointer &ptr) {
   rapidjson::StringBuffer sb;
@@ -264,6 +316,20 @@ static void spec_adder(RestApiComponent::JsonDocument &spec_doc) {
 
   std::string routing_status_def_ptr_str =
       json_pointer_stringfy(routing_status_def_ptr);
+
+  // /definitions/RoutingGuidelinesDef
+  const RestApiComponent::JsonPointer routing_guidelines_def_ptr(
+      routing_guidelines_def.data(), routing_guidelines_def.size());
+
+  routing_guidelines_def_ptr.Set(
+      spec_doc,
+      JsonValue(rapidjson::kObjectType)
+          .AddMember("type", "object", allocator)
+          .AddMember("additionalProperties", "true", allocator),
+      allocator);
+
+  std::string routing_guidelines_def_ptr_str =
+      json_pointer_stringfy(routing_guidelines_def_ptr);
 
   // /parameters/routeNameParam
   const RestApiComponent::JsonPointer route_name_param_ptr(
@@ -735,6 +801,98 @@ static void spec_adder(RestApiComponent::JsonDocument &spec_doc) {
         allocator);
   }
 
+  // /guidelines schema
+  {
+    JsonPointer ptr(routing_guidelines_schema_tokens.data(),
+                    routing_guidelines_schema_tokens.size());
+
+    ptr.Set(
+        spec_doc,
+        JsonValue(rapidjson::kObjectType)
+            .AddMember(
+                "get",
+                JsonValue(rapidjson::kObjectType)
+                    .AddMember("tags",
+                               JsonValue(rapidjson::kArrayType)
+                                   .PushBack("routing", allocator),
+                               allocator)
+                    .AddMember("description",
+                               "Get routing guidelines document schema",
+                               allocator)
+                    .AddMember(
+                        "responses",
+                        JsonValue(rapidjson::kObjectType)
+                            .AddMember(
+                                "200",
+                                JsonValue(rapidjson::kObjectType)
+                                    .AddMember(
+                                        "description",
+                                        "routing guidelines document schema",
+                                        allocator)
+                                    .AddMember(
+                                        "schema",
+                                        JsonValue(rapidjson::kObjectType)
+                                            .AddMember(
+                                                "$ref",
+                                                JsonValue(
+                                                    routing_guidelines_def_ptr_str
+                                                        .data(),
+                                                    routing_guidelines_def_ptr_str
+                                                        .size(),
+                                                    allocator),
+                                                allocator),
+                                        allocator),
+                                allocator),
+                        allocator),
+                allocator),
+        allocator);
+  }
+
+  // /guidelines
+  {
+    JsonPointer ptr(routing_guidelines_tokens.data(),
+                    routing_guidelines_tokens.size());
+
+    ptr.Set(
+        spec_doc,
+        JsonValue(rapidjson::kObjectType)
+            .AddMember(
+                "get",
+                JsonValue(rapidjson::kObjectType)
+                    .AddMember("tags",
+                               JsonValue(rapidjson::kArrayType)
+                                   .PushBack("routing", allocator),
+                               allocator)
+                    .AddMember("description", "Get routing guidelines document",
+                               allocator)
+                    .AddMember(
+                        "responses",
+                        JsonValue(rapidjson::kObjectType)
+                            .AddMember(
+                                "200",
+                                JsonValue(rapidjson::kObjectType)
+                                    .AddMember("description",
+                                               "routing guidelines document",
+                                               allocator)
+                                    .AddMember(
+                                        "schema",
+                                        JsonValue(rapidjson::kObjectType)
+                                            .AddMember(
+                                                "$ref",
+                                                JsonValue(
+                                                    routing_guidelines_def_ptr_str
+                                                        .data(),
+                                                    routing_guidelines_def_ptr_str
+                                                        .size(),
+                                                    allocator),
+                                                allocator),
+                                        allocator),
+                                allocator),
+                        allocator),
+                allocator),
+        allocator);
+  }
+
   // /paths/routesConfig
   {
     JsonPointer ptr(routes_config_path_tokens.data(),
@@ -1172,24 +1330,38 @@ static void start(mysql_harness::PluginFuncEnv *env) {
 
   const bool spec_adder_executed = rest_api_srv.try_process_spec(spec_adder);
 
-  std::array<RestApiComponentPath, 8> paths{{
-      {rest_api_srv, RestRoutingStatus::path_regex,
-       std::make_unique<RestRoutingStatus>(require_realm_routing)},
-      {rest_api_srv, RestRoutingList::path_regex,
-       std::make_unique<RestRoutingList>(require_realm_routing)},
-      {rest_api_srv, RestRoutingBlockedHosts::path_regex,
-       std::make_unique<RestRoutingBlockedHosts>(require_realm_routing)},
-      {rest_api_srv, RestRoutingDestinations::path_regex,
-       std::make_unique<RestRoutingDestinations>(require_realm_routing)},
-      {rest_api_srv, RestRoutingConfig::path_regex,
-       std::make_unique<RestRoutingConfig>(require_realm_routing)},
-      {rest_api_srv, RestRoutingRoutesStatus::path_regex,
-       std::make_unique<RestRoutingRoutesStatus>(require_realm_routing)},
-      {rest_api_srv, RestRoutingHealth::path_regex,
-       std::make_unique<RestRoutingHealth>(require_realm_routing)},
-      {rest_api_srv, RestRoutingConnections::path_regex,
-       std::make_unique<RestRoutingConnections>(require_realm_routing)},
-  }};
+  std::array paths{
+      RestApiComponentPath{
+          rest_api_srv, RestRoutingStatus::path_regex,
+          std::make_unique<RestRoutingStatus>(require_realm_routing)},
+      RestApiComponentPath{
+          rest_api_srv, RestRoutingGuidelines::path_regex,
+          std::make_unique<RestRoutingGuidelines>(require_realm_routing)},
+      RestApiComponentPath{
+          rest_api_srv, RestRoutingGuidelinesSchema::path_regex,
+          std::make_unique<RestRoutingGuidelinesSchema>(require_realm_routing)},
+      RestApiComponentPath{
+          rest_api_srv, RestRoutingList::path_regex,
+          std::make_unique<RestRoutingList>(require_realm_routing)},
+      RestApiComponentPath{
+          rest_api_srv, RestRoutingBlockedHosts::path_regex,
+          std::make_unique<RestRoutingBlockedHosts>(require_realm_routing)},
+      RestApiComponentPath{
+          rest_api_srv, RestRoutingDestinations::path_regex,
+          std::make_unique<RestRoutingDestinations>(require_realm_routing)},
+      RestApiComponentPath{
+          rest_api_srv, RestRoutingConfig::path_regex,
+          std::make_unique<RestRoutingConfig>(require_realm_routing)},
+      RestApiComponentPath{
+          rest_api_srv, RestRoutingRoutesStatus::path_regex,
+          std::make_unique<RestRoutingRoutesStatus>(require_realm_routing)},
+      RestApiComponentPath{
+          rest_api_srv, RestRoutingHealth::path_regex,
+          std::make_unique<RestRoutingHealth>(require_realm_routing)},
+      RestApiComponentPath{
+          rest_api_srv, RestRoutingConnections::path_regex,
+          std::make_unique<RestRoutingConnections>(require_realm_routing)},
+  };
 
   mysql_harness::on_service_ready(env);
 
@@ -1200,11 +1372,51 @@ static void start(mysql_harness::PluginFuncEnv *env) {
   if (!spec_adder_executed) rest_api_srv.remove_process_spec(spec_adder);
 }
 
-static std::array<const char *, 2> required = {{
+static constexpr std::array required{
     "logger",
     // "routing",
     "rest_api",
-}};
+};
+
+namespace {
+
+class RestRoutingConfigExposer : public mysql_harness::SectionConfigExposer {
+ public:
+  using DC = mysql_harness::DynamicConfig;
+  RestRoutingConfigExposer(const bool initial,
+                           const RestRoutingPluginConfig &plugin_config,
+                           const mysql_harness::ConfigSection &default_section)
+      : mysql_harness::SectionConfigExposer(
+            initial, default_section,
+            DC::SectionId{"rest_configs", kSectionName}),
+        plugin_config_(plugin_config) {}
+
+  void expose() override {
+    expose_option("require_realm", plugin_config_.require_realm,
+                  std::string(kHttpDefaultAuthRealmName));
+  }
+
+ private:
+  const RestRoutingPluginConfig &plugin_config_;
+};
+
+}  // namespace
+
+static void expose_configuration(mysql_harness::PluginFuncEnv *env,
+                                 const char * /*key*/, bool initial) {
+  const mysql_harness::AppInfo *info = get_app_info(env);
+
+  if (!info->config) return;
+
+  for (const mysql_harness::ConfigSection *section : info->config->sections()) {
+    if (section->name == kSectionName) {
+      RestRoutingPluginConfig config{section};
+      RestRoutingConfigExposer(initial, config,
+                               info->config->get_default_section())
+          .expose();
+    }
+  }
+}
 
 extern "C" {
 mysql_harness::Plugin REST_ROUTING_EXPORT harness_plugin_rest_routing = {
@@ -1223,7 +1435,8 @@ mysql_harness::Plugin REST_ROUTING_EXPORT harness_plugin_rest_routing = {
     start,    // start
     nullptr,  // stop
     true,     // declares_readiness
-    rest_plugin_supported_options.size(),
-    rest_plugin_supported_options.data(),
+    plugin_supported_options.size(),
+    plugin_supported_options.data(),
+    expose_configuration,
 };
 }

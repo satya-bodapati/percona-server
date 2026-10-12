@@ -64,6 +64,8 @@ if ($SERVER_ID != 1) {
 # A. Check if we need monitoring process. Taken from mysqld_safe.test
 if ($inst_monitor) {
 
+  --let $have_mysqlx= `SELECT count(plugin_status) > 0 FROM information_schema.plugins WHERE plugin_name LIKE 'mysqlx' and plugin_status LIKE 'ACTIVE'`
+
   # 1. Set variables to be used in parameters of mysqld_safe.
   --let $SERVER_ID= `SELECT @@server_id`
   --let $MYSQLD_DATADIR= `SELECT @@datadir`
@@ -74,7 +76,12 @@ if ($inst_monitor) {
   --let $MYSQL_SOCKET= `SELECT @@socket`
   --let $MYSQLX_SOCKET= `SELECT @@mysqlx_socket`
   --let $MYSQL_PORT= `SELECT @@port`
-  --let $MYSQLX_PORT= `SELECT @@mysqlx_port`
+  --let $MYSQLX_ARGS= ""
+  if ($have_mysqlx) {
+    --let $MYSQLX_SOCKET= `SELECT @@mysqlx_socket`
+    --let $MYSQLX_PORT= `SELECT @@mysqlx_port`
+    --let $MYSQLX_ARGS= --mysqlx_socket=$MYSQLX_SOCKET --mysqlx_port=$MYSQLX_PORT
+  }
   --let $MYSQL_PLUGIN_DIR = `SELECT @@plugin_dir`
 
   --let $page_size= `select @@innodb_page_size`
@@ -105,9 +112,7 @@ if ($inst_monitor) {
 
   # 3. Run mysqld_safe script
   --exec sh $MYSQLD_SAFE --defaults-file=$MYSQLTEST_VARDIR/my.cnf --server-id=$SERVER_ID --log-error=$MYSQLTEST_VARDIR/log/mysqld.$SERVER_ID.err --log-error-verbosity=$error_verbosity --basedir=$MYSQL_BASEDIR --ledir=$mysqld_path --mysqld=$mysqld_bin --datadir=$MYSQLD_DATADIR --socket=$MYSQL_SOCKET --mysqlx_socket=$MYSQLX_SOCKET --pid-file=$MYSQL_PIDFILE --port=$MYSQL_PORT --mysqlx_port=$MYSQLX_PORT --plugin_dir=$MYSQL_PLUGIN_DIR --timezone=SYSTEM --log-output=file --secure-file-priv="" --core-file --lc-messages-dir=$MYSQL_MESSAGESDIR --innodb-page-size=$page_size < /dev/null > /dev/null 2>&1 &
-  --enable_reconnect
   --source include/wait_until_connected_again.inc
-  --disable_reconnect
 }
 
 # B. Create the connections

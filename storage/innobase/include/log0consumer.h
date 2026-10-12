@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -43,14 +44,15 @@ class Log_consumer {
   /** @return Name of this consumer. */
   virtual const std::string &get_name() const = 0;
 
-  /** @return Maximum LSN up to which this consumer has consumed redo. */
+  /** @return Maximum LSN up to which this consumer has consumed redo.
+  The caller should acquire log.files_mutex. */
   virtual lsn_t get_consumed_lsn() const = 0;
 
   /** Request the log consumer to consume faster.
-  @remarks This is called whenever the redo log consumer
-  is the most lagging one and it is critical to consume
-  the oldest redo log file. */
-  virtual void consumption_requested() = 0;
+  @remarks This is called whenever the redo log consumer is the most lagging one
+  and it is critical to consume up to the request_lsn. The caller has to hold
+  log.files_mutex and log.limits_mutex. */
+  virtual void consumption_requested(lsn_t request_lsn) = 0;
 
   enum class consumer_type { SERVER, USER };
 
@@ -72,7 +74,7 @@ class Log_user_consumer : public Log_consumer {
 
   lsn_t get_consumed_lsn() const override;
 
-  void consumption_requested() override;
+  void consumption_requested(lsn_t request_lsn) override;
 
   Log_consumer::consumer_type get_consumer_type() const override;
 
@@ -95,7 +97,7 @@ class Log_checkpoint_consumer : public Log_consumer {
 
   lsn_t get_consumed_lsn() const override;
 
-  void consumption_requested() override;
+  void consumption_requested(lsn_t request_lsn) override;
 
  private:
   log_t &m_log;

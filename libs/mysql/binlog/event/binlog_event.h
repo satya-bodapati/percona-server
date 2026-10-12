@@ -1,15 +1,16 @@
-/* Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,16 +21,8 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
-/// @defgroup GroupLibsMysql MySQL Libraries
-
-/// @defgroup GroupLibsMysqlBinlog MySQL Libraries : Binlog Libraries
-/// @ingroup GroupLibsMysql
-
-/// @defgroup GroupLibsMysqlBinlogEvent MySQL Libraries : Binlog Event
-/// @ingroup GroupLibsMysqlBinlog
-
 /**
-  @file binlog_event.h
+  @file
 
   @brief Contains the classes representing events occurring in the replication
   stream. Each event is represented as a byte sequence with logical divisions
@@ -51,6 +44,7 @@
 #include "my_checksum.h"
 #include "my_io.h"
 #include "mysql/binlog/event/debug_vars.h"
+#include "mysql/binlog/event/event_decoding_error.h"
 #include "mysql/binlog/event/event_reader.h"
 
 #if defined(_WIN32)
@@ -147,7 +141,8 @@
    1U + 8 /* type, xid of DDL */ + 1U +                                       \
    2 /* type, default_collation_for_utf8mb4_number */ + 1U +                  \
    1 /* sql_require_primary_key */ + 1U +                                     \
-   1 /* type, default_table_encryption */)
+   1 /* type, default_table_encryption */ + 1U +                              \
+   1 /* type, enable_cascade_triggers */)
 
 /**
    Uninitialized timestamp value (for either last committed or sequence number).
@@ -314,12 +309,13 @@ enum Log_event_type {
 
   TABLE_MAP_EVENT = 19,
 
-  /**
+  /*
     The V1 event numbers are used from 5.1.16 until mysql-5.6.
+    Not generated since 8.2.0, and rejected by the applier since 8.4.0
   */
-  WRITE_ROWS_EVENT_V1 = 23,
-  UPDATE_ROWS_EVENT_V1 = 24,
-  DELETE_ROWS_EVENT_V1 = 25,
+  OBSOLETE_WRITE_ROWS_EVENT_V1 = 23,
+  OBSOLETE_UPDATE_ROWS_EVENT_V1 = 24,
+  OBSOLETE_DELETE_ROWS_EVENT_V1 = 25,
 
   /**
     Something out of the ordinary happened on the master
@@ -367,6 +363,8 @@ enum Log_event_type {
   TRANSACTION_PAYLOAD_EVENT = 40,
 
   HEARTBEAT_LOG_EVENT_V2 = 41,
+
+  GTID_TAGGED_LOG_EVENT = 42,
   /**
     Add new events here - right above this comment!
     Existing events (except ENUM_END_EVENT) should never change their numbers
@@ -386,14 +384,28 @@ enum Log_event_type {
 */
 const std::string &get_event_type_as_string(Log_event_type type);
 
-/**
-  Struct to pass basic information about a event: type, query, is it ignorable
-*/
+/// @brief Event type helpers, enclosed in the structure
+struct Log_event_type_helper {
+  /// @brief Helps to identify known GTID event - returns true
+  /// for GTID_LOG_EVENT and GTID_TAGGED_LOG_EVENT
+  inline static bool is_assigned_gtid_event(const Log_event_type &type) {
+    return type == GTID_LOG_EVENT || type == GTID_TAGGED_LOG_EVENT;
+  }
+  /// @brief Helps to identify any GTID event - returns true
+  /// for GTID_LOG_EVENT, GTID_TAGGED_LOG_EVENT and ANONYMOUS_GTID_LOG_EVENT
+  inline static bool is_any_gtid_event(const Log_event_type &type) {
+    return is_assigned_gtid_event(type) || type == ANONYMOUS_GTID_LOG_EVENT;
+  }
+};
+
+/// Holds basic information about an event: common-header fields, query, etc.
 struct Log_event_basic_info {
   Log_event_type event_type{UNKNOWN_EVENT};
   const char *query{nullptr};
   size_t query_length{0};
   bool ignorable_event{false};
+  int32_t log_pos{0};
+  int32_t server_id{0};
 };
 
 /**
@@ -695,7 +707,7 @@ class Log_event_header {
 
   /*
     The offset in the log where this event originally appeared (it is
-    preserved in relay logs, making SHOW SLAVE STATUS able to print
+    preserved in relay logs, making SHOW REPLICA STATUS able to print
     coordinates of the event in the master's binlog).
   */
   unsigned long long log_pos;
@@ -739,7 +751,14 @@ class Log_event_header {
     @return True if the event object is valid, false otherwise.
   */
 
+#if defined(__GNUC__) && (__GNUC__ >= 14)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wuninitialized"
+#endif
   bool get_is_valid() { return m_is_valid; }
+#if defined(__GNUC__) && (__GNUC__ >= 14)
+#pragma GCC diagnostic pop
+#endif
 
   /**
     Set if the event object shall be considered valid or not.
@@ -748,6 +767,14 @@ class Log_event_header {
   */
 
   void set_is_valid(bool is_valid) { m_is_valid = is_valid; }
+
+  /// @brief Accessor for decoding error
+  /// @return Error that occurred during decoding
+  const Event_decoding_error &get_decoding_error() const;
+
+  /// @brief Sets specific decoding error
+  /// @param decoding_error Decoding error to be set
+  void set_decoding_error(const Event_decoding_error &decoding_error);
 
  private:
   /*
@@ -759,6 +786,9 @@ class Log_event_header {
     memory pointers.
   */
   bool m_is_valid;
+
+  /// Holds information about specific decoding error
+  Event_decoding_error m_decoding_error = Event_decoding_error::ok;
 };
 
 /**

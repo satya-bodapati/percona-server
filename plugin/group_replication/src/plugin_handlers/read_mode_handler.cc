@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,7 +29,7 @@
 #include "plugin/group_replication/include/services/system_variable/get_system_variable.h"
 #include "plugin/group_replication/include/services/system_variable/set_system_variable.h"
 
-int enable_server_read_mode() {
+int enable_server_read_mode(const std::string &reason) {
   DBUG_TRACE;
   int error = 0;
 
@@ -43,7 +44,7 @@ int enable_server_read_mode() {
   LogPluginErr(SYSTEM_LEVEL, ER_GRP_RPL_SUPER_READ_ON);
   if (!super_read_only_value) {
     Set_system_variable set_system_variable;
-    error = set_system_variable.set_global_super_read_only(true);
+    error = set_system_variable.set_global_super_read_only(true, reason);
   }
 
   return error;
@@ -94,7 +95,7 @@ int set_read_mode_state(bool read_only_enabled, bool super_read_only_enabled) {
     error |= set_system_variable.set_global_read_only(false);
   } else if (!super_read_only_enabled) {
     LogPluginErr(SYSTEM_LEVEL, ER_GRP_RPL_SUPER_READ_OFF);
-    error |= set_system_variable.set_global_super_read_only(false);
+    error |= set_system_variable.set_global_super_read_only(false, "");
   }
 
   if (error) {

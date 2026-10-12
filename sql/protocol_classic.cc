@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -183,10 +184,7 @@
    - @subpage page_protocol_com_quit
    - @subpage page_protocol_com_init_db
    - @subpage page_protocol_com_field_list
-   - @subpage page_protocol_com_refresh
    - @subpage page_protocol_com_statistics
-   - @subpage page_protocol_com_process_info
-   - @subpage page_protocol_com_process_kill
    - @subpage page_protocol_com_debug
    - @subpage page_protocol_com_ping
    - @subpage page_protocol_com_change_user
@@ -379,7 +377,7 @@
   @page page_protocol_basic_character_set Character Set
 
   MySQL has a very flexible character set support as documented in
-  [Character Set Support](http://dev.mysql.com/doc/refman/5.7/en/charset.html).
+  [Character Set Support](https://dev.mysql.com/doc/refman/en/charset.html).
   The list of character sets and their IDs can be queried as follows:
 
 <pre>
@@ -699,26 +697,28 @@ bool net_send_error(NET *net, uint sql_errno, const char *err) {
       <td>status_flags</td>
       <td>@ref SERVER_STATUS_flags_enum</td></tr>
   <tr><td colspan="3">}</td></tr>
-  <tr><td colspan="3">if capabilities @& ::CLIENT_SESSION_TRACK</td></tr>
+  <tr><td colspan="3">if capabilities @& ::CLIENT_SESSION_TRACK {</td></tr>
+  <tr><td colspan="3">if (status_flags @& ::SERVER_SESSION_STATE_CHANGED) OR (status is not empty) {</td></tr>
   <tr><td>@ref sect_protocol_basic_dt_string_le "string&lt;lenenc&gt;"</td>
       <td>info</td>
       <td>human readable status information</td></tr>
+  <tr><td colspan="3">} -- if (status_flags @& ::SERVER_SESSION_STATE_CHANGED) OR (s... </td></tr>
   <tr><td colspan="3">  if status_flags @& ::SERVER_SESSION_STATE_CHANGED {</td></tr>
   <tr><td>@ref sect_protocol_basic_dt_string_le "string&lt;lenenc&gt;"</td>
       <td>session state info</td>
       <td>@anchor a_protocol_basic_ok_packet_sessinfo
           @ref sect_protocol_basic_ok_packet_sessinfo</td></tr>
-  <tr><td colspan="3">  }</td></tr>
-  <tr><td colspan="3">} else {</td></tr>
+  <tr><td colspan="3">  } if status_flags @& ::SERVER_SESSION_STATE_CHANGED</td></tr>
+  <tr><td colspan="3">} else { -- if capabilities @& ::CLIENT_SESSION_TRACK </td></tr>
   <tr><td>@ref sect_protocol_basic_dt_string_eof "string&lt;EOF&gt;"</td>
       <td>info</td>
       <td>human readable status information</td></tr>
-  <tr><td colspan="3">}</td></tr>
+  <tr><td colspan="3">} -- if capabilities @& ::CLIENT_SESSION_TRACK </td></tr>
   </table>
 
   These rules distinguish whether the packet represents OK or EOF:
-  - OK: header = 0 and length of packet > 7
-  - EOF: header = 0xfe and length of packet < 9
+  - OK: header = 0 and length of packet >= 7
+  - EOF: header = 0xfe and length of packet < 8
 
   To ensure backward compatibility between old (prior to 5.7.5) and
   new (5.7.5 and up) versions of MySQL, new clients advertise
@@ -990,7 +990,7 @@ static uchar eof_buff[1] = {(uchar)254}; /* Marker for end of fields */
   the @ref page_protocol_basic_ok_packet packets (such as session
   state tracking), and to avoid repeating the changes in
   the @ref page_protocol_basic_eof_packet packet, the
-  @ref page_protocol_basic_ok_packet is deprecated as of MySQL 5.7.5.
+  @ref page_protocol_basic_eof_packet is deprecated as of MySQL 5.7.5.
 
   @warning
   The @ref page_protocol_basic_eof_packet packet may appear in places where
@@ -1385,6 +1385,7 @@ uchar Protocol_classic::get_error() { return m_thd->net.error; }
 
 void Protocol_classic::wipe_net() {
   memset(&m_thd->net, 0, sizeof(m_thd->net));
+  m_thd->store_cached_properties(THD::cached_properties::RW_STATUS);
 }
 
 void Protocol_classic::set_max_packet_size(ulong max_packet_size) {
@@ -1505,7 +1506,7 @@ int Protocol_classic::read_packet() {
   <tr><td colspan="3">if new_params_bind_flag, for each parameter {</td></tr>
   <tr><td>@ref a_protocol_type_int2 "int&lt;2&gt;"</td>
       <td>param_type_and_flag</td>
-      <td>Parameter type (2 bytes). The MSB is reserved for unsigned flag</td></tr>
+      <td>Parameter type (2 bytes). The MSB is reserved for unsigned flag. See @ref enum_field_types </td></tr>
   <tr><td>@ref sect_protocol_basic_dt_string_le "string&lt;lenenc&gt;"</td>
     <td>parameter name</td>
     <td>String</td></tr>
@@ -1522,7 +1523,7 @@ int Protocol_classic::read_packet() {
 
   @par Example
   ~~~~~~~~~
-  21 00 00 00 03 01 01 00    01 fe 00 01 61 01 31 73   !....... ....a.1s
+  2B 00 00 00 03 01 01 00    01 fe 00 01 61 01 31 73   +....... ....a.1s
   65 6c 65 63 74 20 40 40    76 65 72 73 69 6f 6e 5f   elect @@version_c
   63 6f 6d 6d 65 6e 74 20    6c 69 6d 69 74 20 31      omment limit 1
 
@@ -1761,11 +1762,9 @@ int Protocol_classic::read_packet() {
 
 /**
   @page page_protocol_com_field_list COM_FIELD_LIST
-
   @note As of MySQL 5.7.11, COM_FIELD_LIST is deprecated and will be removed in
   a future version of MySQL. Instead, use COM_QUERY to execute a SHOW COLUMNS
   statement.
-
   <table>
   <caption>Payload</caption>
   <tr><th>Type</th><th>Name</th><th>Description</th></tr>
@@ -1780,19 +1779,14 @@ int Protocol_classic::read_packet() {
       <td>wildcard</td>
       <td>field wildcard</td></tr>
   </table>
-
   @return @ref sect_protocol_com_field_list_response
-
   @sa mysql_list_fields, mysqld_list_fields
-
   @section sect_protocol_com_field_list_response COM_FIELD_LIST Response
-
   The response to @ref page_protocol_com_field_list can be one of:
    - @ref page_protocol_basic_err_packet
    - zero or more
      @ref page_protocol_com_query_response_text_resultset_column_definition
    - a closing @ref page_protocol_basic_eof_packet
-
   @warning if ::CLIENT_OPTIONAL_RESULTSET_METADATA is on and the server side
   variable ::Sys_resultset_metadata is not set to ::RESULTSET_METADATA_FULL
   no rows will be sent, just an empty resultset.
@@ -1806,39 +1800,7 @@ int Protocol_classic::read_packet() {
 
   @sa mysql_list_fields, mysqld_list_fields, THD::send_result_metadata,
   dispatch_command, cli_list_fields
-
 */
-
-/**
-  @page page_protocol_com_refresh COM_REFRESH
-
-  @warning As of MySQL 5.7.11, COM_REFRESH is deprecated and will be removed
-  in a future version of MySQL. Instead, use COM_QUERY to execute a
-  FLUSH statement.
-
-  A low-level version of several FLUSH ... and RESET ... statements.
-
-  Calls REFRESH or FLUSH statements.
-
-  <table>
-  <caption>Payload</caption>
-  <tr><th>Type</th><th>Name</th><th>Description</th></tr>
-  <tr><td>@ref a_protocol_type_int1 "int&lt;1&gt;"</td>
-      <td>command</td>
-      <td>0x07: COM_REFRESH</td></tr>
-  <tr><td>@ref a_protocol_type_int1 "int&lt;1&gt;"</td>
-      <td>sub_command</td>
-      <td>A bitmask of sub-systems to refresh.
-      A combination of the first 8 bits of
-      @ref group_cs_com_refresh_flags</td></tr>
-  </table>
-
-  @return @ref page_protocol_basic_err_packet or
-    @ref page_protocol_basic_ok_packet
-
-  @sa dispatch_command, handle_reload_request, mysql_refresh
-*/
-
 
 /**
   @page page_protocol_com_statistics COM_STATISTICS
@@ -1860,58 +1822,6 @@ int Protocol_classic::read_packet() {
   </table>
 
   @sa cli_read_statistics, mysql_stat, dispatch_command, calc_sum_of_all_status
-*/
-
-
-/**
-  @page page_protocol_com_process_info COM_PROCESS_INFO
-
-  @warning As of 5.7.11 ::COM_PROCESS_INFO is deprecated in favor of ::COM_QUERY
-    with SHOW PROCESSLIST
-
-  Get a list of active threads
-
-  @return @ref page_protocol_com_query_response_text_resultset or a
-  @ref page_protocol_basic_err_packet
-
-  <table>
-  <caption>Payload</caption>
-  <tr><th>Type</th><th>Name</th><th>Description</th></tr>
-  <tr><td>@ref a_protocol_type_int1 "int&lt;1&gt;"</td>
-      <td>command</td>
-      <td>0x0A: COM_PROCESS_INFO</td></tr>
-  </table>
-
-  @sa mysql_list_processes, dispatch_command, mysqld_list_processes
-*/
-
-
-/**
-  @page page_protocol_com_process_kill COM_PROCESS_KILL
-
-  Ask the server to terminate a connection
-
-  @warning As of MySQL 5.7.11, COM_PROCESS_KILL is deprecated and will be
-  removed in a future version of MySQL. Instead, use ::COM_QUERY and
-  a KILL command.
-
-  Same as the SQL command `KILL <id>`.
-
-  <table>
-  <caption>Payload</caption>
-  <tr><th>Type</th><th>Name</th><th>Description</th></tr>
-  <tr><td>@ref a_protocol_type_int1 "int&lt;1&gt;"</td>
-      <td>command</td>
-      <td>0x0C: COM_PROCESS_KILL</td></tr>
-  <tr><td>@ref a_protocol_type_int4 "int&lt;4&gt;"</td>
-      <td>connection_id</td>
-      <td>The connection to kill</td></tr>
-  </table>
-
-  @return @ref page_protocol_basic_err_packet or
-    @ref page_protocol_basic_ok_packet
-
-  @sa dispatch_command, mysql_kill, sql_kill
 */
 
 /**
@@ -2042,7 +1952,7 @@ int Protocol_classic::read_packet() {
   <tr><td>@ref a_protocol_type_int1 "int&lt;1&gt;"</td>
       <td>reserved_1</td>
       <td>[00] filler</td></tr>
-  <tr><td colspan="3">if (packet_lenght > 12) {</td></tr>
+  <tr><td colspan="3">if (packet_lenght >= 12) {</td></tr>
   <tr><td>@ref a_protocol_type_int2 "int&lt;2&gt;"</td>
       <td>warning_count</td>
       <td>Number of warnings</td></tr>
@@ -2088,13 +1998,13 @@ int Protocol_classic::read_packet() {
   @par Example
   for a prepared query like  SELECT CONCAT(?, ?) AS col1 and no ::CLIENT_OPTIONAL_RESULTSET_METADATA
   ~~~~~~~~~~~
-  0c 00 00 01 00 01 00 00    00 01 00 02 00 00 00 00|   ................
+  0c 00 00 01 00 01 00 00    00 01 00 02 00 00 00 00    ................
   17 00 00 02 03 64 65 66    00 00 00 01 3f 00 0c 3f    .....def....?..?
-  00 00 00 00 00 fd 80 00    00 00 00|17 00 00 03 03    ................
+  00 00 00 00 00 fd 80 00    00 00 00 17 00 00 03 03    ................
   64 65 66 00 00 00 01 3f    00 0c 3f 00 00 00 00 00    def....?..?.....
-  fd 80 00 00 00 00|05 00    00 04 fe 00 00 02 00|1a    ................
+  fd 80 00 00 00 00 05 00    00 04 fe 00 00 02 00 1a    ................
   00 00 05 03 64 65 66 00    00 00 04 63 6f 6c 31 00    ....def....col1.
-  0c 3f 00 00 00 00 00 fd    80 00 1f 00 00|05 00 00    .?..............
+  0c 3f 00 00 00 00 00 fd    80 00 1f 00 00 05 00 00    .?..............
   06 fe 00 00 02 00                                     ...
   ~~~~~~~~~~~
 
@@ -2205,7 +2115,7 @@ int Protocol_classic::read_packet() {
   <tr><td colspan="3">if new_params_bind_flag, for each parameter {</td></tr>
   <tr><td>@ref a_protocol_type_int2 "int&lt;2&gt;"</td>
     <td>parameter_type</td>
-    <td>Type of the parameter value. See ::enum_field_type</td></tr>
+    <td>Type of the parameter value. See ::enum_field_types. The MSB is reserved for unsigned flag.</td></tr>
   <tr><td colspan="3">if ::CLIENT_QUERY_ATTRIBUTES is on {</td></tr>
   <tr><td>@ref sect_protocol_basic_dt_string_le "string&lt;lenenc&gt;"</td>
       <td>parameter_name</td>
@@ -2359,7 +2269,7 @@ int Protocol_classic::read_packet() {
 
   @section sect_protocol_binary_resultset_row_value Binary Protocol Value
 
-  @subsection sect_protocol_binary_resultset_row_value_string ProtocolBinary::MYSQL_TYPE_STRING, ProtocolBinary::MYSQL_TYPE_VARCHAR, ProtocolBinary::MYSQL_TYPE_VAR_STRING, ProtocolBinary::MYSQL_TYPE_ENUM, ProtocolBinary::MYSQL_TYPE_SET, ProtocolBinary::MYSQL_TYPE_LONG_BLOB, ProtocolBinary::MYSQL_TYPE_MEDIUM_BLOB, ProtocolBinary::MYSQL_TYPE_BLOB, ProtocolBinary::MYSQL_TYPE_TINY_BLOB, ProtocolBinary::MYSQL_TYPE_GEOMETRY, ProtocolBinary::MYSQL_TYPE_BIT, ProtocolBinary::MYSQL_TYPE_DECIMAL, ProtocolBinary::MYSQL_TYPE_NEWDECIMAL:
+  @subsection sect_protocol_binary_resultset_row_value_string ProtocolBinary::MYSQL_TYPE_STRING, ProtocolBinary::MYSQL_TYPE_VARCHAR, ProtocolBinary::MYSQL_TYPE_VAR_STRING, ProtocolBinary::MYSQL_TYPE_ENUM, ProtocolBinary::MYSQL_TYPE_SET, ProtocolBinary::MYSQL_TYPE_LONG_BLOB, ProtocolBinary::MYSQL_TYPE_MEDIUM_BLOB, ProtocolBinary::MYSQL_TYPE_BLOB, ProtocolBinary::MYSQL_TYPE_TINY_BLOB, ProtocolBinary::MYSQL_TYPE_GEOMETRY, ProtocolBinary::MYSQL_TYPE_BIT, ProtocolBinary::MYSQL_TYPE_DECIMAL, ProtocolBinary::MYSQL_TYPE_NEWDECIMAL, ProtocolBinary::MYSQL_TYPE_JSON
 
   <table>
   <caption>::MYSQL_TYPE_STRING</caption>
@@ -2647,7 +2557,7 @@ MY_COMPILER_CLANG_WORKAROUND_REF_DOCBUG()
   <tr><th>Type</th><th>Name</th><th>Description</th></tr>
   <tr><td>@ref a_protocol_type_int1 "int&lt;1&gt;"</td>
       <td>status</td>
-      <td>[0x19] COM_STMT_CLOSE</td></tr>
+      <td>[0x1C] COM_STMT_FETCH</td></tr>
   <tr><td>@ref a_protocol_type_int4 "int&lt;4&gt;"</td>
       <td>statement_id</td>
       <td>ID of the prepared statement to close</td></tr>
@@ -2842,16 +2752,6 @@ bool Protocol_classic::parse_packet(union COM_DATA *data,
       data->com_init_db.length = input_packet_length;
       break;
     }
-    case COM_REFRESH: {
-      if (input_packet_length < 1) goto malformed;
-      data->com_refresh.options = input_raw_packet[0];
-      break;
-    }
-    case COM_PROCESS_KILL: {
-      if (input_packet_length < 4) goto malformed;
-      data->com_kill.id = (ulong)uint4korr(input_raw_packet);
-      break;
-    }
     case COM_SET_OPTION: {
       if (input_packet_length < 2) goto malformed;
       data->com_set_option.opt_command = uint2korr(input_raw_packet);
@@ -2959,12 +2859,9 @@ bool Protocol_classic::parse_packet(union COM_DATA *data,
       */
       const ulong len =
           strend((char *)input_raw_packet) - (char *)input_raw_packet;
-
       if (len >= input_packet_length || len > NAME_LEN) goto malformed;
-
       data->com_field_list.table_name = input_raw_packet;
       data->com_field_list.table_name_length = len;
-
       data->com_field_list.query = input_raw_packet + len + 1;
       data->com_field_list.query_length = input_packet_length - len;
       break;
@@ -3187,7 +3084,7 @@ bool Protocol_classic::end_result_metadata() {
       <td>maximum length of the field</td></tr>
   <tr><td>@ref a_protocol_type_int1 "int&lt;1&gt;"</td>
       <td>type</td>
-      <td>type of the column as defined in ::enum_field_types</td></tr>
+      <td>type of the column as defined in @ref enum_field_types</td></tr>
   <tr><td>@ref a_protocol_type_int1 "int&lt;2&gt;"</td>
       <td>flags</td>
       <td>Flags as defined in @ref group_cs_column_definition_flags</td></tr>
@@ -3199,6 +3096,14 @@ bool Protocol_classic::end_result_metadata() {
         <li>0x1f for dynamic strings, double, float</li>
         <li>0x00 to 0x51 for decimals</li>
         </ul></td></tr>
+  <tr><td>@ref sect_protocol_basic_dt_string_fix "string[2]"</td>
+      <td>reserved</td>
+      <td>reserved for future use.</td></tr>
+  <tr><td colspan="3">if command was COM_FIELD_LIST {</td></tr>
+  <tr><td>@ref sect_protocol_basic_dt_string_le "string&lt;lenenc&gt;"</td>
+      <td>default value</td>
+      <td>NULL if 0xFB</td></tr>
+  <tr><td colspan="3">}</td></tr>
   </table>
 
   @note `decimals` and `column_length` can be used for text output formatting
@@ -3220,7 +3125,7 @@ bool Protocol_classic::end_result_metadata() {
       <td>[01]</td></tr>
   <tr><td>@ref a_protocol_type_int1 "int&lt;1&gt;"</td>
       <td>type</td>
-      <td>type of the column as defined in ::enum_field_types</td></tr>
+      <td>type of the column as defined in @ref enum_field_types</td></tr>
   <tr><td colspan="3">if capabilities @& ::CLIENT_LONG_FLAG {</td></tr>
   <tr><td>@ref sect_protocol_basic_dt_int_le "int&lt;lenenc&gt;"</td>
       <td>length of flags + decimals fields</td>
@@ -3243,12 +3148,9 @@ bool Protocol_classic::end_result_metadata() {
       <td>number of decimal digits</td></tr>
   <tr><td colspan="3">}</td></tr>
   <tr><td colspan="3">if command was COM_FIELD_LIST {</td></tr>
-  <tr><td>@ref sect_protocol_basic_dt_int_le "int&lt;lenenc&gt;"</td>
-      <td>length of default values</td>
-      <td>[02]</td></tr>
   <tr><td>@ref sect_protocol_basic_dt_string_le "string&lt;lenenc&gt;"</td>
-      <td>default_values</td>
-      <td></td></tr>
+      <td>default_value</td>
+      <td>NULL if 0xFB</td></tr>
   <tr><td colspan="3">}</td></tr>
   </table>
 
@@ -3431,6 +3333,7 @@ bool Protocol_classic::store_string(const char *from, size_t length,
          field_types[field_pos] == MYSQL_TYPE_NEWDECIMAL ||
          field_types[field_pos] == MYSQL_TYPE_NEWDATE ||
          field_types[field_pos] == MYSQL_TYPE_JSON ||
+         field_types[field_pos] == MYSQL_TYPE_VECTOR ||
          (field_types[field_pos] >= MYSQL_TYPE_ENUM &&
           field_types[field_pos] <= MYSQL_TYPE_GEOMETRY));
   field_pos++;
@@ -3634,22 +3537,24 @@ bool Protocol_text::store_datetime(const MYSQL_TIME &tm, uint decimals) {
       packet);
 }
 
-bool Protocol_text::store_date(const MYSQL_TIME &tm) {
+bool Protocol_text::store_date(const Date_val date) {
   // field_types check is needed because of the embedded protocol
   assert(send_metadata || field_types == nullptr ||
          field_types[field_pos] == MYSQL_TYPE_DATE);
   field_pos++;
+  MYSQL_TIME tm = MYSQL_TIME(date);
   return store_temporal([&tm](char *to) { return my_date_to_str(tm, to); },
                         packet);
 }
 
-bool Protocol_text::store_time(const MYSQL_TIME &tm, uint decimals) {
+bool Protocol_text::store_time(const Time_val time, uint precision) {
   // field_types check is needed because of the embedded protocol
   assert(send_metadata || field_types == nullptr ||
          field_types[field_pos] == MYSQL_TYPE_TIME);
   field_pos++;
+  MYSQL_TIME tm = MYSQL_TIME(time);
   return store_temporal(
-      [&tm, decimals](char *to) { return my_time_to_str(tm, to, decimals); },
+      [&tm, precision](char *to) { return my_time_to_str(tm, to, precision); },
       packet);
 }
 
@@ -3921,13 +3826,13 @@ bool Protocol_binary::store_datetime(const MYSQL_TIME &tm, uint precision) {
   return false;
 }
 
-bool Protocol_binary::store_date(const MYSQL_TIME &tm) {
-  if (send_metadata) return Protocol_text::store_date(tm);
+bool Protocol_binary::store_date(const Date_val date) {
+  if (send_metadata) return Protocol_text::store_date(date);
   // field_types check is needed because of the embedded protocol
   assert(field_types == nullptr || field_types[field_pos] == MYSQL_TYPE_DATE);
   field_pos++;
 
-  if (tm.year == 0 && tm.month == 0 && tm.day == 0) {
+  if (date.is_zero_date()) {
     // Nothing to send, except a single byte to indicate length = 0.
     return packet->append(char{0});
   }
@@ -3935,26 +3840,26 @@ bool Protocol_binary::store_date(const MYSQL_TIME &tm) {
   char *pos = packet->prep_append(5, PACKET_BUFFER_EXTRA_ALLOC);
   if (pos == nullptr) return true;
   pos[0] = char{4};  // length
-  int2store(pos + 1, tm.year);
-  pos[3] = char(tm.month);
-  pos[4] = char(tm.day);
+  int2store(pos + 1, date.year());
+  pos[3] = char(date.month());
+  pos[4] = char(date.day());
   return false;
 }
 
-bool Protocol_binary::store_time(const MYSQL_TIME &tm, uint precision) {
-  if (send_metadata) return Protocol_text::store_time(tm, precision);
+bool Protocol_binary::store_time(const Time_val time, uint precision) {
+  if (send_metadata) return Protocol_text::store_time(time, precision);
   // field_types check is needed because of the embedded protocol
   assert(field_types == nullptr || field_types[field_pos] == MYSQL_TYPE_TIME);
   field_pos++;
 
   size_t length;
-  if (tm.second_part)
+  if (time.microsecond() != 0) {
     length = 12;
-  else if (tm.hour || tm.minute || tm.second || tm.day)
+  } else if (time.hour() != 0 || time.minute() != 0 || time.second() != 0) {
     length = 8;
-  else
+  } else {
     length = 0;
-
+  }
   char *pos = packet->prep_append(length + 1, PACKET_BUFFER_EXTRA_ALLOC);
   if (pos == nullptr) return false;
   *pos++ = char(length);
@@ -3963,19 +3868,19 @@ bool Protocol_binary::store_time(const MYSQL_TIME &tm, uint precision) {
   if (pos == end) return false;  // zero date
 
   // Move hours to days if we have 24 hours or more.
-  const unsigned days = tm.day + tm.hour / 24;
-  const unsigned hours = tm.hour % 24;
+  const unsigned days = time.hour() / 24;
+  const unsigned hours = time.hour() % 24;
 
-  *pos++ = tm.neg ? 1 : 0;
+  *pos++ = time.is_negative() ? 1 : 0;
   int4store(pos, days);
   pos += 4;
   *pos++ = char(hours);
-  *pos++ = char(tm.minute);
-  *pos++ = char(tm.second);
+  *pos++ = char(time.minute());
+  *pos++ = char(time.second());
 
   if (pos == end) return false;  // no second part
 
-  int4store(pos, tm.second_part);
+  int4store(pos, time.microsecond());
   assert(pos + 4 == end);
   return false;
 }

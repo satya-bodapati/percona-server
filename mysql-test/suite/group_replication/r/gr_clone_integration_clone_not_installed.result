@@ -11,7 +11,7 @@ include/start_and_bootstrap_group_replication.inc
 CREATE TABLE t1 (c1 INT NOT NULL PRIMARY KEY) ENGINE=InnoDB;
 INSERT INTO t1 VALUES (1);
 INSERT INTO t1 VALUES (2);
-include/rpl_sync.inc
+include/rpl/sync.inc
 
 ###############################################################
 # 2. Configure the threshold on server 2 and start GR
@@ -38,13 +38,13 @@ include/assert_grep.inc [Clone plugin is not present in the donor]
 # 4. Cleanup
 SET GLOBAL group_replication_clone_threshold= 9223372036854775807;;
 DROP TABLE t1;
-include/rpl_sync.inc
+include/rpl/sync.inc
 UNINSTALL PLUGIN clone;
 set session sql_log_bin=0;
 call mtr.add_suppression("This member will start distributed recovery using clone. It is due to the number of missing transactions being higher than the configured threshold of*");
 call mtr.add_suppression("There was an issue when configuring the remote cloning process: The clone plugin is not present or active*");
 call mtr.add_suppression("There was an issue when cloning from another server: Error number: 3862 Error message: Clone Donor Error: 1524 : Plugin 'clone' is not loaded");
-call mtr.add_suppression("Internal query: CLONE INSTANCE FROM \'root\'@\'127.0.0.1\':[0-9]+ IDENTIFIED BY \'\\*\\*\\*\\*\\*\' REQUIRE NO SSL; result in error. Error number:*");
+call mtr.add_suppression("Internal query: CLONE INSTANCE FROM \'root\'@\'127.0.0.1\':[0-9]+ IDENTIFIED BY \'\\*\\*\\*\\*\\*\' REQUIRE SSL; result in error. Error number:*");
 call mtr.add_suppression("Due to some issue on the previous step distributed recovery is now executing: Incremental Recovery.");
 set session sql_log_bin=1;
 include/group_replication_end.inc

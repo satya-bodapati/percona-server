@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -46,7 +47,7 @@ public interface DomainTypeHandler<T> {
 
     public String getName();
 
-    public Class<?> getOidClass();
+    public Class<?> getDomainClass();
 
     public boolean isSupportedType();
 
@@ -54,13 +55,11 @@ public interface DomainTypeHandler<T> {
 
     public DomainFieldHandler getFieldHandler(String fieldName);
 
-    public Class<?>[] getProxyInterfaces();
+    public Class<?> getProxyClass();
 
     public T newInstance(Db db);
 
     public ValueHandler getValueHandler(Object instance);
-
-    public T getInstance(ValueHandler handler);
 
     public void objectMarkModified(ValueHandler handler, String fieldName);
 
@@ -104,4 +103,13 @@ public interface DomainTypeHandler<T> {
 
     public T newInstance(ResultData resultData, Db db);
 
+    public boolean isClosing();
+
+    public void setClosing();
+
+    public boolean isClosed();
+
+    public void setClosed();
+
+    public String getTableVersion();
 }

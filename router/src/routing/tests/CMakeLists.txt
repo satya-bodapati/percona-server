@@ -1,15 +1,16 @@
-# Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,11 +23,12 @@
 
 ADD_DEFINITIONS(-DSSL_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/mysql-test/std_data/")
 
-# TODO(sgunders): Remove when all GMock tests use MOCK_METHOD().
-STRING(REPLACE "-Wsuggest-override" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
-
 IF(MY_COMPILER_IS_CLANG)
   STRING_APPEND(CMAKE_CXX_FLAGS " -Wno-deprecated")
+ENDIF()
+
+IF(MY_COMPILER_IS_GNU AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12)
+  ADD_COMPILE_FLAGS(test_next_available.cc test_classic_quit_sender.cc COMPILE_FLAGS "-Wno-restrict")
 ENDIF()
 
 # routing-library as object-lib for testing
@@ -39,10 +41,8 @@ SET(test_files
   test_block_clients.cc
   # test_connection.cc
   test_connection_container.cc
-  test_first_available.cc
   test_metadata_cache_group.cc
-  test_next_available.cc
-  test_round_robin.cc
+  test_static_routing.cc
   test_routing.cc
   test_setup_named_socket_service.cc
   test_setup_tcp_service.cc
@@ -60,10 +60,12 @@ FOREACH(test_file ${test_files})
       routing_export_all
       test-helpers
     INCLUDE_DIRS
+      ${CMAKE_CURRENT_SOURCE_DIR}/../include
       ${CMAKE_CURRENT_SOURCE_DIR}/../src
       ${CMAKE_CURRENT_SOURCE_DIR}/../../harness/tests  # mock_io_service.h
   )
 ENDFOREACH()
+DOWNGRADE_STRINGOP_WARNINGS(routertest_routing_setup_tcp_service)
 
 ADD_TEST_FILE(${CMAKE_CURRENT_SOURCE_DIR}/plugin/test_plugin.cc
   MODULE "routing"
@@ -87,7 +89,7 @@ TARGET_COMPILE_DEFINITIONS(${T}
 # error: __builtin_memcpy reading 106 bytes from a region of size 16
 # for socket_name = make_string(MAX_SOCKET_NAME_LEN - 1); in test_plugin.cc
 IF(MY_COMPILER_IS_GNU AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 11)
-  MY_TARGET_LINK_OPTIONS(${T} "-Wno-stringop-overread")
+  TARGET_LINK_OPTIONS(${T} PRIVATE -Wno-stringop-overread)
 ENDIF()
 
 ADD_ROUTER_TEST_FILE(
@@ -96,15 +98,15 @@ ADD_ROUTER_TEST_FILE(
   LIB_DEPENDS
     mysql_protocol
     test-helpers
-    mysqlxclient_lite
-    mysqlxmessages_lite
+    router_mysqlxclient
+    router_mysqlxmessages
     connection_pool
-    ext::libprotobuf-lite
+    ext::libprotobuf
+    routing_connections
   INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/../src
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
   EXTRA_SOURCES
-    ../src/channel.cc
     ../src/context.cc
     ../src/destination_ssl_context.cc
   )
@@ -114,12 +116,14 @@ TARGET_INCLUDE_DIRECTORIES(${T}
   PRIVATE $<TARGET_PROPERTY:routing,INCLUDE_DIRECTORIES>)
 TARGET_COMPILE_DEFINITIONS(${T}
   PRIVATE ROUTING_STATIC_DEFINE=1)
+TARGET_COMPILE_FEATURES(${T} PUBLIC cxx_std_20)
 
 IF(LIBFUZZER_COMPILE_FLAGS)
   MYSQL_ADD_EXECUTABLE(routertest_fuzz_routing_parser_show_warnings
     fuzz_show_warnings.cc
     ../src/show_warnings_parser.cc
     ../src/sql_lexer.cc
+    ../src/sql_lexer_thd.cc
     ${CMAKE_SOURCE_DIR}/sql/sql_lex_hash.cc
     COMPONENT Router
     DEPENDENCIES GenServerSource GenError
@@ -132,6 +136,7 @@ IF(LIBFUZZER_COMPILE_FLAGS)
   MYSQL_ADD_EXECUTABLE(routertest_fuzz_routing_sql_lexer
     fuzz_sql_lexer.cc
     ../src/sql_lexer.cc
+    ../src/sql_lexer_thd.cc
     ${CMAKE_SOURCE_DIR}/sql/sql_lex_hash.cc
     COMPONENT Router
     DEPENDENCIES GenServerSource GenError

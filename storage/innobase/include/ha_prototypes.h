@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -226,7 +227,7 @@ void thd_set_lock_wait_time(THD *thd,
 /** Is FT ignore stopwords variable set.
 @param thd Thread object
 @return true if ft_ignore_stopwords is set, false otherwise. */
-MY_NODISCARD
+[[nodiscard]]
 bool thd_has_ft_ignore_stopwords(THD *thd) noexcept;
 
 /** Get the value of innodb_tmpdir.
@@ -371,7 +372,6 @@ inline void send_errno_warn(THD *thd, int err, const std::string &context) {
 
 extern const char *TROUBLESHOOTING_MSG;
 extern const char *TROUBLESHOOT_DATADICT_MSG;
-extern const char *BUG_REPORT_MSG;
 extern const char *FORCE_RECOVERY_MSG;
 extern const char *ERROR_CREATING_MSG;
 extern const char *OPERATING_SYSTEM_ERROR_MSG;
@@ -473,13 +473,13 @@ void innobase_commit_low(trx_t *trx);
 
 /** Get the transaction of the current connection handle, if either exists.
 @return transaction of the current connection handle or NULL. */
-MY_NODISCARD
+[[nodiscard]]
 trx_t *innobase_get_trx(void);
 
 /** Get the transaction of the current connection handle if slow query log
 InnoDB extended statistics should be collected.
 @return transaction object if statistics should be collected, or NULL. */
-MY_NODISCARD
+[[nodiscard]]
 trx_t *innobase_get_trx_for_slow_log(void) noexcept;
 
 extern bool innodb_inited;
@@ -491,7 +491,7 @@ ulong thd_parallel_read_threads(THD *thd);
 
 /** Return the maximum buffer size to use for DDL.
 @param[in]      thd       Session instance, or nullptr to query the global
-                          innodb_parallel_read_threads value.
+                          innodb_ddl_buffer_size value.
 @return memory upper limit in bytes. */
 [[nodiscard]] ulong thd_ddl_buffer_size(THD *thd);
 

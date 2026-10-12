@@ -1,15 +1,16 @@
-/* Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,8 +24,7 @@
 #ifndef MYSQL_BINLOG_EVENT_COMPRESSION_NONE_COMP_H
 #define MYSQL_BINLOG_EVENT_COMPRESSION_NONE_COMP_H
 
-#include "compressor.h"
-#include "mysql/binlog/event/nodiscard.h"
+#include "mysql/binlog/event/compression/compressor.h"
 
 namespace mysql::binlog::event::compression {
 
@@ -53,13 +53,13 @@ class None_comp : public Compressor {
   ///
   /// For None_comp, this is guaranteed to produce all output on
   /// success.
-  [[NODISCARD]] Compress_status do_compress(
+  [[nodiscard]] Compress_status do_compress(
       Managed_buffer_sequence_t &out) override;
 
   /// @copydoc Compressor::do_finish
   ///
   /// For None_comp, this is equivalent to @c compress.
-  [[NODISCARD]] Compress_status do_finish(
+  [[nodiscard]] Compress_status do_finish(
       Managed_buffer_sequence_t &out) override;
 
   /// Data previously provided to @c do_feed.

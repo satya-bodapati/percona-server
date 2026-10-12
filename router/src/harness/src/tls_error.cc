@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -47,7 +48,7 @@ static const std::error_category &tls_cert_category() noexcept {
     }
   };
 
-  static category_impl instance;
+  static category_impl const instance;
   return instance;
 }
 
@@ -73,7 +74,7 @@ static const std::error_category &tls_ssl_category() noexcept {
     }
   };
 
-  static category_impl instance;
+  static category_impl const instance;
   return instance;
 }
 
@@ -86,12 +87,13 @@ const std::error_category &tls_err_category() noexcept {
    public:
     const char *name() const noexcept override { return "tls_err"; }
     std::string message(int ev) const override {
-      std::array<char, 120> buf;
-      return ERR_error_string(ev, buf.data());
+      std::array<char, 512> buffer{0};
+      ERR_error_string_n(ev, buffer.data(), buffer.size());
+      return buffer.data();
     }
   };
 
-  static category_impl instance;
+  static category_impl const instance;
   return instance;
 }
 

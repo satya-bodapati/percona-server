@@ -19,6 +19,7 @@
 #include "components/audit_log_filter/audit_encryption.h"
 #include "components/audit_log_filter/json_reader/audit_json_handler.h"
 #include "components/audit_log_filter/json_reader/audit_json_read_stream.h"
+#include "components/audit_log_filter/log_file_timestamp.h"
 #include "components/audit_log_filter/sys_vars.h"
 
 #include <atomic>
@@ -33,10 +34,17 @@
 namespace audit_log_filter {
 
 struct AuditLogReaderArgs {
+  enum class Command {
+    ContinueRead,
+    ReadFromBookmark,
+    ReadFromTimestamp,
+    CloseSeq
+  };
+
+  Command command{Command::ContinueRead};
   std::string timestamp{};
   uint64_t id{0};
   uint64_t max_array_length{0};
-  bool close_read_sequence{false};
 };
 
 struct AuditLogReaderContext {
@@ -44,8 +52,9 @@ struct AuditLogReaderContext {
   std::unique_ptr<AuditLogReaderArgs> batch_reader_args;
   std::unique_ptr<json_reader::AuditJsonHandler> audit_json_handler;
   std::unique_ptr<json_reader::AuditJsonReadStream> audit_json_read_stream;
+  std::unique_ptr<rapidjson::Reader> reader;
   std::deque<FileInfo *> files_to_read;
-  FileInfo *current_file;
+  FileInfo *current_file{nullptr};
   bool is_session_end{false};
   bool is_batch_end{false};
 };
@@ -59,6 +68,7 @@ struct FileInfo {
         is_encrypted{is_encrypted_},
         encryption_options{nullptr} {}
   std::string name;
+  std::string first_timestamp;
   std::string encryption_options_id;
   bool is_compressed;
   bool is_encrypted;
@@ -84,8 +94,7 @@ class AuditLogReader {
   void set_files_to_read_list(AuditLogReaderContext *reader_context) noexcept;
 
  private:
-  std::map<std::string, std::unique_ptr<FileInfo>>
-      m_first_timestamp_to_file_map;
+  std::map<LogFileTimestamp, std::unique_ptr<FileInfo>> m_timestamp_to_file_map;
   std::shared_mutex m_reader_mutex;
   std::atomic<bool> m_reload_requested;
 };

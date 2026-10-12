@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,10 +29,14 @@
 #include <charconv>  // from_chars
 #include <chrono>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
+
+#include "mysql/harness/config_option.h"
+#include "mysql/harness/string_utils.h"
 
 #include "harness_export.h"
 
@@ -106,6 +111,8 @@ T option_as_uint(const std::string_view &value, const std::string &option_desc,
 template <typename T>
 class IntOption {
  public:
+  using value_type = T;
+
   constexpr IntOption(T min_value = std::numeric_limits<T>::min(),
                       T max_value = std::numeric_limits<T>::max())
       : min_value_{min_value}, max_value_{max_value} {}
@@ -115,13 +122,40 @@ class IntOption {
                                         max_value_);
   }
 
+  std::optional<T> operator()(const std::optional<std::string> &value,
+                              const std::string &option_desc) {
+    if (!value.has_value()) return {};
+
+    return mysql_harness::option_as_int(value.value(), option_desc, min_value_,
+                                        max_value_);
+  }
+
  private:
   T min_value_;
   T max_value_;
 };
 
+template <typename Option>
+class ArrayOption {
+ public:
+  using value_type = std::vector<typename Option::value_type>;
+
+  value_type operator()(const std::string &value,
+                        const std::string &option_desc) {
+    value_type result;
+    auto array = mysql_harness::split_string(value, '"', false);
+
+    for (const auto &element : array) {
+      result.push_back(Option()(element, option_desc));
+    }
+
+    return result;
+  }
+};
+
 class StringOption {
  public:
+  using value_type = std::string;
   std::string operator()(const std::string &value,
                          const std::string & /* option_desc */) {
     return value;
@@ -130,6 +164,8 @@ class StringOption {
 
 class BoolOption {
  public:
+  using value_type = bool;
+
   bool operator()(const std::string &value, const std::string &option_desc) {
     if (value == "true" || value == "1") return true;
     if (value == "false" || value == "0") return false;
@@ -166,6 +202,7 @@ using DoubleOption = FloatingPointOption<double>;
 template <typename Dur>
 class DurationOption : public DoubleOption {
  public:
+  using value_type = Dur;
   using duration_type = Dur;
   using __base = DoubleOption;
 
@@ -187,6 +224,7 @@ class DurationOption : public DoubleOption {
  * output is a std::chrono::millisecond
  */
 using MilliSecondsOption = DurationOption<std::chrono::milliseconds>;
+using SecondsOption = DurationOption<std::chrono::seconds>;
 
 }  // namespace mysql_harness
 #endif

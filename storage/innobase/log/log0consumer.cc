@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -52,7 +53,7 @@ void Log_user_consumer::set_consumed_lsn(lsn_t consumed_lsn) {
 
 lsn_t Log_user_consumer::get_consumed_lsn() const { return m_consumed_lsn; }
 
-void Log_user_consumer::consumption_requested() {}
+void Log_user_consumer::consumption_requested(lsn_t /*request_lsn*/) {}
 
 Log_consumer::consumer_type Log_user_consumer::get_consumer_type() const {
   return Log_consumer::consumer_type::USER;
@@ -69,8 +70,12 @@ lsn_t Log_checkpoint_consumer::get_consumed_lsn() const {
   return log_get_checkpoint_lsn(m_log);
 }
 
-void Log_checkpoint_consumer::consumption_requested() {
-  log_request_checkpoint_in_next_file(m_log);
+void Log_checkpoint_consumer::consumption_requested(lsn_t request_lsn) {
+  log_t &log = *log_sys;
+  ut_a(log_is_data_lsn(request_lsn));
+  const lsn_t current_lsn = log_get_lsn(log);
+  ut_a_le(request_lsn, current_lsn);
+  log_request_checkpoint_low(log, request_lsn);
 }
 
 Log_consumer::consumer_type Log_checkpoint_consumer::get_consumer_type() const {

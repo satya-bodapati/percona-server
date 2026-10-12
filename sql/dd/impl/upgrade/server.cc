@@ -1,15 +1,16 @@
-/* Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,11 +23,16 @@
 
 #include "sql/dd/impl/upgrade/server.h"
 
-#include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <sys/types.h>
+#include <iomanip>
+#include <ranges>
+#include <sstream>
+#include <string>
 
+#include "server.h"
+#include "sql/dd/types/abstract_table.h"
 #include "sql/dd/upgrade/server.h"
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
@@ -35,16 +41,28 @@
 
 #include "my_dbug.h"
 #include "mysql/components/services/log_builtins.h"
+#include "mysql/psi/mysql_file.h"
 #include "mysql/strings/m_ctype.h"
 #include "nulls.h"
+
+#include "my_rapidjson_size_t.h"  // Needed, even if flagged as unused.
+#include "rapidjson/document.h"
+#include "rapidjson/prettywriter.h"  // Needed, even if flagged as unused
+#include "rapidjson/stringbuffer.h"
 #include "scripts/mysql_fix_privilege_tables_sql.h"
 #include "scripts/sql_commands_system_tables_data_fix.h"
-#include "scripts/sql_firewall_stored_procedures.h"
+#include "scripts/sql_firewall_sp_firewall_group_delist.h"
+#include "scripts/sql_firewall_sp_firewall_group_enlist.h"
+#include "scripts/sql_firewall_sp_reload_firewall_group_rules.h"
+#include "scripts/sql_firewall_sp_reload_firewall_rules.h"
+#include "scripts/sql_firewall_sp_set_firewall_group_mode.h"
+#include "scripts/sql_firewall_sp_set_firewall_group_mode_and_user.h"
+#include "scripts/sql_firewall_sp_set_firewall_mode.h"
 #include "sql/dd/cache/dictionary_client.h"  // dd::cache::Dictionary_client
 #include "sql/dd/dd_schema.h"                // dd::Schema_MDL_locker
-#include "sql/dd/dd_table.h"  // dd::warn_on_deprecated_prefix_key_partition
-#include "sql/dd/dd_tablespace.h"                 // dd::fill_table_and_parts...
-#include "sql/dd/dd_trigger.h"                    // dd::create_trigger
+#include "sql/dd/dd_table.h"                 // dd::prefix_key_partition_exists
+#include "sql/dd/dd_tablespace.h"            // dd::fill_table_and_parts...
+#include "sql/dd/dd_trigger.h"               // dd::create_trigger
 #include "sql/dd/impl/bootstrap/bootstrap_ctx.h"  // dd::DD_bootstrap_ctx
 #include "sql/dd/impl/bootstrap/bootstrapper.h"
 #include "sql/dd/impl/tables/dd_properties.h"  // dd::tables::DD_properties
@@ -60,13 +78,17 @@
 #include "sql/sp.h"         // Stored_routine_creation_ctx
 #include "sql/sp_head.h"    // sp_head
 #include "sql/sql_base.h"
-#include "sql/sql_prepare.h"
+#include "sql/sql_table.h"
+#include "sql/statement/ed_connection.h"
 #include "sql/strfunc.h"
 #include "sql/table_trigger_dispatcher.h"  // Table_trigger_dispatcher
 #include "sql/thd_raii.h"
 #include "sql/trigger.h"  // Trigger
-#include "sql/trigger_def.h"
 #include "string_with_len.h"
+
+#ifdef HAVE_PERCONA_TELEMETRY
+#include "sql/dd/dd_utility.h"  // check_if_server_ddse_readonly
+#endif
 
 using sql_mode_t = uint64_t;
 extern const char *mysql_sys_schema[];
@@ -75,6 +97,11 @@ extern const char *fill_help_tables[];
 const char *upgrade_modes[] = {"NONE", "MINIMAL", "AUTO", "FORCE", NullS};
 TYPELIB upgrade_mode_typelib = {array_elements(upgrade_modes) - 1, "",
                                 upgrade_modes, nullptr};
+
+const char *check_table_fun_modes[] = {"WARN", "ABORT", NullS};
+TYPELIB check_table_fun_mode_typelib = {
+    array_elements(check_table_fun_modes) - 1, "", check_table_fun_modes,
+    nullptr};
 
 namespace dd {
 namespace upgrade {
@@ -228,90 +255,65 @@ class Server_option_guard {
   ~Server_option_guard() { *server_opt = old_value; }
 };
 
+const dd::String_type MYSQL_SCHEMA_NAME = "mysql";
+const dd::String_type SYS_SCHEMA_NAME = "sys";
+
+dd::String_type &append_escaped(dd::String_type &dst,
+                                const dd::String_type &s) {
+  dst.append(1, '`');
+  for (auto c : s) {
+    if (c == '`') {
+      dst.append(1, '`');
+    }
+    dst.append(1, c);
+  }
+  dst.append(1, '`');
+  return dst;
+}
+
+void comma_separated_join(std::vector<dd::String_type> &list,
+                          dd::String_type &dest) {
+  assert(!list.empty());
+  dest.append(list.front());
+  for (const dd::String_type &elt : list | std::ranges::views::drop(1)) {
+    dest.append(", ").append(elt);
+  }
+}
+
 class MySQL_check {
  private:
   std::vector<dd::String_type> alter_cmds, repairs;
-  bool needs_repair;
+  bool needs_repair = false;
+  dd::String_type m_ddstrbuf;
 
-  static dd::String_type escape_str(const dd::String_type &src) {
-    dd::String_type res = "`";
-    for (size_t i = 0; i < src.size(); i++) {
-      if (src[i] == '`') res += '`';
-      res += src[i];
-    }
-    res += "`";
-    return res;
-  }
-
-  void comma_separated_join(std::vector<dd::String_type> &list,
-                            dd::String_type &dest) {
-    dest = list[0];
-    for (auto it = list.begin() + 1; it != list.end(); it++) dest += "," + *it;
-  }
-
-  bool get_schema_tables(THD *thd, const char *schema,
+  bool get_schema_tables(THD *thd, const dd::String_type &schema_name,
                          dd::String_type &tables_list) {
     Schema_MDL_locker mdl_handler(thd);
     dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
     const dd::Schema *sch = nullptr;
-    std::vector<String_type> tables;
-    dd::Stringstream_type t_list;
 
-    if (mdl_handler.ensure_locked(schema) ||
-        thd->dd_client()->acquire(schema, &sch) ||
-        thd->dd_client()->fetch_schema_component_names<Abstract_table>(
-            sch, &tables)) {
+    std::vector<String_type> schema_table_names;
+    if (mdl_handler.ensure_locked(schema_name.c_str()) ||
+        thd->dd_client()->acquire(schema_name, &sch) ||
+        thd->dd_client()->fetch_schema_base_table_names_not_hidden_by_se(
+            sch, &schema_table_names)) {
       LogErr(ERROR_LEVEL, ER_DD_UPGRADE_FAILED_TO_FETCH_TABLES);
-      return (true);
+      return true;
+    }
+    if (schema_table_names.empty()) {
+      return false;
     }
 
-    char schema_name_buf[NAME_LEN + 1];
-    const char *converted_schema_name = sch->name().c_str();
-    if (lower_case_table_names == 2) {
-      my_stpcpy(schema_name_buf, converted_schema_name);
-      my_casedn_str(system_charset_info, schema_name_buf);
-      converted_schema_name = schema_name_buf;
+    append_escaped(tables_list, sch->name()).append(1, '.');
+    append_escaped(tables_list, schema_table_names.front());
+
+    for (const dd::String_type &table_name :
+         schema_table_names | std::ranges::views::drop(1)) {
+      tables_list.append(", ");
+      append_escaped(tables_list, sch->name()).append(1, '.');
+      append_escaped(tables_list, table_name);
     }
 
-    bool first = true;
-    for (const dd::String_type &table : tables) {
-      char table_name_buf[NAME_LEN + 1];
-      const char *converted_table_name = table.c_str();
-      if (lower_case_table_names == 2) {
-        my_stpcpy(table_name_buf, converted_table_name);
-        my_casedn_str(system_charset_info, table_name_buf);
-        converted_table_name = table_name_buf;
-      }
-
-      MDL_request table_request;
-      MDL_REQUEST_INIT(&table_request, MDL_key::TABLE, converted_schema_name,
-                       converted_table_name, MDL_SHARED, MDL_EXPLICIT);
-
-      if (thd->mdl_context.acquire_lock(&table_request,
-                                        thd->variables.lock_wait_timeout)) {
-        return true;
-      }
-      dd::cache::Dictionary_client::Auto_releaser table_releaser(
-          thd->dd_client());
-      const dd::Abstract_table *table_obj = nullptr;
-      if (thd->dd_client()->acquire(converted_schema_name, converted_table_name,
-                                    &table_obj))
-        return true;
-
-      if (table_obj->type() != dd::enum_table_type::BASE_TABLE ||
-          table_obj->hidden() != dd::Abstract_table::HT_VISIBLE) {
-        thd->mdl_context.release_lock(table_request.ticket);
-        continue;
-      }
-      if (!first)
-        t_list << ", ";
-      else
-        first = false;
-      t_list << escape_str(sch->name()) << "." << escape_str(table_obj->name());
-      thd->mdl_context.release_lock(table_request.ticket);
-    }
-
-    tables_list = t_list.str();
     return false;
   }
 
@@ -362,59 +364,87 @@ class MySQL_check {
     Returns true if something went wrong while retrieving the table list or
     executing CHECK TABLE statements.
   */
-  bool check_tables(THD *thd, const char *schema) {
+  bool check_tables(THD *thd, const dd::String_type &schema_name) {
+    LogErr(INFORMATION_LEVEL, ER_SERVER_UPGRADE_CHECKING_DB,
+           schema_name.c_str());
+
+    dd::String_type &check_statement = m_ddstrbuf;
+    check_statement = "CHECK TABLE ";
+    std::size_t initial_size = check_statement.size();
+    if (get_schema_tables(thd, schema_name, check_statement)) {
+      return true;
+    }
+    if (check_statement.size() == initial_size) {
+      return false;
+    }
+    check_statement.append(" FOR UPGRADE");
+
     Ed_connection con(thd);
-    dd::String_type tables;
-    LEX_STRING str;
-
-    LogErr(INFORMATION_LEVEL, ER_SERVER_UPGRADE_CHECKING_DB, schema);
-    if (get_schema_tables(thd, schema, tables)) return true;
-    if (tables.size() == 0) return false;
-
-    dd::String_type query = "CHECK TABLE " + tables + " FOR UPGRADE";
-    lex_string_strmake(thd->mem_root, &str, query.c_str(), query.size());
-    if (con.execute_direct(str)) return true;
+    if (con.execute_direct(
+            {check_statement.data(), check_statement.length()})) {
+      return true;
+    }
 
     needs_repair |= verify_response(*con.get_result_sets(), false);
     return false;
   }
 
  public:
-  MySQL_check() : needs_repair(false) {}
+  /**
+    Delete the overload taking the schema name as a const char*, to avoid
+    creating unintended temporary dd::String_type objects.
+  */
+  bool check_tables(THD *thd, const char *schema_name) = delete;
 
   bool check_all_schemas(THD *thd) {
-    std::vector<dd::String_type> schemas;
-    if (thd->dd_client()->fetch_global_component_names<dd::Schema>(&schemas))
+    std::vector<dd::String_type> schema_names;
+    if (thd->dd_client()->fetch_global_component_names<dd::Schema>(
+            &schema_names)) {
       return true;
-    for (dd::String_type &schema : schemas) {
-      if (schema.compare("information_schema") == 0 ||
-          schema.compare("performance_schema") == 0)
+    }
+
+    for (dd::String_type &schema_name : schema_names) {
+      if (schema_name.compare("information_schema") == 0 ||
+          schema_name.compare("performance_schema") == 0)
         continue;
-      if (check_tables(thd, schema.c_str())) return true;
+      if (check_tables(thd, schema_name)) {
+        return true;
+      }
     }
     return false;
   }
 
   bool check_system_schemas(THD *thd) {
-    return check_tables(thd, "mysql") || check_tables(thd, "sys");
+    return check_tables(thd, MYSQL_SCHEMA_NAME) ||
+           check_tables(thd, SYS_SCHEMA_NAME);
   }
 
   bool repair_tables(THD *thd) {
-    if (!needs_repair) return false;
+    if (!needs_repair) {
+      return false;
+    }
 
-    for (auto &alter : alter_cmds)
-      if (dd::execute_query(thd, alter)) return true;
+    for (auto &alter : alter_cmds) {
+      if (dd::execute_query(thd, alter)) {
+        return true;
+      }
+    }
     alter_cmds.clear();
 
-    if (repairs.size() == 0) return false;
-    dd::String_type tables;
-    comma_separated_join(repairs, tables);
+    if (repairs.size() == 0) {
+      return false;
+    }
+
+    dd::String_type &repair_statement = m_ddstrbuf;
+    repair_statement = "REPAIR TABLE ";
+
+    comma_separated_join(repairs, repair_statement);
 
     Ed_connection con(thd);
-    LEX_STRING str;
-    dd::String_type query = "REPAIR TABLE " + tables;
-    lex_string_strmake(thd->mem_root, &str, query.c_str(), query.size());
-    if (con.execute_direct(str)) return true;
+    if (con.execute_direct(
+            {repair_statement.data(), repair_statement.length()})) {
+      return true;
+    }
     repairs.clear();
     needs_repair = false;
     (void)verify_response(*con.get_result_sets(), true);
@@ -422,7 +452,8 @@ class MySQL_check {
   }
 };
 
-bool ignore_error_and_execute(THD *thd, const char *query_ptr) {
+bool ignore_error_and_execute(THD *thd, const char *query_ptr,
+                              bool print_err = true) {
   Ed_connection con(thd);
   LEX_STRING str;
   lex_string_strmake(thd->mem_root, &str, query_ptr, strlen(query_ptr));
@@ -431,10 +462,102 @@ bool ignore_error_and_execute(THD *thd, const char *query_ptr) {
   if (con.execute_direct(str) &&
       std::find(ignored_errors.begin(), ignored_errors.end(),
                 con.get_last_errno()) == ignored_errors.end()) {
-    LogErr(ERROR_LEVEL, ER_DD_INITIALIZE_SQL_ERROR, query_ptr,
-           con.get_last_errno(), con.get_last_error());
+    if (print_err)
+      LogErr(ERROR_LEVEL, ER_DD_INITIALIZE_SQL_ERROR, query_ptr,
+             con.get_last_errno(), con.get_last_error());
     return true;
   }
+  return false;
+}
+
+/**
+ * This function will create the firewall's stored procedures.
+ *
+ * @param[in]        thd                thread context
+ * @param[in]        drop_query         DROP statement to drop procedure
+ * @param[in]        fw_proc            stored procedure's SQL definition
+ *
+ * @retval           false              execution of query successful
+ * @retval           true               execution of query failed
+ */
+static bool reinstall_firewall_procedures(THD *thd, const char *drop_query,
+                                          const char *fw_proc[]) {
+  if (!ignore_error_and_execute(thd, drop_query, false))
+    for (auto query = fw_proc; *query != nullptr; query++)
+      if (ignore_error_and_execute(thd, *query)) return true;
+
+  return false;
+}
+
+/**
+ * This function will check and create the firewall's stored procedures.
+ *
+ * @param[in]        thd                thread context
+ *
+ * @retval           false              execution of query successful
+ * @retval           true               execution of query failed
+ */
+static bool upgrade_firewall_procedures(THD *thd) {
+  struct firewall_installer {
+    const char *drop_query;
+    const char **fwproc;
+  };
+
+  static firewall_installer fw_commands[] = {
+      {"DROP PROCEDURE sp_set_firewall_mode", firewall_sp_set_firewall_mode},
+      {"DROP PROCEDURE sp_reload_firewall_rules",
+       firewall_sp_reload_firewall_rules},
+      {"DROP PROCEDURE sp_set_firewall_group_mode",
+       firewall_sp_set_firewall_group_mode},
+      {"DROP PROCEDURE sp_set_firewall_group_mode_and_user",
+       firewall_sp_set_firewall_group_mode_and_user},
+      {"DROP PROCEDURE sp_reload_firewall_group_rules",
+       firewall_sp_reload_firewall_group_rules},
+      {"DROP PROCEDURE sp_firewall_group_enlist",
+       firewall_sp_firewall_group_enlist},
+      {"DROP PROCEDURE sp_firewall_group_delist",
+       firewall_sp_firewall_group_delist},
+  };
+
+  for (auto &fw : fw_commands)
+    if (reinstall_firewall_procedures(thd, fw.drop_query, fw.fwproc))
+      return true;
+
+  return false;
+}
+
+/**
+ * This function will switch to the schema which is pointed by the
+ * mysql-firewall-database variable by executing USE.
+ *
+ * @param[in]        thd                thread context
+ * @param[out]       fw_schema          value of mysql-firewall-database
+ *
+ * @retval           false              execution of USE successful
+ * @retval           true               execution of USE failed
+ */
+static bool switch_to_firewall_schema(THD *thd, std::string &fw_schema) {
+  LEX_STRING firewall_schema_name = {nullptr, 0};
+  Ed_connection conn(thd);
+
+  lex_string_strmake(thd->mem_root, &firewall_schema_name,
+                     STRING_WITH_LEN("SELECT @@mysql_firewall_database"));
+
+  if (conn.execute_direct(firewall_schema_name)) return true;
+
+  const List<Ed_row> rows = *(conn.get_result_sets());
+  const MYSQL_LEX_STRING *result = rows[0]->get_column(0);
+  fw_schema = result->str;
+
+  // if firewall is installed in a schema other than mysql
+  // then switch to that schema
+
+  std::string command = "USE ";
+  command.append(fw_schema);  // forms USE <schema>
+
+  if (strcmp("mysql", fw_schema.c_str()))
+    if (ignore_error_and_execute(thd, command.c_str())) return true;
+
   return false;
 }
 
@@ -442,6 +565,8 @@ bool ignore_error_and_execute(THD *thd, const char *query_ptr) {
 static bool upgrade_firewall(THD *thd) {
   bool has_old_firewall_tables{false};
   bool has_new_firewall_tables{false};
+  bool error{false};
+  std::string fw_schema("mysql");
 
   {
     // lock required tables before checking their existence
@@ -452,7 +577,7 @@ static bool upgrade_firewall(THD *thd) {
                      "firewall_groups", MDL_SHARED, MDL_TRANSACTION);
 
     // check whether firewall tables exist
-    bool error =
+    error =
         (thd->mdl_context.acquire_lock(&request1,
                                        thd->variables.lock_wait_timeout) ||
          thd->mdl_context.acquire_lock(&request2,
@@ -467,13 +592,17 @@ static bool upgrade_firewall(THD *thd) {
     if (error) return true;
   }
 
-  // upgrade stored procedures, leave on error
-  if (has_old_firewall_tables && !has_new_firewall_tables)
-    for (auto query = &firewall_stored_procedures[0]; *query != nullptr;
-         query++)
-      if (ignore_error_and_execute(thd, *query)) return true;
+  // upgrade the procedures
+  if (has_old_firewall_tables || has_new_firewall_tables) {
+    error = switch_to_firewall_schema(thd, fw_schema) ||
+            upgrade_firewall_procedures(thd);
 
-  return false;
+    // we might have switched to another schema during fw upgrade
+    // go back to mysql
+    if (fw_schema != "mysql")
+      error |= ignore_error_and_execute(thd, "USE mysql");
+  }
+  return error;
 }
 
 bool fix_sys_schema(THD *thd) {
@@ -503,9 +632,19 @@ bool fix_sys_schema(THD *thd) {
     return false;
 
   const char **query_ptr;
-  LogErr(INFORMATION_LEVEL, ER_SERVER_UPGRADE_SYS_SCHEMA);
+  LogErr(INFORMATION_LEVEL,
+         dd::bootstrap::DD_bootstrap_ctx::instance().is_server_patch_downgrade()
+             ? ER_SERVER_DOWNGRADE_SYS_SCHEMA
+             : ER_SERVER_UPGRADE_SYS_SCHEMA);
   for (query_ptr = &mysql_sys_schema[0]; *query_ptr != nullptr; query_ptr++)
     if (ignore_error_and_execute(thd, *query_ptr)) return true;
+  DBUG_EXECUTE_IF(
+      "try_event_in_fix_sys_schema",
+      ignore_error_and_execute(
+          thd,
+          "CREATE DEFINER = 'mysql.sys'@'localhost' EVENT sys_test_event ON "
+          "SCHEDULE EVERY 1 MINUTE ENABLE DO SELECT 1");
+      ignore_error_and_execute(thd, "DROP EVENT sys_test_event"););
   thd->mem_root->Clear();
   return false;
 }
@@ -546,34 +685,36 @@ bool fix_mysql_tables(THD *thd) {
 }
 
 bool upgrade_help_tables(THD *thd) {
+  // know if it's upgrade or downgrade
+  bool is_downgrade =
+      dd::bootstrap::DD_bootstrap_ctx::instance().is_server_patch_downgrade();
+
   if (dd::execute_query(thd, "USE mysql")) {
     LogErr(ERROR_LEVEL, ER_DD_UPGRADE_FAILED_FIND_VALID_DATA_DIR);
     return true;
   }
-  LogErr(INFORMATION_LEVEL, ER_SERVER_UPGRADE_HELP_TABLE_STATUS, "started");
+
+  LogErr(INFORMATION_LEVEL,
+         is_downgrade ? ER_SERVER_DOWNGRADE_HELP_TABLE_STATUS
+                      : ER_SERVER_UPGRADE_HELP_TABLE_STATUS,
+         "started");
+
   for (const char **query_ptr = &fill_help_tables[0]; *query_ptr != nullptr;
        query_ptr++)
     if (dd::execute_query(thd, *query_ptr)) {
-      LogErr(ERROR_LEVEL, ER_SERVER_UPGRADE_HELP_TABLE_STATUS, "failed");
+      LogErr(ERROR_LEVEL,
+             is_downgrade ? ER_SERVER_DOWNGRADE_HELP_TABLE_STATUS
+                          : ER_SERVER_UPGRADE_HELP_TABLE_STATUS,
+             "failed");
       return true;
     }
-  LogErr(INFORMATION_LEVEL, ER_SERVER_UPGRADE_HELP_TABLE_STATUS, "completed");
+
+  LogErr(INFORMATION_LEVEL,
+         is_downgrade ? ER_SERVER_DOWNGRADE_HELP_TABLE_STATUS
+                      : ER_SERVER_UPGRADE_HELP_TABLE_STATUS,
+         "completed");
+
   return false;
-}
-
-static void create_upgrade_file() {
-  FILE *out;
-  char upgrade_info_file[FN_REFLEN] = {0};
-  fn_format(upgrade_info_file, "mysql_upgrade_info", mysql_real_data_home_ptr,
-            "", MYF(0));
-
-  if ((out = my_fopen(upgrade_info_file, O_TRUNC | O_WRONLY, MYF(0)))) {
-    /* Write new version to file */
-    fputs(MYSQL_SERVER_VERSION, out);
-    my_fclose(out, MYF(0));
-    return;
-  }
-  LogErr(WARNING_LEVEL, ER_SERVER_UPGRADE_INFO_FILE, upgrade_info_file);
 }
 
 static bool get_shared_tablespace_names(
@@ -595,6 +736,130 @@ static bool get_shared_tablespace_names(
   return thd->dd_client()->foreach<dd::Tablespace>(nullptr, process_spaces);
 }
 
+/*
+  SQL error handler to use during check_table_funs, i.e.
+  while we check table definitions for newly-broken SQL functions.
+  It downgrades errors to warnings, and increases a counter each
+  time each time it does so.
+*/
+class Sql_fun_error_handler : public Internal_error_handler {
+  uint *m_error_count;  ///< Count of downgraded errors.
+
+ public:
+  /**
+     Creates a new Sql_fun_error_handler.
+
+     @param error_count  Address of the error count
+  */
+  explicit Sql_fun_error_handler(uint *error_count)
+      : m_error_count(error_count) {}
+
+ public:
+  bool handle_condition(THD *, uint sql_errno, const char *,
+                        Sql_condition::enum_severity_level *sl,
+                        const char *msg) override {
+    if (*sl == Sql_condition::SL_ERROR) {
+      (*m_error_count)++;
+      LogErr(WARNING_LEVEL, ER_CHECK_TABLE_FUNCTIONS_DOWNGRADED, sql_errno,
+             msg);
+      return true;
+    }
+    return false;
+  }
+};
+
+/**
+  Check table definitions for SQL functions.
+
+  Sometimes, improving a SQL function's behaviour or diagnostics
+  may result in an error being thrown in situations where this
+  wasn't the case. If that call is part of a table's definition,
+  the error will be thrown during the opening of the table,
+  which will then fail.
+
+  This is something the user will generally want to know before
+  putting an upgraded database into production. Therefore, we
+  inspect all user tables that (potentially) have SQL functions
+  in DEFAULT clauses, PARTITIONing, virtual columns, or indexes.
+  Any such table we try to open. This may take a while, but it
+  is preferable to not being aware of breakage.
+
+  @param  thd          The THD to use.
+  @param  schema       The schema whose tables to examine.
+  @param  error_count  Count of errors (total for all check functions).
+  @return false        True if too many errors were detected, false otherwise.
+*/
+static bool check_table_funs(THD *thd, std::unique_ptr<Schema> &schema,
+                             Upgrade_error_counter *error_count) {
+  uint sql_fun_errors = 0;
+
+  // Function called on each table to validate it.
+  auto process_cf_table = [&](std::unique_ptr<dd::Table> &table) {
+    // Skip non-InnoDB tables as their search engine may not be available yet.
+    if (my_strcasecmp(system_charset_info, table->engine().c_str(), "InnoDB"))
+      return false;
+
+    // Are SQL functions used in table def (defaults, virtual columns, etc.)?
+    if (dd::uses_functions(table.get(), schema->name().c_str())) {
+      Open_table_context ot_ctx(
+          thd, MYSQL_OPEN_GET_NEW_TABLE | MYSQL_OPEN_NO_NEW_TABLE_IN_SE);
+
+      char db_name[NAME_LEN + 1];
+      char table_name[NAME_LEN + 1];
+      my_stpncpy(db_name, schema->name().c_str(), NAME_LEN);
+      my_stpncpy(table_name, table->name().c_str(), NAME_LEN);
+
+      if (lower_case_table_names > 1) {
+        my_casedn_str(system_charset_info, db_name);
+        my_casedn_str(system_charset_info, table_name);
+      }
+
+      Table_ref tr(db_name, table_name, TL_READ);
+
+      // Did trying to open this table throw any new errors?
+      uint old_errors = sql_fun_errors;
+      open_table(thd, &tr, &ot_ctx);
+
+      // Did we catch any errors that would have prevented open_table()?
+      if (sql_fun_errors > old_errors) {
+        // Log that the table has problems.
+        LogErr(WARNING_LEVEL, ER_CHECK_TABLE_FUNCTIONS, schema->name().c_str(),
+               table->name().c_str());
+
+        // Create a detailed description of the table.
+        dd::String_type debug_info;
+        dd::uses_functions(table.get(), schema->name().c_str(), &debug_info);
+        LogErr(WARNING_LEVEL, ER_CHECK_TABLE_FUNCTIONS_DETAIL,
+               debug_info.c_str());
+
+        // increase global error count
+        if (opt_check_table_funs == CHECK_TABLE_FUN_ABORT) (*error_count)++;
+      }
+    }
+
+    return error_count->has_too_many_errors();
+  };
+
+  // Skip pfs.
+  if (0 == schema->name().compare("performance_schema")) return false;
+
+  // Our error handler counts errors and downgrades them to warnings.
+  Sql_fun_error_handler error_handler(&sql_fun_errors);
+  thd->push_internal_handler(&error_handler);
+
+  std::unique_ptr<dd::Object_key> table_key(
+      dd::Table::DD_table::create_key_by_schema_id(schema->id()));
+
+  // Iterate over tables in this schema.
+  bool res =
+      thd->dd_client()->foreach<dd::Table>(table_key.get(), process_cf_table);
+
+  // Clean up.
+  thd->pop_internal_handler();
+
+  return res;
+}
+
 static bool check_tables(THD *thd, std::unique_ptr<Schema> &schema,
                          const std::set<dd::String_type> *shared_spaces,
                          Upgrade_error_counter *error_count) {
@@ -604,17 +869,12 @@ static bool check_tables(THD *thd, std::unique_ptr<Schema> &schema,
   auto process_table = [&](std::unique_ptr<dd::Table> &table) {
     invalid_triggers(thd, schema->name().c_str(), *table);
 
-    // The TokuDB engine was removed in 8.0.28 Don't upgrade if it is used.
-    if (my_strcasecmp(system_charset_info, table->engine().c_str(), "TokuDB") ==
-        0) {
-      (*error_count)++;
-      LogErr(ERROR_LEVEL, ER_PERCONA_UNSUPPORTED_ENGINE, schema->name().c_str(),
-             table->name().c_str(), table->engine().c_str());
-    }
-
     // Check for usage of prefix key index in PARTITION BY KEY() function.
-    dd::warn_on_deprecated_prefix_key_partition(
-        thd, schema->name().c_str(), table->name().c_str(), table.get(), true);
+    if (dd::prefix_key_partition_exists(
+            schema->name().c_str(), table->name().c_str(), table.get(), true))
+      return true;
+
+    dd::check_non_standard_key_exists_in_fk(thd, table.get());
 
     // Check for partitioned innodb tables using shared spaces.
     if (!shared_spaces->empty() &&
@@ -635,7 +895,21 @@ static bool check_tables(THD *thd, std::unique_ptr<Schema> &schema,
         }
       }
     }
+
+    // Check if AUTO_INCREMENT is used with DOUBLE/FLOAT
+    for (const auto &col : *table->columns()) {
+      if (col->is_auto_increment() &&
+          (col->type() == enum_column_types::DOUBLE ||
+           col->type() == enum_column_types::FLOAT)) {
+        (*error_count)++;
+        LogErr(ERROR_LEVEL, ER_AUTO_INCREMENT_NOT_SUPPORTED_FOR_FLOAT_DOUBLE,
+               schema->name().c_str(), table->name().c_str(),
+               col->name().c_str());
+      }
+    }
+
     DBUG_EXECUTE_IF("upgrade_failed_during_init", (*error_count)++;);
+
     return error_count->has_too_many_errors();
   };
 
@@ -695,7 +969,144 @@ static bool check_views(THD *thd, std::unique_ptr<Schema> &schema,
   return thd->dd_client()->foreach<dd::View>(view_key.get(), process_view);
 }
 
+/* Make sure the old unsupported "mysql_upgrade_info" file is removed. */
+static void remove_legacy_upgrade_info_file() {
+  char upgrade_file[FN_REFLEN] = {0};
+  fn_format(upgrade_file, "mysql_upgrade_info", mysql_real_data_home_ptr, "",
+            MYF(0));
+  if (!my_access(upgrade_file, F_OK))
+    std::ignore = mysql_file_delete(key_file_misc, upgrade_file, MYF(0));
+}
 }  // namespace
+
+/*
+  Maintain a file named "mysql_upgrade_history" in the data directory.
+
+  The file will contain one entry for each upgrade. The format is structured
+  text on JSON format.
+
+  Errors will be written as warnings to the error log; if we e.g. fail to
+  open the upgrade history file, we will not abort the server since this file
+  is not considered a critical feature of the server.
+
+  @param initialize   If this is the initialization of the data directory.
+*/
+void update_upgrade_history_file(bool initialize) {
+  /* Name of the "mysql_upgrade_history" file. */
+  char upgrade_file[FN_REFLEN] = {0};
+  fn_format(upgrade_file, "mysql_upgrade_history", mysql_real_data_home_ptr, "",
+            MYF(0));
+
+  /* JSON keys. */
+  constexpr char k_file_format[] = "file_format";
+  constexpr char k_upgrade_history[] = "upgrade_history";
+  constexpr char k_date[] = "date";
+  constexpr char k_version[] = "version";
+  constexpr char k_maturity[] = "maturity";
+  constexpr char k_initialize[] = "initialize";
+  constexpr char v_file_format[] = "1";
+
+  /* If > max entries, we keep the first and the (max - 1)  last ones. */
+  constexpr int MAX_HISTORY_SIZE = 1000;
+  static_assert(MAX_HISTORY_SIZE >= 2,
+                "The upgrade history should contain at least the first "
+                "and last entry.");
+  using namespace rapidjson;
+  Document doc;
+
+  /* Open file if it exists, auto close on return. */
+  auto deleter = [&](FILE *ptr) {
+    if (ptr != nullptr) my_fclose(ptr, MYF(0));
+  };
+  std::unique_ptr<FILE, decltype(deleter)> fp(nullptr, deleter);
+
+  MY_STAT sa;
+  char errbuf[MYSYS_STRERROR_SIZE];
+  bool file_exists = (my_stat(upgrade_file, &sa, MYF(0)) != nullptr);
+  bool append = file_exists;  // Append to current doc if possible.
+
+  /* If the file exists, read the doc and see if it is valid. */
+  if (file_exists) {
+    fp.reset(my_fopen(upgrade_file, O_RDONLY, MYF(0)));
+    if (fp == nullptr) {
+      LogErr(WARNING_LEVEL, ER_SERVER_CANT_OPEN_FILE, upgrade_file, my_errno(),
+             my_strerror(errbuf, sizeof(errbuf), my_errno()));
+      return;
+    }
+
+    /* Read contents into buffer. */
+    char buff[512] = {0};
+    std::string parsed_value;
+    do {
+      parsed_value.append(buff);
+      buff[0] = '\0';
+    } while (fgets(buff, sizeof(buff) - 1, fp.get()));
+
+    /* Parse JSON, check expected format. */
+    ParseResult ok = doc.Parse(parsed_value.c_str());
+    if (!(ok && doc.IsObject() && doc[k_file_format].IsString() &&
+          doc[k_upgrade_history].IsArray())) {
+      LogErr(WARNING_LEVEL, ER_INVALID_FILE_FORMAT, upgrade_file);
+      append = false;  // Cannot append, must overwrite with an empty doc.
+    }
+  }
+
+  /* If the file existed with valid contents, append, otherwise, overwrite. */
+  if (append) {
+    /* If current version is same as last entry, return. */
+    Value &hist = doc[k_upgrade_history].GetArray();
+    int count = hist.Size();
+    if (count > 0 &&
+        !strcmp(hist[count - 1][k_version].GetString(), server_version))
+      return;
+
+    /* If the doc contains too many entries, remove from the second and on. */
+    int remove_count = (count - MAX_HISTORY_SIZE) + 1;
+    if (remove_count > 0) {
+      hist.Erase(hist.Begin() + 1, hist.Begin() + remove_count + 1);
+    }
+  } else {
+    /* Otherwise, if no file existed, initialize an empty JSON document. */
+    doc.SetObject();
+    doc.AddMember(k_file_format, v_file_format, doc.GetAllocator());
+    Value history(kArrayType);
+    doc.AddMember(k_upgrade_history, history, doc.GetAllocator());
+  }
+
+  /* Append timestamp, MYSQL_SERVER_VERSION and LTS info to version array. */
+  std::stringstream str;
+  std::time_t sec = my_micro_time() / 1000000;
+  str << std::put_time(std::gmtime(&sec), "%F %T");
+  Value date(str.str().c_str(), str.str().size(), doc.GetAllocator());
+  Value version(server_version, strlen(server_version), doc.GetAllocator());
+  Value maturity(MYSQL_VERSION_MATURITY);
+
+  Value new_version;
+  new_version.SetObject();
+  new_version.AddMember(k_date, date, doc.GetAllocator());
+  new_version.AddMember(k_version, version, doc.GetAllocator());
+  new_version.AddMember(k_maturity, maturity, doc.GetAllocator());
+  if (initialize) {
+    Value init(true);
+    new_version.AddMember(k_initialize, init, doc.GetAllocator());
+  }
+  doc[k_upgrade_history].GetArray().PushBack(new_version, doc.GetAllocator());
+
+  /* Reopen the file, which is auto closed on function return. */
+  fp.reset(my_fopen(upgrade_file, O_CREAT | O_TRUNC | O_WRONLY, MYF(0)));
+  if (fp == nullptr) {
+    LogErr(WARNING_LEVEL, ER_SERVER_CANT_OPEN_FILE, upgrade_file, my_errno(),
+           my_strerror(errbuf, sizeof(errbuf), my_errno()));
+    return;
+  }
+
+  /* Write JSON document to a buffer and further to file with a newline. */
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  doc.Accept(writer);
+  fputs(buffer.GetString(), fp.get());
+  fputs("\n", fp.get());
+}
 
 /*
   This function runs checks on the database before running the upgrade to make
@@ -741,7 +1152,8 @@ bool do_server_upgrade_checks(THD *thd) {
     return check_tables(thd, schema, &shared_spaces, &error_count) ||
            check_events(thd, schema, &error_count) ||
            check_routines(thd, schema, &error_count) ||
-           check_views(thd, schema, &error_count);
+           check_views(thd, schema, &error_count) ||
+           check_table_funs(thd, schema, &error_count);
   };
 
   if (thd->dd_client()->foreach<dd::Schema>(nullptr, process_schema) ||
@@ -749,7 +1161,12 @@ bool do_server_upgrade_checks(THD *thd) {
     thd->pop_internal_handler();
     return dd::end_transaction(thd, true);
   }
-
+  ulong non_std_key_cnt = deprecated_use_fk_on_non_standard_key_count;
+  if (non_std_key_cnt != 0) {
+    LogErr(WARNING_LEVEL, ER_USAGE_DEPRECATION_COUNTER,
+           "foreign key referring to a non-unique or partial key",
+           std::to_string(non_std_key_cnt).c_str(), "during upgrade");
+  }
   thd->pop_internal_handler();
   return false;
 }
@@ -762,7 +1179,7 @@ bool invalid_routine(THD *thd, const dd::Schema &schema,
   Routine_event_context_guard guard(thd);
   sp_head *sp = nullptr;
   st_sp_chistics chistics;
-  prepare_sp_chistics_from_dd_routine(&routine, &chistics);
+  prepare_sp_chistics_from_dd_routine(thd, &routine, &chistics);
 
   dd::String_type return_type_str;
   prepare_return_type_string_from_dd_routine(thd, &routine, &return_type_str);
@@ -924,7 +1341,8 @@ bool upgrade_system_schemas(THD *thd) {
           dd::tables::DD_properties::instance().set(
               thd, "MYSQLD_VERSION_UPGRADED", MYSQL_VERSION_ID);
   }
-  create_upgrade_file();
+
+  remove_legacy_upgrade_info_file();
   bootstrap_error_handler.set_log_error(true);
 
   if (dd::bootstrap::DD_bootstrap_ctx::instance().is_server_patch_downgrade()) {
@@ -952,6 +1370,116 @@ bool upgrade_system_schemas(THD *thd) {
 
   return dd::end_transaction(thd, err);
 }
+
+#ifdef HAVE_PERCONA_TELEMETRY
+/* 1. We INSERT INTO, because prepared statements do not support
+      INSTALL COMPONENT
+   2. We use stored procedure to be able to do conditional action.
+   3. Percona Telemetry Component creates and uses internal user
+      (locked account) percona.telemetry with the following privileges:
+        1. SELECT
+        2. REPLICATION SLAVE
+        3. REPLICATION CLIENT
+      CREATE USER and GRANT do not work yet as ACL is not initialized yet.
+      Use INSERT and UPDATES.
+      This is the same approach as for creation of mysql.user in
+      mysql_system_tables_fix.sql. First we create the user, then update grants.
+      The reasons for this approach are:
+      1. When the user is created, it is granted SHUTDOWN, SUPER, CREATE ROLE,
+         DROP ROLE privileges. percona.telemetry user do not need them, so we
+         drop
+      2. We grant SELECT, REPLICATION SLAVE, REPLICATION CLIENT explicitly.
+         It is for clarity, but also automatically fixes privileges in case
+         someone manually drops them.
+*/
+static const char *percona_telemetry_install[] = {
+    "USE mysql;\n",
+    "SET @have_percona_telemetry= (SELECT COUNT(*) FROM mysql.component WHERE "
+    "component_urn='file://component_percona_telemetry');\n",
+    "SET @cmd= 'INSERT INTO mysql.component(component_group_id, component_urn) "
+    "VALUES (1, \"file://component_percona_telemetry\");';\n",
+    "SET @str = IF(@have_percona_telemetry = 0, @cmd, 'SET @dummy = 0');\n",
+    "PREPARE stmt FROM @str;\n",
+    "EXECUTE stmt;\n",
+    "DROP PREPARE stmt;\n",
+    "SET @group_id= (SELECT LAST_INSERT_ID());\n",
+    "SET @cmd= 'UPDATE mysql.component SET component_group_id=@group_id WHERE "
+    "component_id=@group_id;';\n",
+    "SET @str = IF(@have_percona_telemetry = 0, @cmd, 'SET @dummy = 0');\n",
+    "PREPARE stmt FROM @str;\n",
+    "EXECUTE stmt;\n",
+    "DROP PREPARE stmt;\n",
+    "INSERT IGNORE INTO mysql.user VALUES "
+    "('localhost','percona.telemetry','N','N','N','N','N','N','"
+    "N','N','N','N','N','N','N','N','N','N','N','N','N','N','N','N','N','N','N'"
+    ",'N','N','N','N','','','','',0,0,0,0,'caching_sha2_password','$A$005$"
+    "THISISACOMBINATIONOFINVALIDSALTANDPASSWORDTHATMUSTNEVERBRBEUSED','N',"
+    "CURRENT_TIMESTAMP,NULL,'Y', 'N', 'N', NULL, NULL, NULL, NULL);\n",
+    "UPDATE mysql.user SET Select_priv = 'Y', Repl_slave_priv = 'Y', "
+    "Repl_client_priv = 'Y' WHERE User = 'percona.telemetry' AND Host = 'localhost';\n",
+    "UPDATE mysql.user SET Shutdown_priv = 'N', Super_priv = 'N', "
+    "Create_role_priv = 'N', Drop_role_priv = 'N' WHERE User = "
+    "'percona.telemetry' AND Host = 'localhost';\n",
+    NULL};
+
+static const char *percona_telemetry_uninstall[] = {
+    "USE mysql;\n",
+    "DELETE FROM mysql.component WHERE "
+    "component_urn=\"file://component_percona_telemetry\"\n;",
+    "DELETE FROM mysql.user WHERE user='percona.telemetry' AND Host = 'localhost';\n",
+    NULL};
+
+/**
+  Always return success, regardless of Percona Telemetry Component setup
+  status.
+*/
+bool setup_percona_telemetry(THD *thd [[maybe_unused]]) {
+  /* Do not call dd::check_if_server_ddse_readonly()
+   * to avoid issuing the warning */
+  handlerton *ddse = ha_resolve_by_legacy_type(thd, DB_TYPE_INNODB);
+  if (ddse->is_dict_readonly && ddse->is_dict_readonly()) {
+    LogErr(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+           "Percona Telemetry Component not configured due to InnoDB "
+           "in read only mode.");
+    return false;
+  }
+
+  Disable_autocommit_guard autocommit_guard(thd);
+  Bootstrap_error_handler bootstrap_error_handler;
+
+  Server_option_guard<bool> acl_guard(&opt_noacl, true);
+  Server_option_guard<bool> general_log_guard(&opt_general_log, false);
+  Server_option_guard<bool> slow_log_guard(&opt_slow_log, false);
+  Disable_binlog_guard disable_binlog(thd);
+  Disable_sql_log_bin_guard disable_sql_log_bin(thd);
+
+  bool err = false;
+
+  bootstrap_error_handler.set_log_error(false);
+
+  const char **query_ptr = opt_percona_telemetry_disable
+                               ? &percona_telemetry_uninstall[0]
+                               : &percona_telemetry_install[0];
+  for (; *query_ptr != nullptr; query_ptr++)
+    if (ignore_error_and_execute(thd, *query_ptr)) {
+      LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG,
+             "Failed during setup Percona Telemetry component. Ignoring.");
+      break;
+    };
+
+  bootstrap_error_handler.set_log_error(true);
+
+  close_thread_tables(thd);
+  close_cached_tables(nullptr, nullptr, false, LONG_TIMEOUT);
+
+  if (dd::end_transaction(thd, err)) {
+    LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG,
+           "Failed to setup Percona Telemetry component. Ignoring.");
+  }
+
+  return false;
+}
+#endif /* HAVE_PERCONA_TELEMETRY */
 
 bool no_server_upgrade_required() {
   return !(

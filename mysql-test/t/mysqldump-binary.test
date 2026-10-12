@@ -1,4 +1,6 @@
 --echo # Bug#22601255 Restoring a dump of binary column, made with mysqldump, warns of invalid string
+# This test doesn't support GTID
+--source include/rpl/set_gtid_mode_off.inc
 
 CREATE TABLE t1(
 u CHAR(10),
@@ -7,7 +9,7 @@ blo BLOB,
 g GEOMETRY,
 bi BIT(64));
 
-# These bytes are not valid utf8, except for the first column.
+# These bytes are not valid utf8mb3, except for the first column.
 INSERT INTO t1 VALUES(
 'basic',
 x'EE0C6D03C34C11E5B1640026B977EB17',
@@ -55,20 +57,7 @@ HEX(g)='000000000101000000000000000000F03F000000000000F03F',
 HEX(bi)='EE0C6D03C34C11E5',
 ST_AsText(g) FROM t1;
 
-# Same test with mysqlPUMP
-
---exec $MYSQL_PUMP --include-databases test > $MYSQLTEST_VARDIR/tmp/bug22601255.sql
-DROP TABLE t1;
---exec $MYSQL --show-warnings test < $MYSQLTEST_VARDIR/tmp/bug22601255.sql
-
-SHOW CREATE TABLE t1;
-SELECT
-u='basic',
-HEX(b)='EE0C6D03C34C11E5B1640026B977EB17',
-HEX(blo)='EE0C6D03C34C11E5B1640026B977EB17',
-HEX(g)='000000000101000000000000000000F03F000000000000F03F',
-HEX(bi)='EE0C6D03C34C11E5',
-ST_AsText(g) FROM t1;
-
 DROP TABLE t1;
 --remove_file $MYSQLTEST_VARDIR/tmp/bug22601255.sql
+# Restore the default for gtid_mode which is ON
+--source include/rpl/set_gtid_mode_on.inc

@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,6 +26,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 #include "my_systime.h"           // my_micro_time()
 #include "mysys/buffered_error_log.h"
 #include "sql/log.h"  // log_write_errstream(), log_prio_from_label()
+#include "sql/server_component/mysql_timestamp_imp.h"
 
 extern int log_item_inconsistent(log_item *li);
 
@@ -201,6 +203,7 @@ int log_sink_trad(void *instance [[maybe_unused]], log_line *ll) {
   const char *iso_timestamp = "", *subsys = "";
   my_thread_id thread_id = 0;
   char *line_buffer = nullptr;
+  enum_log_type log_type = LOG_TYPE_ERROR;
 
   if (ll->count > 0) {
     for (c = 0; c < ll->count; c++) {
@@ -266,6 +269,9 @@ int log_sink_trad(void *instance [[maybe_unused]], log_line *ll) {
         case LOG_ITEM_SRV_THREAD:
           thread_id = (my_thread_id)ll->item[c].data.data_integer;
           break;
+        case LOG_ITEM_LOG_TYPE:
+          log_type = (enum enum_log_type)ll->item[c].data.data_integer;
+          break;
         default:
           out_fields--;
       }
@@ -296,11 +302,10 @@ int log_sink_trad(void *instance [[maybe_unused]], log_line *ll) {
         label_len = strlen(label);
       }
 
+      char buff_local_time[iso8601_size];
       if (!(out_types & LOG_ITEM_LOG_TIMESTAMP)) {
-        char buff_local_time[iso8601_size];
-
-        make_iso8601_timestamp(buff_local_time, my_micro_time(),
-                               iso8601_sysvar_logtimestamps);
+        Mysql_timestamp_imp::make_iso8601_timestamp(
+            buff_local_time, my_micro_time(), iso8601_sysvar_logtimestamps);
         iso_timestamp = buff_local_time;
         iso_len = strlen(buff_local_time);
       }
@@ -359,7 +364,7 @@ int log_sink_trad(void *instance [[maybe_unused]], log_line *ll) {
 
       // write log-event to log-file
       if (!log_only_to_buffered_error_log || !buffered_error_log.is_enabled())
-        log_write_errstream(buff_line, len);
+        log_write_errstream(buff_line, len, log_type);
     }
   }
 

@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -79,7 +80,7 @@ ConstIterator::ConstIterator(THD *thd, TABLE *table, Index_lookup *table_ref,
       m_ref(table_ref),
       m_examined_rows(examined_rows) {}
 
-bool ConstIterator::Init() {
+bool ConstIterator::DoInit() {
   m_first_record_since_init = true;
   return false;
 }
@@ -93,7 +94,7 @@ bool ConstIterator::Init() {
   @retval 1  Got an error (other than row not found) during read
 */
 
-int ConstIterator::Read() {
+int ConstIterator::DoRead() {
   if (!m_first_record_since_init) {
     return -1;
   }
@@ -129,7 +130,7 @@ EQRefIterator::EQRefIterator(THD *thd, TABLE *table, Index_lookup *ref,
   @retval  1 - Error
 */
 
-bool EQRefIterator::Init() {
+bool EQRefIterator::DoInit() {
   if (!table()->file->inited) {
     int error = table()->file->ha_index_init(m_ref->key, /*sorted=*/false);
     if (error) {
@@ -159,7 +160,7 @@ bool EQRefIterator::Init() {
   @retval  1 - Error
 */
 
-int EQRefIterator::Read() {
+int EQRefIterator::DoRead() {
   if (!m_first_record_since_init) {
     return -1;
   }
@@ -235,11 +236,11 @@ int EQRefIterator::Read() {
 
 /**
   Since EQRefIterator may buffer a record, do not unlock
-  it if it was not used in this invocation of EQRefIterator::Read().
+  it if it was not used in this invocation of EQRefIterator::DoRead().
   Only count locks, thus remembering if the record was left unused,
   and unlock already when pruning the current value of
   Index_lookup buffer.
-  @sa EQRefIterator::Read()
+  @sa EQRefIterator::DoRead()
 */
 
 void EQRefIterator::UnlockRow() {
@@ -257,7 +258,7 @@ PushedJoinRefIterator::PushedJoinRefIterator(THD *thd, TABLE *table,
       m_is_unique(is_unique),
       m_examined_rows(examined_rows) {}
 
-bool PushedJoinRefIterator::Init() {
+bool PushedJoinRefIterator::DoInit() {
   assert(!m_use_order);  // Pushed child can't be sorted
 
   if (!table()->file->inited) {
@@ -272,14 +273,14 @@ bool PushedJoinRefIterator::Init() {
   return false;
 }
 
-int PushedJoinRefIterator::Read() {
+int PushedJoinRefIterator::DoRead() {
   if (m_first_record_since_init) {
     m_first_record_since_init = false;
 
     /* Perform "Late NULLs Filtering" (see internals manual for explanations) */
     if (m_ref->impossible_null_ref()) {
       table()->set_no_row();
-      DBUG_PRINT("info", ("PushedJoinRefIterator::Read() null_rejected"));
+      DBUG_PRINT("info", ("PushedJoinRefIterator::DoRead() null_rejected"));
       return -1;
     }
 
@@ -334,7 +335,7 @@ static bool init_index(TABLE *table, handler *file, uint idx, bool sorted) {
 }
 
 template <bool Reverse>
-bool RefIterator<Reverse>::Init() {
+bool RefIterator<Reverse>::DoInit() {
   m_first_record_since_init = true;
   m_is_mvi_unique_filter_enabled = false;
   if (table()->file->inited) return false;
@@ -354,7 +355,7 @@ bool RefIterator<Reverse>::Init() {
 
 //! @cond
 template <>
-int RefIterator<false>::Read() {  // Forward read.
+int RefIterator<false>::DoRead() {  // Forward read.
   if (m_first_record_since_init) {
     m_first_record_since_init = false;
 
@@ -410,7 +411,7 @@ int RefIterator<false>::Read() {  // Forward read.
   SELECT * FROM t1 WHERE a=1 ORDER BY a DESC,b DESC.
 */
 template <>
-int RefIterator<true>::Read() {  // Reverse read.
+int RefIterator<true>::DoRead() {  // Reverse read.
   assert(m_ref->keypart_hash == nullptr);
 
   if (m_first_record_since_init) {
@@ -488,11 +489,13 @@ DynamicRangeIterator::DynamicRangeIterator(THD *thd, TABLE *table,
 
 DynamicRangeIterator::~DynamicRangeIterator() {
   // This is owned by our MEM_ROOT.
-  destroy(m_qep_tab->range_scan());
-  m_qep_tab->set_range_scan(nullptr);
+  if (m_qep_tab->range_scan() != nullptr) {
+    ::destroy_at(m_qep_tab->range_scan());
+    m_qep_tab->set_range_scan(nullptr);
+  }
 }
 
-bool DynamicRangeIterator::Init() {
+bool DynamicRangeIterator::DoInit() {
   Opt_trace_context *const trace = &thd()->opt_trace;
   const bool disable_trace =
       m_quick_traced_before &&
@@ -586,7 +589,7 @@ bool DynamicRangeIterator::Init() {
   return m_iterator->Init();
 }
 
-int DynamicRangeIterator::Read() {
+int DynamicRangeIterator::DoRead() {
   if (m_iterator == nullptr) {
     return -1;
   } else {
@@ -612,7 +615,7 @@ FullTextSearchIterator::FullTextSearchIterator(THD *thd, TABLE *table,
   // hand, maintains alternative plans with and without index scans throughout
   // the planning, and doesn't determine whether it should use the indexed or
   // non-indexed plan until the full query plan has been constructed.
-  if (thd->lex->using_hypergraph_optimizer) {
+  if (thd->lex->using_hypergraph_optimizer()) {
     // Should not already be enabled.
     assert(!ft_func->score_from_index_scan);
     // Should operate on the main object.
@@ -649,7 +652,7 @@ FullTextSearchIterator::~FullTextSearchIterator() {
   }
 }
 
-bool FullTextSearchIterator::Init() {
+bool FullTextSearchIterator::DoInit() {
   assert(m_ft_func->ft_handler != nullptr);
   assert(table()->file->ft_handler == m_ft_func->ft_handler);
 
@@ -672,10 +675,69 @@ bool FullTextSearchIterator::Init() {
   return false;
 }
 
-int FullTextSearchIterator::Read() {
+int FullTextSearchIterator::DoRead() {
   int error = table()->file->ha_ft_read(table()->record[0]);
   if (error) {
     return HandleError(error);
+  }
+  if (m_examined_rows != nullptr) {
+    ++*m_examined_rows;
+  }
+  return 0;
+}
+
+VectorSearchIterator::VectorSearchIterator(THD *thd, TABLE *table,
+                                           Index_lookup *ref, Item *item,
+                                           ha_rows limit,
+                                           ha_rows *examined_rows)
+    : TableRowIterator(thd, table),
+      m_ref(ref),
+      m_examined_rows(examined_rows),
+      m_first(true),
+      m_item(item),
+      m_limit(limit) {}
+
+VectorSearchIterator::~VectorSearchIterator() {
+  table()->file->ha_index_or_rnd_end();
+}
+
+bool VectorSearchIterator::DoInit() {
+  if (!table()->file->inited) {
+    int error = table()->file->vec_init();
+    if (error) {
+      PrintError(error);
+      return true;
+    }
+  }
+
+  m_first = true;
+
+  return false;
+}
+
+int VectorSearchIterator::DoRead() {
+  if (m_first) {
+    int error =
+        table()->file->vec_read_first(m_item, table()->record[0], m_limit);
+    if (error) {
+      /*
+        When the query vector has the wrong dimensions we override the
+        somewhat confusing error reported by handler::print_error() with
+        the one DISTANCE() reports for a dimensions mismatch (which is
+        appropriate here, since vector search is only used with distance).
+      */
+      if (error == HA_ERR_VECTOR_WRONG_DIMENSIONS) {
+        my_error(ER_WRONG_ARGUMENTS, MYF(0), "distance");
+        return 1;
+      }
+      return HandleError(error);
+    }
+    m_first = false;
+  } else {
+    int error = table()->file->vec_read_next(table()->record[0]);
+    if (error) {
+      return HandleError(error);
+    }
   }
   if (m_examined_rows != nullptr) {
     ++*m_examined_rows;
@@ -696,7 +758,7 @@ RefOrNullIterator::RefOrNullIterator(THD *thd, TABLE *table, Index_lookup *ref,
       m_expected_rows(expected_rows),
       m_examined_rows(examined_rows) {}
 
-bool RefOrNullIterator::Init() {
+bool RefOrNullIterator::DoInit() {
   m_reading_first_row = true;
   m_is_mvi_unique_filter_enabled = false;
   *m_ref->null_ref_key = false;
@@ -713,7 +775,7 @@ bool RefOrNullIterator::Init() {
   return set_record_buffer(table(), m_expected_rows);
 }
 
-int RefOrNullIterator::Read() {
+int RefOrNullIterator::DoRead() {
   if (m_reading_first_row && !*m_ref->null_ref_key) {
     /* Perform "Late NULLs Filtering" (see internals manual for explanations)
      */
@@ -785,7 +847,7 @@ AlternativeIterator::AlternativeIterator(
   assert(!m_applicable_cond_guards.empty());
 }
 
-bool AlternativeIterator::Init() {
+bool AlternativeIterator::DoInit() {
   m_iterator = m_source_iterator.get();
   for (bool *cond_guard : m_applicable_cond_guards) {
     if (!*cond_guard) {
@@ -847,7 +909,7 @@ static ulonglong get_exact_record_count(QEP_TAB *qep_tab, uint table_count,
   return count;
 }
 
-int UnqualifiedCountIterator::Read() {
+int UnqualifiedCountIterator::DoRead() {
   if (!m_has_row) {
     return -1;
   }
@@ -876,7 +938,7 @@ int UnqualifiedCountIterator::Read() {
   return 0;
 }
 
-int ZeroRowsAggregatedIterator::Read() {
+int ZeroRowsAggregatedIterator::DoRead() {
   if (!m_has_row) {
     return -1;
   }
@@ -908,31 +970,29 @@ int ZeroRowsAggregatedIterator::Read() {
 TableValueConstructorIterator::TableValueConstructorIterator(
     THD *thd, ha_rows *examined_rows,
     const mem_root_deque<mem_root_deque<Item *> *> &row_value_list,
-    mem_root_deque<Item *> *join_fields)
+    Mem_root_array<Item_values_column *> *output_refs)
     : RowIterator(thd),
       m_examined_rows(examined_rows),
       m_row_value_list(row_value_list),
-      m_output_refs(join_fields) {
+      m_output_refs(output_refs) {
   assert(examined_rows != nullptr);
 }
 
-bool TableValueConstructorIterator::Init() {
+bool TableValueConstructorIterator::DoInit() {
   m_row_it = m_row_value_list.begin();
   return false;
 }
 
-int TableValueConstructorIterator::Read() {
-  if (*m_examined_rows == m_row_value_list.size()) return -1;
+int TableValueConstructorIterator::DoRead() {
+  if (m_row_it == m_row_value_list.end()) return -1;
 
   // If the TVC has a single row, we don't create Item_values_column reference
   // objects during resolving. We will instead use the single row directly from
   // Query_block::item_list, such that we don't have to change references here.
-  if (m_row_value_list.size() != 1) {
-    auto output_refs_it = VisibleFields(*m_output_refs).begin();
+  if (m_output_refs != nullptr) {
+    Item_values_column **output_refs_it = m_output_refs->begin();
     for (const Item *value : **m_row_it) {
-      Item_values_column *ref =
-          down_cast<Item_values_column *>(*output_refs_it);
-      ++output_refs_it;
+      Item_values_column *ref = *output_refs_it++;
 
       // Ideally we would not be casting away constness here. However, as the
       // evaluation of Item objects during execution is not const (i.e. none of
@@ -940,9 +1000,9 @@ int TableValueConstructorIterator::Read() {
       // Item_values_column object cannot be const.
       ref->set_value(const_cast<Item *>(value));
     }
-    ++m_row_it;
   }
 
+  ++m_row_it;
   ++*m_examined_rows;
   return 0;
 }

@@ -1,15 +1,16 @@
-/* Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License, version 2.0,
  as published by the Free Software Foundation.
 
- This program is also distributed with certain software (including
+ This program is designed to work with certain software (including
  but not limited to OpenSSL) that is licensed under separate terms,
  as designated in a particular file or component or in included license
  documentation.  The authors of MySQL hereby grant you an additional
  permission to link the program and your derivative works with the
- separately licensed software that they have included with MySQL.
+ separately licensed software that they have either included with
+ the program or referenced in the documentation.
 
  Without limiting anything contained in the foregoing, this file,
  which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -26,13 +27,16 @@
  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include "mysys/my_kdf.h"
+#include "my_ssl_algo_cache.h"
 
-#include <openssl/evp.h>
+#include <openssl/evp.h>  // IWYU pragma: keep
+// IWYU pragma: no_include <openssl/types.h>
 #if OPENSSL_VERSION_NUMBER >= 0x10100000L
 #include <openssl/kdf.h>
 #endif
 
-#include <assert.h>
+#include <cassert>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 
@@ -46,13 +50,13 @@ int create_kdf_key(const unsigned char *key, const unsigned int key_length,
                    unsigned char *rkey, unsigned int rkey_size,
                    std::vector<std::string> *kdf_options) {
   assert(kdf_options != nullptr);
-  int nkdf_options = kdf_options->size();
+  int const nkdf_options = kdf_options->size();
   assert(nkdf_options > 0);
   if (nkdf_options < 1) {
     return 1;
   }
 
-  std::string kdf_name = (*kdf_options)[0];
+  std::string const kdf_name = (*kdf_options)[0];
   std::unique_ptr<Key_derivation_function> kdf_function;
 
   if (kdf_name == "hkdf") {
@@ -81,7 +85,7 @@ Key_hkdf_function::Key_hkdf_function(std::vector<std::string> *kdf_options) {
   1 error
 */
 int Key_hkdf_function::validate_options() {
-  int nkdf_options = kdf_options_->size();
+  int const nkdf_options = kdf_options_->size();
   if (nkdf_options > 1) {
     salt_ = (*kdf_options_)[1];
   }
@@ -108,7 +112,7 @@ int Key_hkdf_function::derive_key(const unsigned char *key,
   if (EVP_PKEY_derive_init(pctx) <= 0) {
     EVP_PKEY_CTX_free(pctx);
   }
-  if (EVP_PKEY_CTX_set_hkdf_md(pctx, EVP_sha512()) <= 0) {
+  if (EVP_PKEY_CTX_set_hkdf_md(pctx, my_EVP_sha512()) <= 0) {
     EVP_PKEY_CTX_free(pctx);
     return 1;
   }
@@ -158,14 +162,14 @@ Key_pbkdf2_hmac_function::Key_pbkdf2_hmac_function(
   1 error
 */
 int Key_pbkdf2_hmac_function::validate_options() {
-  int nkdf_options = kdf_options_->size();
+  int const nkdf_options = kdf_options_->size();
   iterations_ = {min_kdf_iterations_size};
 
   if (nkdf_options > 1) {
     salt_ = (*kdf_options_)[1];
   }
   if (nkdf_options > 2) {
-    std::string sIterations = (*kdf_options_)[2];
+    std::string const sIterations = (*kdf_options_)[2];
     iterations_ = atoi(sIterations.c_str());
   }
   if (iterations_ < min_kdf_iterations_size ||
@@ -188,6 +192,6 @@ int Key_pbkdf2_hmac_function::derive_key(const unsigned char *key,
   int res{0};
   res = PKCS5_PBKDF2_HMAC((const char *)key, key_length,
                           (const unsigned char *)salt_.c_str(), salt_.length(),
-                          iterations_, EVP_sha512(), key_size, rkey);
+                          iterations_, my_EVP_sha512(), key_size, rkey);
   return res ? 0 : 1;
 }

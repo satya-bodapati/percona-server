@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1997, 2023, Oracle and/or its affiliates.
+Copyright (c) 1997, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -43,7 +44,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 /** Default value for maximum on-disk size of change buffer in terms
 of percentage of the buffer pool. */
-constexpr uint32_t CHANGE_BUFFER_DEFAULT_SIZE = 25;
+constexpr uint32_t CHANGE_BUFFER_DEFAULT_SIZE = 5;
 
 #ifndef UNIV_HOTBACKUP
 /* Possible operations buffered in the insert/whatever buffer. See
@@ -208,7 +209,7 @@ static inline bool ibuf_bitmap_page(const page_id_t &page_id,
                                     const page_size_t &page_size);
 
 /** Checks if a page is a level 2 or 3 page in the ibuf hierarchy of pages.
-Must not be called when recv_no_ibuf_operations==true.
+Must not be called when recv_recovery_is_on().
 @param[in]      page_id         page id
 @param[in]      page_size       page size
 @param[in]      x_latch         false if relaxed check (avoid latching the
@@ -224,7 +225,7 @@ in which case a new transaction is created.
                                  mtr_t *mtr) MY_ATTRIBUTE((warn_unused_result));
 
 /** Checks if a page is a level 2 or 3 page in the ibuf hierarchy of pages.
-Must not be called when recv_no_ibuf_operations==true.
+Must not be called when recv_recovery_is_on().
 @param[in]      page_id         Tablespace/page identifier
 @param[in]      page_size       Page size
 @param[in]  location Location where requested
@@ -296,8 +297,8 @@ ulint ibuf_merge_space(space_id_t space); /*!< in: space id */
 @param[in] block Block or nullptr.
 @param[in] mtr MTR or nullptr.
 @return end of log record or NULL */
-byte *ibuf_parse_bitmap_init(byte *ptr, byte *end_ptr, buf_block_t *block,
-                             mtr_t *mtr);
+const byte *ibuf_parse_bitmap_init(const byte *ptr, const byte *end_ptr,
+                                   buf_block_t *block, mtr_t *mtr);
 #ifndef UNIV_HOTBACKUP
 #ifdef UNIV_IBUF_COUNT_DEBUG
 

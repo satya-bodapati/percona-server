@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,7 +25,7 @@
 
 #include "storage/ndb/plugin/ndb_record_layout.h"
 
-#include <assert.h>
+#include <cassert>
 #include <cstdint>
 #include "NdbApi.hpp"
 #include "my_byteorder.h"
@@ -107,7 +108,8 @@ void Ndb_record_layout::setValue(int idx, unsigned short value,
   *(reinterpret_cast<unsigned short *>(data)) = value;
 }
 
-void Ndb_record_layout::setValue(int idx, std::string value, char *data) const {
+void Ndb_record_layout::setValue(int idx, const std::string &value,
+                                 char *data) const {
   assert(idx < (int)m_columns);
   setNotNull(idx, data);
   ndb_pack_varchar(record_specs[idx].column, record_specs[idx].offset,
@@ -126,7 +128,7 @@ void Ndb_record_layout::setValue(int idx, unsigned int *value,
   }
 }
 
-void Ndb_record_layout::packValue(int idx, std::string value,
+void Ndb_record_layout::packValue(int idx, const std::string &value,
                                   char *data) const {
   ndb_pack_varchar(record_specs[idx].column, 0, value.c_str(), value.length(),
                    data);

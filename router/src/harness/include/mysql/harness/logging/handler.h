@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,8 +30,8 @@
 #include "mysql/harness/logging/logging.h"
 
 #include <fstream>
-#include <iostream>
 #include <mutex>
+#include <ostream>
 #include <string>
 
 namespace mysql_harness {
@@ -213,6 +214,40 @@ class HARNESS_EXPORT FileHandler : public StreamHandler {
 
   const Path file_path_;
   std::ofstream fstream_;
+};
+
+/**
+ * Acts as an actual represenation of external handler attached to
+ * ExternalHandlerProxy to handle logging.
+ */
+class HARNESS_EXPORT ExternalHandler {
+ public:
+  virtual ~ExternalHandler() = default;
+  virtual void do_log(
+      const mysql_harness::logging::Record &record) noexcept = 0;
+};
+
+/**
+ * Acts as a placeholder for a handler that can be attached later (does not log
+ * until this is done).
+ */
+class HARNESS_EXPORT ExternalHandlerProxy : public Handler {
+ public:
+  using HandlerPtr = std::shared_ptr<ExternalHandler>;
+
+ public:
+  ExternalHandlerProxy(bool format_messages, LogLevel level,
+                       LogTimestampPrecision timestamp_precision)
+      : Handler(format_messages, level, timestamp_precision) {}
+  void reopen([[maybe_unused]] const std::string dst = "") override {}
+  void attach_handler(HandlerPtr handler) { handler_ = handler; }
+
+ private:
+  void do_log(const Record &record) override {
+    if (handler_) handler_->do_log(record);
+  }
+
+  HandlerPtr handler_;
 };
 
 }  // namespace logging

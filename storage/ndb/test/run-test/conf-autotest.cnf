@@ -1,15 +1,16 @@
-# Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -40,7 +41,7 @@ protocol=tcp
 [cluster_config.2ndbd]
 ndb_mgmd = CHOOSE_host1
 ndbd = CHOOSE_host2,CHOOSE_host3
-ndbapi= CHOOSE_host1,,
+ndbapi= CHOOSE_host1,,,,
 
 NoOfReplicas = 2
 DataMemory = 400M
@@ -71,7 +72,7 @@ TimeBetweenWatchDogCheckInitial=60000
 [cluster_config.2node]
 ndb_mgmd = CHOOSE_host1
 ndbd = CHOOSE_host2,CHOOSE_host3
-ndbapi= CHOOSE_host1,,
+ndbapi= CHOOSE_host1,,,,
 
 NoOfReplicas = 2
 DataMemory = 400M
@@ -104,7 +105,7 @@ TimeBetweenWatchDogCheckInitial=60000
 [cluster_config.2node8thr]
 ndb_mgmd = CHOOSE_host1
 ndbd = CHOOSE_host2,CHOOSE_host3
-ndbapi= CHOOSE_host1,,
+ndbapi= CHOOSE_host1,,,,
 
 NoOfReplicas = 2
 IndexMemory = 100M
@@ -135,7 +136,7 @@ TransactionDeadlockDetectionTimeout=2500
 [cluster_config.2node10thr]
 ndb_mgmd = CHOOSE_host1
 ndbd = CHOOSE_host2,CHOOSE_host3
-ndbapi= CHOOSE_host1,,
+ndbapi= CHOOSE_host1,,,,
 
 NoOfReplicas = 2
 DataMemory = 400M
@@ -167,7 +168,7 @@ TransactionDeadlockDetectionTimeout=2500
 [cluster_config.4node]
 ndb_mgmd = CHOOSE_host1
 ndbd = CHOOSE_host2,CHOOSE_host3,CHOOSE_host4,CHOOSE_host5
-ndbapi= CHOOSE_host1,,
+ndbapi= CHOOSE_host1,,,,
 
 NoOfReplicas = 2
 IndexMemory = 100M
@@ -228,7 +229,7 @@ InitialTablespace = datafile01.dat:256M;datafile02.dat:256M
 [cluster_config.3node3rpl]
 ndb_mgmd = CHOOSE_host1
 ndbd = CHOOSE_host2,CHOOSE_host3,CHOOSE_host1
-ndbapi= CHOOSE_host1,,
+ndbapi= CHOOSE_host1,,,,
 
 NoOfReplicas = 3
 IndexMemory = 100M
@@ -292,7 +293,7 @@ TransactionDeadlockDetectionTimeout=2500
 [cluster_config.4node4rpl]
 ndb_mgmd = CHOOSE_host1
 ndbd = CHOOSE_host2,CHOOSE_host3,CHOOSE_host4,CHOOSE_host5
-ndbapi= CHOOSE_host1,,
+ndbapi= CHOOSE_host1,,,,
 
 NoOfReplicas = 4
 IndexMemory = 100M
@@ -327,7 +328,7 @@ TransactionDeadlockDetectionTimeout=2500
 [cluster_config.2node2mgm]
 ndb_mgmd = CHOOSE_host1,CHOOSE_host6
 ndbd = CHOOSE_host2,CHOOSE_host3
-ndbapi= CHOOSE_host1,,
+ndbapi= CHOOSE_host1,,,,
 
 NoOfReplicas = 2
 IndexMemory = 50M
@@ -348,7 +349,7 @@ TransactionDeadlockDetectionTimeout=2500
 [cluster_config.2node8thr2mgm]
 ndb_mgmd = CHOOSE_host1,CHOOSE_host6
 ndbd = CHOOSE_host2,CHOOSE_host3
-ndbapi= CHOOSE_host1,,
+ndbapi= CHOOSE_host1,,,,
 
 NoOfReplicas = 2
 IndexMemory = 50M
@@ -370,7 +371,7 @@ TransactionDeadlockDetectionTimeout=2500
 [cluster_config.4node2mgm]
 ndb_mgmd = CHOOSE_host1,CHOOSE_host8
 ndbd = CHOOSE_host2,CHOOSE_host3,CHOOSE_host4,CHOOSE_host5
-ndbapi= CHOOSE_host1,,
+ndbapi= CHOOSE_host1,,,,
 
 NoOfReplicas = 2
 IndexMemory = 50M

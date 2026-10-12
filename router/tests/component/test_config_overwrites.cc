@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,18 +26,31 @@
 #include <chrono>
 
 #include <gmock/gmock.h>
+#include <gtest/gtest.h>
 
 #include "config_builder.h"
+#include "mock_server_testutils.h"
 #include "mysql/harness/string_utils.h"  // split_string
 #include "router_component_test.h"
 #include "router_component_testutils.h"
+#include "stdx_expected_no_error.h"
 #include "tcp_port_pool.h"
 
 using namespace std::chrono_literals;
 using namespace std::string_literals;
 using testing::StartsWith;
 
+namespace mysqlrouter {
+std::ostream &operator<<(std::ostream &os, const MysqlError &e) {
+  return os << e.sql_state() << " code: " << e.value() << ": " << e.message();
+}
+}  // namespace mysqlrouter
+
 class RouterConfigOwerwriteTest : public RouterComponentBootstrapTest {
+ public:
+  RouterConfigOwerwriteTest(bool use_new_bootstrap_exe)
+      : RouterComponentBootstrapTest(use_new_bootstrap_exe) {}
+
  protected:
   auto &launch_router(const std::vector<std::string> &params,
                       int expected_exit_code,
@@ -66,23 +80,43 @@ class RouterConfigOwerwriteTest : public RouterComponentBootstrapTest {
   }
 
   TempDirectory conf_dir{"conf"};
-  const std::string simple_trace_file{get_data_dir().join("my_port.js").str()};
+};
+
+class RouterConfigOwerwriteTestOldExe : public RouterConfigOwerwriteTest {
+ public:
+  RouterConfigOwerwriteTestOldExe() : RouterConfigOwerwriteTest(false) {}
+};
+
+struct LevelOkParameter {
+  std::string override_param;
+  bool use_new_executable;
 };
 
 class BootstrapDebugLevelOkTest
     : public RouterConfigOwerwriteTest,
-      public ::testing::WithParamInterface<std::string> {};
+      public ::testing::WithParamInterface<LevelOkParameter> {
+ public:
+  BootstrapDebugLevelOkTest()
+      : RouterConfigOwerwriteTest(GetParam().use_new_executable) {}
+};
 
 TEST_P(BootstrapDebugLevelOkTest, BootstrapDebugLevelOk) {
-  const auto overwrite_param = GetParam();
+  const auto overwrite_param = GetParam().override_param;
   const std::string tracefile = "bootstrap_gr.js";
   TempDirectory bootstrap_dir;
   const std::string debug_level_output =
       "SELECT * FROM mysql_innodb_cluster_metadata.schema_version";
 
   const uint16_t server_port = port_pool_.get_next_available();
-  const std::string json_stmts = get_data_dir().join(tracefile).str();
-  launch_mysql_server_mock(json_stmts, server_port, EXIT_SUCCESS, false);
+  const uint16_t http_port = port_pool_.get_next_available();
+
+  mock_server_spawner().spawn(mock_server_cmdline(tracefile)
+                                  .port(server_port)
+                                  .http_port(http_port)
+                                  .args());
+
+  set_mock_metadata(http_port, "00000000-0000-0000-0000-0000000000g1",
+                    classic_ports_to_gr_nodes({server_port}), 0, {server_port});
 
   // launch the router in bootstrap mode
   std::vector<std::string> cmdline = {
@@ -101,23 +135,41 @@ TEST_P(BootstrapDebugLevelOkTest, BootstrapDebugLevelOk) {
       get_file_output("mysqlrouter.conf", bootstrap_dir.name());
   const std::vector<std::string> lines =
       mysql_harness::split_string(conf_content, '\n');
-  EXPECT_THAT(lines, ::testing::Contains("level=INFO"));
+  EXPECT_THAT(lines, ::testing::Contains("level=info"));
   EXPECT_THAT(lines, ::testing::Not(::testing::Contains(
-                         ::testing::AnyOf("level=debug", "level=DEBUG"))));
+                         ::testing::AnyOf("level=debug", "level=debug"))));
 }
 
-INSTANTIATE_TEST_SUITE_P(BootstrapDebugLevelOk, BootstrapDebugLevelOkTest,
-                         ::testing::Values("--logger.level=debug",
-                                           "--logger.level=DEBUG"));
+INSTANTIATE_TEST_SUITE_P(
+    BootstrapDebugLevelOk, BootstrapDebugLevelOkTest,
+    ::testing::Values(LevelOkParameter{"--logger.level=debug", false},
+                      LevelOkParameter{"--logger.level=DEBUG", false}));
 
 struct OverwriteErrorTestParam {
+  OverwriteErrorTestParam() {}
+  OverwriteErrorTestParam(const std::vector<std::string> &p1,
+                          const std::string &p2)
+      : overwrite_params{p1}, expected_error_msg{p2} {}
+
   std::vector<std::string> overwrite_params;
   std::string expected_error_msg;
 };
 
+struct OverwriteErrorExeTestParam : public OverwriteErrorTestParam {
+  OverwriteErrorExeTestParam() {}
+  OverwriteErrorExeTestParam(const std::vector<std::string> &p1,
+                             const std::string &p2, bool p3)
+      : OverwriteErrorTestParam(p1, p2), use_new_executable{p3} {}
+  bool use_new_executable;
+};
+
 class BootstrapOverwriteErrorTest
     : public RouterConfigOwerwriteTest,
-      public ::testing::WithParamInterface<OverwriteErrorTestParam> {};
+      public ::testing::WithParamInterface<OverwriteErrorExeTestParam> {
+ public:
+  BootstrapOverwriteErrorTest()
+      : RouterConfigOwerwriteTest(GetParam().use_new_executable) {}
+};
 
 TEST_P(BootstrapOverwriteErrorTest, BootstrapOverwriteError) {
   const auto param = GetParam();
@@ -125,8 +177,8 @@ TEST_P(BootstrapOverwriteErrorTest, BootstrapOverwriteError) {
   TempDirectory bootstrap_dir;
 
   const uint16_t server_port = port_pool_.get_next_available();
-  const std::string json_stmts = get_data_dir().join(tracefile).str();
-  launch_mysql_server_mock(json_stmts, server_port, EXIT_SUCCESS, false);
+  mock_server_spawner().spawn(
+      mock_server_cmdline(tracefile).port(server_port).args());
 
   // launch the router in bootstrap mode
   std::vector<std::string> cmdline = {
@@ -145,28 +197,34 @@ TEST_P(BootstrapOverwriteErrorTest, BootstrapOverwriteError) {
 INSTANTIATE_TEST_SUITE_P(
     BootstrapOverwriteError, BootstrapOverwriteErrorTest,
     ::testing::Values(
-        OverwriteErrorTestParam{
+        OverwriteErrorExeTestParam{
             {"--logger.level", "DEBUG2"},
-            "Configuration error: Log level 'debug2' is not valid."},
-        OverwriteErrorTestParam{
+            "Configuration error: Log level 'debug2' is not valid.",
+            false},
+        OverwriteErrorExeTestParam{
             {"--logger.sinks", "filelog"},
             "Invalid argument '--logger.sinks'. Only "
             "'--logger.level' configuration option can be set with a command "
-            "line parameter when bootstrapping."},
-        OverwriteErrorTestParam{
+            "line parameter when bootstrapping.",
+            false},
+        OverwriteErrorExeTestParam{
             {"--DEFAULT.read_timeout", "30"},
             "Invalid argument '--DEFAULT.read_timeout'. Only "
             "'--logger.level' configuration option can be set with a command "
-            "line parameter when bootstrapping."},
-        OverwriteErrorTestParam{
+            "line parameter when bootstrapping.",
+            false},
+        OverwriteErrorExeTestParam{
             {"--abc.read_timeout", "30"},
             "Invalid argument '--abc.read_timeout'. Only "
             "'--logger.level' configuration option can be set with a command "
-            "line parameter when bootstrapping."}));
+            "line parameter when bootstrapping.",
+            false}));
 
 class OverwriteLogLevelTest
-    : public RouterConfigOwerwriteTest,
-      public ::testing::WithParamInterface<std::string> {};
+    : public RouterConfigOwerwriteTestOldExe,
+      public ::testing::WithParamInterface<std::string> {
+ public:
+};
 
 /* @test Verify that using --logger.level on top of --DEFAULT.logging_folder
  * overwrite works as expected */
@@ -210,7 +268,7 @@ INSTANTIATE_TEST_SUITE_P(
                       "--Logger.Level=DEBUG", "--LOGGER.LEVEL=DEBUG"));
 
 /* @test Verify that using --DEBUG.logging_folder overwrite works as expected */
-TEST_F(RouterConfigOwerwriteTest, OverwriteLoggingFolder) {
+TEST_F(RouterConfigOwerwriteTestOldExe, OverwriteLoggingFolder) {
   const std::string keepalive_section = get_keepalive_section();
 
   // create config file without logging_folder configured
@@ -249,7 +307,7 @@ TEST_F(RouterConfigOwerwriteTest, OverwriteLoggingFolder) {
 
 /* @test Sunny-day scenario, we check that overwriting an option in the
  * configuration file with a command line parameter works */
-TEST_F(RouterConfigOwerwriteTest, OverwriteRoutingPort) {
+TEST_F(RouterConfigOwerwriteTestOldExe, OverwriteRoutingPort) {
   const auto router_port = port_pool_.get_next_available();
   const auto server_port = port_pool_.get_next_available();
   const auto router_port_overwrite = port_pool_.get_next_available();
@@ -262,17 +320,24 @@ TEST_F(RouterConfigOwerwriteTest, OverwriteRoutingPort) {
   const std::string overwrite_param =
       "--routing:A.bind_port=" + std::to_string(router_port_overwrite);
 
-  launch_mysql_server_mock(simple_trace_file, server_port, EXIT_SUCCESS);
+  mock_server_spawner().spawn(
+      mock_server_cmdline("my_port.js").port(server_port).args());
 
   launch_router({"-c", conf_file, overwrite_param}, EXIT_SUCCESS, 5s);
 
-  make_new_connection_ok(router_port_overwrite, server_port);
+  {
+    auto conn_res = make_new_connection(router_port_overwrite);
+    ASSERT_NO_ERROR(conn_res);
+    auto port_res = select_port(conn_res->get());
+    ASSERT_NO_ERROR(port_res);
+    EXPECT_EQ(*port_res, server_port);
+  }
   verify_new_connection_fails(router_port);
 }
 
 /* @test Check that overwriting an option that does not exist in the
  * configuration file adds this option to the configuration */
-TEST_F(RouterConfigOwerwriteTest, OverwriteOptionMissingInTheConfig) {
+TEST_F(RouterConfigOwerwriteTestOldExe, OverwriteOptionMissingInTheConfig) {
   const auto router_port = port_pool_.get_next_available();
   const auto server_port = port_pool_.get_next_available();
 
@@ -283,19 +348,20 @@ TEST_F(RouterConfigOwerwriteTest, OverwriteOptionMissingInTheConfig) {
 
   const std::string overwrite_param = "--routing:A.max_connect_errors=1";
 
-  launch_mysql_server_mock(simple_trace_file, server_port, EXIT_SUCCESS);
+  mock_server_spawner().spawn(
+      mock_server_cmdline("my_port.js").port(server_port).args());
 
   launch_router({"-c", conf_file, overwrite_param}, EXIT_SUCCESS, 5s);
 
-  make_bad_connection(router_port);
+  EXPECT_NO_THROW(make_bad_connection(router_port));
 
   // since we set the max_connect_errors threshold to 1 and made one connection
   // error already the next connection attempt should fail
-  verify_new_connection_fails(router_port);
+  EXPECT_NO_FATAL_FAILURE(verify_new_connection_fails(router_port));
 }
 
 class OverwriteIgnoreUnknownOptionTest
-    : public RouterConfigOwerwriteTest,
+    : public RouterConfigOwerwriteTestOldExe,
       public ::testing::WithParamInterface<std::string> {};
 
 /* @test Non-existing option of a valid section is just ignored the same way it
@@ -314,13 +380,20 @@ TEST_P(OverwriteIgnoreUnknownOptionTest, OverwriteIgnoreUnknownOption) {
 
   const std::string overwrite_param = GetParam();
 
-  launch_mysql_server_mock(simple_trace_file, server_port, EXIT_SUCCESS);
+  mock_server_spawner().spawn(
+      mock_server_cmdline("my_port.js").port(server_port).args());
 
   launch_router({"-c", conf_file, overwrite_param,
                  "--DEFAULT.unknown_config_option", "warning"},
                 EXIT_SUCCESS, 5s);
 
-  make_new_connection_ok(router_port1, server_port);
+  {
+    auto conn_res = make_new_connection(router_port1);
+    ASSERT_NO_ERROR(conn_res);
+    auto port_res = select_port(conn_res->get());
+    ASSERT_NO_ERROR(port_res);
+    EXPECT_EQ(*port_res, server_port);
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -329,7 +402,7 @@ INSTANTIATE_TEST_SUITE_P(
                       "--routing:main01.help=please", "--DEFAULT.help="));
 
 class OverwriteErrorTest
-    : public RouterConfigOwerwriteTest,
+    : public RouterConfigOwerwriteTestOldExe,
       public ::testing::WithParamInterface<OverwriteErrorTestParam> {};
 
 /* @test Check that overwritten option is validated properly if it is used and
@@ -408,7 +481,7 @@ INSTANTIATE_TEST_SUITE_P(
                                 "Error: invalid argument '--a::::a=b"}));
 
 class UnknownSectionNameTest
-    : public RouterConfigOwerwriteTest,
+    : public RouterConfigOwerwriteTestOldExe,
       public ::testing::WithParamInterface<OverwriteErrorTestParam> {};
 
 /* @test Using invalid(unknown) section for parameter overwrite should
@@ -448,25 +521,26 @@ INSTANTIATE_TEST_SUITE_P(
                                 "Error: Invalid argument '--DEFAULT:test'. Key "
                                 "not allowed on DEFAULT section"}));
 
-class MetadataConfigTest : public RouterConfigOwerwriteTest,
+class MetadataConfigTest : public RouterConfigOwerwriteTestOldExe,
                            public ::testing::WithParamInterface<std::string> {};
 
 TEST_P(MetadataConfigTest, MetadataConfig) {
   auto md_server_port = port_pool_.get_next_available();
   auto md_server_http_port = port_pool_.get_next_available();
   auto router_port = port_pool_.get_next_available();
-  const std::string json_metadata =
-      get_data_dir().join("metadata_1_node_repeat_v2_gr.js").str();
 
-  /*auto &metadata_server = */ launch_mysql_server_mock(
-      json_metadata, md_server_port, EXIT_SUCCESS, false, md_server_http_port);
+  /*auto &metadata_server = */ mock_server_spawner().spawn(
+      mock_server_cmdline("metadata_1_node_repeat_v2_gr.js")
+          .port(md_server_port)
+          .http_port(md_server_http_port)
+          .args());
 
   const std::string metadata_cache_section =
       mysql_harness::ConfigBuilder::build_section(
           "metadata_cache:test", {
                                      {"cluster_type", "gr"},
-                                     {"router_id", "1"},
                                      {"metadata_cluster", "test"},
+                                     {"router_id", "1"},
                                  });
 
   const std::string routing_section =

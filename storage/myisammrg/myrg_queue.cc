@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,21 +21,21 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
-#include <assert.h>
 #include <sys/types.h>
+#include <cassert>
 
 #include "my_inttypes.h"
 #include "storage/myisam/myisamdef.h"
 #include "storage/myisammrg/myrg_def.h"
 
 static int queue_key_cmp(void *keyseg, uchar *a, uchar *b) {
-  MYRG_TABLE *ma = (MYRG_TABLE *)a;
-  MYRG_TABLE *mb = (MYRG_TABLE *)b;
+  auto *ma = (MYRG_TABLE *)a;
+  auto *mb = (MYRG_TABLE *)b;
   MI_INFO *aa = ma->table;
   MI_INFO *bb = mb->table;
   uint not_used[2];
-  int ret = ha_key_cmp((HA_KEYSEG *)keyseg, aa->lastkey, bb->lastkey,
-                       USE_WHOLE_KEY, SEARCH_FIND, not_used);
+  int const ret = ha_key_cmp((HA_KEYSEG *)keyseg, aa->lastkey, bb->lastkey,
+                             USE_WHOLE_KEY, SEARCH_FIND, not_used);
   if (ret < 0) return -1;
   if (ret > 0) return 1;
 
@@ -44,9 +45,9 @@ static int queue_key_cmp(void *keyseg, uchar *a, uchar *b) {
     rowid). This is used by index_merge access method, grep for ROR in
     sql/opt_range.cc for details.
   */
-  return (ma->file_offset < mb->file_offset)
-             ? -1
-             : (ma->file_offset > mb->file_offset) ? 1 : 0;
+  return (ma->file_offset < mb->file_offset)   ? -1
+         : (ma->file_offset > mb->file_offset) ? 1
+                                               : 0;
 } /* queue_key_cmp */
 
 int _myrg_init_queue(MYRG_INFO *info, int inx,

@@ -34,6 +34,7 @@ call mtr.add_suppression("Failure when cleaning Group Replication server state")
 call mtr.add_suppression("Failure when unregistering the server state observers");
 call mtr.add_suppression("Failure when unregistering the transactions state observers");
 call mtr.add_suppression("Failure when unregistering the binlog state observers");
+call mtr.add_suppression("Failure when unregistering service 'group_replication_flow_control_service'");
 call mtr.add_suppression("Group Replication plugin is not installed");
 call mtr.add_suppression("For the creation of replication channels the server id must be different from 0");
 call mtr.add_suppression("Unable to start Group Replication. Replication applier infrastructure is not initialized since the server was started with server_id=0. Please, restart the server with server_id larger than 0.");
@@ -50,9 +51,9 @@ SET SESSION sql_log_bin= 1;
 --let $restart_parameters=restart:--group_replication_local_address=$_group_replication_local_address --group_replication_group_seeds=$_group_replication_group_seeds --group_replication_group_name=$group_replication_group_name --server_id=0
 --replace_result $_group_replication_local_address GROUP_REPLICATION_LOCAL_ADDRESS $_group_replication_group_seeds GROUP_REPLICATION_GROUP_SEEDS $group_replication_group_name GROUP_REPLICATION_GROUP_NAME
 --source include/restart_mysqld.inc
-# Needed as we are not using rpl_restart_server.inc
+# Needed as we are not using rpl/restart_server.inc
 --let $rpl_server_number= 1
---source include/rpl_reconnect.inc
+--source include/rpl/reconnect.inc
 
 
 --echo
@@ -91,8 +92,8 @@ START GROUP_REPLICATION;
 --let $restart_parameters=restart:--group_replication_local_address=$_group_replication_local_address --group_replication_group_seeds=$_group_replication_group_seeds --group_replication_group_name=$group_replication_group_name --server_id=$_server_id
 --replace_result $_group_replication_local_address GROUP_REPLICATION_LOCAL_ADDRESS $_group_replication_group_seeds GROUP_REPLICATION_GROUP_SEEDS $group_replication_group_name GROUP_REPLICATION_GROUP_NAME
 --source include/restart_mysqld.inc
-# Needed as we are not using rpl_restart_server.inc
+# Needed as we are not using rpl/restart_server.inc
 --let $rpl_server_number= 1
---source include/rpl_reconnect.inc
+--source include/rpl/reconnect.inc
 
 --source include/group_replication_end.inc

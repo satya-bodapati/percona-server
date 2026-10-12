@@ -1,18 +1,19 @@
 #ifndef ITEM_SUM_INCLUDED
 #define ITEM_SUM_INCLUDED
 
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -450,7 +451,8 @@ class Item_sum : public Item_func {
     SUM_BIT_FUNC,         // BIT_AND, BIT_OR and BIT_XOR
     UDF_SUM_FUNC,         // user defined functions
     GROUP_CONCAT_FUNC,    // GROUP_CONCAT
-    JSON_AGG_FUNC,        // JSON_ARRAYAGG and JSON_OBJECTAGG
+    JSON_OBJECTAGG_FUNC,  // JSON_OBJECTAGG
+    JSON_ARRAYAGG_FUNC,   // JSON_ARRAYAGG
     ROW_NUMBER_FUNC,      // Window functions
     RANK_FUNC,
     DENSE_RANK_FUNC,
@@ -536,6 +538,8 @@ class Item_sum : public Item_func {
   /// Copy constructor, need to perform subqueries with temporary tables
   Item_sum(THD *thd, const Item_sum *item);
 
+  ~Item_sum() override { assert(aggr == nullptr); }
+
   bool do_itemize(Parse_context *pc, Item **res) override;
   Type type() const override { return SUM_FUNC_ITEM; }
   virtual enum Sumfunctype sum_func() const = 0;
@@ -596,7 +600,9 @@ class Item_sum : public Item_func {
   }
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
-  bool eq(const Item *item, bool binary_cmp) const override;
+  uint64 hash() override;
+  bool eq(const Item *item) const override;
+  bool eq_specific(const Item *item) const override;
   /**
     Mark an aggregate as having no rows.
 
@@ -644,6 +650,7 @@ class Item_sum : public Item_func {
   bool has_aggregate_ref_in_group_by(uchar *arg) override;
   bool init_sum_func_check(THD *thd);
   bool check_sum_func(THD *thd, Item **ref);
+  bool check_function_as_value_generator(uchar *) override;
 
   Item *set_arg(THD *thd, uint i, Item *new_val) override;
   /// @todo delete this when we no longer support temporary transformations
@@ -724,7 +731,7 @@ class Item_sum : public Item_func {
     return false;
   }
 
-  void split_sum_func(THD *thd, Ref_item_array ref_item_array,
+  bool split_sum_func(THD *thd, Ref_item_array ref_item_array,
                       mem_root_deque<Item *> *fields) override;
 
   void cleanup() override;
@@ -971,11 +978,14 @@ class Item_sum_num : public Item_sum {
   }
   String *val_str(String *str) override;
   my_decimal *val_decimal(my_decimal *) override;
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_numeric(ltime, fuzzydate); /* Decimal or real */
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_numeric(date, flags); /* Decimal or real */
   }
-  bool get_time(MYSQL_TIME *ltime) override {
-    return get_time_from_numeric(ltime); /* Decimal or real */
+  bool val_time(Time_val *time) override {
+    return get_time_from_numeric(time); /* Decimal or real */
+  }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_numeric(dt, flags);
   }
   void reset_field() override;
 };
@@ -1006,10 +1016,13 @@ class Item_sum_int : public Item_sum_num {
   }
   String *val_str(String *str) override;
   my_decimal *val_decimal(my_decimal *) override;
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_int(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_int(date, flags);
   }
-  bool get_time(MYSQL_TIME *ltime) override { return get_time_from_int(ltime); }
+  bool val_time(Time_val *time) override { return get_time_from_int(time); }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_int(dt, flags);
+  }
   enum Item_result result_type() const override { return INT_RESULT; }
 };
 
@@ -1041,6 +1054,12 @@ class Item_sum_sum : public Item_sum_num {
         m_frame_null_count(0) {
     set_distinct(distinct);
   }
+
+  Item_sum_sum(Item *item_par)
+      : Item_sum_num(item_par),
+        hybrid_type(INVALID_RESULT),
+        m_count(0),
+        m_frame_null_count(0) {}
 
   Item_sum_sum(THD *thd, Item_sum_sum *item);
   enum Sumfunctype sum_func() const override {
@@ -1075,6 +1094,9 @@ class Item_sum_count : public Item_sum_int {
   Item_sum_count(const POS &pos, Item *item_par, PT_window *w)
       : Item_sum_int(pos, item_par, w), count(0) {}
   Item_sum_count(Item_int *number) : Item_sum_int(number), count(0) {}
+  Item_sum_count(Item *item, bool distinct) : Item_sum_int(item), count(0) {
+    set_distinct(distinct);
+  }
   /**
     Constructs an instance for COUNT(DISTINCT)
 
@@ -1084,7 +1106,6 @@ class Item_sum_count : public Item_sum_int {
 
     This constructor is called by the parser only for COUNT (DISTINCT).
   */
-
   Item_sum_count(const POS &pos, PT_item_list *list, PT_window *w)
       : Item_sum_int(pos, list, w), count(0) {
     set_distinct(true);
@@ -1118,98 +1139,100 @@ class Item_sum_avg;
 class Item_sum_bit;
 
 /**
-  This is used in connection which a parent Item_sum:
-  - which can produce different result types (is "hybrid")
-  - which stores function's value into a temporary table's column (one
-  row per group).
+  This is used in connection with a parent aggregate Item:
+  - which stores function's value into a temporary table's column (one row
+    per group).
+  - except when the output is a local variable in a stored procedure, in which
+    case the variable is used as the target.
   - which stores in the column some internal piece of information which should
-  not be returned to the user, so special implementations are needed.
+    not be returned to the user, so special implementations are needed.
+  The classes that inherit from Item_aggregate_field are created during
+  optimization and resolved upon construction, thus the fix_fields() function
+  is not needed and thus not implemented. The resolve_type() needs a default
+  implementation since it is a virtual function.
 */
-class Item_sum_hybrid_field : public Item_result_field {
+class Item_aggregate_field : public Item_result_field {
  protected:
   /// The tmp table's column containing the value of the set function.
-  Field *field;
+  Field *m_field{nullptr};
   /// Stores the Item's result type.
-  Item_result hybrid_type;
+  Item_result m_result_type{INVALID_RESULT};
 
  public:
-  enum Item_result result_type() const override { return hybrid_type; }
+  enum Item_result result_type() const override { return m_result_type; }
+  // resolve_type is not used for these classes, but is needed bc it is virtual
+  bool resolve_type(THD *) override { return false; }
   bool mark_field_in_map(uchar *arg) override {
     /*
       Filesort (find_all_keys) over a temporary table collects the columns it
       needs.
     */
-    return Item::mark_field_in_map(pointer_cast<Mark_field *>(arg), field);
+    return Item::mark_field_in_map(pointer_cast<Mark_field *>(arg), m_field);
   }
   bool check_function_as_value_generator(uchar *args) override {
     Check_function_as_value_generator_parameters *func_arg =
         pointer_cast<Check_function_as_value_generator_parameters *>(args);
-    func_arg->banned_function_name = func_name();
+    func_arg->err_code = func_arg->get_unnamed_function_error_code();
     return true;
-  }
-  void cleanup() override {
-    field = nullptr;
-    Item_result_field::cleanup();
   }
 };
 
 /**
-  Common abstract class for:
-    Item_avg_field
-    Item_variance_field
+  Common abstract class for aggregate field classes that return numeric values:
+    Item_aggr_avg_field
+    Item_aggr_variance_field
 */
-class Item_sum_num_field : public Item_sum_hybrid_field {
+class Item_aggr_numeric_field : public Item_aggregate_field {
  public:
   longlong val_int() override {
     /* can't be fix_fields()ed */
     return llrint_with_overflow_check(val_real());
   }
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_numeric(ltime, fuzzydate); /* Decimal or real */
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_numeric(date, flags); /* Decimal or real */
   }
-  bool get_time(MYSQL_TIME *ltime) override {
-    return get_time_from_numeric(ltime); /* Decimal or real */
+  bool val_time(Time_val *time) override {
+    return get_time_from_numeric(time); /* Decimal or real */
+  }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_numeric(dt, flags);
   }
   bool is_null() override { return update_null_value() || null_value; }
 };
 
-class Item_avg_field : public Item_sum_num_field {
+class Item_aggr_avg_field : public Item_aggr_numeric_field {
  public:
-  uint f_precision, f_scale, dec_bin_size;
-  uint prec_increment;
-  Item_avg_field(Item_result res_type, Item_sum_avg *item);
-  enum Type type() const override { return FIELD_AVG_ITEM; }
+  Item_aggr_avg_field(Item_sum_avg *item);
+  enum Type type() const override { return AGGR_FIELD_ITEM; }
   double val_real() override;
   my_decimal *val_decimal(my_decimal *) override;
   String *val_str(String *) override;
-  bool resolve_type(THD *) override { return false; }
-  const char *func_name() const override {
-    assert(0);
-    return "avg_field";
-  }
+
+ private:
+  uint m_precision;
+  uint m_scale;
+  uint m_dec_bin_size;
+  uint m_prec_increment;
 };
 
-/// This is used in connection with an Item_sum_bit, @see Item_sum_hybrid_field
-class Item_sum_bit_field : public Item_sum_hybrid_field {
- protected:
-  ulonglong reset_bits;
-
+/// This is used in connection with an Item_sum_bit, @see Item_aggregate_field
+class Item_aggr_bit_field : public Item_aggregate_field {
  public:
-  Item_sum_bit_field(Item_result res_type, Item_sum_bit *item,
-                     ulonglong reset_bits);
+  Item_aggr_bit_field(Item_sum_bit *item, ulonglong reset_bits);
   longlong val_int() override;
   double val_real() override;
   my_decimal *val_decimal(my_decimal *) override;
   String *val_str(String *) override;
-  bool resolve_type(THD *) override { return false; }
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override;
-  bool get_time(MYSQL_TIME *ltime) override;
-  enum Type type() const override { return FIELD_BIT_ITEM; }
-  const char *func_name() const override {
-    assert(0);
-    return "sum_bit_field";
-  }
+  bool val_date(Date_val *date, my_time_flags_t flags) override;
+  bool val_time(Time_val *time) override;
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override;
+  enum Type type() const override { return AGGR_FIELD_ITEM; }
+
+ private:
+  ulonglong m_reset_bits;
 };
+
+enum class Json_constructor_null_clause { NULL_ON_NULL, ABSENT_ON_NULL };
 
 /// Common abstraction for Item_sum_json_array and Item_sum_json_object
 class Item_sum_json : public Item_sum {
@@ -1222,34 +1245,47 @@ class Item_sum_json : public Item_sum {
   String m_conversion_buffer;
   /// Wrapper around the container (object/array) which accumulates the value.
   unique_ptr_destroy_only<Json_wrapper> m_wrapper;
+  /// JSON constructor null clause
+  Json_constructor_null_clause m_json_constructor_null_clause{
+      Json_constructor_null_clause::NULL_ON_NULL};
 
   /**
     Construct an Item_sum_json instance.
 
     @param wrapper a wrapper around the Json_array or Json_object that contains
                    the aggregated result
+    @param json_constructor_null_clause Specifies the behavior for
+                                        handling NULL values in JSON
+                                        constructors
+                                        i.e, NULL_ON_NULL and ABSENT_ON_NULL
     @param parent_args arguments to forward to Item_sum's constructor
   */
   template <typename... Args>
-  explicit Item_sum_json(unique_ptr_destroy_only<Json_wrapper> wrapper,
-                         Args &&... parent_args);
+  explicit Item_sum_json(
+      unique_ptr_destroy_only<Json_wrapper> wrapper,
+      Json_constructor_null_clause json_constructor_null_clause,
+      Args &&...parent_args);
 
  public:
   ~Item_sum_json() override;
   bool fix_fields(THD *thd, Item **pItem) override;
-  enum Sumfunctype sum_func() const override { return JSON_AGG_FUNC; }
   Item_result result_type() const override { return STRING_RESULT; }
+
+  bool do_itemize(Parse_context *pc, Item **res) override;
 
   double val_real() override;
   longlong val_int() override;
   String *val_str(String *str) override;
   bool val_json(Json_wrapper *wr) override;
   my_decimal *val_decimal(my_decimal *decimal_buffer) override;
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override;
-  bool get_time(MYSQL_TIME *ltime) override;
-
+  bool val_date(Date_val *date, my_time_flags_t flags) override;
+  bool val_time(Time_val *time) override;
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override;
   void reset_field() override;
   void update_field() override;
+
+  void print(const THD *thd, String *str,
+             enum_query_type query_type) const override;
 
   bool check_wf_semantics1(THD *, Query_block *,
                            Window_evaluation_requirements *) override;
@@ -1264,11 +1300,14 @@ class Item_sum_json_array final : public Item_sum_json {
   Item_sum_json_array(THD *thd, Item_sum *item,
                       unique_ptr_destroy_only<Json_wrapper> wrapper,
                       unique_ptr_destroy_only<Json_array> array);
-  Item_sum_json_array(const POS &pos, Item *a, PT_window *w,
+  Item_sum_json_array(const POS &pos, Item *a,
+                      Json_constructor_null_clause json_constructor_null_clause,
+                      PT_window *w,
                       unique_ptr_destroy_only<Json_wrapper> wrapper,
                       unique_ptr_destroy_only<Json_array> array);
   ~Item_sum_json_array() override;
   const char *func_name() const override { return "json_arrayagg"; }
+  enum Sumfunctype sum_func() const override { return JSON_ARRAYAGG_FUNC; }
   void clear() override;
   bool add() override;
   Item *copy_or_same(THD *thd) override;
@@ -1305,6 +1344,7 @@ class Item_sum_json_object final : public Item_sum_json {
                        unique_ptr_destroy_only<Json_object> object);
   ~Item_sum_json_object() override;
   const char *func_name() const override { return "json_objectagg"; }
+  enum Sumfunctype sum_func() const override { return JSON_OBJECTAGG_FUNC; }
   void clear() override;
   bool add() override;
   Item *copy_or_same(THD *thd) override;
@@ -1339,9 +1379,7 @@ class Item_sum_avg final : public Item_sum_sum {
   String *val_str(String *str) override;
   void reset_field() override;
   void update_field() override;
-  Item *result_item(Field *) override {
-    return new Item_avg_field(hybrid_type, this);
-  }
+  Item *result_item(Field *) override { return new Item_aggr_avg_field(this); }
   const char *func_name() const override { return "avg"; }
   Item *copy_or_same(THD *thd) override;
   Field *create_tmp_field(bool group, TABLE *table) override;
@@ -1354,22 +1392,14 @@ class Item_sum_avg final : public Item_sum_sum {
 
 class Item_sum_variance;
 
-class Item_variance_field : public Item_sum_num_field {
- protected:
-  uint sample;
-
+class Item_aggr_variance_field : public Item_aggr_numeric_field {
  public:
-  Item_variance_field(Item_sum_variance *item);
-  enum Type type() const override { return FIELD_VARIANCE_ITEM; }
+  Item_aggr_variance_field(Item_sum_variance *item);
+  enum Type type() const override { return AGGR_FIELD_ITEM; }
   double val_real() override;
   String *val_str(String *str) override { return val_string_from_real(str); }
   my_decimal *val_decimal(my_decimal *dec_buf) override {
     return val_decimal_from_real(dec_buf);
-  }
-  bool resolve_type(THD *) override { return false; }
-  const char *func_name() const override {
-    assert(0);
-    return "variance_field";
   }
   bool check_function_as_value_generator(uchar *args) override {
     Check_function_as_value_generator_parameters *func_arg =
@@ -1377,6 +1407,9 @@ class Item_variance_field : public Item_sum_num_field {
     func_arg->err_code = func_arg->get_unnamed_function_error_code();
     return true;
   }
+
+ private:
+  uint m_sample;
 };
 
 /*
@@ -1473,7 +1506,9 @@ class Item_sum_variance : public Item_sum_num {
   my_decimal *val_decimal(my_decimal *) override;
   void reset_field() override;
   void update_field() override;
-  Item *result_item(Field *) override { return new Item_variance_field(this); }
+  Item *result_item(Field *) override {
+    return new Item_aggr_variance_field(this);
+  }
   void no_rows_in_result() override {}
   const char *func_name() const override {
     return sample ? "var_samp" : "variance";
@@ -1491,17 +1526,13 @@ class Item_sum_variance : public Item_sum_num {
 
 class Item_sum_std;
 
-class Item_std_field final : public Item_variance_field {
+class Item_aggr_std_field final : public Item_aggr_variance_field {
  public:
-  Item_std_field(Item_sum_std *item);
-  enum Type type() const override { return FIELD_STD_ITEM; }
+  Item_aggr_std_field(Item_sum_std *item);
+  enum Type type() const override { return AGGR_FIELD_ITEM; }
   double val_real() override;
   my_decimal *val_decimal(my_decimal *) override;
   enum Item_result result_type() const override { return REAL_RESULT; }
-  const char *func_name() const override {
-    assert(0);
-    return "std_field";
-  }
   bool check_function_as_value_generator(uchar *args) override {
     Check_function_as_value_generator_parameters *func_arg =
         pointer_cast<Check_function_as_value_generator_parameters *>(args);
@@ -1522,7 +1553,7 @@ class Item_sum_std : public Item_sum_variance {
   Item_sum_std(THD *thd, Item_sum_std *item) : Item_sum_variance(thd, item) {}
   enum Sumfunctype sum_func() const override { return STD_FUNC; }
   double val_real() override;
-  Item *result_item(Field *) override { return new Item_std_field(this); }
+  Item *result_item(Field *) override { return new Item_aggr_std_field(this); }
   const char *func_name() const override {
     return sample ? "stddev_samp" : "std";
   }
@@ -1664,15 +1695,15 @@ class Item_sum_hybrid : public Item_sum {
   bool fix_fields(THD *, Item **) override;
   void clear() override;
   void update_after_wf_arguments_changed(THD *thd) override;
-  void split_sum_func(THD *thd, Ref_item_array ref_item_array,
+  bool split_sum_func(THD *thd, Ref_item_array ref_item_array,
                       mem_root_deque<Item *> *fields) override;
   double val_real() override;
   longlong val_int() override;
-  longlong val_time_temporal() override;
   longlong val_date_temporal() override;
   my_decimal *val_decimal(my_decimal *) override;
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override;
-  bool get_time(MYSQL_TIME *ltime) override;
+  bool val_date(Date_val *date, my_time_flags_t flags) override;
+  bool val_time(Time_val *time) override;
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override;
   void reset_field() override;
   String *val_str(String *) override;
   bool val_json(Json_wrapper *wr) override;
@@ -1700,7 +1731,9 @@ class Item_sum_hybrid : public Item_sum {
     result_field, if needed.
   */
   void min_max_update_str_field();
-  void min_max_update_temporal_field();
+  void min_max_update_time_field();
+  void min_max_update_date_field();
+  void min_max_update_datetime_field();
   void min_max_update_json_field();
   void min_max_update_real_field();
   void min_max_update_int_field();
@@ -1833,7 +1866,7 @@ class Item_sum_bit : public Item_sum {
   }
 
   Item *result_item(Field *) override {
-    return new Item_sum_bit_field(hybrid_type, this, reset_bits);
+    return new Item_aggr_bit_field(this, reset_bits);
   }
 
   enum Sumfunctype sum_func() const override { return SUM_BIT_FUNC; }
@@ -1843,8 +1876,9 @@ class Item_sum_bit : public Item_sum {
   double val_real() override;
   String *val_str(String *str) override;
   my_decimal *val_decimal(my_decimal *decimal_value) override;
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override;
-  bool get_time(MYSQL_TIME *ltime) override;
+  bool val_date(Date_val *date, my_time_flags_t flags) override;
+  bool val_time(Time_val *time) override;
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override;
   void reset_field() override;
   void update_field() override;
   bool resolve_type(THD *) override;
@@ -1975,6 +2009,7 @@ class Item_udf_sum : public Item_sum {
   void cleanup() override;
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
+  uint64 hash() override;
 };
 
 class Item_sum_udf_float final : public Item_udf_sum {
@@ -1990,11 +2025,12 @@ class Item_sum_udf_float final : public Item_udf_sum {
   double val_real() override;
   String *val_str(String *str) override;
   my_decimal *val_decimal(my_decimal *) override;
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_real(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_real(date, flags);
   }
-  bool get_time(MYSQL_TIME *ltime) override {
-    return get_time_from_real(ltime);
+  bool val_time(Time_val *time) override { return get_time_from_real(time); }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_real(dt, flags);
   }
   bool resolve_type(THD *) override {
     set_data_type(MYSQL_TYPE_DOUBLE);
@@ -2017,10 +2053,13 @@ class Item_sum_udf_int final : public Item_udf_sum {
   }
   String *val_str(String *str) override;
   my_decimal *val_decimal(my_decimal *) override;
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_int(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_int(date, flags);
   }
-  bool get_time(MYSQL_TIME *ltime) override { return get_time_from_int(ltime); }
+  bool val_time(Time_val *time) override { return get_time_from_int(time); }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_int(dt, flags);
+  }
   enum Item_result result_type() const override { return INT_RESULT; }
   bool resolve_type(THD *) override {
     set_data_type_longlong();
@@ -2056,11 +2095,12 @@ class Item_sum_udf_str final : public Item_udf_sum {
     return cs->cset->strtoll10(cs, res->ptr(), &end, &err_not_used);
   }
   my_decimal *val_decimal(my_decimal *dec) override;
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_string(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_string(date, flags);
   }
-  bool get_time(MYSQL_TIME *ltime) override {
-    return get_time_from_string(ltime);
+  bool val_time(Time_val *time) override { return get_time_from_string(time); }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_string(dt, flags);
   }
   enum Item_result result_type() const override { return STRING_RESULT; }
   bool resolve_type(THD *) override;
@@ -2078,11 +2118,12 @@ class Item_sum_udf_decimal final : public Item_udf_sum {
   double val_real() override;
   longlong val_int() override;
   my_decimal *val_decimal(my_decimal *) override;
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_decimal(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_decimal(date, flags);
   }
-  bool get_time(MYSQL_TIME *ltime) override {
-    return get_time_from_decimal(ltime);
+  bool val_time(Time_val *time) override { return get_time_from_decimal(time); }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_decimal(dt, flags);
   }
   enum Item_result result_type() const override { return DECIMAL_RESULT; }
   bool resolve_type(THD *) override {
@@ -2190,11 +2231,12 @@ class Item_func_group_concat final : public Item_sum {
   my_decimal *val_decimal(my_decimal *decimal_value) override {
     return val_decimal_from_string(decimal_value);
   }
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_string(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_string(date, flags);
   }
-  bool get_time(MYSQL_TIME *ltime) override {
-    return get_time_from_string(ltime);
+  bool val_time(Time_val *time) override { return get_time_from_string(time); }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_string(dt, flags);
   }
 
   bool has_distinct() const noexcept { return distinct; }
@@ -2211,6 +2253,7 @@ class Item_func_group_concat final : public Item_sum {
   void no_rows_in_result() override;
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
+  uint64 hash() override;
   bool change_context_processor(uchar *arg) override {
     context = pointer_cast<Item_ident::Change_context *>(arg)->m_context;
     return false;
@@ -2243,14 +2286,13 @@ class Item_non_framing_wf : public Item_sum {
       : Item_sum(pos, opt_list, w) {}
   Item_non_framing_wf(THD *thd, Item_non_framing_wf *i) : Item_sum(thd, i) {}
 
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_numeric(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_numeric(date, flags);
   }
-
-  bool get_time(MYSQL_TIME *ltime) override {
-    return get_time_from_numeric(ltime);
+  bool val_time(Time_val *time) override { return get_time_from_numeric(time); }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_numeric(dt, flags);
   }
-
   void reset_field() override { assert(false); }
   void update_field() override { assert(false); }
   bool add() override {
@@ -2461,7 +2503,7 @@ class Item_ntile : public Item_non_framing_wf {
 /**
   LEAD/LAG window functions, cf. SQL 2011 Section 6.10 \<window function\>
 */
-class Item_lead_lag : public Item_non_framing_wf {
+class Item_lead_lag final : public Item_non_framing_wf {
   enum_null_treatment m_null_treatment;
   bool m_is_lead;  ///< if true, the function is LEAD, else LAG
   int64 m_n;       ///< canonicalized offset value
@@ -2502,6 +2544,7 @@ class Item_lead_lag : public Item_non_framing_wf {
 
   bool resolve_type(THD *thd) override;
   bool fix_fields(THD *thd, Item **items) override;
+  TYPELIB *get_typelib() const override;
   void update_after_wf_arguments_changed(THD *thd) override;
   void clear() override;
   bool check_wf_semantics1(THD *thd, Query_block *select,
@@ -2514,8 +2557,9 @@ class Item_lead_lag : public Item_non_framing_wf {
   String *val_str(String *str) override;
   my_decimal *val_decimal(my_decimal *decimal_buffer) override;
 
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override;
-  bool get_time(MYSQL_TIME *ltime) override;
+  bool val_date(Date_val *date, my_time_flags_t flags) override;
+  bool val_time(Time_val *time) override;
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override;
   bool val_json(Json_wrapper *wr) override;
 
   bool needs_partition_cardinality() const override {
@@ -2530,7 +2574,7 @@ class Item_lead_lag : public Item_non_framing_wf {
     return true;
   }
 
-  void split_sum_func(THD *thd, Ref_item_array ref_item_array,
+  bool split_sum_func(THD *thd, Ref_item_array ref_item_array,
                       mem_root_deque<Item *> *fields) override;
 
   void set_has_value(bool value) { m_has_value = value; }
@@ -2590,8 +2634,9 @@ class Item_first_last_value : public Item_sum {
   String *val_str(String *str) override;
   my_decimal *val_decimal(my_decimal *decimal_buffer) override;
 
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override;
-  bool get_time(MYSQL_TIME *ltime) override;
+  bool val_date(Date_val *date, my_time_flags_t flags) override;
+  bool val_time(Time_val *time) override;
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override;
   bool val_json(Json_wrapper *wr) override;
 
   void reset_field() override { assert(false); }
@@ -2601,7 +2646,7 @@ class Item_first_last_value : public Item_sum {
     return false;
   }
 
-  void split_sum_func(THD *thd, Ref_item_array ref_item_array,
+  bool split_sum_func(THD *thd, Ref_item_array ref_item_array,
                       mem_root_deque<Item *> *fields) override;
   bool uses_only_one_row() const override { return true; }
 
@@ -2661,8 +2706,9 @@ class Item_nth_value : public Item_sum {
   String *val_str(String *str) override;
   my_decimal *val_decimal(my_decimal *decimal_buffer) override;
 
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override;
-  bool get_time(MYSQL_TIME *ltime) override;
+  bool val_date(Date_val *date, my_time_flags_t flags) override;
+  bool val_time(Time_val *time) override;
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override;
   bool val_json(Json_wrapper *wr) override;
 
   void reset_field() override { assert(false); }
@@ -2672,7 +2718,7 @@ class Item_nth_value : public Item_sum {
     return false;
   }
 
-  void split_sum_func(THD *thd, Ref_item_array ref_item_array,
+  bool split_sum_func(THD *thd, Ref_item_array ref_item_array,
                       mem_root_deque<Item *> *fields) override;
   bool uses_only_one_row() const override { return true; }
 
@@ -2706,6 +2752,12 @@ class Item_func_grouping : public Item_int_func {
   bool fix_fields(THD *thd, Item **ref) override;
   void update_used_tables() override;
   bool aggregate_check_distinct(uchar *arg) override;
+  bool check_args_found_in_group_by() const;
+  bool check_function_as_value_generator(uchar *) override;
+
+ private:
+  /// The query block in which this function is called.
+  const Query_block *m_query_block{nullptr};
 };
 
 /**
@@ -2739,8 +2791,9 @@ class Item_rollup_sum_switcher final : public Item_sum {
   my_decimal *val_decimal(my_decimal *dec) override;
   bool val_json(Json_wrapper *result) override;
   bool is_null() override;
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override;
-  bool get_time(MYSQL_TIME *ltime) override;
+  bool val_date(Date_val *date, my_time_flags_t flags) override;
+  bool val_time(Time_val *time) override;
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override;
   const char *func_name() const override { return "rollup_sum_switcher"; }
   table_map used_tables() const override { return master()->used_tables(); }
   Item_result result_type() const override { return master()->result_type(); }
@@ -2762,6 +2815,12 @@ class Item_rollup_sum_switcher final : public Item_sum {
   bool add() override {
     assert(false);
     return true;
+  }
+  void no_rows_in_result() override {
+    // Produce a single grouping row with NULLs for all group by
+    // expressions and grand total for aggregates.
+    set_current_rollup_level(0);
+    master()->no_rows_in_result();
   }
 
   bool reset_and_add_for_rollup(int last_unchanged_group_item_idx);
@@ -2830,8 +2889,9 @@ class Item_sum_collect : public Item_sum {
   my_decimal *val_decimal(my_decimal *decimal_buffer) override;
   longlong val_int() override { return val_int_from_string(); }
   double val_real() override { return val_real_from_string(); }
-  bool get_date(MYSQL_TIME *, my_time_flags_t) override { return true; }
-  bool get_time(MYSQL_TIME *) override { return true; }
+  bool val_date(Date_val *, my_time_flags_t) override { return true; }
+  bool val_time(Time_val *) override { return true; }
+  bool val_datetime(Datetime_val *, my_time_flags_t) override { return true; }
   enum Sumfunctype sum_func() const override { return GEOMETRY_AGGREGATE_FUNC; }
   Item_result result_type() const override { return STRING_RESULT; }
   int set_aggregator(Aggregator::Aggregator_type) override {
@@ -2839,12 +2899,11 @@ class Item_sum_collect : public Item_sum {
        In contrast to Item_sum, Item_sum_collect always uses Aggregator_simple,
        and only needs to reset its aggregator when called.
        */
-    if (aggr) {
+    if (aggr != nullptr) {
       aggr->clear();
       return false;
     }
 
-    destroy(aggr);
     aggr = new (*THR_MALLOC) Aggregator_simple(this);
     return aggr ? false : true;
   }

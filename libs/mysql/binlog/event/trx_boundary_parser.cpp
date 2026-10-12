@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -113,12 +114,6 @@ bool Transaction_boundary_parser::check_row_logging_constraints(
         log_event_info.event_type != mysql::binlog::event::UPDATE_ROWS_EVENT &&
         log_event_info.event_type != mysql::binlog::event::DELETE_ROWS_EVENT &&
         log_event_info.event_type !=
-            mysql::binlog::event::WRITE_ROWS_EVENT_V1 &&
-        log_event_info.event_type !=
-            mysql::binlog::event::UPDATE_ROWS_EVENT_V1 &&
-        log_event_info.event_type !=
-            mysql::binlog::event::DELETE_ROWS_EVENT_V1 &&
-        log_event_info.event_type !=
             mysql::binlog::event::PARTIAL_UPDATE_ROWS_EVENT &&
         log_event_info.event_type !=
             mysql::binlog::event::ROWS_QUERY_LOG_EVENT &&
@@ -152,6 +147,7 @@ Transaction_boundary_parser::get_event_boundary_type(
   switch (event_info.event_type) {
     case mysql::binlog::event::GTID_LOG_EVENT:
     case mysql::binlog::event::ANONYMOUS_GTID_LOG_EVENT:
+    case mysql::binlog::event::GTID_TAGGED_LOG_EVENT:
       boundary_type = EVENT_BOUNDARY_TYPE_GTID;
       break;
 
@@ -230,9 +226,6 @@ Transaction_boundary_parser::get_event_boundary_type(
     case mysql::binlog::event::WRITE_ROWS_EVENT:
     case mysql::binlog::event::UPDATE_ROWS_EVENT:
     case mysql::binlog::event::DELETE_ROWS_EVENT:
-    case mysql::binlog::event::WRITE_ROWS_EVENT_V1:
-    case mysql::binlog::event::UPDATE_ROWS_EVENT_V1:
-    case mysql::binlog::event::DELETE_ROWS_EVENT_V1:
     case mysql::binlog::event::VIEW_CHANGE_EVENT:
     case mysql::binlog::event::PARTIAL_UPDATE_ROWS_EVENT:
       boundary_type = EVENT_BOUNDARY_TYPE_STATEMENT;
@@ -328,7 +321,8 @@ bool Transaction_boundary_parser::update_state(
               if (current_parser_state == EVENT_PARSER_GTID)
                 log_server_warning(
                     ER_TRX_BOUND_GTID_LOG_EVENT_IN_STREAM,
-                    "after a GTID_LOG_EVENT or an ANONYMOUS_GTID_LOG_EVENT");
+                    "after a GTID_LOG_EVENT, GTID_TAGGED_LOG_EVENT or an "
+                    "ANONYMOUS_GTID_LOG_EVENT");
               else {
                 if (current_parser_state == EVENT_PARSER_DDL)
                   log_server_warning(ER_TRX_BOUND_GTID_LOG_EVENT_IN_STREAM,

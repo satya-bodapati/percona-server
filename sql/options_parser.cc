@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,10 +25,10 @@
 
 #include "sql/options_parser.h"
 
-#include <assert.h>
-#include <stddef.h>
 #include <algorithm>
+#include <cassert>
 #include <cctype>
+#include <cstddef>
 #include <stdexcept>
 #include <utility>
 
@@ -93,7 +94,7 @@ result parse_options_string(String *str, char delimiter,
   size_t str_end_pos = str_copy.length() - 1;
   result parser_result;
 
-  if (str_copy.size() == 0) {
+  if (str_copy.empty()) {
     parser_result.status = parser_status::OK;
     parser_result.msg = "";
     return parser_result;
@@ -153,7 +154,7 @@ result parse_options_string(String *str, char delimiter,
   }
 
   size_t substring_startpos = str_start_pos;
-  size_t delimiter_count =
+  size_t const delimiter_count =
       std::count(str_copy.begin(), str_copy.end(), delimiter);
   size_t substring_endpos = 0;
   size_t key_value_separator_pos = 0;
@@ -198,7 +199,7 @@ result parse_options_string(String *str, char delimiter,
                               // before delimiter.
     }
 
-    size_t key_value_separator_count =
+    size_t const key_value_separator_count =
         std::count(str_copy.begin() + substring_startpos,
                    str_copy.begin() + substring_endpos, key_value_separator);
 
@@ -240,9 +241,9 @@ result parse_options_string(String *str, char delimiter,
       return parser_result;
     }
 
-    std::string key =
+    std::string const key =
         str_copy.substr(key_startpos, key_endpos - key_startpos + 1);
-    std::string value =
+    std::string const value =
         str_copy.substr(value_startpos, value_endpos - value_startpos + 1);
     if (key_value_separator_count > 1) {
       parser_result.status = parser_status::MORE_THAN_ONE_SEPARATOR;
@@ -295,7 +296,7 @@ result parse_options_string(String *str, char delimiter,
   @retval false parsing was successful
   @retval true parsing was ununsuccessful
 */
-bool resolve_parser_result(result result, const char *function_name) {
+bool resolve_parser_result(const result &result, const char *function_name) {
   switch (result.status) {
     case parser_status::STARTS_WITH_INVALID_CHARACTER: {
       my_error(ER_INVALID_OPTION_START_CHARACTER, MYF(0), function_name,

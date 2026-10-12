@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2023, Oracle and/or its affiliates.
+  Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -42,6 +43,7 @@
 #include "router_component_testutils.h"
 #include "router_config.h"
 #include "router_test_helpers.h"
+#include "stdx_expected_no_error.h"
 
 using mysqlrouter::ClusterType;
 using mysqlrouter::MetadataSchemaVersion;
@@ -49,6 +51,12 @@ using mysqlrouter::MySQLSession;
 using ::testing::PrintToString;
 using namespace std::chrono_literals;
 using namespace std::string_literals;
+
+namespace mysqlrouter {
+std::ostream &operator<<(std::ostream &os, const MysqlError &e) {
+  return os << e.sql_state() << " code: " << e.value() << ": " << e.message();
+}
+}  // namespace mysqlrouter
 
 class RouterComponenClustertMetadataTest : public RouterComponentMetadataTest {
 };
@@ -94,8 +102,6 @@ TEST_P(RouterComponenClustertMetadataTestInstanceListUnordered,
   std::vector<ProcessWrapper *> nodes;
   std::vector<uint16_t> node_classic_ports;
   std::vector<uint16_t> node_http_ports;
-  const std::string json_metadata =
-      get_data_dir().join(GetParam().tracefile).str();
 
   using ClusterNode = ::ClusterNode;
   std::vector<GRNode> gr_nodes;
@@ -105,16 +111,20 @@ TEST_P(RouterComponenClustertMetadataTestInstanceListUnordered,
     node_http_ports.push_back(port_pool_.get_next_available());
 
     nodes.push_back(
-        &launch_mysql_server_mock(json_metadata, node_classic_ports[i],
-                                  EXIT_SUCCESS, false, node_http_ports[i]));
+        &mock_server_spawner().spawn(mock_server_cmdline(GetParam().tracefile)
+                                         .port(node_classic_ports[i])
+                                         .http_port(node_http_ports[i])
+                                         .args()));
+
+    const std::string role = (i == 0) ? "PRIMARY" : "SECONDARY";
     gr_nodes.emplace_back(node_classic_ports[i],
-                          "uuid-" + std::to_string(i + 1));
+                          "uuid-" + std::to_string(i + 1), "ONLINE", role);
     cluster_nodes.emplace_back(node_classic_ports[i],
                                "uuid-" + std::to_string(i + 1));
   }
 
   for (auto [i, http_port] : stdx::views::enumerate(node_http_ports)) {
-    ::set_mock_metadata(http_port, kGroupID, gr_nodes, i, cluster_nodes);
+    set_mock_metadata(http_port, kGroupID, gr_nodes, i, cluster_nodes);
   }
 
   SCOPED_TRACE("// launch the router with metadata-cache configuration");
@@ -134,8 +144,8 @@ TEST_P(RouterComponenClustertMetadataTestInstanceListUnordered,
   const std::vector<ClusterNode> cluster_nodes_reversed(cluster_nodes.rbegin(),
                                                         cluster_nodes.rend());
   for (auto [i, http_port] : stdx::views::enumerate(node_http_ports)) {
-    ::set_mock_metadata(http_port, kGroupID, gr_nodes_reversed, i,
-                        cluster_nodes_reversed, 1);
+    set_mock_metadata(http_port, kGroupID, gr_nodes_reversed, i,
+                      cluster_nodes_reversed);
   }
 
   EXPECT_TRUE(wait_for_transaction_count_increase(node_http_ports[0]));
@@ -154,8 +164,6 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(
         ClusterMetadataTestParams("metadata_dynamic_nodes_v2_gr.js",
                                   "unordered_gr_v2", ClusterType::GR_V2, "0.1"),
-        ClusterMetadataTestParams("metadata_dynamic_nodes.js", "unordered_gr",
-                                  ClusterType::GR_V1, "0.1"),
         ClusterMetadataTestParams("metadata_dynamic_nodes_v2_ar.js",
                                   "unordered_ar_v2", ClusterType::RS_V2,
                                   "0.1")),
@@ -170,22 +178,24 @@ class RouterComponenClustertMetadataTestInvalidMysqlXPort
  * to be discarded for the classic protocol connections (Bug#30617645)
  */
 TEST_P(RouterComponenClustertMetadataTestInvalidMysqlXPort, InvalidMysqlXPort) {
-  const std::string json_metadata =
-      get_data_dir().join(GetParam().tracefile).str();
-
   SCOPED_TRACE("// single node cluster is fine for this test");
   const uint16_t node_classic_port{port_pool_.get_next_available()};
   const uint16_t node_http_port{port_pool_.get_next_available()};
   const uint32_t kInvalidPort{76000};
 
-  /*auto &cluster_node = */ launch_mysql_server_mock(
-      json_metadata, node_classic_port, EXIT_SUCCESS, false, node_http_port);
+  /*auto &cluster_node = */ mock_server_spawner().spawn(
+      mock_server_cmdline(GetParam().tracefile)
+          .port(node_classic_port)
+          .http_port(node_http_port)
+          .args());
 
   SCOPED_TRACE(
       "// let the metadata for our single node report invalid mysqlx port");
-  ::set_mock_metadata(node_http_port, "uuid", {{node_classic_port}}, 0,
-                      {{node_classic_port, kInvalidPort}}, 0, 0, false,
-                      "127.0.0.1");
+  auto cluster_nodes = classic_ports_to_cluster_nodes({node_classic_port});
+  cluster_nodes[0].x_port = kInvalidPort;
+  set_mock_metadata(node_http_port, "uuid",
+                    classic_ports_to_gr_nodes({node_classic_port}), 0,
+                    cluster_nodes, 0, false, "127.0.0.1");
 
   SCOPED_TRACE("// launch the router with metadata-cache configuration");
   const auto router_port = port_pool_.get_next_available();
@@ -213,8 +223,6 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(
         ClusterMetadataTestParams("metadata_dynamic_nodes_v2_gr.js", "gr_v2",
                                   ClusterType::GR_V2, "5"),
-        ClusterMetadataTestParams("metadata_dynamic_nodes.js", "gr",
-                                  ClusterType::GR_V1, "5"),
         ClusterMetadataTestParams("metadata_dynamic_nodes_v2_ar.js", "ar_v2",
                                   ClusterType::RS_V2, "5")),
     get_test_description);
@@ -236,24 +244,17 @@ TEST_P(CheckRouterInfoUpdatesTest, CheckRouterInfoUpdates) {
       "node)");
   auto md_server_port = port_pool_.get_next_available();
   auto md_server_http_port = port_pool_.get_next_available();
-  const std::string json_metadata =
-      get_data_dir().join(GetParam().tracefile).str();
 
-  /*auto &metadata_server = */ launch_mysql_server_mock(
-      json_metadata, md_server_port, EXIT_SUCCESS, false, md_server_http_port);
+  /*auto &metadata_server = */ mock_server_spawner().spawn(
+      mock_server_cmdline(GetParam().tracefile)
+          .port(md_server_port)
+          .http_port(md_server_http_port)
+          .args());
 
-  SCOPED_TRACE(
-      "// let's tell the mock which attributes it should expect so that it "
-      "does the strict sql matching for us");
-  auto globals =
-      mock_GR_metadata_as_json("uuid", {md_server_port}, 0, {md_server_port});
-  JsonAllocator allocator;
-  globals.AddMember("router_version", MYSQL_ROUTER_VERSION, allocator);
-  globals.AddMember("router_rw_classic_port", router_port, allocator);
-  globals.AddMember("router_metadata_user",
-                    JsonValue(router_metadata_username.c_str(),
-                              router_metadata_username.length(), allocator),
-                    allocator);
+  auto globals = mock_GR_metadata_as_json(
+      "uuid", classic_ports_to_gr_nodes({md_server_port}), 0,
+      classic_ports_to_cluster_nodes({md_server_port}));
+
   const auto globals_str = json_to_string(globals);
   MockServerRestClient(md_server_http_port).set_globals(globals_str);
 
@@ -297,7 +298,7 @@ TEST_P(CheckRouterInfoUpdatesTest, CheckRouterInfoUpdates) {
   EXPECT_STREQ("SELECT * FROM mysql_innodb_cluster_metadata.schema_version",
                queries.at(3).c_str());
 
-  if (GetParam().cluster_type != ClusterType::GR_V1) {
+  {
     SCOPED_TRACE(
         "// last_check_in should be attempted at least twice (first update is "
         "done on start)");
@@ -307,20 +308,67 @@ TEST_P(CheckRouterInfoUpdatesTest, CheckRouterInfoUpdates) {
         get_update_last_check_in_count(server_globals);
     EXPECT_GE(2, last_check_in_upd_count);
   }
+
+  {
+    std::string server_globals =
+        MockServerRestClient(md_server_http_port).get_globals_as_json_string();
+
+    const std::string router_version =
+        get_str_field_value(server_globals, "upd_attr_router_version");
+    EXPECT_STREQ(MYSQL_ROUTER_VERSION, router_version.c_str())
+        << server_globals;
+
+    const std::string md_username =
+        get_str_field_value(server_globals, "upd_attr_md_username");
+    EXPECT_STREQ(router_metadata_username.c_str(), md_username.c_str())
+        << server_globals;
+
+    const std::string rw_classic_port =
+        get_str_field_value(server_globals, "upd_attr_rw_classic_port");
+    EXPECT_STREQ(rw_classic_port.c_str(), std::to_string(router_port).c_str())
+        << server_globals;
+
+    SCOPED_TRACE(
+        "// verify the JSON config set by the Router in the attributes against "
+        "the schema");
+
+    RecordProperty("Worklog", "15649");
+    RecordProperty("RequirementId", "FR1,FR1.2,FR2");
+    RecordProperty("Description",
+                   "Testing if the Router correctly exposes it's full static "
+                   "configuration upon start.");
+
+    // first validate the configuration json against general "public" schema for
+    // the structure corectness
+    const std::string public_config_schema =
+        get_file_output(Path(ROUTER_SRC_DIR)
+                            .join("src")
+                            .join("harness")
+                            .join("src")
+                            .join("configuration_schema.json")
+                            .str());
+
+    validate_config_stored_in_md(md_server_http_port, public_config_schema);
+
+    // then validate against strict schema that also checks the values expected
+    // for the current configuration
+    const std::string strict_config_schema = get_file_output(
+        get_data_dir().join("configuration_schema_strict.json").str());
+
+    validate_config_stored_in_md(md_server_http_port, strict_config_schema);
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(
     CheckRouterInfoUpdates, CheckRouterInfoUpdatesTest,
-    ::testing::Values(
-        ClusterMetadataTestParams("metadata_dynamic_nodes_version_update.js",
-                                  "router_version_update_once_gr_v1",
-                                  ClusterType::GR_V1, "0.1"),
-        ClusterMetadataTestParams(
-            "metadata_dynamic_nodes_version_update_v2_gr.js",
-            "router_version_update_once_gr_v2", ClusterType::GR_V2, "0.1"),
-        ClusterMetadataTestParams(
-            "metadata_dynamic_nodes_version_update_v2_ar.js",
-            "router_version_update_once_ar_v2", ClusterType::RS_V2, "0.1")),
+    ::testing::Values(ClusterMetadataTestParams(
+                          "metadata_dynamic_nodes_version_update_v2_gr.js",
+                          "router_version_update_once_gr_v2",
+                          ClusterType::GR_V2, "0.1"),
+                      ClusterMetadataTestParams(
+                          "metadata_dynamic_nodes_version_update_v2_ar.js",
+                          "router_version_update_once_ar_v2",
+                          ClusterType::RS_V2, "0.1")),
     get_test_description);
 
 /**
@@ -336,26 +384,21 @@ TEST_F(RouterComponenClustertMetadataTest,
       "node)");
   auto md_server_port = port_pool_.get_next_available();
   auto md_server_http_port = port_pool_.get_next_available();
-  const std::string json_metadata =
-      get_data_dir()
-          .join("metadata_dynamic_nodes_version_update_v2_gr.js")
-          .str();
 
-  /*auto &metadata_server = */ launch_mysql_server_mock(
-      json_metadata, md_server_port, EXIT_SUCCESS, false, md_server_http_port);
+  /*auto &metadata_server = */ mock_server_spawner().spawn(
+      mock_server_cmdline("metadata_dynamic_nodes_version_update_v2_gr.js")
+          .port(md_server_port)
+          .http_port(md_server_http_port)
+          .args());
 
   SCOPED_TRACE(
       "// let's tell the mock which attributes it should expect so that it "
       "does the strict sql matching for us");
-  auto globals =
-      mock_GR_metadata_as_json("uuid", {md_server_port}, 0, {md_server_port});
+  auto globals = mock_GR_metadata_as_json(
+      "uuid", classic_ports_to_gr_nodes({md_server_port}), 0,
+      classic_ports_to_cluster_nodes({md_server_port}));
+
   JsonAllocator allocator;
-  globals.AddMember("router_version", MYSQL_ROUTER_VERSION, allocator);
-  globals.AddMember("router_rw_classic_port", router_port, allocator);
-  globals.AddMember("router_metadata_user",
-                    JsonValue(router_metadata_username.c_str(),
-                              router_metadata_username.length(), allocator),
-                    allocator);
 
   // instrument the metadata in a way that shows that we bootstrapped once the
   // Cluster was standalone but now it is part of a ClusterSet
@@ -399,8 +442,12 @@ TEST_F(RouterComponenClustertMetadataTest,
 /**
  * @test verify if appropriate warning messages are logged when the Cluster has
  * deprecated metadata version.
+ *
+ * Disabled as there is currently no deprecated version. Version 1.x is no
+ * longer supported.
  */
-TEST_F(RouterComponenClustertMetadataTest, LogWarningWhenMetadataIsDeprecated) {
+TEST_F(RouterComponenClustertMetadataTest,
+       DISABLED_LogWarningWhenMetadataIsDeprecated) {
   RecordProperty("Worklog", "15876");
   RecordProperty("RequirementId", "FR1");
   RecordProperty("Description",
@@ -416,14 +463,16 @@ TEST_F(RouterComponenClustertMetadataTest, LogWarningWhenMetadataIsDeprecated) {
   for (size_t i = 0; i < cluster_nodes_ports.size(); ++i) {
     const auto classic_port = cluster_nodes_ports[i];
     const auto http_port = cluster_nodes_http_ports[i];
-    launch_mysql_server_mock(
-        get_data_dir().join("metadata_dynamic_nodes.js").str(), classic_port,
-        EXIT_SUCCESS, false, http_port);
+
+    mock_server_spawner().spawn(mock_server_cmdline("metadata_dynamic_nodes.js")
+                                    .port(classic_port)
+                                    .http_port(http_port)
+                                    .args());
 
     EXPECT_TRUE(MockServerRestClient(http_port).wait_for_rest_endpoint_ready());
-    ::set_mock_metadata(http_port, "uuid",
-                        classic_ports_to_gr_nodes(cluster_nodes_ports), 1,
-                        classic_ports_to_cluster_nodes(cluster_nodes_ports));
+    set_mock_metadata(http_port, "uuid",
+                      classic_ports_to_gr_nodes(cluster_nodes_ports), 1,
+                      classic_ports_to_cluster_nodes(cluster_nodes_ports));
   }
 
   // launch the router with metadata-cache configuration
@@ -462,18 +511,20 @@ TEST_P(PermissionErrorOnVersionUpdateTest, PermissionErrorOnAttributesUpdate) {
       "node)");
   auto md_server_port = port_pool_.get_next_available();
   auto md_server_http_port = port_pool_.get_next_available();
-  const std::string json_metadata =
-      get_data_dir().join(GetParam().tracefile).str();
 
-  /*auto &metadata_server =*/launch_mysql_server_mock(
-      json_metadata, md_server_port, EXIT_SUCCESS, false, md_server_http_port);
+  /*auto &metadata_server = */ mock_server_spawner().spawn(
+      mock_server_cmdline(GetParam().tracefile)
+          .port(md_server_port)
+          .http_port(md_server_http_port)
+          .args());
 
   SCOPED_TRACE(
       "// let's tell the mock which attributes it should expect so that it "
       "does the strict sql matching for us, also tell it to issue the "
       "permission error on the update attempt");
-  auto globals =
-      mock_GR_metadata_as_json("uuid", {md_server_port}, 0, {md_server_port});
+  auto globals = mock_GR_metadata_as_json(
+      "uuid", classic_ports_to_gr_nodes({md_server_port}), 0,
+      classic_ports_to_cluster_nodes({md_server_port}));
   JsonAllocator allocator;
   globals.AddMember("router_version", MYSQL_ROUTER_VERSION, allocator);
   globals.AddMember("router_rw_classic_port", router_port, allocator);
@@ -506,8 +557,10 @@ TEST_P(PermissionErrorOnVersionUpdateTest, PermissionErrorOnAttributesUpdate) {
   const std::string log_content = router.get_logfile_content();
   const std::string needle =
       "Make sure to follow the correct steps to upgrade your metadata.\n"
-      "Run the dba.upgradeMetadata() then launch the new Router version "
-      "when prompted";
+      "In MySQL Shell, run dba.upgradeMetadata(), then launch the new Router "
+      "version when prompted.\n"
+      "If the MySQL account used by MySQL Router is missing privileges, "
+      "run dba.setupRouterAccount() to update its grants.";
   EXPECT_EQ(1, count_str_occurences(log_content, needle)) << log_content;
 
   SCOPED_TRACE(
@@ -528,18 +581,14 @@ TEST_P(PermissionErrorOnVersionUpdateTest, PermissionErrorOnAttributesUpdate) {
 
 INSTANTIATE_TEST_SUITE_P(
     PermissionErrorOnVersionUpdate, PermissionErrorOnVersionUpdateTest,
-    ::testing::Values(
-        ClusterMetadataTestParams("metadata_dynamic_nodes_version_update.js",
-                                  "router_version_update_fail_on_perm_gr_v1",
-                                  ClusterType::GR_V1, "0.1"),
-        ClusterMetadataTestParams(
-            "metadata_dynamic_nodes_version_update_v2_gr.js",
-            "router_version_update_fail_on_perm_gr_v2", ClusterType::GR_V2,
-            "0.1"),
-        ClusterMetadataTestParams(
-            "metadata_dynamic_nodes_version_update_v2_ar.js",
-            "router_version_update_fail_on_perm_ar_v2", ClusterType::RS_V2,
-            "0.1")),
+    ::testing::Values(ClusterMetadataTestParams(
+                          "metadata_dynamic_nodes_version_update_v2_gr.js",
+                          "router_version_update_fail_on_perm_gr_v2",
+                          ClusterType::GR_V2, "0.1"),
+                      ClusterMetadataTestParams(
+                          "metadata_dynamic_nodes_version_update_v2_ar.js",
+                          "router_version_update_fail_on_perm_ar_v2",
+                          ClusterType::RS_V2, "0.1")),
     get_test_description);
 
 class UpgradeInProgressTest
@@ -552,13 +601,16 @@ TEST_P(UpgradeInProgressTest, UpgradeInProgress) {
       "node)");
   auto md_server_port = port_pool_.get_next_available();
   auto md_server_http_port = port_pool_.get_next_available();
-  const std::string json_metadata =
-      get_data_dir().join(GetParam().tracefile).str();
 
-  /*auto &metadata_server = */ launch_mysql_server_mock(
-      json_metadata, md_server_port, EXIT_SUCCESS, false, md_server_http_port);
-  ::set_mock_metadata(md_server_http_port, "uuid", {md_server_port}, 0,
-                      {md_server_port});
+  /*auto &metadata_server = */ mock_server_spawner().spawn(
+      mock_server_cmdline(GetParam().tracefile)
+          .port(md_server_port)
+          .http_port(md_server_http_port)
+          .args());
+
+  set_mock_metadata(md_server_http_port, "uuid",
+                    classic_ports_to_gr_nodes({md_server_port}), 0,
+                    classic_ports_to_cluster_nodes({md_server_port}));
 
   SCOPED_TRACE("// launch the router with metadata-cache configuration");
   const auto router_port = port_pool_.get_next_available();
@@ -573,11 +625,16 @@ TEST_P(UpgradeInProgressTest, UpgradeInProgress) {
   EXPECT_TRUE(wait_for_port_used(router_port));
 
   SCOPED_TRACE("// let us make some user connection via the router port");
-  auto client = make_new_connection_ok(router_port, md_server_port);
+  auto client_res = make_new_connection(router_port);
+  ASSERT_NO_ERROR(client_res);
+  ASSERT_NO_FATAL_FAILURE(verify_port(client_res->get(), md_server_port));
+
+  auto client = std::move(*client_res);
 
   SCOPED_TRACE("// let's mimmic start of the metadata update now");
-  auto globals =
-      mock_GR_metadata_as_json("uuid", {md_server_port}, 0, {md_server_port});
+  auto globals = mock_GR_metadata_as_json(
+      "uuid", classic_ports_to_gr_nodes({md_server_port}), 0,
+      classic_ports_to_cluster_nodes({md_server_port}));
   JsonAllocator allocator;
   globals.AddMember("upgrade_in_progress", 1, allocator);
   globals.AddMember("md_query_count", 0, allocator);
@@ -621,16 +678,14 @@ TEST_P(UpgradeInProgressTest, UpgradeInProgress) {
 
 INSTANTIATE_TEST_SUITE_P(
     UpgradeInProgress, UpgradeInProgressTest,
-    ::testing::Values(
-        ClusterMetadataTestParams("metadata_dynamic_nodes_version_update.js",
-                                  "metadata_upgrade_in_progress_gr_v1",
-                                  ClusterType::GR_V1, "0.1"),
-        ClusterMetadataTestParams(
-            "metadata_dynamic_nodes_version_update_v2_gr.js",
-            "metadata_upgrade_in_progress_gr_v2", ClusterType::GR_V2, "0.1"),
-        ClusterMetadataTestParams(
-            "metadata_dynamic_nodes_version_update_v2_ar.js",
-            "metadata_upgrade_in_progress_ar_v2", ClusterType::RS_V2, "0.1")),
+    ::testing::Values(ClusterMetadataTestParams(
+                          "metadata_dynamic_nodes_version_update_v2_gr.js",
+                          "metadata_upgrade_in_progress_gr_v2",
+                          ClusterType::GR_V2, "0.1"),
+                      ClusterMetadataTestParams(
+                          "metadata_dynamic_nodes_version_update_v2_ar.js",
+                          "metadata_upgrade_in_progress_ar_v2",
+                          ClusterType::RS_V2, "0.1")),
     get_test_description);
 
 /**
@@ -649,20 +704,21 @@ TEST_P(NodeRemovedTest, NodeRemoved) {
   std::vector<ProcessWrapper *> cluster_nodes;
 
   SCOPED_TRACE("// launch cluster with 2 nodes");
-  const std::string json_metadata =
-      get_data_dir().join(GetParam().tracefile).str();
-
   for (size_t i = 0; i < NUM_NODES; ++i) {
     node_ports.push_back(port_pool_.get_next_available());
     node_http_ports.push_back(port_pool_.get_next_available());
   }
 
   for (size_t i = 0; i < NUM_NODES; ++i) {
-    cluster_nodes.push_back(&launch_mysql_server_mock(
-        json_metadata, node_ports[i], EXIT_SUCCESS, false, node_http_ports[i]));
-    ::set_mock_metadata(node_http_ports[i], "uuid",
-                        classic_ports_to_gr_nodes(node_ports), i,
-                        classic_ports_to_cluster_nodes(node_ports));
+    cluster_nodes.push_back(&mock_server_spawner().spawn(  //
+        mock_server_cmdline(GetParam().tracefile)
+            .port(node_ports[i])
+            .http_port(node_http_ports[i])
+            .args()));
+
+    set_mock_metadata(node_http_ports[i], "uuid",
+                      classic_ports_to_gr_nodes(node_ports), i,
+                      classic_ports_to_cluster_nodes(node_ports));
   }
 
   SCOPED_TRACE("// launch the router with metadata-cache configuration");
@@ -680,8 +736,10 @@ TEST_P(NodeRemovedTest, NodeRemoved) {
   EXPECT_TRUE(wait_for_transaction_count_increase(node_http_ports[0], 2));
   SCOPED_TRACE(
       "// Make a connection to the primary, it should be the first node");
-  { /*auto client =*/
-    make_new_connection_ok(router_port, node_ports[0]);
+  {
+    auto conn_res = make_new_connection(router_port);
+    ASSERT_NO_ERROR(conn_res);
+    ASSERT_NO_FATAL_FAILURE(verify_port(conn_res->get(), node_ports[0]));
   }
 
   SCOPED_TRACE(
@@ -698,8 +756,9 @@ TEST_P(NodeRemovedTest, NodeRemoved) {
   SCOPED_TRACE(
       "// Tell the second node that it is a new Primary and the only member of "
       "the cluster");
-  ::set_mock_metadata(node_http_ports[1], "uuid", {node_ports[1]}, 0,
-                      {node_ports[1]});
+  set_mock_metadata(node_http_ports[1], "uuid",
+                    classic_ports_to_gr_nodes({node_ports[1]}), 0,
+                    classic_ports_to_cluster_nodes({node_ports[1]}));
 
   SCOPED_TRACE(
       "// Connect to the router primary port, the connection should be ok and "
@@ -707,7 +766,11 @@ TEST_P(NodeRemovedTest, NodeRemoved) {
   EXPECT_TRUE(wait_for_transaction_count_increase(node_http_ports[1], 2));
 
   SCOPED_TRACE("// let us make some user connection via the router port");
-  /*auto client =*/make_new_connection_ok(router_port, node_ports[1]);
+  {
+    auto conn_res = make_new_connection(router_port);
+    ASSERT_NO_ERROR(conn_res);
+    ASSERT_NO_FATAL_FAILURE(verify_port(conn_res->get(), node_ports[1]));
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -734,10 +797,12 @@ TEST_P(MetadataCacheMetadataServersOrder, MetadataServersOrder) {
   for (size_t i = 0; i < kClusterNodes; ++i) {
     const auto classic_port = port_pool_.get_next_available();
     const auto http_port = port_pool_.get_next_available();
-    const std::string tracefile =
-        get_data_dir().join(GetParam().tracefile).str();
-    cluster_nodes.push_back(&launch_mysql_server_mock(
-        tracefile, classic_port, EXIT_SUCCESS, false, http_port));
+
+    cluster_nodes.push_back(&mock_server_spawner().spawn(  //
+        mock_server_cmdline(GetParam().tracefile)
+            .port(classic_port)
+            .http_port(http_port)
+            .args()));
 
     md_servers_classic_ports.push_back(classic_port);
     md_servers_http_ports.push_back(http_port);
@@ -745,10 +810,9 @@ TEST_P(MetadataCacheMetadataServersOrder, MetadataServersOrder) {
 
   for (const auto [i, http_port] :
        stdx::views::enumerate(md_servers_http_ports)) {
-    ::set_mock_metadata(
-        http_port, "uuid", classic_ports_to_gr_nodes(md_servers_classic_ports),
-        i, classic_ports_to_cluster_nodes(md_servers_classic_ports),
-        /*primary_id=*/0);
+    set_mock_metadata(http_port, "uuid",
+                      classic_ports_to_gr_nodes(md_servers_classic_ports), i,
+                      classic_ports_to_cluster_nodes(md_servers_classic_ports));
   }
 
   // launch the router with metadata-cache configuration
@@ -756,10 +820,10 @@ TEST_P(MetadataCacheMetadataServersOrder, MetadataServersOrder) {
       get_metadata_cache_section(GetParam().cluster_type, "0.1");
   const auto router_rw_port = port_pool_.get_next_available();
   const std::string routing_rw_section = get_metadata_cache_routing_section(
-      router_rw_port, "PRIMARY", "first-available", "", "rw");
+      router_rw_port, "PRIMARY", "first-available", "rw");
   const auto router_ro_port = port_pool_.get_next_available();
   const std::string routing_ro_section = get_metadata_cache_routing_section(
-      router_ro_port, "PRIMARY", "round-robin", "", "ro");
+      router_ro_port, "PRIMARY", "round-robin", "ro");
   /*auto &router =*/
   launch_router(metadata_cache_section, routing_rw_section + routing_ro_section,
                 md_servers_classic_ports, EXIT_SUCCESS,
@@ -784,12 +848,23 @@ TEST_P(MetadataCacheMetadataServersOrder, MetadataServersOrder) {
                     md_servers_classic_ports[2]});
 
   // now promote first SECONDARY to become new PRIMARY
+  auto gr_nodes = classic_ports_to_gr_nodes(md_servers_classic_ports);
+  auto metadata_nodes =
+      classic_ports_to_cluster_nodes(md_servers_classic_ports);
+
+  if (GetParam().cluster_type != mysqlrouter::ClusterType::RS_V2) {
+    // For ReplicaSet there is no GR and role is determined directly in the
+    // metadata
+    gr_nodes[0].member_role = "SECONDARY";
+    gr_nodes[1].member_role = "PRIMARY";
+  } else {
+    metadata_nodes[0].role = "SECONDARY";
+    metadata_nodes[1].role = "PRIMARY";
+  }
+
   for (const auto [i, http_port] :
        stdx::views::enumerate(md_servers_http_ports)) {
-    ::set_mock_metadata(
-        http_port, "uuid", classic_ports_to_gr_nodes(md_servers_classic_ports),
-        i, classic_ports_to_cluster_nodes(md_servers_classic_ports),
-        /*primary_id=*/1);
+    set_mock_metadata(http_port, "uuid", gr_nodes, i, metadata_nodes);
   }
 
   // check that the second metadata server (new PRIMARY) is queried for metadata
@@ -817,9 +892,7 @@ INSTANTIATE_TEST_SUITE_P(
         ClusterMetadataTestParams("metadata_dynamic_nodes_v2_gr.js", "GR_V2",
                                   ClusterType::GR_V2),
         ClusterMetadataTestParams("metadata_dynamic_nodes_v2_ar.js", "AR",
-                                  ClusterType::RS_V2),
-        ClusterMetadataTestParams("metadata_dynamic_nodes.js", "GR_V1",
-                                  ClusterType::GR_V1)),
+                                  ClusterType::RS_V2)),
     get_test_description);
 
 class MetadataCacheChangeClusterName
@@ -838,10 +911,12 @@ TEST_P(MetadataCacheChangeClusterName, ChangeClusterName) {
   for (size_t i = 0; i < kClusterNodes; ++i) {
     const auto classic_port = port_pool_.get_next_available();
     const auto http_port = port_pool_.get_next_available();
-    const std::string tracefile =
-        get_data_dir().join(GetParam().tracefile).str();
-    cluster_nodes.push_back(&launch_mysql_server_mock(
-        tracefile, classic_port, EXIT_SUCCESS, false, http_port));
+
+    cluster_nodes.push_back(&mock_server_spawner().spawn(  //
+        mock_server_cmdline(GetParam().tracefile)
+            .port(classic_port)
+            .http_port(http_port)
+            .args()));
 
     md_servers_classic_ports.push_back(classic_port);
     md_servers_http_ports.push_back(http_port);
@@ -873,18 +948,29 @@ TEST_P(MetadataCacheChangeClusterName, ChangeClusterName) {
       GetParam().cluster_type, "0.1", kInitialClusterName);
   const auto router_rw_port = port_pool_.get_next_available();
   const std::string routing_rw_section = get_metadata_cache_routing_section(
-      router_rw_port, "PRIMARY", "first-available", "", "rw");
+      router_rw_port, "PRIMARY", "first-available", "rw");
   const auto router_ro_port = port_pool_.get_next_available();
   const std::string routing_ro_section = get_metadata_cache_routing_section(
-      router_ro_port, "SECONDARY", "round-robin", "", "ro");
+      router_ro_port, "SECONDARY", "round-robin", "ro");
   auto &router = launch_router(metadata_cache_section,
                                routing_rw_section + routing_ro_section,
                                md_servers_classic_ports, EXIT_SUCCESS,
                                /*wait_for_notify_ready=*/30s);
 
   // make sure that Router works
-  make_new_connection_ok(router_rw_port, md_servers_classic_ports[0]);
-  make_new_connection_ok(router_ro_port, md_servers_classic_ports[1]);
+  {
+    auto conn_res = make_new_connection(router_rw_port);
+    ASSERT_NO_ERROR(conn_res);
+    ASSERT_NO_FATAL_FAILURE(
+        verify_port(conn_res->get(), md_servers_classic_ports[0]));
+  }
+
+  {
+    auto conn_res = make_new_connection(router_ro_port);
+    ASSERT_NO_ERROR(conn_res);
+    ASSERT_NO_FATAL_FAILURE(
+        verify_port(conn_res->get(), md_servers_classic_ports[1]));
+  }
 
   // now change the cluster name in the metadata
   for (const auto [i, http_port] :
@@ -896,8 +982,19 @@ TEST_P(MetadataCacheChangeClusterName, ChangeClusterName) {
       wait_for_transaction_count_increase(md_servers_http_ports[0], 2, 5s));
 
   // the Router should still work
-  make_new_connection_ok(router_rw_port, md_servers_classic_ports[0]);
-  make_new_connection_ok(router_ro_port, md_servers_classic_ports[1]);
+  {
+    auto conn_res = make_new_connection(router_rw_port);
+    ASSERT_NO_ERROR(conn_res);
+    ASSERT_NO_FATAL_FAILURE(
+        verify_port(conn_res->get(), md_servers_classic_ports[0]));
+  }
+
+  {
+    auto conn_res = make_new_connection(router_ro_port);
+    ASSERT_NO_ERROR(conn_res);
+    ASSERT_NO_FATAL_FAILURE(
+        verify_port(conn_res->get(), md_servers_classic_ports[1]));
+  }
 
   // now stop the Router and start it again, this is to make sure that not only
   // change of the ClusterName while the Router is running works but also when
@@ -910,8 +1007,19 @@ TEST_P(MetadataCacheChangeClusterName, ChangeClusterName) {
                                      md_servers_classic_ports, EXIT_SUCCESS,
                                      /*wait_for_notify_ready=*/30s);
 
-  make_new_connection_ok(router_rw_port, md_servers_classic_ports[0]);
-  make_new_connection_ok(router_ro_port, md_servers_classic_ports[1]);
+  {
+    auto conn_res = make_new_connection(router_rw_port);
+    ASSERT_NO_ERROR(conn_res);
+    ASSERT_NO_FATAL_FAILURE(
+        verify_port(conn_res->get(), md_servers_classic_ports[0]));
+  }
+
+  {
+    auto conn_res = make_new_connection(router_ro_port);
+    ASSERT_NO_ERROR(conn_res);
+    ASSERT_NO_FATAL_FAILURE(
+        verify_port(conn_res->get(), md_servers_classic_ports[1]));
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -920,12 +1028,12 @@ INSTANTIATE_TEST_SUITE_P(
         ClusterMetadataTestParams("metadata_dynamic_nodes_v2_gr.js", "GR_V2",
                                   ClusterType::GR_V2),
         ClusterMetadataTestParams("metadata_dynamic_nodes_v2_ar.js", "AR",
-                                  ClusterType::RS_V2),
-        ClusterMetadataTestParams("metadata_dynamic_nodes.js", "GR_V1",
-                                  ClusterType::GR_V1)),
+                                  ClusterType::RS_V2)),
     get_test_description);
 
 struct SessionReuseTestParams {
+  std::string test_name;
+
   std::string router_ssl_mode;
   bool server_ssl_enabled;
   bool expected_session_reuse;
@@ -949,23 +1057,28 @@ TEST_P(SessionReuseTest, SessionReuse) {
     classic_ports.push_back(port_pool_.get_next_available());
     http_ports.push_back(port_pool_.get_next_available());
   }
-  const std::string json_metadata =
-      get_data_dir().join("metadata_dynamic_nodes_v2_gr.js").str();
 
   for (size_t i = 0; i < kClusterNodes; ++i) {
-    cluster_nodes.push_back(&launch_mysql_server_mock(
-        json_metadata, classic_ports[i], EXIT_SUCCESS, false, http_ports[i], 0,
-        "", "0.0.0.0", 30s, /*enable_ssl*/ test_params.server_ssl_enabled));
-    ::set_mock_metadata(http_ports[i], "uuid",
-                        classic_ports_to_gr_nodes(classic_ports), 0,
-                        classic_ports_to_cluster_nodes(classic_ports));
+    cluster_nodes.push_back(&mock_server_spawner().spawn(  //
+        mock_server_cmdline("metadata_dynamic_nodes_v2_gr.js")
+            .port(classic_ports[i])
+            .http_port(http_ports[i])
+            .enable_ssl(test_params.server_ssl_enabled)
+            .args()));
+
+    set_mock_metadata(http_ports[i], "uuid",
+                      classic_ports_to_gr_nodes(classic_ports), 0,
+                      classic_ports_to_cluster_nodes(classic_ports));
   }
 
   const auto router_rw_port = port_pool_.get_next_available();
-  const std::string metadata_cache_section = get_metadata_cache_section(
-      ClusterType::GR_V2, "0.2", "test", test_params.router_ssl_mode);
+  const std::string metadata_cache_section =
+      get_metadata_cache_section(ClusterType::GR_V2, "0.2", "test",
+                                 test_params.router_ssl_mode) +
+      // close connection to allow a reconnect with ssl-session-reuse.
+      "close_connection_after_refresh=1\n";
   const std::string routing_rw = get_metadata_cache_routing_section(
-      router_rw_port, "PRIMARY", "first-available", "", "rw");
+      router_rw_port, "PRIMARY", "first-available", "rw");
 
   launch_router(metadata_cache_section, routing_rw, classic_ports, EXIT_SUCCESS,
                 /*wait_for_notify_ready=*/30s);
@@ -997,6 +1110,7 @@ INSTANTIATE_TEST_SUITE_P(
         /* default ssl_mode in the Router ("PREFERRED"), ssl enabled on the
            server side so we expect session reuse */
         SessionReuseTestParams{
+            "router_default_ssl_mode_with_server_ssl",
             /*router_ssl_mode*/ "",
             /*server_ssl_enabled*/ true,
             /*expected_session_reuse*/ true,
@@ -1004,21 +1118,25 @@ INSTANTIATE_TEST_SUITE_P(
 
         /* ssl_mode in the Router "REQUIRED", ssl enabled on the server side so
            we expect session reuse */
-        SessionReuseTestParams{/*router_ssl_mode*/ "REQUIRED",
+        SessionReuseTestParams{"router_ssl_mode_required_with_server_ssl",
+                               /*router_ssl_mode*/ "REQUIRED",
                                /*server_ssl_enabled*/ true,
                                /*expected_session_reuse*/ true},
 
         /* ssl_mode in the Router "PREFERRED", ssl disabled on the server side
          so we DON'T expect session reuse */
-        SessionReuseTestParams{/*router_ssl_mode*/ "PREFERRED",
+        SessionReuseTestParams{"router_ssl_mode_preferred_without_server_ssl",
+                               /*router_ssl_mode*/ "PREFERRED",
                                /*server_ssl_enabled*/ false,
                                /*expected_session_reuse*/ false},
 
         /* ssl_mode in the Router "DISABLED", ssl enabled on the server side
            so we DON'T expect session reuse */
-        SessionReuseTestParams{/*router_ssl_mode*/ "DISABLED",
+        SessionReuseTestParams{"router_ssl_mode_disabled_with_server_ssl",
+                               /*router_ssl_mode*/ "DISABLED",
                                /*server_ssl_enabled*/ true,
-                               /*expected_session_reuse*/ false}));
+                               /*expected_session_reuse*/ false}),
+    [](const auto &info) { return info.param.test_name; });
 
 struct StatsUpdatesFrequencyParam {
   std::string test_name;
@@ -1057,30 +1175,33 @@ TEST_P(StatsUpdatesFrequencyTest, Verify) {
   RecordProperty("Description", GetParam().test_description);
 
   if (GetParam().cluster_type == ClusterType::GR_CS) {
-    create_clusterset(1, /*target_cluster_id*/ 0,
-                      /*primary_cluster_id*/ 0, "metadata_clusterset.js",
-                      GetParam().router_options_json);
+    ClusterSetOptions cs_options;
+    cs_options.tracefile = "metadata_clusterset.js";
+    cs_options.metadata_version = GetParam().metadata_version;
+    cs_options.router_options = GetParam().router_options_json;
+    create_clusterset(cs_options);
 
-    primary_node_http_port = clusterset_data_.clusters[0].nodes[0].http_port;
-    metadata_server_ports = clusterset_data_.get_md_servers_classic_ports();
+    primary_node_http_port = cs_options.topology.clusters[0].nodes[0].http_port;
+    metadata_server_ports = cs_options.topology.get_md_servers_classic_ports();
   } else {
-    const std::string tracefile =
-        GetParam().cluster_type == ClusterType::GR_V2
-            ? get_data_dir().join("metadata_dynamic_nodes_v2_gr.js").str()
-            : get_data_dir().join("metadata_dynamic_nodes_v2_ar.js").str();
+    const std::string tracefile = GetParam().cluster_type == ClusterType::GR_V2
+                                      ? "metadata_dynamic_nodes_v2_gr.js"
+                                      : "metadata_dynamic_nodes_v2_ar.js";
 
     const auto md_server_port = port_pool_.get_next_available();
     primary_node_http_port = port_pool_.get_next_available();
     metadata_server_ports.push_back(md_server_port);
 
-    launch_mysql_server_mock(tracefile, md_server_port, EXIT_SUCCESS, false,
-                             primary_node_http_port);
+    mock_server_spawner().spawn(mock_server_cmdline(tracefile)
+                                    .port(md_server_port)
+                                    .http_port(primary_node_http_port)
+                                    .args());
 
-    ::set_mock_metadata(primary_node_http_port, "uuid",
-                        classic_ports_to_gr_nodes({md_server_port}), 0,
-                        classic_ports_to_cluster_nodes({md_server_port}), 0, 0,
-                        false, "127.0.0.1", GetParam().router_options_json,
-                        GetParam().metadata_version);
+    set_mock_metadata(primary_node_http_port, "uuid",
+                      classic_ports_to_gr_nodes({md_server_port}), 0,
+                      classic_ports_to_cluster_nodes({md_server_port}), 0,
+                      false, "127.0.0.1", GetParam().router_options_json,
+                      GetParam().metadata_version);
   }
 
   SCOPED_TRACE("// Launch the Router");
@@ -1088,7 +1209,7 @@ TEST_P(StatsUpdatesFrequencyTest, Verify) {
   const std::string metadata_cache_section =
       get_metadata_cache_section(GetParam().cluster_type, "0.05");
   const std::string routing_rw = get_metadata_cache_routing_section(
-      router_rw_port, "PRIMARY", "first-available", "", "rw");
+      router_rw_port, "PRIMARY", "first-available", "rw");
 
   auto &router = launch_router(metadata_cache_section, routing_rw,
                                metadata_server_ports, EXIT_SUCCESS,
@@ -1105,12 +1226,29 @@ TEST_P(StatsUpdatesFrequencyTest, Verify) {
   const auto last_check_in_count = get_int_global_value(
       primary_node_http_port, "update_last_check_in_count");
 
+  const auto old_last_check_in_count = get_int_global_value(
+      primary_node_http_port, "old_update_last_check_in_count");
+
   if (GetParam().expect_updates) {
     // last_check_in updates expected
-    EXPECT_GT(last_check_in_count, 0);
+    if (GetParam().metadata_version >=
+        mysqlrouter::MetadataSchemaVersion{2, 4, 0}) {
+      EXPECT_GT(last_check_in_count, 1);
+      EXPECT_EQ(old_last_check_in_count, 0);
+    } else {
+      EXPECT_GT(old_last_check_in_count, 1);
+      EXPECT_EQ(last_check_in_count, 0);
+    }
   } else {
-    // no last_check_in updates expected
-    EXPECT_EQ(0, last_check_in_count);
+    // no periodic last_check_in updates expected, only the initial-one
+    if (GetParam().metadata_version >=
+        mysqlrouter::MetadataSchemaVersion{2, 4, 0}) {
+      EXPECT_EQ(1, last_check_in_count);
+      EXPECT_EQ(0, old_last_check_in_count);
+    } else {
+      EXPECT_EQ(0, last_check_in_count);
+      EXPECT_EQ(1, old_last_check_in_count);
+    }
   }
 
   const std::string log_content = router.get_logfile_content();
@@ -1131,7 +1269,7 @@ INSTANTIATE_TEST_SUITE_P(
             "router_options.stats_updates_frequency=0 - ClusterSet",
             /*router_options_json*/ R"({"stats_updates_frequency" : 0})",
             /*cluster_type*/ ClusterType::GR_CS,
-            /*metadata_version*/ {2, 2, 0},
+            /*metadata_version*/ {2, 4, 0},
             /*expect_updates*/ false,
             /*expect_parsing_error*/ false},
         // explicit 0 - InnoDBCluster
@@ -1140,7 +1278,7 @@ INSTANTIATE_TEST_SUITE_P(
             "router_options.stats_updates_frequency=0 - InnoDBCluster",
             /*router_options_json*/ R"({"stats_updates_frequency" : 0})",
             /*cluster_type*/ ClusterType::GR_V2,
-            /*metadata_version*/ {2, 2, 0},
+            /*metadata_version*/ {2, 4, 0},
             /*expect_updates*/ false,
             /*expect_parsing_error*/ false},
         // explicit 0 - ReplicaSet
@@ -1149,7 +1287,7 @@ INSTANTIATE_TEST_SUITE_P(
             "router_options.stats_updates_frequency=0 - ReplicaSet",
             /*router_options_json*/ R"({"stats_updates_frequency" : 0})",
             /*cluster_type*/ ClusterType::RS_V2,
-            /*metadata_version*/ {2, 2, 0},
+            /*metadata_version*/ {2, 4, 0},
             /*expect_updates*/ false,
             /*expect_parsing_error*/ false},
         StatsUpdatesFrequencyParam{
@@ -1158,7 +1296,7 @@ INSTANTIATE_TEST_SUITE_P(
             "- ClusterSet - default is never do updates",
             /*router_options_json*/ "{}",
             /*cluster_type*/ ClusterType::GR_CS,
-            /*metadata_version*/ {2, 2, 0},
+            /*metadata_version*/ {2, 4, 0},
             /*expect_updates*/ false,
             /*expect_parsing_error*/ false},
         StatsUpdatesFrequencyParam{"cluster_options_empty_json",
@@ -1168,7 +1306,7 @@ INSTANTIATE_TEST_SUITE_P(
                                    "default is do updates every 10th TTL",
                                    /*router_options_json*/ "{}",
                                    /*cluster_type*/ ClusterType::GR_V2,
-                                   /*metadata_version*/ {2, 2, 0},
+                                   /*metadata_version*/ {2, 4, 0},
                                    /*expect_updates*/ true,
                                    /*expect_parsing_error*/ false},
         StatsUpdatesFrequencyParam{"replicaset_options_empty_json",
@@ -1178,7 +1316,7 @@ INSTANTIATE_TEST_SUITE_P(
                                    "default is do updates every 10th TTL",
                                    /*router_options_json*/ "{}",
                                    /*cluster_type*/ ClusterType::RS_V2,
-                                   /*metadata_version*/ {2, 2, 0},
+                                   /*metadata_version*/ {2, 4, 0},
                                    /*expect_updates*/ true,
                                    /*expect_parsing_error*/ false},
         StatsUpdatesFrequencyParam{"clusterset_options_empty_string",
@@ -1187,7 +1325,7 @@ INSTANTIATE_TEST_SUITE_P(
                                    "ClusterSet - default is never do updates",
                                    /*router_options_json*/ "",
                                    /*cluster_type*/ ClusterType::GR_CS,
-                                   /*metadata_version*/ {2, 2, 0},
+                                   /*metadata_version*/ {2, 4, 0},
                                    /*expect_updates*/ false,
                                    /*expect_parsing_error*/ false},
         StatsUpdatesFrequencyParam{
@@ -1196,7 +1334,7 @@ INSTANTIATE_TEST_SUITE_P(
             "updates every 10th TTL",
             /*router_options_json*/ "",
             /*cluster_type*/ ClusterType::GR_V2,
-            /*metadata_version*/ {2, 2, 0},
+            /*metadata_version*/ {2, 4, 0},
             /*expect_updates*/ true,
             /*expect_parsing_error*/ false},
         StatsUpdatesFrequencyParam{
@@ -1205,7 +1343,7 @@ INSTANTIATE_TEST_SUITE_P(
             "updates every 10th TTL",
             /*router_options_json*/ "",
             /*cluster_type*/ ClusterType::RS_V2,
-            /*metadata_version*/ {2, 2, 0},
+            /*metadata_version*/ {2, 4, 0},
             /*expect_updates*/ true,
             /*expect_parsing_error*/ false},
         StatsUpdatesFrequencyParam{
@@ -1215,7 +1353,7 @@ INSTANTIATE_TEST_SUITE_P(
             "ClusterSet - default is never do updates",
             /*router_options_json*/ R"({"stats_updates_frequency" : "aaa"})",
             /*cluster_type*/ ClusterType::GR_CS,
-            /*metadata_version*/ {2, 2, 0},
+            /*metadata_version*/ {2, 4, 0},
             /*expect_updates*/ false,
             /*expect_parsing_error*/ true},
         StatsUpdatesFrequencyParam{
@@ -1224,7 +1362,7 @@ INSTANTIATE_TEST_SUITE_P(
             "InnoDBCluster - default is do updates every 10th TTL",
             /*router_options_json*/ R"({"stats_updates_frequency" : "aaa"})",
             /*cluster_type*/ ClusterType::GR_V2,
-            /*metadata_version*/ {2, 2, 0},
+            /*metadata_version*/ {2, 4, 0},
             /*expect_updates*/ true,
             /*expect_parsing_error*/ true},
         StatsUpdatesFrequencyParam{
@@ -1234,7 +1372,7 @@ INSTANTIATE_TEST_SUITE_P(
             "ReplicaSet - default is do updates every 10th TTL",
             /*router_options_json*/ R"({"stats_updates_frequency" : -1})",
             /*cluster_type*/ ClusterType::RS_V2,
-            /*metadata_version*/ {2, 2, 0},
+            /*metadata_version*/ {2, 4, 0},
             /*expect_updates*/ true,
             /*expect_parsing_error*/ true},
         StatsUpdatesFrequencyParam{
@@ -1243,7 +1381,7 @@ INSTANTIATE_TEST_SUITE_P(
             "at least 1 update is expected",
             /*router_options_json*/ R"({"stats_updates_frequency" : 1})",
             /*cluster_type*/ ClusterType::GR_CS,
-            /*metadata_version*/ {2, 2, 0},
+            /*metadata_version*/ {2, 4, 0},
             /*expect_updates*/ true,
             /*expect_parsing_error*/ false},
         StatsUpdatesFrequencyParam{
@@ -1252,7 +1390,7 @@ INSTANTIATE_TEST_SUITE_P(
             "at least 1 update is expected",
             /*router_options_json*/ R"({"stats_updates_frequency" : 1})",
             /*cluster_type*/ ClusterType::GR_V2,
-            /*metadata_version*/ {2, 2, 0},
+            /*metadata_version*/ {2, 4, 0},
             /*expect_updates*/ true,
             /*expect_parsing_error*/ false},
         StatsUpdatesFrequencyParam{
@@ -1261,7 +1399,7 @@ INSTANTIATE_TEST_SUITE_P(
             "at least 1 update is expected",
             /*router_options_json*/ R"({"stats_updates_frequency" : 1})",
             /*cluster_type*/ ClusterType::RS_V2,
-            /*metadata_version*/ {2, 2, 0},
+            /*metadata_version*/ {2, 4, 0},
             /*expect_updates*/ true,
             /*expect_parsing_error*/ false},
         StatsUpdatesFrequencyParam{
@@ -1270,7 +1408,7 @@ INSTANTIATE_TEST_SUITE_P(
             "update is expected",
             /*router_options_json*/ R"({"stats_updates_frequency" : 5})",
             /*cluster_type*/ ClusterType::GR_CS,
-            /*metadata_version*/ {2, 2, 0},
+            /*metadata_version*/ {2, 4, 0},
             /*expect_updates*/ false,
             /*expect_parsing_error*/ false},
         StatsUpdatesFrequencyParam{
@@ -1279,7 +1417,7 @@ INSTANTIATE_TEST_SUITE_P(
             "update is expected",
             /*router_options_json*/ R"({"stats_updates_frequency" : 5})",
             /*cluster_type*/ ClusterType::GR_V2,
-            /*metadata_version*/ {2, 2, 0},
+            /*metadata_version*/ {2, 4, 0},
             /*expect_updates*/ false,
             /*expect_parsing_error*/ false},
         StatsUpdatesFrequencyParam{
@@ -1288,7 +1426,7 @@ INSTANTIATE_TEST_SUITE_P(
             "update is expected",
             /*router_options_json*/ R"({"stats_updates_frequency" : 5})",
             /*cluster_type*/ ClusterType::RS_V2,
-            /*metadata_version*/ {2, 2, 0},
+            /*metadata_version*/ {2, 4, 0},
             /*expect_updates*/ false,
             /*expect_parsing_error*/ false},
         StatsUpdatesFrequencyParam{"replicaset_options_invalid_json",
@@ -1298,7 +1436,7 @@ INSTANTIATE_TEST_SUITE_P(
                                    "parsing error should be logged",
                                    /*router_options_json*/ "aaabc",
                                    /*cluster_type*/ ClusterType::RS_V2,
-                                   /*metadata_version*/ {2, 2, 0},
+                                   /*metadata_version*/ {2, 4, 0},
                                    /*expect_updates*/ true,
                                    /*expect_parsing_error*/ true},
         StatsUpdatesFrequencyParam{
@@ -1321,7 +1459,7 @@ INSTANTIATE_TEST_SUITE_P(
             /*expect_updates*/ true,
             /*expect_parsing_error*/ false},
         StatsUpdatesFrequencyParam{
-            "clusterset_metadata_2_1_0_updates_frequency_0s", "FR2",
+            "cluster_metadata_2_1_0_updates_frequency_0s", "FR2",
             "Standalone Cluster, metadata vesion 2.1.0 (before "
             "v2_router_options view was added), even though "
             "v2_router_cs_options has '0' configured so we don't use it for "
@@ -1334,6 +1472,164 @@ INSTANTIATE_TEST_SUITE_P(
     [](const ::testing::TestParamInfo<StatsUpdatesFrequencyParam> &info) {
       return info.param.test_name;
     });
+
+struct ServerCompatTestParam {
+  std::string description;
+  ClusterType cluster_type;
+  std::string tracefile;
+  std::string server_version;
+  std::string expected_warning_msg;
+};
+
+class CheckServerCompatibilityTest
+    : public RouterComponenClustertMetadataTest,
+      public ::testing::WithParamInterface<ServerCompatTestParam> {};
+
+/**
+ * @test
+ *       Verifies that the server version is checked for compatibility when the
+ * Router is running with the GR Cluster and Replica Set
+ */
+TEST_P(CheckServerCompatibilityTest, Spec) {
+  RecordProperty("Description", GetParam().description);
+
+  const size_t kClusterNodes{2};
+  std::vector<ProcessWrapper *> cluster_nodes;
+  std::vector<uint16_t> md_servers_classic_ports, md_servers_http_ports;
+
+  // launch the mock servers
+  for (size_t i = 0; i < kClusterNodes; ++i) {
+    const auto classic_port = port_pool_.get_next_available();
+    const auto http_port = port_pool_.get_next_available();
+
+    cluster_nodes.push_back((&mock_server_spawner().spawn(  //
+        mock_server_cmdline(GetParam().tracefile)
+            .port(classic_port)
+            .http_port(http_port)
+            .args())));
+
+    md_servers_classic_ports.push_back(classic_port);
+    md_servers_http_ports.push_back(http_port);
+  }
+
+  for (const auto http_port : md_servers_http_ports) {
+    set_mock_metadata(http_port, "uuid",
+                      classic_ports_to_gr_nodes(md_servers_classic_ports), 0,
+                      classic_ports_to_cluster_nodes(md_servers_classic_ports));
+  }
+
+  // launch the router
+  const std::string metadata_cache_section =
+      get_metadata_cache_section(GetParam().cluster_type);
+  const auto router_rw_port = port_pool_.get_next_available();
+  const std::string routing_rw_section = get_metadata_cache_routing_section(
+      router_rw_port, "PRIMARY", "first-available", "rw");
+  const auto router_ro_port = port_pool_.get_next_available();
+  const std::string routing_ro_section = get_metadata_cache_routing_section(
+      router_ro_port, "SECONDARY", "round-robin", "ro");
+  auto &router = launch_router(metadata_cache_section,
+                               routing_rw_section + routing_ro_section,
+                               md_servers_classic_ports, EXIT_SUCCESS,
+                               /*wait_for_notify_ready=*/30s);
+
+  // make sure that Router works
+  auto client_res = make_new_connection(router_rw_port);
+  ASSERT_NO_ERROR(client_res);
+  ASSERT_NO_FATAL_FAILURE(
+      verify_port(client_res->get(), md_servers_classic_ports[0]));
+
+  client_res = make_new_connection(router_ro_port);
+  ASSERT_NO_ERROR(client_res);
+  ASSERT_NO_FATAL_FAILURE(
+      verify_port(client_res->get(), md_servers_classic_ports[1]));
+
+  const std::string kMockServerConnectionsUri(
+      "/api/v1/mock_server/connections/");
+
+  SCOPED_TRACE("// change the cluster nodes versions to " +
+               GetParam().server_version);
+  for (const auto http_port : md_servers_http_ports) {
+    set_mock_server_version(http_port, GetParam().server_version);
+
+    // close all connections to ensure the metadata-cache sees the new
+    // server-version.
+    ASSERT_NO_THROW(
+        MockServerRestClient(http_port).send_delete(kMockServerConnectionsUri));
+  }
+
+  EXPECT_TRUE(
+      wait_for_transaction_count_increase(md_servers_http_ports[0], 5, 5s));
+
+  if (!GetParam().expected_warning_msg.empty()) {
+    EXPECT_TRUE(wait_log_contains(router, GetParam().expected_warning_msg, 5s))
+        << GetParam().expected_warning_msg;
+  }
+
+  auto conn_res = make_new_connection(router_rw_port);
+  ASSERT_NO_ERROR(conn_res);
+  ASSERT_NO_FATAL_FAILURE(
+      verify_port(conn_res->get(), md_servers_classic_ports[0]));
+
+  conn_res = make_new_connection(router_ro_port);
+  ASSERT_NO_ERROR(conn_res);
+  ASSERT_NO_FATAL_FAILURE(
+      verify_port(conn_res->get(), md_servers_classic_ports[1]));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Spec, CheckServerCompatibilityTest,
+    ::testing::Values(
+        ServerCompatTestParam{
+            "GR Cluster; Server is the same version as Router - OK",
+            ClusterType::GR_V2, "metadata_dynamic_nodes_v2_gr.js",
+            std::to_string(MYSQL_ROUTER_VERSION_MAJOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_MINOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_PATCH),
+            ""},
+        ServerCompatTestParam{
+            "Replica Set; Server is the same version as Router - OK",
+            ClusterType::RS_V2, "metadata_dynamic_nodes_v2_ar.js",
+            std::to_string(MYSQL_ROUTER_VERSION_MAJOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_MINOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_PATCH),
+            ""},
+        ServerCompatTestParam{
+            "GR Cluster; Server major version is higher than Router - "
+            "we should log a warning",
+            ClusterType::GR_V2, "metadata_dynamic_nodes_v2_gr.js",
+            std::to_string(MYSQL_ROUTER_VERSION_MAJOR + 1) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_MINOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_PATCH),
+            "WARNING .* MySQL Server version .* is higher than the Router "
+            "version. You should upgrade the Router to match the MySQL Server "
+            "version."},
+        ServerCompatTestParam{
+            "GR Cluster; Server minor version is higher than Router - "
+            "we should log a warning",
+            ClusterType::GR_V2, "metadata_dynamic_nodes_v2_gr.js",
+            std::to_string(MYSQL_ROUTER_VERSION_MAJOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_MINOR + 1) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_PATCH),
+            "WARNING .* MySQL Server version .* is higher than the Router "
+            "version. You should upgrade the Router to match the MySQL Server "
+            "version."},
+        ServerCompatTestParam{
+            "GR Cluster; Server patch version is higher than Router - OK",
+            ClusterType::GR_V2, "metadata_dynamic_nodes_v2_gr.js",
+            std::to_string(MYSQL_ROUTER_VERSION_MAJOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_MINOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_PATCH + 1),
+            ""},
+        ServerCompatTestParam{
+            "Replica Set; Server minor version is higher than Router - "
+            "we should log a warning",
+            ClusterType::RS_V2, "metadata_dynamic_nodes_v2_ar.js",
+            std::to_string(MYSQL_ROUTER_VERSION_MAJOR) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_MINOR + 1) + "." +
+                std::to_string(MYSQL_ROUTER_VERSION_PATCH),
+            "WARNING .* MySQL Server version .* is higher than the Router "
+            "version. You should upgrade the Router to match the MySQL Server "
+            "version."}));
 
 int main(int argc, char *argv[]) {
   init_windows_sockets();

@@ -43,6 +43,8 @@ ALTER USER user() IDENTIFIED BY 'auth_string' ACCOUNT LOCK;
 ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'ACCOUNT LOCK' at line 1
 GRANT CREATE USER ON *.* TO user2@localhost;
 FLUSH PRIVILEGES;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 SELECT USER();
 USER()
 user2@localhost
@@ -50,7 +52,7 @@ ALTER USER user2@localhost IDENTIFIED BY 'auth_string' ACCOUNT LOCK;
 SELECT USER();
 USER()
 user2@localhost
-connect(localhost,user2,auth_string,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,user2,auth_string,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'user2'@'localhost'. Account is locked.
 ALTER USER user2@localhost ACCOUNT LOCK;
 SELECT host,user,plugin,authentication_string,account_locked
@@ -60,21 +62,21 @@ user	user2
 plugin	#
 authentication_string	#
 account_locked	Y
-connect(localhost,user2,auth_string,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,user2,auth_string,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'user2'@'localhost'. Account is locked.
-CREATE USER 'user8'@'localhost' IDENTIFIED WITH 'mysql_native_password'
-            AS '*67092806AE91BFB6BE72DE6C7BE2B7CCA8CFA9DF'
+CREATE USER 'user8'@'localhost' IDENTIFIED WITH 'caching_sha2_password'
+            BY 'auth_string'
             ACCOUNT UNLOCK;
 ALTER USER 'user8'@'localhost' ACCOUNT LOCK PASSWORD EXPIRE NEVER;
-CREATE USER 'user9'@'localhost' IDENTIFIED WITH 'mysql_native_password'
-            AS '*67092806AE91BFB6BE72DE6C7BE2B7CCA8CFA9DF'
+CREATE USER 'user9'@'localhost' IDENTIFIED WITH 'caching_sha2_password'
+            BY 'auth_string'
             ACCOUNT LOCK;
-CREATE USER 'user10'@'localhost' IDENTIFIED WITH 'mysql_native_password'
-            AS '*67092806AE91BFB6BE72DE6C7BE2B7CCA8CFA9DF'
+CREATE USER 'user10'@'localhost' IDENTIFIED WITH 'caching_sha2_password'
+            BY 'auth_string'
             PASSWORD EXPIRE NEVER ACCOUNT UNLOCK;
 ALTER USER 'user10'@'localhost' PASSWORD EXPIRE DEFAULT ACCOUNT LOCK;
-CREATE USER 'user11'@'localhost' IDENTIFIED WITH 'mysql_native_password'
-            AS '*67092806AE91BFB6BE72DE6C7BE2B7CCA8CFA9DF'
+CREATE USER 'user11'@'localhost' IDENTIFIED WITH 'caching_sha2_password'
+            BY 'auth_string'
             ACCOUNT LOCK PASSWORD EXPIRE NEVER;
 ALTER USER 'user11'@'localhost' PASSWORD EXPIRE INTERVAL 10 DAY ACCOUNT LOCK;
 CREATE USER ACCOUNT UNLOCK user5@localhost;
@@ -153,7 +155,7 @@ user	u1
 plugin	#
 authentication_string	#
 account_locked	Y
-connect(localhost,u1,,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,u1,,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u1'@'localhost'. Account is locked.
 ALTER USER u1@localhost;
 SELECT user,plugin,authentication_string,account_locked
@@ -162,7 +164,7 @@ user	u1
 plugin	#
 authentication_string	#
 account_locked	Y
-connect(localhost,u1,,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,u1,,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u1'@'localhost'. Account is locked.
 CREATE USER u2@localhost IDENTIFIED BY 'auth_string' ACCOUNT LOCK;
 SELECT user,plugin,authentication_string,account_locked
@@ -171,7 +173,7 @@ user	u2
 plugin	#
 authentication_string	#
 account_locked	Y
-connect(localhost,u2,auth_string,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,u2,auth_string,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u2'@'localhost'. Account is locked.
 
 SHOW CREATE USER u2@localhost;
@@ -179,10 +181,10 @@ CREATE USER for u2@localhost
 CREATE USER `u2`@`localhost` IDENTIFIED WITH '<default_authentication_plugin>' AS '<non-deterministic-password-hash>' REQUIRE NONE PASSWORD EXPIRE DEFAULT ACCOUNT LOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT
 # Recreating user using SHOW CREATE USER output for u2@localhost
 DROP USER u2@localhost;
-CREATE USER 'u2'@'localhost' IDENTIFIED WITH 'mysql_native_password'
-            AS '*67092806AE91BFB6BE72DE6C7BE2B7CCA8CFA9DF'
+CREATE USER 'u2'@'localhost' IDENTIFIED WITH 'caching_sha2_password'
+            BY 'auth_string'
             REQUIRE NONE PASSWORD EXPIRE DEFAULT ACCOUNT LOCK;
-connect(localhost,u2,auth_string,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,u2,auth_string,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u2'@'localhost'. Account is locked.
 ALTER USER u2@localhost IDENTIFIED BY 'auth_string' ACCOUNT UNLOCK;
 SELECT user,plugin,authentication_string,account_locked
@@ -211,7 +213,7 @@ account_locked	Y
 SHOW CREATE USER u3@localhost;
 CREATE USER for u3@localhost
 CREATE USER `u3`@`localhost` IDENTIFIED WITH 'sha256_password' REQUIRE NONE PASSWORD EXPIRE DEFAULT ACCOUNT LOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT
-connect(localhost,u3,,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,u3,,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u3'@'localhost'. Account is locked.
 ALTER USER u3@localhost IDENTIFIED WITH 'sha256_password'
                         ACCOUNT LOCK ACCOUNT UNLOCK;
@@ -268,18 +270,18 @@ authentication_string	#
 password_expired	N
 password_lifetime	90
 account_locked	N
-CREATE USER user5@localhost IDENTIFIED WITH 'mysql_native_password' AS '*67092806AE91BFB6BE72DE6C7BE2B7CCA8CFA9DF'
+CREATE USER user5@localhost IDENTIFIED WITH 'caching_sha2_password' BY 'auth_string'
                             ACCOUNT UNLOCK PASSWORD EXPIRE NEVER;
 SELECT USER();
 USER()
 user5@localhost
 
-CREATE USER user6@localhost IDENTIFIED WITH 'mysql_native_password'
+CREATE USER user6@localhost IDENTIFIED WITH 'caching_sha2_password'
                             ACCOUNT UNLOCK ACCOUNT LOCK PASSWORD EXPIRE NEVER;
 SELECT user,plugin,authentication_string,password_expired,
 password_lifetime,account_locked FROM mysql.user WHERE USER='user6';
 user	user6
-plugin	mysql_native_password
+plugin	caching_sha2_password
 authentication_string	#
 password_expired	N
 password_lifetime	0
@@ -287,15 +289,15 @@ account_locked	Y
 
 SHOW CREATE USER user6@localhost;
 CREATE USER for user6@localhost
-CREATE USER `user6`@`localhost` IDENTIFIED WITH 'mysql_native_password' REQUIRE NONE PASSWORD EXPIRE NEVER ACCOUNT LOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT
-connect(localhost,user6,,test,MASTER_PORT,MASTER_SOCKET);
+CREATE USER `user6`@`localhost` IDENTIFIED WITH 'caching_sha2_password' REQUIRE NONE PASSWORD EXPIRE NEVER ACCOUNT LOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT
+connect(localhost,user6,,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'user6'@'localhost'. Account is locked.
-ALTER USER user6@localhost IDENTIFIED WITH 'mysql_native_password'
+ALTER USER user6@localhost IDENTIFIED WITH 'caching_sha2_password'
                            ACCOUNT LOCK ACCOUNT UNLOCK;
 SELECT user,plugin,authentication_string,password_expired,
 password_lifetime,account_locked FROM mysql.user WHERE USER='user6';
 user	user6
-plugin	mysql_native_password
+plugin	caching_sha2_password
 authentication_string	#
 password_expired	Y
 password_lifetime	0
@@ -303,12 +305,12 @@ account_locked	N
 SELECT USER();
 ERROR HY000: You must reset your password using ALTER USER statement before executing this statement.
 
-CREATE USER user7@localhost IDENTIFIED WITH 'mysql_native_password' BY 'auth_string#%y'
+CREATE USER user7@localhost IDENTIFIED WITH 'caching_sha2_password' BY 'auth_string#%y'
             PASSWORD EXPIRE DEFAULT ACCOUNT LOCK PASSWORD EXPIRE NEVER ACCOUNT UNLOCK;
 SELECT user,plugin,authentication_string,password_expired,
 password_lifetime,account_locked FROM mysql.user WHERE USER='user7';
 user	user7
-plugin	mysql_native_password
+plugin	caching_sha2_password
 authentication_string	#
 password_expired	N
 password_lifetime	0
@@ -316,7 +318,7 @@ account_locked	N
 
 SHOW CREATE USER user7@localhost;
 CREATE USER for user7@localhost
-CREATE USER `user7`@`localhost` IDENTIFIED WITH 'mysql_native_password' AS '*1643D320B9787E87A3C6CE2C953B9E4FDBC048BC' REQUIRE NONE PASSWORD EXPIRE NEVER ACCOUNT UNLOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT
+CREATE USER `user7`@`localhost` IDENTIFIED WITH '<undeterministic_password_hash>' REQUIRE NONE PASSWORD EXPIRE NEVER ACCOUNT UNLOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT
 SELECT USER();
 USER()
 user7@localhost
@@ -332,17 +334,17 @@ password_lifetime	0
 account_locked	Y
 
 # Testing connection with wrong password and ACCOUNT LOCK state
-connect(localhost,user7,auth_string#%y,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,user7,auth_string#%y,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR 28000: Access denied for user 'user7'@'localhost' (using password: YES)
 # Testing connection with correct password and ACCOUNT LOCK state
-connect(localhost,user7,auth_string_sha256,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,user7,auth_string_sha256,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'user7'@'localhost'. Account is locked.
-CREATE USER user8@localhost IDENTIFIED WITH 'mysql_native_password'
-AS '*67092806AE91BFB6BE72DE6C7BE2B7CCA8CFA9DF' ACCOUNT UNLOCK PASSWORD EXPIRE NEVER;
+CREATE USER user8@localhost IDENTIFIED WITH 'caching_sha2_password'
+BY 'auth_string' ACCOUNT UNLOCK PASSWORD EXPIRE NEVER;
 SELECT user,plugin,authentication_string,password_expired,
 password_lifetime,account_locked FROM mysql.user WHERE USER='user8';
 user	user8
-plugin	mysql_native_password
+plugin	caching_sha2_password
 authentication_string	#
 password_expired	N
 password_lifetime	0
@@ -350,16 +352,16 @@ account_locked	N
 
 SHOW CREATE USER user8@localhost;
 CREATE USER for user8@localhost
-CREATE USER `user8`@`localhost` IDENTIFIED WITH 'mysql_native_password' AS '*67092806AE91BFB6BE72DE6C7BE2B7CCA8CFA9DF' REQUIRE NONE PASSWORD EXPIRE NEVER ACCOUNT UNLOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT
+CREATE USER `user8`@`localhost` IDENTIFIED WITH '<undeterministic password hash>' REQUIRE NONE PASSWORD EXPIRE NEVER ACCOUNT UNLOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT
 SELECT USER();
 USER()
 user8@localhost
-ALTER USER user8@localhost IDENTIFIED WITH 'mysql_native_password' BY 'new_auth_string'
+ALTER USER user8@localhost IDENTIFIED WITH 'caching_sha2_password' BY 'new_auth_string'
                            ACCOUNT UNLOCK PASSWORD EXPIRE;
 SELECT user,plugin,authentication_string,password_expired,
 password_lifetime,account_locked FROM mysql.user WHERE USER='user8';
 user	user8
-plugin	mysql_native_password
+plugin	caching_sha2_password
 authentication_string	#
 password_expired	Y
 password_lifetime	0
@@ -385,7 +387,7 @@ account_locked	Y
 SHOW CREATE USER u5@localhost;
 CREATE USER for u5@localhost
 CREATE USER `u5`@`localhost` IDENTIFIED WITH '<default_authentication_plugin>' REQUIRE SSL PASSWORD EXPIRE ACCOUNT LOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT
-connect(localhost,u5,,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,u5,,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u5'@'localhost'. Account is locked.
 ALTER USER u5@localhost REQUIRE SSL PASSWORD EXPIRE DEFAULT ACCOUNT UNLOCK;
 SELECT USER();
@@ -405,7 +407,7 @@ account_locked	Y
 SHOW CREATE USER u6@localhost;
 CREATE USER for u6@localhost
 CREATE USER `u6`@`localhost` IDENTIFIED WITH '<default_authentication_plugin>' AS '<non-deterministic-password-hash>' REQUIRE X509 PASSWORD EXPIRE NEVER ACCOUNT LOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT
-connect(localhost,u6,auth_string,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,u6,auth_string,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u6'@'localhost'. Account is locked.
 ALTER USER u6@localhost ACCOUNT UNLOCK;
 SELECT user,plugin,authentication_string,ssl_type,password_expired,
@@ -446,12 +448,12 @@ CREATE USER `u7`@`localhost` IDENTIFIED WITH 'sha256_password' REQUIRE CIPHER 'E
 SELECT USER();
 USER()
 u7@localhost
-ALTER USER u7@localhost IDENTIFIED WITH 'mysql_native_password'
+ALTER USER u7@localhost IDENTIFIED WITH 'caching_sha2_password'
                         PASSWORD EXPIRE DEFAULT ACCOUNT LOCK;
 SELECT user,plugin,authentication_string,ssl_type,ssl_cipher,x509_issuer,
 x509_subject,password_expired,password_lifetime,account_locked FROM mysql.user WHERE USER='u7';
 user	u7
-plugin	mysql_native_password
+plugin	caching_sha2_password
 authentication_string	#
 ssl_type	SPECIFIED
 ssl_cipher	ECDHE-RSA-AES128-GCM-SHA256
@@ -463,8 +465,8 @@ account_locked	Y
 
 SHOW CREATE USER u7@localhost;
 CREATE USER for u7@localhost
-CREATE USER `u7`@`localhost` IDENTIFIED WITH 'mysql_native_password' REQUIRE CIPHER 'ECDHE-RSA-AES128-GCM-SHA256' PASSWORD EXPIRE ACCOUNT LOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT
-connect(localhost,u7,,test,MASTER_PORT,MASTER_SOCKET);
+CREATE USER `u7`@`localhost` IDENTIFIED WITH 'caching_sha2_password' REQUIRE CIPHER 'ECDHE-RSA-AES128-GCM-SHA256' PASSWORD EXPIRE ACCOUNT LOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT
+connect(localhost,u7,,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u7'@'localhost'. Account is locked.
 CREATE USER u8@localhost IDENTIFIED WITH 'sha256_password' BY 'auth_string'
             REQUIRE ISSUER '/C=SE/ST=Stockholm/L=Stockholm/O=Oracle/OU=MySQL/CN=CA'
@@ -503,7 +505,7 @@ x509_subject
 password_expired	N
 password_lifetime	0
 account_locked	Y
-connect(localhost,u8,auth_string,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,u8,auth_string,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u8'@'localhost'. Account is locked.
 CREATE USER u9@localhost
 REQUIRE SUBJECT "/C=SE/ST=Stockholm/L=Stockholm/O=Oracle/OU=MySQL/CN=Client"
@@ -520,7 +522,7 @@ x509_subject	/C=SE/ST=Stockholm/L=Stockholm/O=Oracle/OU=MySQL/CN=Client
 password_expired	N
 password_lifetime	0
 account_locked	Y
-connect(localhost,u9,,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,u9,,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u9'@'localhost'. Account is locked.
 ALTER USER u9@localhost IDENTIFIED WITH 'sha256_password' BY 'auth_string' ACCOUNT UNLOCK;
 SELECT user,plugin,authentication_string,ssl_type,ssl_cipher,x509_issuer,
@@ -584,7 +586,7 @@ account_locked	Y
 SHOW CREATE USER u10@localhost;
 CREATE USER for u10@localhost
 CREATE USER `u10`@`localhost` IDENTIFIED WITH 'sha256_password' AS '<non-deterministic-password-hash>' REQUIRE CIPHER 'ECDHE-RSA-AES128-GCM-SHA256' PASSWORD EXPIRE DEFAULT ACCOUNT LOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT
-connect(localhost,u10,auth_string#y,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,u10,auth_string#y,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u10'@'localhost'. Account is locked.
 CREATE USER u11@localhost WITH MAX_QUERIES_PER_HOUR 2 ACCOUNT LOCK;
 SELECT user,plugin,authentication_string,max_questions,password_expired,
@@ -600,7 +602,7 @@ account_locked	Y
 SHOW CREATE USER u11@localhost;
 CREATE USER for u11@localhost
 CREATE USER `u11`@`localhost` IDENTIFIED WITH '<default_authentication_plugin>' REQUIRE NONE WITH MAX_QUERIES_PER_HOUR 2 PASSWORD EXPIRE DEFAULT ACCOUNT LOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT
-connect(localhost,u11,,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,u11,,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u11'@'localhost'. Account is locked.
 ALTER USER u11@localhost WITH MAX_QUERIES_PER_HOUR 6 ACCOUNT UNLOCK ACCOUNT UNLOCK;
 SELECT user,plugin,authentication_string,max_questions,password_expired,
@@ -617,7 +619,7 @@ SHOW CREATE USER u11@localhost;
 CREATE USER for u11@localhost
 CREATE USER `u11`@`localhost` IDENTIFIED WITH '<default_authentication_plugin>' REQUIRE NONE WITH MAX_QUERIES_PER_HOUR 6 PASSWORD EXPIRE DEFAULT ACCOUNT UNLOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT
 DROP USER u11@localhost;
-CREATE USER 'u11'@'localhost' IDENTIFIED WITH 'mysql_native_password'
+CREATE USER 'u11'@'localhost' IDENTIFIED WITH 'caching_sha2_password'
 REQUIRE NONE WITH MAX_QUERIES_PER_HOUR 6 PASSWORD EXPIRE DEFAULT ACCOUNT UNLOCK;
 SELECT user,plugin,authentication_string,max_questions,password_expired,
 password_lifetime,account_locked FROM mysql.user WHERE USER='u11';
@@ -692,7 +694,7 @@ max_connections	2
 password_expired	N
 password_lifetime	NULL
 account_locked	Y
-connect(localhost,u13,,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,u13,,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u13'@'localhost'. Account is locked.
 ALTER USER u13@localhost PASSWORD EXPIRE INTERVAL 20 DAY ACCOUNT UNLOCK;
 SELECT user,plugin,authentication_string,max_connections,password_expired,
@@ -791,9 +793,9 @@ CREATE USER u18@localhost,
 u19@localhost IDENTIFIED BY 'auth_string',
 u20@localhost IDENTIFIED WITH 'sha256_password',
 u21@localhost IDENTIFIED WITH 'sha256_password' BY 'auth_string',
-u22@localhost IDENTIFIED WITH 'mysql_native_password',
-u23@localhost IDENTIFIED WITH 'mysql_native_password'
-                          AS '*318C29553A414C4A571A077BC9E9A9F67D5E5634'
+u22@localhost IDENTIFIED WITH 'caching_sha2_password',
+u23@localhost IDENTIFIED WITH 'caching_sha2_password'
+                          BY 'auth_&string'
             REQUIRE SUBJECT '/C=SE/ST=Stockholm/L=Stockholm/O=Oracle/OU=MySQL/CN=Client'
             WITH MAX_QUERIES_PER_HOUR 2 MAX_USER_CONNECTIONS 2 ACCOUNT LOCK;
 SELECT user,plugin,authentication_string,ssl_type,ssl_cipher,x509_issuer,
@@ -860,7 +862,7 @@ SELECT user,plugin,authentication_string,ssl_type,ssl_cipher,
 x509_issuer,x509_subject,max_questions,max_user_connections,password_expired,
 password_lifetime,account_locked FROM mysql.user WHERE USER='u22';
 user	u22
-plugin	mysql_native_password
+plugin	caching_sha2_password
 authentication_string	#
 ssl_type	SPECIFIED
 ssl_cipher	
@@ -875,7 +877,7 @@ SELECT user,plugin,authentication_string,ssl_type,ssl_cipher,
 x509_issuer,x509_subject,max_questions,max_user_connections,password_expired,
 password_lifetime,account_locked FROM mysql.user WHERE USER='u23';
 user	u23
-plugin	mysql_native_password
+plugin	caching_sha2_password
 authentication_string	#
 ssl_type	SPECIFIED
 ssl_cipher	
@@ -886,25 +888,25 @@ max_user_connections	2
 password_expired	N
 password_lifetime	NULL
 account_locked	Y
-connect(localhost,u18,,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,u18,,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u18'@'localhost'. Account is locked.
-connect(localhost,u19,auth_string,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,u19,auth_string,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u19'@'localhost'. Account is locked.
-connect(localhost,u20,,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,u20,,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u20'@'localhost'. Account is locked.
-connect(localhost,u21,auth_string,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,u21,auth_string,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u21'@'localhost'. Account is locked.
-connect(localhost,u22,,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,u22,,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u22'@'localhost'. Account is locked.
-connect(localhost,u23,auth_&string,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,u23,auth_&string,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u23'@'localhost'. Account is locked.
 ALTER  USER u18@localhost,
 u19@localhost IDENTIFIED BY 'auth_string',
 u20@localhost IDENTIFIED WITH 'sha256_password',
 u21@localhost IDENTIFIED WITH 'sha256_password' BY 'auth_string',
-u22@localhost IDENTIFIED WITH 'mysql_native_password',
-u23@localhost IDENTIFIED WITH 'mysql_native_password'
-                          AS '*318C29553A414C4A571A077BC9E9A9F67D5E5634'
+u22@localhost IDENTIFIED WITH 'caching_sha2_password',
+u23@localhost IDENTIFIED WITH 'caching_sha2_password'
+                          BY 'auth_&string'
                           REQUIRE CIPHER "ECDHE-RSA-AES128-GCM-SHA256"
                           ISSUER "/C=SE/ST=Stockholm/L=Stockholm/O=Oracle/OU=MySQL/CN=CA"
                           ACCOUNT UNLOCK;
@@ -972,7 +974,7 @@ SELECT user,plugin,authentication_string,ssl_type,ssl_cipher,x509_issuer,
 x509_subject,max_questions,max_user_connections,password_expired,password_lifetime,
 account_locked FROM mysql.user WHERE USER='u22';
 user	u22
-plugin	mysql_native_password
+plugin	caching_sha2_password
 authentication_string	#
 ssl_type	SPECIFIED
 ssl_cipher	ECDHE-RSA-AES128-GCM-SHA256
@@ -987,7 +989,7 @@ SELECT user,plugin,authentication_string,ssl_type,ssl_cipher,x509_issuer,
 x509_subject,max_questions,max_user_connections,password_expired,password_lifetime,
 account_locked FROM mysql.user WHERE USER='u23';
 user	u23
-plugin	mysql_native_password
+plugin	caching_sha2_password
 authentication_string	#
 ssl_type	SPECIFIED
 ssl_cipher	ECDHE-RSA-AES128-GCM-SHA256
@@ -1067,7 +1069,7 @@ GRANT EXECUTE ON PROCEDURE test.p1 TO u2@localhost;
 GRANT EXECUTE ON FUNCTION test.myfunc TO u2@localhost;
 ALTER USER u1@localhost ACCOUNT LOCK;
 # Login for u1@localhost should fail.
-connect(localhost,u1,pass,test,MASTER_PORT,MASTER_SOCKET);
+connect(localhost,u1,pass,test,SOURCE_PORT,SOURCE_SOCKET);
 ERROR HY000: Access denied for user 'u1'@'localhost'. Account is locked.
 # Login as u2 and run stored procedure and trigger as u1.
 SELECT CURRENT_USER();

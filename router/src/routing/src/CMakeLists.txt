@@ -1,15 +1,16 @@
-# Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,12 +23,9 @@
 
 INCLUDE(GenerateExportHeader)
 
-IF (NOT TARGET ext::libprotobuf-lite)
-  MESSAGE(FATAL_ERROR "Routing plugin requires protobuf-lite library")
-ENDIF()
-
 ADD_LIBRARY(sql_lexer STATIC
   sql_lexer.cc
+  sql_lexer_thd.cc
   ${CMAKE_SOURCE_DIR}/sql/sql_lex_hash.cc
   )
 TARGET_INCLUDE_DIRECTORIES(sql_lexer
@@ -35,26 +33,56 @@ TARGET_INCLUDE_DIRECTORIES(sql_lexer
 # generate sql_yacc.h
 ADD_DEPENDENCIES(sql_lexer GenServerSource GenError)
 
-ADD_LIBRARY(routing SHARED
+ADD_LIBRARY(routing_frontend_lib STATIC
+  routing.cc
+)
+
+TARGET_LINK_LIBRARIES(routing_frontend_lib
+  PUBLIC
+  harness_stdx)
+
+TARGET_INCLUDE_DIRECTORIES(
+  routing_frontend_lib
+PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include/
+  ${CMAKE_CURRENT_BINARY_DIR}/../include/
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../router/include/
+  ${CMAKE_CURRENT_BINARY_DIR}/../../router/include/
+)
+
+## routing_connections is used by "routing" and "connection_pool"
+ROUTER_ADD_SHARED_LIBRARY(routing_connections
+  channel.cc
+
+  OUTPUT_NAME "mysqlrouter_routing_connections"
+
+  LINK_LIBRARIES
+  PUBLIC
+  harness_stdx
+  harness_tls
+  mysql_protocol
+  )
+
+ROUTER_ADD_SHARED_LIBRARY(routing
   mysql_routing.cc
   destination.cc
   destination_error.cc
+  destinations_option_parser.cc
   dest_metadata_cache.cc
-  dest_first_available.cc
-  dest_next_available.cc
-  dest_round_robin.cc
-  routing.cc
+  dest_static.cc
   context.cc
   mysql_routing_common.cc
   connection_container.cc
   routing_component.cc
-  channel.cc
   destination_ssl_context.cc
   classic_connection_base.cc
   classic_connection.cc
   x_connection.cc
   connection.cc
   blocked_endpoints.cc
+  routing_guidelines_adapter.cc
 
   await_client_or_server.cc
   forwarding_processor.cc
@@ -76,6 +104,7 @@ ADD_LIBRARY(routing SHARED
   classic_auth_caching_sha2_forwarder.cc
   classic_auth_forwarder.cc
   classic_auth_native_forwarder.cc
+  classic_auth_openid_connect_forwarder.cc
   classic_auth_sha256_password_forwarder.cc
   classic_binlog_dump_forwarder.cc
   classic_change_user_forwarder.cc
@@ -103,6 +132,7 @@ ADD_LIBRARY(routing SHARED
   classic_auth_cleartext_sender.cc
   classic_auth_caching_sha2_sender.cc
   classic_auth_native_sender.cc
+  classic_auth_openid_connect_sender.cc
   classic_auth_sha256_password_sender.cc
   classic_change_user_sender.cc
   # classic_greeting_sender.cc
@@ -122,54 +152,39 @@ ADD_LIBRARY(routing SHARED
   sql_value.cc
   start_transaction_parser.cc
   implicit_commit_parser.cc
+  router_require.cc
 
   openssl_msg.cc
-)
 
-TARGET_LINK_LIBRARIES(routing
+  OUTPUT_NAME "mysqlrouter_routing"
+
+  DEPENDENCIES GenLiteProtos
+
+  LINK_LIBRARIES
   PUBLIC
   harness_stdx
   harness_tls
   mysql_protocol
-  router_lib
+  router_utils
+  routing_connections
   router_mysqlxmessages
-  ext::libprotobuf-lite
+  routing_frontend_lib
+  ext::libprotobuf
   metadata_cache
   connection_pool
   destination_status
   sql_lexer
+  routing_guidelines
   )
+
 IF(SOLARIS)
   TARGET_LINK_LIBRARIES(routing
     PRIVATE -lnsl
     PRIVATE -lsocket)
 ENDIF()
 
-TARGET_INCLUDE_DIRECTORIES(routing
-  PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}
-  PUBLIC
-  ${CMAKE_CURRENT_SOURCE_DIR}/../include/
-  ${CMAKE_CURRENT_BINARY_DIR}/../include/
-  )
-SET_TARGET_PROPERTIES(routing PROPERTIES
-  OUTPUT_NAME "mysqlrouter_routing"
-  SOVERSION 1
-  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/runtime_output_directory
-  LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/library_output_directory)
-INSTALL(TARGETS routing
-  RUNTIME DESTINATION ${ROUTER_INSTALL_BINDIR} COMPONENT Router
-  ARCHIVE DESTINATION ${ROUTER_INSTALL_LIBDIR} COMPONENT Router
-  LIBRARY DESTINATION ${ROUTER_INSTALL_LIBDIR} COMPONENT Router
-  NAMELINK_SKIP
-  )
-ADD_DEPENDENCIES(routing GenLiteProtos)
+DOWNGRADE_STRINGOP_WARNINGS(routing)
 
-ADD_INSTALL_RPATH_FOR_OPENSSL(routing)
-SET_PATH_TO_CUSTOM_SSL_FOR_APPLE(routing)
-
-GENERATE_EXPORT_HEADER(routing
-  EXPORT_FILE_NAME ${CMAKE_CURRENT_BINARY_DIR}/../include/mysqlrouter/routing_export.h)
 TARGET_COMPILE_DEFINITIONS(routing PRIVATE
   MYSQL_ROUTER_LOG_DOMAIN="routing")
 

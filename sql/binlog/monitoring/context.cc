@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -274,7 +275,7 @@ void Transaction_compression::reset() {
 void Transaction_compression::update(
     log_type log_type, mysql::binlog::event::compression::type comp_type,
     Gtid &gtid, uint64_t transaction_timestamp, uint64_t comp_bytes,
-    uint64_t uncomp_bytes, Sid_map *sid_map) {
+    uint64_t uncomp_bytes, Tsid_map *tsid_map) {
   DBUG_TRACE;
   Gtid_specification spec;
   char gtid_buf[Gtid::MAX_TEXT_LENGTH + 1];
@@ -282,7 +283,7 @@ void Transaction_compression::update(
     spec.set_anonymous();
   else
     spec.set(gtid);
-  auto gtid_buf_len = spec.to_string(sid_map, gtid_buf, true);
+  auto gtid_buf_len = spec.to_string(tsid_map, gtid_buf, true);
   std::string gtid_string(gtid_buf, gtid_buf_len);
 
 #ifndef NDEBUG
@@ -296,11 +297,12 @@ void Transaction_compression::update(
                                       comp_bytes, uncomp_bytes);
 }
 
-void Transaction_compression::get_stats(std::vector<Compression_stats *> &v) {
+void Transaction_compression::get_stats(
+    std::vector<std::unique_ptr<Compression_stats>> &v) {
   for (auto const &entry : m_stats) {
     // if first seen transaction is set
     if (std::get<3>(entry.second->get_first_transaction_stats()) != 0) {
-      v.push_back(new Compression_stats(*entry.second));
+      v.push_back(std::make_unique<Compression_stats>(*entry.second));
     }
   }
 }

@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -60,7 +61,7 @@ void Group_validation_message::decode_payload(const unsigned char *buffer,
 
   unsigned char has_channels_aux = '0';
   decode_payload_item_char(&slider, &payload_item_type, &has_channels_aux);
-  has_channels = (has_channels_aux == '1') ? true : false;
+  has_channels = has_channels_aux == '1';
 
   uint16 member_weight_aux = 0;
   decode_payload_item_int2(&slider, &payload_item_type, &member_weight_aux);
@@ -71,15 +72,15 @@ void Group_validation_message::encode_payload(
     std::vector<unsigned char> *buffer) const {
   DBUG_TRACE;
 
-  uint16 group_validation_message_type_aux =
+  auto group_validation_message_type_aux =
       (uint16)group_validation_message_type;
   encode_payload_item_int2(buffer, PIT_VALIDATION_TYPE,
                            group_validation_message_type_aux);
 
-  char has_channels_aux = has_channels ? '1' : '0';
+  char const has_channels_aux = has_channels ? '1' : '0';
   encode_payload_item_char(buffer, PIT_VALIDATION_CHANNEL, has_channels_aux);
 
-  uint16 member_weight_aux = (uint16)member_weight;
+  auto member_weight_aux = (uint16)member_weight;
   encode_payload_item_int2(buffer, PIT_MEMBER_WEIGHT, member_weight_aux);
 
   encode_payload_item_int8(buffer, PIT_SENT_TIMESTAMP,

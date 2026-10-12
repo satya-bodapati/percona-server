@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,6 +29,7 @@
 #include <assert.h>
 #include <stddef.h>
 #include <sys/types.h>
+#include <atomic>
 
 #include "mysql/psi/mysql_cond.h"  // mysql_cond_t
 #include "mysql/psi/mysql_mutex.h"
@@ -118,6 +120,10 @@ class Connection_handler_manager {
   static ulong max_used_connections;       // Protected by LOCK_connection_count
   static ulong max_used_connections_time;  // Protected by LOCK_connection_count
 
+  // Atomic status variables.
+  static std::atomic_ulong
+      incoming_connection_count;  // Only external sessions.
+
   // System variable
   static ulong thread_handling;
 
@@ -166,13 +172,18 @@ class Connection_handler_manager {
 
     @param ignore_max_connection_count  true if checking for a limit
                                         specified by the max-connections
-                                        server option should be skipped
+                                        server option should be skipped.
+
+    @param internal_session true if this is an internal session created
+                            by the session service. If this is the case,
+                            we will not count this as an incoming connection.
 
     @retval
       true   max_connections NOT exceeded
       false  max_connections reached
   */
-  bool check_and_incr_conn_count(bool ignore_max_connection_count);
+  bool check_and_incr_conn_count(bool ignore_max_connection_count,
+                                 bool internal_session);
 
   /**
     Reset the max_used_connections counter to the number of current
@@ -191,6 +202,10 @@ class Connection_handler_manager {
     */
     if (connection_count == 0) mysql_cond_signal(&COND_connection_count);
     mysql_mutex_unlock(&LOCK_connection_count);
+  }
+
+  static ulong get_incoming_connects() {
+    return incoming_connection_count.load();
   }
 
   void inc_aborted_connects() { m_aborted_connects++; }
@@ -233,6 +248,12 @@ class Connection_handler_manager {
     wat till connection_count to become zero.
   */
   static void wait_till_no_connection();
+
+  /**
+    Performs required initializations after the daemonization of the mysqld
+    process.
+  */
+  void post_daemonize_init();
 
   /**
     Return number of connections in thread-safe way.

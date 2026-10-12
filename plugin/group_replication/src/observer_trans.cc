@@ -1,15 +1,16 @@
-/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -123,14 +124,6 @@ int group_replication_trans_before_dml(Trans_param *param, int &out) {
     return 0;
   }
 
-  if ((out += (param->trans_ctx_info.transaction_write_set_extraction ==
-               HASH_ALGORITHM_OFF))) {
-    /* purecov: begin inspected */
-    LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_TRANS_WRITE_SET_EXTRACTION_NOT_SET);
-    return 0;
-    /* purecov: end */
-  }
-
   if (local_member_info->has_enforces_update_everywhere_checks() &&
       (out += (param->trans_ctx_info.tx_isolation == ISO_SERIALIZABLE))) {
     LogPluginErr(ERROR_LEVEL, ER_GRP_RPL_UNSUPPORTED_TRANS_ISOLATION);
@@ -176,6 +169,7 @@ int group_replication_trans_before_commit(Trans_param *param) {
   int error = 0;
   const int pre_wait_error = 1;
   const int post_wait_error = 2;
+  int64 last_committed = 0;
   int64 sequence_number = 1;
 
   DBUG_EXECUTE_IF("group_replication_force_error_on_before_commit_listener",
@@ -288,15 +282,20 @@ int group_replication_trans_before_commit(Trans_param *param) {
   const ulong transaction_size_limit = get_transaction_size_limit();
   my_off_t transaction_size = 0;
 
-  const bool is_gtid_specified = param->gtid_info.type == ASSIGNED_GTID;
+  bool is_gtid_specified = param->gtid_info.type == ASSIGNED_GTID;
+
+  mysql::gtid::Tag_plain automatic_tag;
+  automatic_tag.clear();
+
   Gtid gtid = {param->gtid_info.sidno, param->gtid_info.gno};
   if (!is_gtid_specified) {
-    // Dummy values that will be replaced after certification.
+    // sidno and gno are dummy values that will be replaced after certification
     gtid.sidno = 1;
     gtid.gno = 1;
+    automatic_tag = param->gtid_info.automatic_tag;
   }
 
-  const Gtid_specification gtid_specification = {ASSIGNED_GTID, gtid};
+  Gtid_specification gtid_specification = {ASSIGNED_GTID, gtid, automatic_tag};
   Gtid_log_event *gle = nullptr;
 
   Transaction_context_log_event *tcle = nullptr;
@@ -393,6 +392,15 @@ int group_replication_trans_before_commit(Trans_param *param) {
         comment at binlog_cache_data::may_have_sbr_stmts().
       */
       may_have_sbr_stmts = true;
+
+      /*
+        Empty transactions, despite not having write-set, can be
+        applied in parallel with any other transaction, as such we
+        flag those transactions with `last_committed = -1`.
+      */
+      if (is_gtid_specified && !param->is_create_table_as_query_block) {
+        last_committed = -1;
+      }
     }
 
     DBUG_EXECUTE_IF("group_replication_after_add_write_set", {
@@ -448,8 +456,8 @@ int group_replication_trans_before_commit(Trans_param *param) {
 
   // Notice the GTID of atomic DDL is written to the trans cache as well.
   gle = new Gtid_log_event(
-      param->server_id, is_dml || param->is_atomic_ddl, 0, sequence_number,
-      may_have_sbr_stmts, *(param->original_commit_timestamp),
+      param->server_id, is_dml || param->is_atomic_ddl, last_committed,
+      sequence_number, may_have_sbr_stmts, *(param->original_commit_timestamp),
       immediate_commit_timestamp, gtid_specification,
       *(param->original_server_version), *(param->immediate_server_version));
   /*

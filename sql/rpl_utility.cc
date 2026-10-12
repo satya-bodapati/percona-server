@@ -1,15 +1,16 @@
-/* Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -224,6 +225,7 @@ inline bool time_cross_check(enum_field_types type1, enum_field_types type2) {
    @param[in] is_array Whether the source field is a typed array
    @param[in] rli      Relay log info (for error reporting)
    @param[in] mflags   Flags from the table map event
+   @param[in] vector_dimensionality Dimensionality of vector column
    @param[out] order_var Order between source field and target field
 
    @return @c true if conversion is possible according to the current
@@ -233,6 +235,7 @@ inline bool time_cross_check(enum_field_types type1, enum_field_types type2) {
 static bool can_convert_field_to(Field *field, enum_field_types source_type,
                                  uint metadata, bool is_array,
                                  Relay_log_info *rli, uint16 mflags,
+                                 unsigned int vector_dimensionality,
                                  int *order_var) {
   DBUG_TRACE;
 #ifndef NDEBUG
@@ -266,6 +269,11 @@ static bool can_convert_field_to(Field *field, enum_field_types source_type,
       return true;
     }
 
+    if (field->real_type() == MYSQL_TYPE_VECTOR &&
+        down_cast<Field_vector *>(field)->get_max_dimensions() !=
+            vector_dimensionality) {
+      return false;
+    }
     DBUG_PRINT("debug",
                ("Base types are identical, doing field size comparison"));
     if (field->compatible_field_size(metadata, rli, mflags, order_var))
@@ -414,6 +422,7 @@ static bool can_convert_field_to(Field *field, enum_field_types source_type,
       }
       break;
 
+    case MYSQL_TYPE_VECTOR:
     case MYSQL_TYPE_GEOMETRY:
     case MYSQL_TYPE_JSON:
     case MYSQL_TYPE_TIMESTAMP:
@@ -531,13 +540,23 @@ bool table_def::compatible_with(THD *thd, Relay_log_info *rli, TABLE *table,
       min<ulong>(fields->filtered_size(), filtered_size(replica_has_gipk));
   TABLE *tmp_table = nullptr;
 
+  auto vector_dimensionality_it = m_vector_dimensionality.begin();
+
   for (auto it = fields->begin(); it.filtered_pos() < cols_to_check; ++it) {
     Field *const field = *it;
     size_t col = it.translated_pos();
     size_t absolute_col_pos = it.absolute_pos();
     int order;
+
+    unsigned int vector_dimensionality = 0;
+    if (type(col) == MYSQL_TYPE_VECTOR &&
+        vector_dimensionality_it != m_vector_dimensionality.end()) {
+      vector_dimensionality = *vector_dimensionality_it++;
+    }
+
     if (can_convert_field_to(field, type(col), field_metadata(col),
-                             is_array(col), rli, m_flags, &order)) {
+                             is_array(col), rli, m_flags, vector_dimensionality,
+                             &order)) {
       DBUG_PRINT("debug", ("Checking column %lu -"
                            " field '%s' can be converted - order: %d",
                            static_cast<long unsigned int>(col),
@@ -579,8 +598,8 @@ bool table_def::compatible_with(THD *thd, Relay_log_info *rli, TABLE *table,
       enum loglevel report_level = INFORMATION_LEVEL;
       String source_type(source_buf, sizeof(source_buf), &my_charset_latin1);
       String target_type(target_buf, sizeof(target_buf), &my_charset_latin1);
-      show_sql_type(type(col), is_array(col), field_metadata(col),
-                    &source_type);
+      show_sql_type(type(col), is_array(col), field_metadata(col), &source_type,
+                    nullptr, vector_dimensionality);
       field->sql_type(target_type);
       if (!ignored_error_code(ER_SERVER_REPLICA_CONVERSION_FAILED)) {
         report_level = ERROR_LEVEL;
@@ -604,7 +623,7 @@ bool table_def::compatible_with(THD *thd, Relay_log_info *rli, TABLE *table,
       if (report_level != INFORMATION_LEVEL)
         rli->report(report_level, ER_SERVER_REPLICA_CONVERSION_FAILED,
                     ER_THD(thd, ER_SERVER_REPLICA_CONVERSION_FAILED),
-                    static_cast<int>(col), db_name, tbl_name,
+                    (static_cast<int>(col)) + 1, db_name, tbl_name,
                     source_type.c_ptr_safe(), target_type.c_ptr_safe());
       return false;
     }
@@ -873,6 +892,7 @@ std::pair<my_off_t, std::pair<uint, bool>> read_field_metadata(
   switch (binlog_type) {
     case MYSQL_TYPE_TINY_BLOB:
     case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_VECTOR:
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_LONG_BLOB:
     case MYSQL_TYPE_DOUBLE:
@@ -928,7 +948,8 @@ std::pair<my_off_t, std::pair<uint, bool>> read_field_metadata(
 PSI_memory_key key_memory_table_def_memory;
 
 table_def::table_def(unsigned char *types, ulong size, uchar *field_metadata,
-                     int metadata_size, uchar *null_bitmap, uint16 flags)
+                     int metadata_size, uchar *null_bitmap, uint16 flags,
+                     const std::vector<unsigned int> &vector_dimensionality)
     : m_size(size),
       m_type(nullptr),
       m_field_metadata_size(metadata_size),
@@ -939,7 +960,8 @@ table_def::table_def(unsigned char *types, ulong size, uchar *field_metadata,
       m_json_column_count(-1),
       m_is_array(nullptr),
       m_is_gipk_set(false),
-      m_is_gipk_on_table(false) {
+      m_is_gipk_on_table(false),
+      m_vector_dimensionality(vector_dimensionality) {
   m_memory = (uchar *)my_multi_malloc(
       key_memory_table_def_memory, MYF(MY_WME), &m_type, size,
       &m_field_metadata, size * sizeof(uint), &m_is_array, size * sizeof(bool),
@@ -1225,6 +1247,7 @@ uint Hash_slave_rows::make_hash_key(TABLE *table, MY_BITMAP *cols) {
       */
       switch (f->type()) {
         case MYSQL_TYPE_BLOB:
+        case MYSQL_TYPE_VECTOR:
         case MYSQL_TYPE_VARCHAR:
         case MYSQL_TYPE_GEOMETRY:
         case MYSQL_TYPE_JSON:
@@ -1380,51 +1403,6 @@ bool is_require_row_format_violation(const THD *thd) {
   }
 
   return false;
-}
-
-// TODO: once the old syntax is removed, remove this as well.
-static const std::unordered_map<std::string, std::string> deprecated_field_map{
-    {"Replica_IO_State", "Slave_IO_State"},
-    {"Source_Host", "Master_Host"},
-    {"Source_User", "Master_User"},
-    {"Source_Port", "Master_Port"},
-    {"Source_Log_File", "Master_Log_File"},
-    {"Read_Source_Log_Pos", "Read_Master_Log_Pos"},
-    {"Relay_Source_Log_File", "Relay_Master_Log_File"},
-    {"Replica_IO_Running", "Slave_IO_Running"},
-    {"Replica_SQL_Running", "Slave_SQL_Running"},
-    {"Exec_Source_Log_Pos", "Exec_Master_Log_Pos"},
-    {"Source_SSL_Allowed", "Master_SSL_Allowed"},
-    {"Source_SSL_CA_File", "Master_SSL_CA_File"},
-    {"Source_SSL_CA_Path", "Master_SSL_CA_Path"},
-    {"Source_SSL_Cert", "Master_SSL_Cert"},
-    {"Source_SSL_Cipher", "Master_SSL_Cipher"},
-    {"Source_SSL_Key", "Master_SSL_Key"},
-    {"Seconds_Behind_Source", "Seconds_Behind_Master"},
-    {"Source_SSL_Verify_Server_Cert", "Master_SSL_Verify_Server_Cert"},
-    {"Source_Server_Id", "Master_Server_Id"},
-    {"Source_UUID", "Master_UUID"},
-    {"Source_Info_File", "Master_Info_File"},
-    {"Replica_SQL_Running_State", "Slave_SQL_Running_State"},
-    {"Source_Retry_Count", "Master_Retry_Count"},
-    {"Source_Bind", "Master_Bind"},
-    {"Source_SSL_Crl", "Master_SSL_Crl"},
-    {"Source_SSL_Crlpath", "Master_SSL_Crlpath"},
-    {"Source_TLS_Version", "Master_TLS_Version"},
-    {"Source_public_key_path", "Master_public_key_path"},
-    {"Get_Source_public_key", "Get_master_public_key"},
-    {"Server_Id", "Server_id"},
-    {"Source_Id", "Master_id"},
-    {"Replica_UUID", "Slave_UUID"}};
-
-void rename_fields_use_old_replica_source_terms(
-    THD *thd, mem_root_deque<Item *> &field_list) {
-  for (auto &item : field_list) {
-    std::string name{item->full_name()};
-    auto itr = deprecated_field_map.find(name);
-    if (itr != deprecated_field_map.end()) name = itr->second;
-    item->rename(thd->mem_strdup(name.c_str()));
-  }
 }
 
 bool is_immediate_server_gipk_ready(THD &thd) {

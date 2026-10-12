@@ -1,15 +1,16 @@
-# Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,6 +22,7 @@
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
 INCLUDE(${CMAKE_SOURCE_DIR}/cmake/protobuf.cmake)
+INCLUDE(GenerateExportHeader)
 
 SET(PROTOBUF_FULL_LIB_NAME mysqlxmessages)
 SET(PROTOBUF_LITE_LIB_NAME mysqlxmessages_lite)
@@ -62,13 +64,73 @@ MY_ADD_CUSTOM_TARGET(GenLiteProtos ALL
 MYSQL_PROTOBUF_GENERATE_CPP_LIBRARY(
   ${PROTOBUF_FULL_LIB_NAME}
   ${MYSQLX_PROTOBUF_PROTO_FILES}
-  OUTPUT_DIRECTORY ${PROTOBUF_FULL_GENERATE_DIR})
+  OUTPUT_DIRECTORY ${PROTOBUF_FULL_GENERATE_DIR}
+  DLLEXPORT_DECL MYSQLXMESSAGES_EXPORT  # EXPORT_HEADER_NAME of GenerateExportHeader
+  )
+TARGET_LINK_LIBRARIES(${PROTOBUF_FULL_LIB_NAME} PUBLIC ext::libprotobuf)
+
+TARGET_COMPILE_DEFINITIONS(${PROTOBUF_FULL_LIB_NAME}
+  PUBLIC MYSQLXMESSAGES_STATIC_DEFINE
+  )
+
+# force the include of the export header.
+IF(MSVC)
+  TARGET_COMPILE_OPTIONS(mysqlxmessages
+    PUBLIC /FI${CMAKE_CURRENT_BINARY_DIR}/mysqlxmessages_export.h)
+ELSE()
+  TARGET_COMPILE_OPTIONS(mysqlxmessages
+    PUBLIC -include ${CMAKE_CURRENT_BINARY_DIR}/mysqlxmessages_export.h)
+ENDIF()
+
 TARGET_INCLUDE_DIRECTORIES(${PROTOBUF_FULL_LIB_NAME} SYSTEM PUBLIC
   ${MYSQLX_PROJECT_DIR}/client/
   ${PROTOBUF_FULL_GENERATE_DIR}
   ${MYSQLX_GENERATE_DIR})
-MYSQLX_APPEND_INTERFACE_COMPILE_DEFINITIONS(${PROTOBUF_FULL_LIB_NAME}
-  "USE_MYSQLX_FULL_PROTO")
+TARGET_COMPILE_DEFINITIONS(${PROTOBUF_FULL_LIB_NAME} PUBLIC
+  MYSQLXMESSAGES_STATIC_DEFINE
+  USE_MYSQLX_FULL_PROTO)
+
+# create shared lib that's not built by default. It is specified
+# to allow GENERATE_EXPORT_HEADER create the right dllexport() declarations
+# and provided router_mysqlxmessages a template.
+IF(APPLE)
+  # For Xcode the ADD_LIBRARY below fails with
+  # The custom command generating ..... is attached to multiple targets:
+  #    mysqlxmessages  mysqlxmessages_shared
+  # Rather than having a special implementation for Xcode only,
+  # we do this for all builds (including make/ninja) on MacOS:
+  MERGE_LIBRARIES_SHARED(mysqlxmessages_shared mysqlxmessages
+    EXCLUDE_FROM_ALL
+    SKIP_INSTALL
+    )
+ELSE()
+  ADD_LIBRARY(mysqlxmessages_shared SHARED
+    EXCLUDE_FROM_ALL
+    $<TARGET_PROPERTY:mysqlxmessages,SOURCES>
+    )
+ENDIF()
+SET_TARGET_PROPERTIES(mysqlxmessages_shared
+  PROPERTIES
+  EXCLUDE_FROM_ALL TRUE
+  EXCLUDE_FROM_DEFAULT_BUILD TRUE
+    )
+GENERATE_EXPORT_HEADER(mysqlxmessages_shared
+  BASE_NAME mysqlxmessages
+  )
+
+TARGET_COMPILE_DEFINITIONS(mysqlxmessages_shared
+  PUBLIC
+  USE_MYSQLX_FULL_PROTO)
+TARGET_COMPILE_OPTIONS(mysqlxmessages_shared
+  PUBLIC $<TARGET_PROPERTY:mysqlxmessages,INTERFACE_COMPILE_OPTIONS>)
+
+TARGET_INCLUDE_DIRECTORIES(mysqlxmessages_shared
+  PRIVATE $<TARGET_PROPERTY:mysqlxmessages,INCLUDE_DIRECTORIES>
+  )
+TARGET_INCLUDE_DIRECTORIES(mysqlxmessages_shared
+  SYSTEM PUBLIC
+  $<TARGET_PROPERTY:mysqlxmessages,INTERFACE_SYSTEM_INCLUDE_DIRECTORIES>
+  )
 
 MYSQL_PROTOBUF_GENERATE_CPP_LIBRARY(
   ${PROTOBUF_LITE_LIB_NAME}
@@ -76,13 +138,18 @@ MYSQL_PROTOBUF_GENERATE_CPP_LIBRARY(
   OUTPUT_DIRECTORY ${PROTOBUF_LITE_GENERATE_DIR}
   DEPENDENCIES GenLiteProtos
   ADDITIONAL_COMMENT "- lite version")
+TARGET_LINK_LIBRARIES(${PROTOBUF_LITE_LIB_NAME} PUBLIC ext::libprotobuf-lite)
+
 TARGET_INCLUDE_DIRECTORIES(${PROTOBUF_LITE_LIB_NAME} SYSTEM PUBLIC
   ${MYSQLX_PROJECT_DIR}/client/
   ${PROTOBUF_LITE_GENERATE_DIR}
   ${MYSQLX_GENERATE_DIR})
 
+TARGET_COMPILE_DEFINITIONS(${PROTOBUF_LITE_LIB_NAME}
+  PUBLIC
+  MYSQLXMESSAGES_STATIC_DEFINE
+  )
 
-SET(MYSQLX_PROTOCOL_FLAGS "${MY_PUBLIC_PROTOBUF_FLAGS}" PARENT_SCOPE)
 SET(MYSQLX_PROTOCOL_FULL_LIB ${PROTOBUF_FULL_LIB_NAME} PARENT_SCOPE)
 SET(MYSQLX_PROTOCOL_INCLUDE_DIR ${CMAKE_CURRENT_BINARY_DIR} PARENT_SCOPE)
 SET(MYSQLX_PROTOCOL_LITE_LIB ${PROTOBUF_LITE_LIB_NAME} PARENT_SCOPE)

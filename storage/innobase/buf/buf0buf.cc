@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2026, Oracle and/or its affiliates.
 Copyright (c) 2008, Google Inc.
 
 Portions of this file contain modifications contributed and copyrighted by
@@ -13,12 +13,13 @@ This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -67,8 +68,11 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <sys/types.h>
 #include <time.h>
 #include <map>
+#include <mutex>
 #include <new>
 #include <sstream>
+#include <string_view>
+#include <unordered_map>
 
 #include "buf0checksum.h"
 #include "buf0dump.h"
@@ -80,7 +84,11 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "srv0srv.h"
 #include "srv0start.h"
 #include "sync0sync.h"
+#include "sync0types.h"
 #include "trx0trx.h"
+#include "ut0dbg.h"
+#include "ut0lst.h"
+#include "ut0mutex.h"
 #include "ut0new.h"
 
 #include "scope_guard.h"
@@ -326,6 +334,10 @@ static buf_pool_chunk_map_t *buf_chunk_map_reg;
 pool(s). */
 buf_stat_per_index_t *buf_stat_per_index;
 
+/** Tracks adding dirty pages to the flush list. The life cycle
+of this object is constraint to the life of buffer pool*/
+Buf_flush_list_added_lsns_aligned_ptr buf_flush_list_added;
+
 #if defined UNIV_DEBUG || defined UNIV_BUF_DEBUG
 /** This is used to insert validation operations in execution
 in the debug version */
@@ -337,6 +349,65 @@ static ulint buf_dbg_counter = 0;
 with small buffer pool size. */
 bool srv_buf_pool_debug;
 #endif /* UNIV_DEBUG */
+
+namespace {
+#ifndef UNIV_HOTBACKUP
+const std::unordered_map<buf_io_fix, std::string_view> buf_io_fix_str{
+    {BUF_IO_NONE, "BUF_IO_NONE"},
+    {BUF_IO_READ, "BUF_IO_READ"},
+    {BUF_IO_WRITE, "BUF_IO_WRITE"},
+    {BUF_IO_PIN, "BUF_IO_PIN"},
+};
+
+const std::unordered_map<buf_flush_t, std::string_view> buf_flush_str{
+    {BUF_FLUSH_LRU, "BUF_FLUSH_LRU"},
+    {BUF_FLUSH_LIST, "BUF_FLUSH_LIST"},
+    {BUF_FLUSH_SINGLE_PAGE, "BUF_FLUSH_SINGLE_PAGE"},
+    {BUF_FLUSH_N_TYPES, "BUF_FLUSH_N_TYPES"}};
+
+/** Helper iostream operator presenting the io_fix value as human-readable
+name of the enum. Used in error messages of Buf_io_fix_latching_rules.
+@param[in,out]  outs    the output stream to which to print
+@param[in]  io_fix  the value to be printed
+@return always equals the stream passed as the outs argument
+*/
+static std::ostream &operator<<(std::ostream &outs, const buf_io_fix io_fix) {
+  ut_a(buf_page_t::is_correct_io_fix_value(io_fix));
+  return outs << buf_io_fix_str.at(io_fix);
+}
+
+/** Helper ostream operator to print buf_page_state in human-readable name of
+the enum.
+@param[in,out]  outs   the output stream
+@param[in]  state  the page state to be printed
+@return same output stream passed as input */
+std::ostream &operator<<(std::ostream &outs, const buf_page_state &state) {
+  const std::string_view state_str = buf_page_state_str.at(state);
+  if (state_str.length() < 2) {
+    /* Compression pages states: invalid for buffer block pages */
+    if (state == BUF_BLOCK_POOL_WATCH) {
+      return outs << "POOL_WATCH";
+    } else if (state == BUF_BLOCK_ZIP_PAGE) {
+      return outs << "ZIP_PAGE";
+    } else if (state == BUF_BLOCK_ZIP_DIRTY) {
+      return outs << "ZIP_DIRTY";
+    } else {
+      ut_error;
+    }
+  }
+  return outs << state_str;
+}
+
+/** Helper ostream operator to print buf_flush_t in human-readable name of the
+enum.
+@param[in,out]  outs        the output stream
+@param[in]  flush_type  the flush_type to be printed
+@return same output stream passed as input */
+std::ostream &operator<<(std::ostream &outs, const buf_flush_t &flush_type) {
+  return outs << buf_flush_str.at(flush_type);
+}
+#endif /* !UNIV_HOTBACKUP */
+}  // namespace
 
 #if defined UNIV_PFS_MUTEX || defined UNIV_PFS_RWLOCK
 #ifndef PFS_SKIP_BUFFER_MUTEX_RWLOCK
@@ -387,6 +458,9 @@ ulint buf_get_flush_list_len(const buf_pool_t *buf_pool) {
 lsn_t buf_pool_get_oldest_modification_approx(void) {
   lsn_t lsn = 0;
   lsn_t oldest_lsn = 0;
+
+  /* When we traverse all the flush lists we don't care if previous
+  flush lists changed. We do not require consistent result. */
 
   for (ulint i = 0; i < srv_buf_pool_instances; i++) {
     buf_pool_t *buf_pool;
@@ -445,7 +519,7 @@ lsn_t buf_pool_get_oldest_modification_lwm(void) {
 
   const log_t &log = *log_sys;
 
-  const lsn_t lag = log_buffer_flush_order_lag(log);
+  const lsn_t lag = buf_flush_list_added->order_lag();
 
   ut_a(lag % OS_FILE_LOG_BLOCK_SIZE == 0);
 
@@ -461,22 +535,14 @@ lsn_t buf_pool_get_oldest_modification_lwm(void) {
   }
 }
 
-/** Get total buffer pool statistics.
-@param[out] LRU_len Length of all lru lists
-@param[out] free_len Length of all free lists
-@param[out] flush_list_len Length of all flush lists */
 void buf_get_total_list_len(ulint *LRU_len, ulint *free_len,
                             ulint *flush_list_len) {
-  ulint i;
-
   *LRU_len = 0;
   *free_len = 0;
   *flush_list_len = 0;
 
-  for (i = 0; i < srv_buf_pool_instances; i++) {
-    buf_pool_t *buf_pool;
-
-    buf_pool = buf_pool_from_array(i);
+  for (size_t i = 0; i < srv_buf_pool_instances; i++) {
+    buf_pool_t *buf_pool = buf_pool_from_array(i);
 
     *LRU_len += UT_LIST_GET_LEN(buf_pool->LRU);
     *free_len += UT_LIST_GET_LEN(buf_pool->free);
@@ -707,6 +773,50 @@ void buf_page_print(const byte *read_buf, const page_size_t &page_size,
 extern mysql_pfs_key_t buffer_block_mutex_key;
 #endif /* !PFS_SKIP_BUFFER_MUTEX_RWLOCK */
 
+/** Registers one buffer block's mutex and rw-locks with performance schema.
+ The latch objects must already be constructed. Used by
+ pfs_register_buffer_block() when latches are created eagerly, and by
+ buf_block_lazy_init_latches() when they are created lazily on first use. */
+static void pfs_register_buffer_block_latches(
+    buf_block_t *block) /*!< in/out: buffer block */
+{
+#ifdef UNIV_PFS_MUTEX
+  BPageMutex *mutex;
+
+  mutex = &block->mutex;
+
+#ifndef PFS_SKIP_BUFFER_MUTEX_RWLOCK
+  mutex->pfs_add(buffer_block_mutex_key);
+#endif /* !PFS_SKIP_BUFFER_MUTEX_RWLOCK */
+
+#endif /* UNIV_PFS_MUTEX */
+
+  rw_lock_t *rwlock;
+
+#ifdef UNIV_PFS_RWLOCK
+  rwlock = &block->lock;
+  ut_a(!rwlock->pfs_psi);
+
+#ifndef PFS_SKIP_BUFFER_MUTEX_RWLOCK
+  rwlock->pfs_psi =
+      (PSI_server) ? PSI_server->init_rwlock(buf_block_lock_key, rwlock) : NULL;
+#else
+  rwlock->pfs_psi = (PSI_server)
+                        ? PSI_server->init_rwlock(PFS_NOT_INSTRUMENTED, rwlock)
+                        : NULL;
+#endif /* !PFS_SKIP_BUFFER_MUTEX_RWLOCK */
+
+#ifdef UNIV_DEBUG
+  rwlock = &block->debug_latch;
+  ut_a(!rwlock->pfs_psi);
+  rwlock->pfs_psi =
+      (PSI_server) ? PSI_server->init_rwlock(buf_block_debug_latch_key, rwlock)
+                   : NULL;
+#endif /* UNIV_DEBUG */
+
+#endif /* UNIV_PFS_RWLOCK */
+}
+
 /** This function registers mutexes and rwlocks in buffer blocks with
  performance schema. If PFS_MAX_BUFFER_MUTEX_LOCK_REGISTER is
  defined to be a value less than chunk->size, then only mutexes
@@ -723,57 +833,67 @@ static void pfs_register_buffer_block(
   num_to_register = std::min(chunk->size, PFS_MAX_BUFFER_MUTEX_LOCK_REGISTER);
 
   for (ulint i = 0; i < num_to_register; i++) {
-#ifdef UNIV_PFS_MUTEX
-    BPageMutex *mutex;
-
-    mutex = &block->mutex;
-
-#ifndef PFS_SKIP_BUFFER_MUTEX_RWLOCK
-    mutex->pfs_add(buffer_block_mutex_key);
-#endif /* !PFS_SKIP_BUFFER_MUTEX_RWLOCK */
-
-#endif /* UNIV_PFS_MUTEX */
-
-    rw_lock_t *rwlock;
-
-#ifdef UNIV_PFS_RWLOCK
-    rwlock = &block->lock;
-    ut_a(!rwlock->pfs_psi);
-
-#ifndef PFS_SKIP_BUFFER_MUTEX_RWLOCK
-    rwlock->pfs_psi = (PSI_server)
-                          ? PSI_server->init_rwlock(buf_block_lock_key, rwlock)
-                          : NULL;
-#else
-    rwlock->pfs_psi =
-        (PSI_server) ? PSI_server->init_rwlock(PFS_NOT_INSTRUMENTED, rwlock)
-                     : NULL;
-#endif /* !PFS_SKIP_BUFFER_MUTEX_RWLOCK */
-
-#ifdef UNIV_DEBUG
-    rwlock = &block->debug_latch;
-    ut_a(!rwlock->pfs_psi);
-    rwlock->pfs_psi = (PSI_server) ? PSI_server->init_rwlock(
-                                         buf_block_debug_latch_key, rwlock)
-                                   : NULL;
-#endif /* UNIV_DEBUG */
-
-#endif /* UNIV_PFS_RWLOCK */
+    pfs_register_buffer_block_latches(block);
     block++;
   }
 }
 #endif /* PFS_GROUP_BUFFER_SYNC */
 
-/** Initializes a buffer control block when the buf_pool is created. */
-static void buf_block_init(
-    buf_pool_t *buf_pool, /*!< in: buffer pool instance */
-    buf_block_t *block,   /*!< in: pointer to control block */
-    byte *frame)          /*!< in: pointer to buffer frame */
-{
+/** Initialize latches for a buffer block. */
+void buf_block_lazy_init_latches(buf_block_t *block) {
+  ut_a(!block->latches_initialized.load(std::memory_order_relaxed));
+
+  /* This runs when lazy_init is being used, on the first use of a block:
+     the block has just been taken from the free list and is owned
+     exclusively by this thread (BUF_BLOCK_READY_FOR_USE), so it
+     is not yet reachable by any other thread. */
+  ut_ad(buf_block_get_state(block) == BUF_BLOCK_READY_FOR_USE);
+
+  mutex_create(LATCH_ID_BUF_BLOCK_MUTEX, &block->mutex);
+
+#if defined PFS_SKIP_BUFFER_MUTEX_RWLOCK || defined PFS_GROUP_BUFFER_SYNC
+  rw_lock_create(PFS_NOT_INSTRUMENTED, &block->lock, LATCH_ID_BUF_BLOCK_LOCK);
+  ut_d(rw_lock_create(PFS_NOT_INSTRUMENTED, &block->debug_latch,
+                      LATCH_ID_BUF_BLOCK_DEBUG));
+#else
+  rw_lock_create(buf_block_lock_key, &block->lock, LATCH_ID_BUF_BLOCK_LOCK);
+  ut_d(rw_lock_create(buf_block_debug_latch_key, &block->debug_latch,
+                      LATCH_ID_BUF_BLOCK_DEBUG));
+#endif
+
+#ifdef PFS_GROUP_BUFFER_SYNC
+  /* With eager initialization the block latches are registered with
+  performance schema in bulk by pfs_register_buffer_block() when the chunk is
+  created. In lazy mode that call is skipped (the latch objects do not exist at
+  chunk creation), so instrument this block's freshly created latches here.
+  The rw-locks above were created with PFS_NOT_INSTRUMENTED, i.e. with a null
+  pfs_psi, exactly like in the eager flow before its bulk registration.
+
+  Note the intentional divergence: eager pfs_register_buffer_block() only
+  registers the first PFS_MAX_BUFFER_MUTEX_LOCK_REGISTER latches of each chunk,
+  whereas here every block is registered on its first use. The cap defaults to
+  ULINT_MAX so there is no practical difference today; should it ever be
+  lowered, lazy mode would instrument more latches than eager mode. */
+  pfs_register_buffer_block_latches(block);
+#endif /* PFS_GROUP_BUFFER_SYNC */
+
+  block->lock.is_block_lock = true;
+
+  ut_ad(rw_lock_validate(&block->lock));
+
+  /* Publish with release so the acquire load in the lock-free
+  INFORMATION_SCHEMA.INNODB_BUFFER_PAGE scanner sees fully constructed latch
+  objects once it observes the flag set. */
+  block->latches_initialized.store(true, std::memory_order_release);
+}
+
+/** Lightweight initialization of a buffer control block: no latches created. */
+static void buf_block_init_without_latches(buf_pool_t *buf_pool,
+                                           buf_block_t *block, byte *frame) {
   UNIV_MEM_DESC(frame, UNIV_PAGE_SIZE);
 
-  /* This function should only be executed at database startup or by
-  buf_pool_resize(). Either way, adaptive hash index must not exist. */
+  /* buf_block_init_without_latches() is only executed at database startup
+  or by buf_pool_resize(). Either way, adaptive hash index must not exist. */
   block->ahi.assert_empty_on_init();
 
   block->frame = frame;
@@ -803,34 +923,20 @@ static void buf_block_init(
 
   page_zip_des_init(&block->page.zip);
 
-  mutex_create(LATCH_ID_BUF_BLOCK_MUTEX, &block->mutex);
-
-#if defined PFS_SKIP_BUFFER_MUTEX_RWLOCK || defined PFS_GROUP_BUFFER_SYNC
-  /* If PFS_SKIP_BUFFER_MUTEX_RWLOCK is defined, skip registration
-  of buffer block rwlock with performance schema.
-
-  If PFS_GROUP_BUFFER_SYNC is defined, skip the registration
-  since buffer block rwlock will be registered later in
-  pfs_register_buffer_block(). */
-
-  rw_lock_create(PFS_NOT_INSTRUMENTED, &block->lock, LATCH_ID_BUF_BLOCK_LOCK);
-
-  ut_d(rw_lock_create(PFS_NOT_INSTRUMENTED, &block->debug_latch,
-                      LATCH_ID_BUF_BLOCK_DEBUG));
-
-#else /* PFS_SKIP_BUFFER_MUTEX_RWLOCK || PFS_GROUP_BUFFER_SYNC */
-
-  rw_lock_create(buf_block_lock_key, &block->lock, LATCH_ID_BUF_BLOCK_LOCK);
-
-  ut_d(rw_lock_create(buf_block_debug_latch_key, &block->debug_latch,
-                      LATCH_ID_BUF_BLOCK_DEBUG));
-
-#endif /* PFS_SKIP_BUFFER_MUTEX_RWLOCK || PFS_GROUP_BUFFER_SYNC */
-
-  block->lock.is_block_lock = true;
-
-  ut_ad(rw_lock_validate(&(block->lock)));
+  /* Latches are NOT initialized here. Block creation happens either at
+  startup (no concurrency on this instance yet) or, for resize, under the
+  instance's free_list_mutex. */
+  ut_ad(srv_is_being_started || mutex_own(&buf_pool->free_list_mutex));
+  /* Relaxed is safe: false is the sentinel the lock-free I_S scanner treats as
+  "unused, do not touch the latch", so observing it (or the default-constructed
+  false) never causes a dereference and needs no ordering. This flag is only
+  ever written false here, at chunk creation, before the block is reachable as
+  a normal free-list block; it is never flipped true->false for a live block
+  (latches, once created, live until the chunk is freed). The only value whose
+  visibility must be ordered is the true published after latch construction. */
+  block->latches_initialized.store(false, std::memory_order_relaxed);
 }
+
 /* We maintain our private view of innobase_should_madvise_buf_pool() which we
 initialize at the beginning of buf_pool_init() and then update when the
 @@global.innodb_buffer_pool_in_core_file changes.
@@ -1017,7 +1123,8 @@ static buf_chunk_t *buf_chunk_init(
     buf_chunk_t *chunk,   /*!< out: chunk of buffers */
     ulonglong mem_size,   /*!< in: requested size in bytes */
     bool populate,        /*!< in: virtual page preallocation */
-    std::mutex *mutex)    /*!< in,out: Mutex protecting chunk map. */
+    std::mutex *mutex)    /*!< in,out: mutex protecting the chunk map, or
+                          nullptr when no concurrency is possible */
 {
   buf_block_t *block;
   byte *frame;
@@ -1079,7 +1186,38 @@ static buf_chunk_t *buf_chunk_init(
   block = chunk->blocks;
 
   for (i = chunk->size; i--;) {
-    buf_block_init(buf_pool, block, frame);
+    buf_block_init_without_latches(buf_pool, block, frame);
+
+    /* When lazy latch initialization is disabled, create the latches now
+    (eager initialization, the original behavior). When enabled, they are
+    created on first use in buf_LRU_get_free_only(). */
+    if (!srv_buf_pool_lazy_latch_init) {
+      /* Use rw_lock_create_unregistered so all rw-locks from this chunk are
+      spliced onto rw_lock_list in one O(1) operation below, instead of
+      taking rw_lock_list_mutex once per block. */
+      mutex_create(LATCH_ID_BUF_BLOCK_MUTEX, &block->mutex);
+#if defined PFS_SKIP_BUFFER_MUTEX_RWLOCK || defined PFS_GROUP_BUFFER_SYNC
+      rw_lock_create_unregistered(PFS_NOT_INSTRUMENTED, &block->lock,
+                                  LATCH_ID_BUF_BLOCK_LOCK);
+      ut_d(rw_lock_create_unregistered(
+          PFS_NOT_INSTRUMENTED, &block->debug_latch, LATCH_ID_BUF_BLOCK_DEBUG));
+#else
+      rw_lock_create_unregistered(buf_block_lock_key, &block->lock,
+                                  LATCH_ID_BUF_BLOCK_LOCK);
+      ut_d(rw_lock_create_unregistered(buf_block_debug_latch_key,
+                                       &block->debug_latch,
+                                       LATCH_ID_BUF_BLOCK_DEBUG));
+#endif
+      block->lock.is_block_lock = true;
+      ut_ad(rw_lock_validate(&block->lock));
+      /* Publish with release, same as the lazy path: at startup this is
+      redundant (single thread), but buf_chunk_init() also runs for chunks
+      added by an online resize, whose blocks become visible to the lock-free
+      INFORMATION_SCHEMA.INNODB_BUFFER_PAGE scanner. Release guarantees that a
+      scanner observing the flag set also sees the constructed latches. */
+      block->latches_initialized.store(true, std::memory_order_release);
+    }
+
     UNIV_MEM_INVALID(block->frame, UNIV_PAGE_SIZE);
 
     /* Add the block to the free list */
@@ -1093,19 +1231,44 @@ static buf_chunk_t *buf_chunk_init(
     frame += UNIV_PAGE_SIZE;
   }
 
+  /* Build this chunk's rw-lock list lock-free (blocks are exclusively owned
+  until published). This is an O(n) pass over the chunk's blocks, but it
+  acquires no mutex, so many threads can run it concurrently (each on its own
+  chunk) without contending. Only needed for eager init; lazy init registers
+  each lock individually when the block is first used. */
+  rw_lock_list_t chunk_locks;
+  UT_LIST_INIT(chunk_locks);
+  if (!srv_buf_pool_lazy_latch_init) {
+    buf_block_t *lock_block = chunk->blocks;
+    for (ulint j = 0; j < chunk->size; ++j, ++lock_block) {
+      UT_LIST_ADD_LAST(chunk_locks, &lock_block->lock);
+      ut_d(UT_LIST_ADD_LAST(chunk_locks, &lock_block->debug_latch));
+    }
+  }
+
+  /* buf_pool instances are created in parallel during buf_pool_init(), so the
+  caller passes a mutex to serialize inserts into the shared chunk map. During
+  resize there is no concurrency and mutex is nullptr. */
   if (mutex != nullptr) {
     mutex->lock();
   }
 
   buf_pool_register_chunk(chunk);
+  /* O(1) splice under rw_lock_list_mutex; consumes (empties) chunk_locks. */
+  rw_lock_list_register_bulk(std::move(chunk_locks));
 
   if (mutex != nullptr) {
     mutex->unlock();
   }
 
 #ifdef PFS_GROUP_BUFFER_SYNC
-  pfs_register_buffer_block(chunk);
+  /* In lazy mode the latch objects are not constructed yet; they are
+  instrumented one by one in buf_block_lazy_init_latches() instead. */
+  if (!srv_buf_pool_lazy_latch_init) {
+    pfs_register_buffer_block(chunk);
+  }
 #endif /* PFS_GROUP_BUFFER_SYNC */
+
   return (chunk);
 }
 
@@ -1156,16 +1319,11 @@ buf_block_t *buf_pool_contains_zip(buf_pool_t *buf_pool, const void *data) {
 #endif /* UNIV_DEBUG */
 
 /** Checks that all file pages in the buffer chunk are in a replaceable state.
- @return address of a non-free block, or NULL if all freed */
-static const buf_block_t *buf_chunk_not_freed(
-    buf_chunk_t *chunk) /*!< in: chunk being checked */
-{
-  buf_block_t *block;
-  ulint i;
+@param[in] chunk The chunk to be checked */
+static void buf_assert_all_are_replaceable(buf_chunk_t *chunk) {
+  buf_block_t *block = chunk->blocks;
 
-  block = chunk->blocks;
-
-  for (i = chunk->size; i--; block++) {
+  for (auto i = chunk->size; i--; block++) {
     switch (buf_block_get_state(block)) {
       case BUF_BLOCK_POOL_WATCH:
       case BUF_BLOCK_ZIP_PAGE:
@@ -1183,24 +1341,16 @@ static const buf_block_t *buf_chunk_not_freed(
         break;
       case BUF_BLOCK_FILE_PAGE:
         buf_page_mutex_enter(block);
-        auto ready = buf_flush_ready_for_replace(&block->page);
+        const auto &bpage = block->page;
+        if (!buf_flush_ready_for_replace(&bpage) ||
+            DBUG_EVALUATE_IF("simulate_dirty_page_at_shutdown", true, false)) {
+          ib::fatal(UT_LOCATION_HERE, ER_IB_ERR_PAGE_DIRTY_AT_SHUTDOWN)
+              << *block;
+        }
         buf_page_mutex_exit(block);
-
-        if (UNIV_UNLIKELY(block->page.is_corrupt)) {
-          /* corrupt page may remain, it can be
-          skipped */
-          break;
-        }
-
-        if (!ready) {
-          return (block);
-        }
-
         break;
     }
   }
-
-  return (nullptr);
 }
 
 /** Set buffer pool size variables
@@ -1229,7 +1379,8 @@ static void buf_pool_set_sizes(void) {
 @param[in]      buf_pool            buffer pool instance
 @param[in]      buf_pool_size size in bytes
 @param[in]      instance_no   id of the instance
-@param[in,out]  mutex         Mutex to protect common data structures
+@param[in,out]  mutex         mutex protecting the shared chunk map while
+                              instances are created in parallel
 @param[out]     err           DB_SUCCESS if all goes well
 @param[in]      populate      virtual page preallocation */
 static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
@@ -1250,7 +1401,7 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
 
   buf_pool->stat.reset();
 
-  if (pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset) == -1) {
+  if (pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset) != 0) {
     ib::error(ER_IB_ERR_SCHED_SETAFFNINITY_FAILED)
         << "sched_setaffinity() failed!";
   }
@@ -1278,6 +1429,16 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
 
     buf_pool->chunks = reinterpret_cast<buf_chunk_t *>(ut::zalloc_withkey(
         UT_NEW_THIS_FILE_PSI_KEY, buf_pool->n_chunks * sizeof(*chunk)));
+
+    if (buf_pool->chunks == nullptr) {
+      ib::error(ER_IB_MSG_64) << "buffer pool " << instance_no
+                              << " : failed to allocate"
+                                 " the chunk array.";
+      err = DB_ERROR;
+      mutex_exit(&buf_pool->chunks_mutex);
+      return;
+    }
+
     buf_pool->chunks_old = nullptr;
 
     UT_LIST_INIT(buf_pool->LRU);
@@ -1300,14 +1461,17 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
 
     do {
       if (!buf_chunk_init(buf_pool, chunk, chunk_size, populate, mutex)) {
+        /* Failure cleanup at startup, under chunks_mutex. */
+        ut_ad(mutex_own(&buf_pool->chunks_mutex));
         while (--chunk >= buf_pool->chunks) {
           buf_block_t *block = chunk->blocks;
 
           for (i = chunk->size; i--; block++) {
-            mutex_free(&block->mutex);
-            rw_lock_free(&block->lock);
-
-            ut_d(rw_lock_free(&block->debug_latch));
+            if (block->latches_initialized) {
+              mutex_free(&block->mutex);
+              rw_lock_free(&block->lock);
+              ut_d(rw_lock_free(&block->debug_latch));
+            }
           }
           buf_pool->deallocate_chunk(chunk);
         }
@@ -1360,6 +1524,8 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
 
   buf_pool->run_lru = os_event_create();
   os_event_set(buf_pool->run_lru);
+
+  buf_pool->flushing_allowed = true;
 
   buf_pool->watch = (buf_page_t *)ut::zalloc_withkey(
       UT_NEW_THIS_FILE_PSI_KEY, sizeof(*buf_pool->watch) * BUF_POOL_WATCH_SIZE);
@@ -1439,14 +1605,17 @@ static void buf_pool_free_instance(buf_pool_t *buf_pool) {
   chunks = buf_pool->chunks;
   chunk = chunks + buf_pool->n_chunks;
 
+  ut_ad(mutex_own(&buf_pool->chunks_mutex));
+
   while (--chunk >= chunks) {
     buf_block_t *block = chunk->blocks;
 
     for (ulint i = chunk->size; i--; block++) {
-      mutex_free(&block->mutex);
-      rw_lock_free(&block->lock);
-
-      ut_d(rw_lock_free(&block->debug_latch));
+      if (block->latches_initialized) {
+        mutex_free(&block->mutex);
+        rw_lock_free(&block->lock);
+        ut_d(rw_lock_free(&block->debug_latch));
+      }
     }
 
     buf_pool->deallocate_chunk(chunk);
@@ -1476,6 +1645,7 @@ static void buf_pool_free() {
 
   ut::free(buf_pool_ptr);
   buf_pool_ptr = nullptr;
+  buf_flush_list_added.reset(nullptr);
 }
 
 /** Creates the buffer pool.
@@ -1492,6 +1662,8 @@ dberr_t buf_pool_init(ulint total_size, bool populate, ulint n_instances) {
   ut_ad(n_instances == srv_buf_pool_instances);
 
   NUMA_MEMPOLICY_INTERLEAVE_IN_SCOPE;
+
+  buf_flush_list_added = Buf_flush_list_added_lsns::create();
 
   /* Usually buf_pool_should_madvise is protected by buf_pool_t::chunk_mutex-es,
   but at this point in time there is no buf_pool_t instances yet, and no risk of
@@ -1535,13 +1707,15 @@ dberr_t buf_pool_init(ulint total_size, bool populate, ulint n_instances) {
       n = n_instances;
     }
 
-    std::vector<std::thread> threads;
+    std::vector<IB_thread> threads;
 
     std::mutex m;
 
     for (ulint id = i; id < n; ++id) {
-      threads.emplace_back(std::thread(buf_pool_create, &buf_pool_ptr[id], size,
-                                       id, &m, std::ref(errs[id]), populate));
+      threads.emplace_back(os_thread_create(
+          buf_pool_create_thread_key, 0, buf_pool_create, &buf_pool_ptr[id],
+          size, id, &m, std::ref(errs[id]), populate));
+      threads[id - i].start();
     }
 
     for (ulint id = i; id < n; ++id) {
@@ -2195,13 +2369,7 @@ static void buf_pool_resize() {
     // No locking needed to read, same thread updated those
     ut_ad(buf_pool->curr_size == buf_pool->old_size);
     ut_ad(buf_pool->n_chunks_new == buf_pool->n_chunks);
-#ifdef UNIV_DEBUG
     ut_ad(UT_LIST_GET_LEN(buf_pool->withdraw) == 0);
-
-    buf_flush_list_mutex_enter(buf_pool);
-    ut_ad(buf_pool->flush_rbt == nullptr);
-    buf_flush_list_mutex_exit(buf_pool);
-#endif
 
     buf_pool->curr_size = new_instance_size;
 
@@ -2426,20 +2594,24 @@ withdraw_retry:
 
       ulint sum_freed = 0;
 
+      /* Resize holds the instance's free_list_mutex (and runs with
+      buf_pool_resizing set), so reading latches_initialized here is safe. */
+      ut_ad(buf_pool_resizing);
+      ut_ad(mutex_own(&buf_pool->free_list_mutex));
+
       while (chunk < echunk) {
         buf_block_t *block = chunk->blocks;
 
         for (ulint j = chunk->size; j--; block++) {
-          mutex_free(&block->mutex);
-          rw_lock_free(&block->lock);
-
-          ut_d(rw_lock_free(&block->debug_latch));
+          if (block->latches_initialized) {
+            mutex_free(&block->mutex);
+            rw_lock_free(&block->lock);
+            ut_d(rw_lock_free(&block->debug_latch));
+          }
         }
 
         buf_pool->deallocate_chunk(chunk);
-
         sum_freed += chunk->size;
-
         ++chunk;
       }
 
@@ -2502,8 +2674,8 @@ withdraw_retry:
       while (chunk < echunk) {
         ulonglong unit = srv_buf_pool_chunk_unit;
 
-        if (!buf_chunk_init(buf_pool, chunk, unit,
-                            static_cast<bool>(srv_numa_interleave), nullptr)) {
+        if (!buf_chunk_init(buf_pool, chunk, unit, srv_buf_pool_populate,
+                            nullptr)) {
           ib::error(ER_IB_MSG_65) << "buffer pool " << i
                                   << " : failed to allocate"
                                      " new memory.";
@@ -2699,6 +2871,9 @@ void buf_pool_clear_hash_index(void) {
 
   DEBUG_SYNC_C("purge_wait_for_btr_search_latch");
 
+  bool pause_before_processing = DBUG_EVALUATE_IF(
+      "buf_pool_clear_hash_index_check_other_blocks", true, false);
+
   for (ulong p = 0; p < srv_buf_pool_instances; p++) {
     buf_pool_t *const buf_pool = buf_pool_from_array(p);
     buf_chunk_t *const chunks = buf_pool->chunks;
@@ -2718,6 +2893,13 @@ void buf_pool_clear_hash_index(void) {
           /* The block is already not in AHI, and it can't be added before the
           AHI is re-enabled, so there's nothing to be done here. */
           continue;
+        }
+
+        /* Identify target block and sync with test */
+        if (pause_before_processing && block->page.old &&
+            !block->page.is_dirty()) {
+          DEBUG_SYNC_C("buf_pool_clear_hash_index_will_process_block");
+          pause_before_processing = false;
         }
 
         /* This latch will prevent block state transitions. It is important for
@@ -2753,6 +2935,8 @@ void buf_pool_clear_hash_index(void) {
             /* No other state should have AHI */
             ut_ad(block->ahi.index == nullptr);
             ut_ad(block->ahi.n_pointers == 0);
+            /* Go to next block as AHI is already nullptr */
+            continue;
         }
 
 #if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
@@ -2764,6 +2948,13 @@ void buf_pool_clear_hash_index(void) {
         btr_search_set_block_not_cached(block);
       }
     }
+  }
+
+  /* Main intent was to identify target block. Due to rare race conditions, such
+  block is not found. To prevent timeout, unblock in case target block is not
+  found */
+  if (pause_before_processing) {
+    DEBUG_SYNC_C("buf_pool_clear_hash_index_will_process_block");
   }
 }
 
@@ -2923,7 +3114,7 @@ the LRU list it resets the value to the tail of the LRU list.
 buf_page_t *LRUItr::start() {
   ut_ad(mutex_own(m_mutex));
 
-  if (!m_hp || m_hp->old) {
+  if (!m_hp || !m_hp->old) {
     m_hp = UT_LIST_GET_LAST(m_buf_pool->LRU);
   }
 
@@ -2952,9 +3143,8 @@ bool buf_pool_watch_is_sentinel(const buf_pool_t *buf_pool,
 }
 
 /** Add watch for the given page to be read in. Caller must have
-appropriate hash_lock for the bpage and hold the LRU list mutex to avoid a race
-condition with buf_LRU_free_page inserting the same page into the page hash.
-This function may release the hash_lock and reacquire it.
+appropriate hash_lock for the bpage. This function may release the
+hash_lock and reacquire it.
 @param[in]      page_id         page id
 @param[in,out]  hash_lock       hash_lock currently latched
 @return NULL if watch set, block if the page is in the buffer pool */
@@ -2986,15 +3176,25 @@ static buf_page_t *buf_pool_watch_set(const page_id_t &page_id,
   of latching. We acquire all the hash_locks. They are needed
   because we don't want to read any stale information in
   buf_pool->watch[]. However, it is not in the critical code path
-  as this function will be called only by the purge thread. */
+  as this function will be called only by the purge thread.
+
+  Holding all the hash cell X-latches also stabilizes page hash
+  membership: every insert into and delete from the page hash happens
+  under the affected cell's X-latch, including the delete + re-insert
+  transition of the keep-zip path of buf_LRU_free_page(), which keeps
+  the cell's X-latch continuously so that the page id is never
+  observably absent from the hash (see the page_hash membership-change
+  protocol at its declaration in buf0buf.h). Therefore the LRU list
+  mutex does not need to be (and is not) taken here: the recheck below
+  cannot miss a page which is logically in the buffer pool. */
 
   /* To obey latching order first release the hash_lock. */
   rw_lock_x_unlock(*hash_lock);
 
-  mutex_enter(&buf_pool->LRU_list_mutex);
   hash_lock_x_all(buf_pool->page_hash);
 
-  /* If not own LRU_list_mutex, page_hash can be changed. */
+  /* page_hash could have been resized while we did not hold any
+  hash cell latch. */
   *hash_lock = buf_page_hash_lock_get(buf_pool, page_id);
 
   /* We have to recheck that the page
@@ -3005,7 +3205,6 @@ static buf_page_t *buf_pool_watch_set(const page_id_t &page_id,
 
   bpage = buf_page_hash_get_low(buf_pool, page_id);
   if (bpage) {
-    mutex_exit(&buf_pool->LRU_list_mutex);
     hash_unlock_x_all_but(buf_pool->page_hash, *hash_lock);
     goto page_found;
   }
@@ -3035,8 +3234,6 @@ static buf_page_t *buf_pool_watch_set(const page_id_t &page_id,
         ut_d(bpage->in_page_hash = true);
         HASH_INSERT(buf_page_t, hash, buf_pool->page_hash, page_id.hash(),
                     bpage);
-
-        mutex_exit(&buf_pool->LRU_list_mutex);
 
         /* Once the sentinel is in the page_hash we can
         safely release all locks except just the
@@ -3092,7 +3289,9 @@ void buf_pool_watch_unset(const page_id_t &page_id) {
   rw_lock_t *hash_lock = buf_page_hash_lock_get(buf_pool, page_id);
   rw_lock_x_lock(hash_lock, UT_LOCATION_HERE);
 
-  /* page_hash can be changed. */
+  /* A concurrent buffer pool resize can rehash page_hash and remap this
+  page id to a different shard latch between computing hash_lock and
+  latching it; re-confirm and re-latch the correct shard. */
   hash_lock = buf_page_hash_lock_x_confirm(hash_lock, buf_pool, page_id);
 
   /* The page must exist because buf_pool_watch_set()
@@ -3119,7 +3318,9 @@ bool buf_pool_watch_occurred(const page_id_t &page_id) {
 
   rw_lock_s_lock(hash_lock, UT_LOCATION_HERE);
 
-  /* If not own buf_pool_mutex, page_hash can be changed. */
+  /* A concurrent buffer pool resize can rehash page_hash and remap this
+  page id to a different shard latch between computing hash_lock and
+  latching it; re-confirm and re-latch the correct shard. */
   hash_lock = buf_page_hash_lock_s_confirm(hash_lock, buf_pool, page_id);
 
   /* The page must exist because buf_pool_watch_set()
@@ -3168,6 +3369,26 @@ static void buf_page_make_young_if_needed(buf_page_t *bpage) {
   ut_ad(!mutex_own(&buf_pool_from_bpage(bpage)->LRU_list_mutex));
   ut_ad(bpage->buf_fix_count > 0);
   ut_a(buf_page_in_file(bpage));
+
+  /* A page whose read IO is still in progress may not yet be linked into
+  the LRU list: buf_page_init_for_read() makes the page hash-visible before
+  it links it into the LRU list. Such a page must not be promoted -
+  buf_LRU_make_block_young() would unlink a node which is not linked,
+  corrupting the LRU list.
+  Reading the io-fix snapshot without the block mutex is correct here: the
+  LRU-add happens-before the read IO is dispatched, which happens-before
+  io_fix is reset to BUF_IO_NONE at IO completion. Thus observing
+  !was_io_fix_read() implies the LRU-add has already happened, and the
+  buf-fix held by our caller keeps the page in the LRU. Skipping the
+  promotion on a stale BUF_IO_READ snapshot is benign: the page was just
+  added at the head of the old sublist and a subsequent access will promote
+  it.
+  Both orderings this argument depends on (BUF_IO_READ is published before
+  the page is hash-reachable; the read io-fix is cleared only after the
+  LRU-add) are asserted at the transitions in buf_page_t::set_io_fix(). */
+  if (bpage->was_io_fix_read()) {
+    return;
+  }
 
   if (buf_page_peek_if_too_old(bpage)) {
     buf_page_make_young(bpage);
@@ -3513,8 +3734,8 @@ buf_block_t *buf_block_from_ahi(const byte *ptr) {
 
   buf_block_t *block = &chunk->blocks[offs];
 
-  /* The function buf_chunk_init() invokes buf_block_init() so that
-  block[n].frame == block->frame + n * UNIV_PAGE_SIZE.  Check it. */
+  /* The function buf_chunk_init() invokes buf_block_init_without_latches() so
+  that block[n].frame == block->frame + n * UNIV_PAGE_SIZE.  Check it. */
   ut_ad(block->frame == page_align(ptr));
   /* Read the state of the block without holding a mutex.
   A state transition from BUF_BLOCK_FILE_PAGE to
@@ -3564,6 +3785,7 @@ static void buf_wait_for_read(buf_block_t *block, trx_t *trx) {
 
   The repeated reads of io_fix will not be optimized out because it's an atomic
   variable.*/
+  ut_ad(block->latches_initialized);
   std::chrono::steady_clock::time_point start_time;
   while (block->page.was_io_fix_read()) {
     if (start_time == std::chrono::steady_clock::time_point{})
@@ -3802,7 +4024,9 @@ buf_block_t *Buf_fetch<T>::lookup() {
 
   rw_lock_s_lock(m_hash_lock, UT_LOCATION_HERE);
 
-  /* If not own LRU_list_mutex, page_hash can be changed. */
+  /* A concurrent buffer pool resize can rehash page_hash and remap this
+  page id to a different shard latch between computing m_hash_lock and
+  latching it; re-confirm and re-latch the correct shard. */
   m_hash_lock =
       buf_page_hash_lock_s_confirm(m_hash_lock, m_buf_pool, m_page_id);
 
@@ -3852,7 +4076,10 @@ buf_block_t *Buf_fetch<T>::is_on_watch() {
 
   rw_lock_x_lock(m_hash_lock, UT_LOCATION_HERE);
 
-  /* If not own LRU_list_mutex, page_hash can be changed. */
+  /* A concurrent buffer pool resize can rehash page_hash (buf_pool_resize()
+  changes the number of cells), remapping this page id to a different shard
+  latch after we computed m_hash_lock but before we latched it. Re-confirm
+  the shard the page id currently maps to and re-latch it if it moved. */
   m_hash_lock =
       buf_page_hash_lock_x_confirm(m_hash_lock, m_buf_pool, m_page_id);
 
@@ -3917,7 +4144,10 @@ dberr_t Buf_fetch<T>::zip_page_handler(buf_block_t *&fix_block) {
 
   mutex_enter(&m_buf_pool->LRU_list_mutex);
 
-  /* If not own LRU_list_mutex, page_hash can be changed. */
+  /* We hold the LRU list mutex, which blocks a concurrent buffer pool
+  resize (buf_pool_resize() takes it), so page_hash cannot be rehashed
+  here: the shard latch for this page id is stable and no _confirm is
+  needed. */
   m_hash_lock = buf_page_hash_lock_get(m_buf_pool, m_page_id);
 
   rw_lock_x_lock(m_hash_lock, UT_LOCATION_HERE);
@@ -3988,13 +4218,12 @@ dberr_t Buf_fetch<T>::zip_page_handler(buf_block_t *&fix_block) {
   buf_block_set_io_fix(block, BUF_IO_READ);
 
   ut::Location loc{m_file, m_line};
+  ut_ad(block->latches_initialized);
   rw_lock_x_lock_gen(&block->lock, 0, loc);
 
   rw_lock_x_unlock(m_hash_lock);
 
   mutex_exit(&m_buf_pool->zip_mutex);
-
-  const auto access_time = buf_page_is_accessed(&block->page);
 
   buf_page_mutex_exit(block);
 
@@ -4012,14 +4241,22 @@ dberr_t Buf_fetch<T>::zip_page_handler(buf_block_t *&fix_block) {
     ut_a(success);
   }
 
-  if (!recv_no_ibuf_operations) {
-    if (access_time != std::chrono::steady_clock::time_point{}) {
-#ifdef UNIV_IBUF_COUNT_DEBUG
-      ut_a(ibuf_count_get(m_page_id) == 0);
-#endif /* UNIV_IBUF_COUNT_DEBUG */
-    } else {
-      ibuf_merge_or_delete_for_page(block, m_page_id, &m_page_size, true);
-    }
+  if (!recv_recovery_is_on()) {
+    /* All transitions to state of BUF_BLOCK_ZIP_PAGE or ZIP_DIRTY have
+     possibility of ibuf entries on the page.
+
+    unzip_LRU uncompressed frame evictions create a small window for ibuf
+    entries on the page. buf_LRU_block_remove_hashed() in buf_LRU_free_page()
+    releases page hash lock and block mutex. Before they are re-acquired, ibuf
+    is possible on the page
+
+    DISK->ZIP_PAGE : ibuf entry should be applied (page was out of BP)
+    FILE_PAGE->ZIP_PAGE: caused by unzip_LRU eviction
+    ZIP_PAGE -> ZIP_DIRTY: page dirty on unzip LRU eviction
+    ZIP_DIRTY->ZIP_PAGE: a dirty page (previously on unzip_LRU) is flushed.
+
+    So apply change-buffer merge on the page */
+    ibuf_merge_or_delete_for_page(block, m_page_id, &m_page_size, true);
   }
 
   buf_page_mutex_enter(block);
@@ -4087,30 +4324,12 @@ dberr_t Buf_fetch<T>::check_state(buf_block_t *&block) {
 
 template <typename T>
 void Buf_fetch<T>::read_page() {
-  bool success{};
-  auto sync = m_mode != Page_fetch::SCAN;
-
-  if (sync) {
-    success = buf_read_page(m_page_id, m_page_size, m_trx);
-  } else {
-    dberr_t err;
-
-    auto ret = buf_read_page_low(&err, false, 0, BUF_READ_ANY_PAGE, m_page_id,
-                                 m_page_size, false, m_trx, false);
-    success = ret > 0;
-
-    if (success) {
-      srv_stats.buf_pool_reads.add(1);
-    }
-
-    ut_a(err != DB_TABLESPACE_DELETED);
-
-    /* Increment number of I/O operations used for LRU policy. */
-    buf_LRU_stat_inc_io();
-  }
-
-  if (success) {
-    if (sync) {
+  if (buf_read_page(m_page_id, m_page_size, m_trx)) {
+    /* Avoid doing read-ahead for parallel scans (well, at least currently this
+    flag is used only during the parallel scans). This would cause unnecessary
+    IO when the process is already being parallelized on higher level of
+    abstraction. */
+    if (m_mode != Page_fetch::SCAN) {
       buf_read_ahead_random(m_page_id, m_page_size, ibuf_inside(m_mtr), m_trx);
     }
     m_retries = 0;
@@ -4141,6 +4360,8 @@ void Buf_fetch<T>::read_page() {
 
 template <typename T>
 void Buf_fetch<T>::mtr_add_page(buf_block_t *block) {
+  ut_ad(block->latches_initialized);
+
   mtr_memo_type_t fix_type;
 
   ut::Location loc{m_file, m_line};
@@ -4222,12 +4443,15 @@ dberr_t Buf_fetch<T>::debug_check(buf_block_t *fix_block) {
     mutex_enter(fix_mutex);
 
     if (buf_LRU_free_page(&fix_block->page, true)) {
-      /* If not own LRU_list_mutex, page_hash can be changed. */
+      /* buf_LRU_free_page() released the page hash latch; re-acquire the
+      shard latch for this page id before re-checking / re-watching it. */
       m_hash_lock = buf_page_hash_lock_get(m_buf_pool, m_page_id);
 
       rw_lock_x_lock(m_hash_lock, UT_LOCATION_HERE);
 
-      /* If not own LRU_list_mutex, page_hash can be changed. */
+      /* We held no shard latch across the lines above, so a concurrent
+      buffer pool resize may have rehashed page_hash and remapped this page
+      id to a different shard; re-confirm and re-latch the correct shard. */
       m_hash_lock =
           buf_page_hash_lock_x_confirm(m_hash_lock, m_buf_pool, m_page_id);
 
@@ -4378,21 +4602,19 @@ buf_block_t *Buf_fetch<T>::single_page() {
   /* Check if this is the first access to the page */
   const auto access_time = buf_page_is_accessed(&block->page);
 
+  /* This is a heuristic and we don't care about ordering issues. */
+  if (access_time == std::chrono::steady_clock::time_point{}) {
+    buf_page_mutex_enter(block);
+
+    buf_page_set_accessed(&block->page);
+
+    buf_page_mutex_exit(block);
+  }
+
   /* Don't move the page to the head of the LRU list so that the
   page can be discarded quickly if it is not accessed again. */
-  if (m_mode != Page_fetch::SCAN) {
-    /* This is a heuristic and we don't care about ordering issues. */
-    if (access_time == std::chrono::steady_clock::time_point{}) {
-      buf_page_mutex_enter(block);
-
-      buf_page_set_accessed(&block->page);
-
-      buf_page_mutex_exit(block);
-    }
-
-    if (m_mode != Page_fetch::PEEK_IF_IN_POOL) {
-      buf_page_make_young_if_needed(&block->page);
-    }
+  if (m_mode != Page_fetch::PEEK_IF_IN_POOL && m_mode != Page_fetch::SCAN) {
+    buf_page_make_young_if_needed(&block->page);
   }
 
 #if defined UNIV_DEBUG || defined UNIV_BUF_DEBUG
@@ -4420,7 +4642,6 @@ buf_block_t *Buf_fetch<T>::single_page() {
 
   if (m_mode != Page_fetch::PEEK_IF_IN_POOL &&
       m_mode != Page_fetch::POSSIBLY_FREED_NO_READ_AHEAD &&
-      m_mode != Page_fetch::SCAN &&
       access_time == std::chrono::steady_clock::time_point{}) {
     /* In the case of a first access, try to apply linear read-ahead */
 
@@ -4526,10 +4747,16 @@ bool buf_page_optimistic_get(ulint rw_latch, buf_block_t *block,
 
   buf_block_buf_fix_inc(block, ut::Location{file, line});
 
+  /* Grab the access time while we have the mutex to potentially
+  avoid the need to acquire the mutex the second time (below). */
+  auto access_time = buf_page_is_accessed(&block->page);
+
   buf_page_mutex_exit(block);
 
   ut_ad(!ibuf_inside(mtr) ||
         ibuf_page(block->page.id, block->page.size, UT_LOCATION_HERE, nullptr));
+
+  ut_ad(block->latches_initialized);
 
   bool success;
   mtr_memo_type_t fix_type;
@@ -4572,15 +4799,35 @@ bool buf_page_optimistic_get(ulint rw_latch, buf_block_t *block,
     return (false);
   }
 
-  buf_page_mutex_enter(block);
+  /* Only grab the mutex to update access time if it was zero when we
+  checked earlier. This check is to reduce contention on page mutex
+  for hot pages (access time would be set only if it was zero anyway). */
+  if (access_time == std::chrono::steady_clock::time_point{}) {
+    buf_page_mutex_enter(block);
 
-  const auto access_time = buf_page_is_accessed(&block->page);
+    /* Refresh the access_time. Because of race condition we might see
+    that it's been set by other thread since the last time we checked.
 
-  buf_page_set_accessed(&block->page);
+    Note: it's important to update access_time variable because we use it
+    later to determine if it was the first page access and we should:
+        - try reading ahead next consecutive pages on the disk,
+        - update thd->access_distinct_page() statistics (trx != nullptr).
 
-  ut_ad(!block->page.file_page_was_freed);
+    Without this:
+        - we could be calling too many times the buf_read_ahead_linear
+          if the set of hot pages was changing over time,
+        - the sum of innodb_pages_distinct across many queries
+          could have the same page counted twice (so no longer would be
+          lower bound for the total number of unique page accesses). */
+    access_time = buf_page_is_accessed(&block->page);
 
-  buf_page_mutex_exit(block);
+    /* This is no-op if access time was non-zero. */
+    buf_page_set_accessed(&block->page);
+
+    ut_ad(!block->page.file_page_was_freed);
+
+    buf_page_mutex_exit(block);
+  }
 
   if (fetch_mode != Page_fetch::SCAN) {
     buf_page_make_young_if_needed(&block->page);
@@ -4598,10 +4845,11 @@ bool buf_page_optimistic_get(ulint rw_latch, buf_block_t *block,
   trx_t *trx;
   if (access_time == std::chrono::steady_clock::time_point{}) {
     trx = innobase_get_trx_for_slow_log();
-    /* In the case of a first access, try to apply linear read-ahead */
+    /* In the case of a first access, try to apply linear read-ahead. */
     buf_read_ahead_linear(block->page.id, block->page.size, ibuf_inside(mtr),
                           trx);
   } else {
+    /* It's not the first page access (don't bump access_distinct_page). */
     trx = nullptr;
   }
 
@@ -4655,6 +4903,8 @@ bool buf_page_get_known_nowait(ulint rw_latch, buf_block_t *block,
   }
 
   ut_ad(!ibuf_inside(mtr) || hint == Cache_hint::KEEP_OLD);
+
+  ut_ad(block->latches_initialized);
 
   bool success;
   mtr_memo_type_t fix_type;
@@ -4746,6 +4996,8 @@ const buf_block_t *buf_page_try_get(const page_id_t &page_id,
 
   buf_block_buf_fix_inc(block, location);
   buf_page_mutex_exit(block);
+
+  ut_ad(block->latches_initialized);
 
   mtr_memo_type_t fix_type = MTR_MEMO_PAGE_S_FIX;
   auto success = rw_lock_s_lock_nowait(&block->lock, location);
@@ -4904,7 +5156,7 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
 
     ibuf_mtr_start(&mtr);
 
-    if (!recv_no_ibuf_operations &&
+    if (!recv_recovery_is_on() &&
         !ibuf_page(page_id, page_size, UT_LOCATION_HERE, &mtr)) {
       ibuf_mtr_commit(&mtr);
 
@@ -4932,8 +5184,6 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     data = buf_buddy_alloc(buf_pool, page_size.physical());
   }
 
-  mutex_enter(&buf_pool->LRU_list_mutex);
-
   hash_lock = buf_page_hash_lock_get(buf_pool, page_id);
 
   rw_lock_x_lock(hash_lock, UT_LOCATION_HERE);
@@ -4946,8 +5196,6 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
       !buf_pool_watch_is_sentinel(buf_pool, watch_page)) {
     /* The page is already in the buffer pool. */
     watch_page = nullptr;
-
-    mutex_exit(&buf_pool->LRU_list_mutex);
 
     rw_lock_x_unlock(hash_lock);
 
@@ -4985,38 +5233,81 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     block->mark_for_read_io();
     buf_page_set_io_fix(bpage, BUF_IO_READ);
 
-    /* The block must be put to the LRU list, to the old blocks */
-    buf_LRU_add_block(bpage, true /* to old blocks */);
-
     if (page_size.is_compressed()) {
+      /* Setting zip.data is still protected by the hash X-latch here:
+      the page is already in the page hash, but no other thread can look
+      it up until the latch is released below. */
       block->page.zip.data = (page_zip_t *)data;
-
-      /* To maintain the invariant
-      block->in_unzip_LRU_list
-      == buf_page_belongs_to_unzip_LRU(&block->page)
-      we have to add this block to unzip_LRU
-      after block->page.zip.data is set. */
-      ut_ad(buf_page_belongs_to_unzip_LRU(&block->page));
-      buf_unzip_LRU_add_block(block, true);
     }
 
-    mutex_exit(&buf_pool->LRU_list_mutex);
-
-    /* We set a pass-type x-lock on the frame because then
-    the same thread which called for the read operation
-    (and is running now at this point of code) can wait
-    for the read to complete by waiting for the x-lock on
-    the frame; if the x-lock were recursive, the same
-    thread would illegally get the x-lock before the page
-    read is completed.  The x-lock is cleared by the
-    io-handler thread. */
-
+    ut_ad(block->latches_initialized);
     rw_lock_x_lock_gen(&block->lock, BUF_IO_READ, UT_LOCATION_HERE);
 
     rw_lock_x_unlock(hash_lock);
 
     buf_page_mutex_exit(block);
+
+    /* The page is hash-visible already, but eviction cannot see it
+    (not on LRU yet) and readers are blocked on the frame X-lock,
+    so no other thread can race with the add.
+
+    IMPORTANT: we strongly depend here on the fact that there is no
+    other thread that can try to acquire that frame's S-lock while
+    holding already the LRU list mutex (it would be deadlock cycle).
+    For existing use cases, for that thread to exist, the page would
+    need to be in the LRU list already. This latching rule is documented
+    at the LRU_list_mutex declaration in buf0buf.h and enforced in debug
+    builds by rw_lock_assert_wait_allowed() at the rw-lock wait entry
+    points in sync0rw.cc (it cannot be expressed via latch_level_t
+    ordering: block->lock is SYNC_LEVEL_VARYING, which LatchDebug
+    ignores). */
+
+    /* Widen the hash-visible-not-in-LRU window: the page is already
+    reachable through the page hash but not yet linked into the LRU list.
+    Threads finding it via the page hash (buf_page_get_zip() ->
+    buf_block_try_discard_uncompressed(), buf_buddy_relocate(),
+    buf_page_make_young_if_needed()) must back off from it, because it is
+    io-fixed for read. */
+    DBUG_EXECUTE_IF(
+        "buf_page_init_for_read_delay_lru_add",
+        std::this_thread::sleep_for(std::chrono::microseconds(100)););
+
+    mutex_enter(&buf_pool->LRU_list_mutex);
+
+    /* For a compressed page zip.data was set above, before the page
+    became reachable through the page hash, so
+    buf_page_belongs_to_unzip_LRU() already holds and buf_LRU_add_block()
+    links the block into the unzip_LRU list as well, within this same
+    critical section: every observer of the LRU list sees the invariant
+    block->in_unzip_LRU_list ==
+    buf_page_belongs_to_unzip_LRU(&block->page) hold. (This is unlike the
+    pre-narrowing code, which set zip.data only after buf_LRU_add_block()
+    and therefore had to add the block to the unzip_LRU list explicitly
+    afterwards; an explicit second add here would corrupt the list.) */
+    buf_LRU_add_block(bpage, true /* to old blocks */);
+
+    ut_ad(!page_size.is_compressed() || block->in_unzip_LRU_list);
+
+    mutex_exit(&buf_pool->LRU_list_mutex);
   } else {
+    /* Compressed-only page: a bare BUF_BLOCK_ZIP_PAGE descriptor with no
+    uncompressed frame (and thus no frame rw-lock). It is initialized and
+    made hash-visible while the page hash X-latch and zip_mutex (this
+    descriptor's "block mutex") are held, and is linked into the LRU list
+    afterwards under a brief LRU_list_mutex hold - the same narrowed
+    latching order as for the block-backed pages above.
+
+    Setting io_fix = BUF_IO_READ before the descriptor becomes reachable
+    through the page hash is what makes the hash-visible-but-not-in-LRU
+    window safe, exactly as for block-backed pages: every path which
+    could move or free the page based on finding it in the page hash
+    backs off from a read-io-fixed page (buf_page_make_young_if_needed()
+    skips it, buf_page_free_stale() bails out, buf_buddy relocation and
+    Buf_fetch<T>::zip_page_handler() require io_fix == BUF_IO_NONE), and
+    readers (e.g. buf_page_get_zip()) wait for the read to complete,
+    which happens-after the LRU-add below, because the read IO is only
+    dispatched after this function returns. */
+
     /* Initialize the buf_pool pointer. */
     bpage->buf_pool_index = buf_pool_index(buf_pool);
 
@@ -5047,6 +5338,8 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
     ut_d(bpage->in_free_list = false);
     ut_d(bpage->in_LRU_list = false);
 
+    buf_page_set_io_fix(bpage, BUF_IO_READ);
+
     ut_d(bpage->in_page_hash = true);
 
     if (watch_page != nullptr) {
@@ -5067,16 +5360,31 @@ buf_page_t *buf_page_init_for_read(ulint mode, const page_id_t &page_id,
 
     rw_lock_x_unlock(hash_lock);
 
-    /* The block must be put to the LRU list, to the old blocks.
-    The zip size is already set into the page zip */
+    mutex_exit(&buf_pool->zip_mutex);
+
+    /* Widen the hash-visible-not-in-LRU window, as in the block-backed
+    branch above. */
+    DBUG_EXECUTE_IF(
+        "buf_page_init_for_read_delay_lru_add",
+        std::this_thread::sleep_for(std::chrono::microseconds(100)););
+
+    /* The page is hash-visible already (io-fixed for read, see above),
+    but eviction cannot see it (not on the LRU list yet), so no other
+    thread can race with the add. The block must be put to the LRU list,
+    to the old blocks. The zip size is already set into the page zip. */
+    mutex_enter(&buf_pool->LRU_list_mutex);
+#if defined UNIV_DEBUG || defined UNIV_BUF_DEBUG
+    /* buf_LRU_insert_zip_clean() requires the zip_mutex; re-acquired
+    here under the LRU list mutex, which follows the registered
+    latch_level_t order (SYNC_BUF_LRU_LIST > SYNC_BUF_BLOCK). */
+    mutex_enter(&buf_pool->zip_mutex);
+#endif /* UNIV_DEBUG || UNIV_BUF_DEBUG */
     buf_LRU_add_block(bpage, true /* to old blocks */);
 #if defined UNIV_DEBUG || defined UNIV_BUF_DEBUG
     buf_LRU_insert_zip_clean(bpage);
+    mutex_exit(&buf_pool->zip_mutex);
 #endif /* UNIV_DEBUG || UNIV_BUF_DEBUG */
     mutex_exit(&buf_pool->LRU_list_mutex);
-    buf_page_set_io_fix(bpage, BUF_IO_READ);
-
-    mutex_exit(&buf_pool->zip_mutex);
   }
 
   buf_pool->n_pend_reads.fetch_add(1);
@@ -5174,16 +5482,27 @@ buf_block_t *buf_page_create(const page_id_t &page_id,
   /* Latch the page before releasing hash lock so that concurrent request for
   this page doesn't see half initialized page. ALTER tablespace for encryption
   and clone page copy can request page for any page id within tablespace
-  size limit. */
+  size limit.
+
+  The nowait variants must be used and cannot fail: the frame comes from
+  the free list, so its latch is unlocked, and the block is unreachable by
+  other threads until the page hash X-latch is released below. This keeps
+  the LRU_list_mutex latching rule (no waiting for a frame latch under the
+  LRU list mutex, see the LRU_list_mutex declaration) free of blocking
+  acquisitions - we hold the LRU list mutex here. */
   mtr_memo_type_t mtr_latch_type;
+  bool latched [[maybe_unused]];
+
+  ut_ad(block->latches_initialized);
 
   if (rw_latch == RW_X_LATCH) {
-    rw_lock_x_lock(&block->lock, UT_LOCATION_HERE);
+    latched = rw_lock_x_lock_nowait(&block->lock, UT_LOCATION_HERE);
     mtr_latch_type = MTR_MEMO_PAGE_X_FIX;
   } else {
-    rw_lock_sx_lock(&block->lock, UT_LOCATION_HERE);
+    latched = rw_lock_sx_lock_nowait(&block->lock, 0, UT_LOCATION_HERE);
     mtr_latch_type = MTR_MEMO_PAGE_SX_FIX;
   }
+  ut_ad(latched);
   mtr_memo_push(mtr, block, mtr_latch_type);
 
   rw_lock_x_unlock(hash_lock);
@@ -5603,23 +5922,8 @@ void buf_page_free_stale_during_write(buf_page_t *bpage,
   ut_ad(!mutex_own(block_mutex));
   ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
 }
-#ifdef UNIV_DEBUG
-/** Helper iostream operator presenting the io_fix value as human-readable
-name of the enum. Used in error messages of Buf_io_fix_latching_rules.
-@param[in]  outs    the output stream to which to print
-@param[in]  io_fix  the value to be printed
-@return always equals the stream passed as the outs argument
-*/
-static std::ostream &operator<<(std::ostream &outs, const buf_io_fix io_fix) {
-  ut_a(buf_page_t::is_correct_io_fix_value(io_fix));
-  return outs << std::map<buf_io_fix, const char *>{
-             {BUF_IO_NONE, "BUF_IO_NONE"},
-             {BUF_IO_READ, "BUF_IO_READ"},
-             {BUF_IO_WRITE, "BUF_IO_WRITE"},
-             {BUF_IO_PIN, "BUF_IO_PIN"},
-         }[io_fix];
-}
 
+#ifdef UNIV_DEBUG
 /* Possible io_buf states and transitions between them, with latches required
 for transition.
 @see buf_page_t::Latching_rules_helpers::get_owned_latches() for the meaning of
@@ -5743,6 +6047,30 @@ void buf_page_t::set_io_fix(buf_io_fix io_fix) {
     take_io_responsibility();
   }
   Latching_rules_helpers::on_transition_to(*this, io_fix);
+
+  if (io_fix == BUF_IO_READ) {
+    /* BUF_IO_READ may only be stored on a page that is not yet reachable
+    through the page hash: either it is not in the page hash at all, or
+    the storing thread still holds the hash cell's X-latch. Threads which
+    find a page through a page hash lookup therefore can never observe a
+    pre-read BUF_IO_NONE, which is what allows
+    buf_page_make_young_if_needed() to test was_io_fix_read() without the
+    block mutex to detect a page whose LRU-add is still pending.
+    (This cannot be expressed in buf_io_fix_latching_rules: its latch set
+    does not include the page hash latches.) */
+    ut_ad(!in_page_hash ||
+          buf_page_hash_lock_held_x(buf_pool_from_bpage(this), this));
+  }
+
+  if (old_io_fix == BUF_IO_READ && io_fix == BUF_IO_NONE) {
+    /* The read IO is dispatched only after buf_page_init_for_read() has
+    linked the page into the LRU list, so by the time the read io-fix is
+    cleared the page must be in the LRU list.
+    buf_page_make_young_if_needed() relies on this: observing
+    io_fix != BUF_IO_READ implies the LRU-add has completed and the page
+    may be promoted. */
+    ut_ad(in_LRU_list);
+  }
 #endif
   this->io_fix.store(io_fix, std::memory_order_relaxed);
 #ifdef UNIV_DEBUG
@@ -6000,13 +6328,12 @@ bool buf_page_io_complete(buf_page_t *bpage, bool evict, IORequest *type,
       /* Pages must be uncompressed for crash recovery. */
       ut_a(uncompressed);
       recv_recover_page(true, (buf_block_t *)bpage);
-    }
-
-    if (uncompressed && !Compression::is_compressed_page(frame) &&
-        !recv_no_ibuf_operations &&
-        fil_page_get_type(frame) == FIL_PAGE_INDEX && page_is_leaf(frame) &&
-        !fsp_is_system_temporary(bpage->id.space()) &&
-        !fsp_is_undo_tablespace(bpage->id.space()) && !bpage->was_stale()) {
+    } else if (uncompressed && !Compression::is_compressed_page(frame) &&
+               fil_page_get_type(frame) == FIL_PAGE_INDEX &&
+               page_is_leaf(frame) &&
+               !fsp_is_system_temporary(bpage->id.space()) &&
+               !fsp_is_undo_tablespace(bpage->id.space()) &&
+               !bpage->was_stale()) {
       buf_block_t *block;
       bool update_ibuf_bitmap;
 
@@ -6133,25 +6460,15 @@ bool buf_page_io_complete(buf_page_t *bpage, bool evict, IORequest *type,
 
 /** Asserts that all file pages in the buffer are in a replaceable state.
 @param[in]      buf_pool        buffer pool instance */
-static void buf_must_be_all_freed_instance(buf_pool_t *buf_pool) {
-  ulint i;
-  buf_chunk_t *chunk;
-
+static void buf_assert_all_are_replaceable(buf_pool_t *buf_pool) {
   ut_ad(buf_pool);
 
-  chunk = buf_pool->chunks;
+  buf_chunk_t *chunk = buf_pool->chunks;
 
-  for (i = buf_pool->n_chunks; i--; chunk++) {
+  for (auto i = buf_pool->n_chunks; i--; chunk++) {
     mutex_enter(&buf_pool->LRU_list_mutex);
-
-    const buf_block_t *block = buf_chunk_not_freed(chunk);
-
+    buf_assert_all_are_replaceable(chunk);
     mutex_exit(&buf_pool->LRU_list_mutex);
-
-    if (block) {
-      ib::fatal(UT_LOCATION_HERE, ER_IB_MSG_83)
-          << "Page " << block->page.id << " still fixed or dirty";
-    }
   }
 }
 
@@ -6166,25 +6483,34 @@ static void buf_refresh_io_stats(buf_pool_t *buf_pool) {
 /** Invalidates file pages in one buffer pool instance
 @param[in]      buf_pool        buffer pool instance */
 static void buf_pool_invalidate_instance(buf_pool_t *buf_pool) {
-  ulint i;
-
   ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
 
+  /* Pause LRU threads on event. */
   os_event_reset(buf_pool->run_lru);
-  auto guard = create_scope_guard([&]() { os_event_set(buf_pool->run_lru); });
 
-  for (i = BUF_FLUSH_LRU; i < BUF_FLUSH_N_TYPES; i++) {
-    /* Although this function is called during startup and
-    during redo application phase during recovery, Percona InnoDB
-    might be running several LRU manager threads at this stage.
-    Hence, a new write batch can be in initialization stage at this point. */
+  /* Prevent new flushes to start (buf_flush_start() checks this flag,
+  when starting a new flush). */
+  mutex_enter(&buf_pool->flush_state_mutex);
+  buf_pool->flushing_allowed = false;
+  mutex_exit(&buf_pool->flush_state_mutex);
 
-    /* For buffer pool invalidation to proceed we must ensure there is NO
-    write activity happening. */
+  auto guard = create_scope_guard([&]() {
+    mutex_enter(&buf_pool->flush_state_mutex);
+    buf_pool->flushing_allowed = true;
+    mutex_exit(&buf_pool->flush_state_mutex);
+    os_event_set(buf_pool->run_lru);
+  });
+
+  /* New flushing has been disallowed; wait for pending flushes. */
+  for (size_t i = BUF_FLUSH_LRU; i < BUF_FLUSH_N_TYPES; i++) {
     buf_flush_await_no_flushing(buf_pool, static_cast<buf_flush_t>(i));
   }
 
-  ut_d(buf_must_be_all_freed_instance(buf_pool));
+  /* It is crucial that the BP must contain only pages in replaceable state,
+  before we attempt to free them using buf_LRU_scan_and_free_block(), because
+  this function skips over pages which aren't replaceable, and we promise to
+  our caller that all pages will be removed from BP.*/
+  ut_d(buf_assert_all_are_replaceable(buf_pool));
 
   while (buf_LRU_scan_and_free_block(buf_pool, true)) {
   }
@@ -6226,6 +6552,7 @@ static void buf_pool_validate_instance(buf_pool_t *buf_pool) {
   ulint n_flush = 0;
   ulint n_free = 0;
   ulint n_zip = 0;
+  ulint n_lru_add_pending = 0;
 
   ut_ad(buf_pool);
 
@@ -6274,7 +6601,26 @@ static void buf_pool_validate_instance(buf_pool_t *buf_pool) {
             }
           }
 
+#ifdef UNIV_DEBUG
+          if (!block->page.in_LRU_list) {
+            /* buf_page_init_for_read() makes the page hash-visible before
+            linking it into the LRU list. Such a page is still io-fixed for
+            read. Reading in_LRU_list is stable here: it is only modified
+            under LRU_list_mutex, which we hold. */
+            ut_a(block->page.was_io_fix_read());
+            n_lru_add_pending++;
+          } else {
+            n_lru++;
+          }
+#else  /* UNIV_DEBUG */
+          /* Without UNIV_DEBUG there is no in_LRU_list flag; count how many
+          FILE_PAGE blocks may legitimately be missing from the LRU list so
+          the length cross-check below can be relaxed by that amount. */
+          if (block->page.was_io_fix_read()) {
+            n_lru_add_pending++;
+          }
           n_lru++;
+#endif /* UNIV_DEBUG */
           break;
 
         case BUF_BLOCK_NOT_USED:
@@ -6300,10 +6646,10 @@ static void buf_pool_validate_instance(buf_pool_t *buf_pool) {
         /* All clean blocks should be I/O-unfixed. */
         break;
       case BUF_IO_READ:
-        /* In buf_LRU_free_page(), we temporarily set
-        b->io_fix = BUF_IO_READ for a newly allocated
-        control block in order to prevent
-        buf_page_get_gen() from decompressing the block. */
+        /* A clean compressed-only page can be io-fixed for read only
+        while its initial read from disk is pending. (buf_LRU_free_page()
+        pins the re-inserted compressed-only descriptor with
+        buf_page_set_sticky(), which is BUF_IO_PIN, not BUF_IO_READ.) */
         break;
       default:
         ut_error;
@@ -6375,7 +6721,15 @@ static void buf_pool_validate_instance(buf_pool_t *buf_pool) {
         << buf_pool->curr_size << " zip " << n_zip << ". Aborting...";
   }
 
+#ifdef UNIV_DEBUG
+  /* Pages whose read IO is in progress and which are not yet linked into
+  the LRU list were counted into n_lru_add_pending instead of n_lru. */
+  (void)n_lru_add_pending;
   ut_a(UT_LIST_GET_LEN(buf_pool->LRU) == n_lru);
+#else  /* UNIV_DEBUG */
+  ut_a(UT_LIST_GET_LEN(buf_pool->LRU) <= n_lru);
+  ut_a(n_lru <= UT_LIST_GET_LEN(buf_pool->LRU) + n_lru_add_pending);
+#endif /* UNIV_DEBUG */
 
   mutex_exit(&buf_pool->LRU_list_mutex);
   mutex_exit(&buf_pool->chunks_mutex);
@@ -6959,25 +7313,15 @@ void buf_print_io(FILE *file) /*!< in/out: buffer where to print */
   ut::free(pool_info);
 }
 
-/** Refreshes the statistics used to print per-second averages. */
-void buf_refresh_io_stats_all(void) {
-  for (ulint i = 0; i < srv_buf_pool_instances; i++) {
-    buf_pool_t *buf_pool;
-
-    buf_pool = buf_pool_from_array(i);
-
-    buf_refresh_io_stats(buf_pool);
+void buf_refresh_io_stats_all() {
+  for (size_t i = 0; i < srv_buf_pool_instances; i++) {
+    buf_refresh_io_stats(buf_pool_from_array(i));
   }
 }
 
-/** Aborts the current process if there is any page in other state. */
-void buf_must_be_all_freed(void) {
-  for (ulint i = 0; i < srv_buf_pool_instances; i++) {
-    buf_pool_t *buf_pool;
-
-    buf_pool = buf_pool_from_array(i);
-
-    buf_must_be_all_freed_instance(buf_pool);
+void buf_assert_all_are_replaceable() {
+  for (size_t i = 0; i < srv_buf_pool_instances; i++) {
+    buf_assert_all_are_replaceable(buf_pool_from_array(i));
   }
 }
 
@@ -7115,18 +7459,6 @@ bool is_buffer_pool_resize_in_progress() {
 }
 #endif /* !UNIV_HOTBACKUP */
 
-[[nodiscard]] bool buf_page_t::is_zeroes(const page_t *const ptr,
-                                         const size_t len) noexcept {
-  bool is_zero = true;
-  for (size_t i = 0; i < len; i++) {
-    if (*(ptr + i) != 0) {
-      is_zero = false;
-      break;
-    }
-  }
-  return is_zero;
-}
-
 [[nodiscard]] bool buf_page_t::is_memory(const page_t *const ptr) noexcept {
   const page_t *const frame = page_align(ptr);
   return mach_read_from_8(frame + FIL_PAGE_LSN) == 0;
@@ -7144,4 +7476,77 @@ bool buf_block_t::is_empty() const {
   return page_rec_is_supremum(page_rec_get_next(page_get_infimum_rec(frame)));
 }
 
-bool buf_block_t::is_compact() const { return page_is_comp(frame); }
+#ifndef UNIV_HOTBACKUP
+namespace {
+/** Print the page's access_time as duration between first access and now, or
+0.0 if never accessed
+@param[in]  access_time  the time_point when page was first accessed
+@return time elapsed since access_time */
+int64_t time_elapsed(std::chrono::steady_clock::time_point access_time) {
+  if (access_time == std::chrono::steady_clock::time_point{}) {
+    return 0;
+  }
+  return static_cast<int64_t>(
+      std::chrono::duration_cast<std::chrono::seconds>(
+          std::chrono::steady_clock::now() - access_time)
+          .count());
+}
+}  // namespace
+
+std::ostream &operator<<(std::ostream &outs, const buf_page_t &page) {
+  /* Print in json format: "key":"value" */
+
+  ut_ad(mutex_own(buf_page_get_mutex(&page)));
+  ut_ad(buf_page_in_file(&page));
+
+  return outs << "{\"page\":{\"id\":\"" << page.id << "\",\"size\":\""
+              << page.size << "\",\"page_type\":\""
+              << reinterpret_cast<const buf_block_t &>(page).get_page_type_str()
+              << "\",\"was_stale\":" << page.was_stale()
+              << ",\"buf_fix_count\":" << page.buf_fix_count.load()
+              << ",\"io_fix\":\"" << page.get_io_fix_snapshot()
+              << "\",\"newest_lsn\":" << page.get_newest_lsn()
+              << ",\"oldest_lsn\":" << page.get_oldest_lsn()
+              << ",\"is_dirty\":" << page.is_dirty() << ",\"flush_type\":\""
+              << page.flush_type
+              << "\",\"dblwr_batch_id\":" << page.get_dblwr_batch_id()
+              << ",\"old\":" << page.old
+              << ",\"first_accessed\":" << time_elapsed(page.access_time)
+#ifdef UNIV_DEBUG
+              << ",\"file_page_was_freed\":" << page.file_page_was_freed
+              << ",\"someone_has_io_responsibility\":"
+              << page.someone_has_io_responsibility()
+              << ",\"current_thread_has_io_responsibility\":"
+              << page.current_thread_has_io_responsibility()
+              << ",\"in_flush_list\":" << page.in_flush_list
+              << ",\"in_free_list\":" << page.in_free_list
+              << ",\"in_LRU_list\":" << page.in_LRU_list
+              << ",\"in_page_hash\":" << page.in_page_hash
+              << ",\"in_zip_hash\":" << page.in_zip_hash
+#endif /* UNIV_DEBUG */
+              << "}}";
+}
+
+std::ostream &operator<<(std::ostream &outs, const buf_block_t &block) {
+  /* Print in json format: "key":"value" */
+
+  /* Block state corresponding to buf_page_state_str */
+  outs << "{\"block\":{\"state\":\"" << buf_block_get_state(&block)
+       << "\",\"buf_pool_index\":" << unsigned{block.page.buf_pool_index};
+
+  if (buf_page_in_file(&block.page)) {
+    ut_ad(mutex_own(buf_page_get_mutex(&block.page)));
+    outs << ",\"page\":" << block.page;
+  }
+
+  return outs << ",\"made_dirty_without_latch\":"
+              << block.made_dirty_with_no_latch
+              << ",\"modify_clock\":" << block.modify_clock
+#ifdef UNIV_DEBUG
+              << ",\"in_unzip_LRU_list\":" << block.in_unzip_LRU_list
+              << ",\"in_withdraw_list\":" << block.in_withdraw_list
+              << ",\"rw_lock_t\":\"" << block.lock.to_string() << "\""
+#endif /* UNIV_DEBUG */
+              << "}}";
+}
+#endif /* !UNIV_HOTBACKUP */

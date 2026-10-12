@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,6 +26,7 @@
 #include "keyring/keyring_file.h"
 
 #include <array>
+#include <cstdint>
 #include <fstream>
 #include <memory>
 #include <stdexcept>
@@ -32,7 +34,8 @@
 
 #include "mysql/harness/filesystem.h"
 
-const std::array<char, 4> kKeyringFileSignature = {'M', 'R', 'K', 'R'};
+static constexpr auto kKeyringFileSignature =
+    std::to_array<char>({'M', 'R', 'K', 'R'});
 
 namespace mysql_harness {
 
@@ -172,7 +175,7 @@ void KeyringFile::load(const std::string &file_name, const std::string &key) {
     file.read(reinterpret_cast<char *>(&header_size), sizeof(header_size));
     if (header_size > 0) {
       if (header_size >
-          file_size - sizeof(kKeyringFileSignature) - sizeof(header_size)) {
+          file_size - kKeyringFileSignature.size() - sizeof(header_size)) {
         throw std::runtime_error("Invalid data found in keyring file " +
                                  file_name);
       }

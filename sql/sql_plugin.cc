@@ -1,15 +1,16 @@
-/* Copyright (c) 2005, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2005, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -35,7 +36,6 @@
 #include "my_base.h"
 #include "my_compiler.h"
 #include "my_dbug.h"
-#include "my_default.h"  // free_defaults
 #include "my_getopt.h"
 #include "my_inttypes.h"
 #include "my_list.h"
@@ -71,6 +71,7 @@
 #include "prealloced_array.h"
 #include "sql/auth/auth_acls.h"
 #include "sql/auth/auth_common.h"  // check_table_access
+#include "sql/auth/auth_plugin_shutdown.h"
 #include "sql/auto_thd.h"          // Auto_THD
 #include "sql/current_thd.h"
 #include "sql/dd/cache/dictionary_client.h"  // dd::cache::Dictionary_client
@@ -398,8 +399,6 @@ static const char *plugin_declarations_sym = "_mysql_plugin_declarations_";
 static int min_plugin_interface_version =
     MYSQL_PLUGIN_INTERFACE_VERSION & ~0xFF;
 
-static void *innodb_callback_data;
-
 /* Note that 'int version' must be the first field of every plugin
    sub-structure (plugin->info).
 */
@@ -463,14 +462,12 @@ static bool reap_needed = false;
 static int plugin_array_version = 0;
 
 static bool initialized = false;
-
-static MEM_ROOT plugin_mem_root;
-static uint global_variables_dynamic_size = 0;
-static malloc_unordered_map<std::string, st_bookmark *> *bookmark_hash;
+MEM_ROOT plugin_mem_root;
+uint global_variables_dynamic_size = 0;
+malloc_unordered_map<std::string, st_bookmark *> *bookmark_hash;
 /** Hash for system variables of string type with MEMALLOC flag. */
-static malloc_unordered_map<std::string, st_bookmark *>
+malloc_unordered_map<std::string, st_bookmark *>
     *malloced_string_type_sysvars_bookmark_hash;
-
 /* prototypes */
 static void plugin_load(MEM_ROOT *tmp_root, int *argc, char **argv);
 static bool plugin_load_list(MEM_ROOT *tmp_root, int *argc, char **argv,
@@ -1086,6 +1083,12 @@ static bool plugin_add(MEM_ROOT *tmp_root, LEX_CSTRING name,
         report_error(report, ER_CANT_OPEN_LIBRARY, dl_name, 0, buf);
         return true;
       }
+
+      if (plugin->type == MYSQL_KEYRING_PLUGIN) {
+        LogErr(WARNING_LEVEL, ER_WARN_KEYRING_PLUGIN_DEPRECTED,
+               plugin->name ? plugin->name : "<unknown name>");
+      }
+
       tmp.plugin = plugin;
       tmp.name.str = plugin->name;
       tmp.name.length = name_len;
@@ -1318,16 +1321,7 @@ static int plugin_initialize(st_plugin_int *plugin) {
       goto err;
     }
 
-    /* FIXME: Need better solution to transfer the callback function
-    array to memcached */
-    if (strcmp(plugin->name.str, "InnoDB") == 0) {
-      innodb_callback_data = ((handlerton *)plugin->data)->data;
-    }
   } else if (plugin->plugin->init) {
-    if (strcmp(plugin->name.str, "daemon_memcached") == 0) {
-      plugin->data = innodb_callback_data;
-    }
-
     if (plugin->plugin->init(plugin)) {
       LogErr(ERROR_LEVEL, ER_PLUGIN_INIT_FAILED, plugin->name.str);
       goto err;
@@ -2049,32 +2043,10 @@ error:
   return true;
 }
 
-/*
-  Shutdown memcached plugin before binlog shuts down
-*/
-void memcached_shutdown() {
-  if (initialized) {
-    for (st_plugin_int **it = plugin_array->begin(); it != plugin_array->end();
-         ++it) {
-      st_plugin_int *plugin = *it;
-
-      if (plugin->state == PLUGIN_IS_READY &&
-          strcmp(plugin->name.str, "daemon_memcached") == 0) {
-        plugin_deinitialize(plugin, true);
-
-        mysql_mutex_lock(&LOCK_plugin_delete);
-        mysql_rwlock_wrlock(&LOCK_system_variables_hash);
-        mysql_mutex_lock(&LOCK_plugin);
-        plugin->state = PLUGIN_IS_DYING;
-        plugin_del(plugin);
-        mysql_mutex_unlock(&LOCK_plugin);
-        mysql_rwlock_unlock(&LOCK_system_variables_hash);
-        mysql_mutex_unlock(&LOCK_plugin_delete);
-      }
-    }
-  }
+void cleanup_global_system_variables() {
+  cleanup_variables(nullptr, &global_system_variables);
+  cleanup_variables(nullptr, &max_system_variables);
 }
-
 /*
   Deinitialize and unload all the loaded plugins.
   Note: During valgrind testing, the shared objects (.dll/.so)
@@ -2091,6 +2063,10 @@ void plugin_shutdown() {
 
   if (initialized) {
     size_t count = plugin_array->size();
+
+    // Stop new auth plugin operations and drain in-flight callbacks first.
+    start_auth_plugin_shutdown_and_wait();
+
     mysql_mutex_lock(&LOCK_plugin);
 
     reap_needed = true;
@@ -2183,12 +2159,6 @@ void plugin_shutdown() {
       if (plugins[i]->state & PLUGIN_IS_UNINITIALIZED) plugin_del(plugins[i]);
     }
 
-    /*
-      Now we can deallocate all memory.
-    */
-
-    cleanup_variables(nullptr, &global_system_variables);
-    cleanup_variables(nullptr, &max_system_variables);
     mysql_mutex_unlock(&LOCK_plugin);
     mysql_rwlock_unlock(&LOCK_system_variables_hash);
     mysql_mutex_unlock(&LOCK_plugin_delete);
@@ -2280,8 +2250,9 @@ static bool mysql_install_plugin(THD *thd, LEX_CSTRING name,
                                  const LEX_STRING *dl) {
   TABLE *table;
   bool error = true;
-  int argc = orig_argc;
-  char **argv = orig_argv;
+  int argc;
+  char **argv;
+  char **argv_copy;
   st_plugin_int *tmp = nullptr;
   bool store_infoschema_metadata = false;
   dd::Schema_MDL_locker mdl_handler(thd);
@@ -2353,16 +2324,18 @@ static bool mysql_install_plugin(THD *thd, LEX_CSTRING name,
   mysql_mutex_lock(&LOCK_plugin);
 
   {
-    MEM_ROOT alloc{PSI_NOT_INSTRUMENTED, 512};
-    my_getopt_use_args_separator = true;
-    if (my_load_defaults(MYSQL_CONFIG_NAME, load_default_groups, &argc, &argv,
-                         &alloc, nullptr)) {
+    argc = argc_cached;
+    if (!(argv_copy =
+              (char **)my_memdup(PSI_NOT_INSTRUMENTED, argv_cached,
+                                 (argc + 1) * sizeof(char *), MYF(0)))) {
       mysql_mutex_unlock(&LOCK_plugin);
       mysql_rwlock_unlock(&LOCK_system_variables_hash);
-      report_error(REPORT_TO_USER, ER_PLUGIN_IS_NOT_LOADED, name.str);
+      report_error(REPORT_TO_USER, ER_OUTOFMEMORY,
+                   static_cast<int>((argc + 1) * sizeof(char *)));
       goto err;
     }
-    my_getopt_use_args_separator = false;
+    argv = argv_copy;
+
     /*
      Append parse early and static variables present in mysqld-auto.cnf file
      for the newly installed plugin to process those options which are specific
@@ -2498,6 +2471,7 @@ static bool mysql_install_plugin(THD *thd, LEX_CSTRING name,
   }
 
 err:
+  my_free(argv_copy);
   mysql_mutex_unlock(&LOCK_plugin_install);
   return end_transaction(thd, error);
 }
@@ -2804,123 +2778,6 @@ bool plugin_foreach_with_mask(THD *thd, plugin_foreach_func *func, int type,
   return plugin_foreach_with_mask(thd, funcs, type, state_mask, arg);
 }
 
-/****************************************************************************
-  System Variables support
-****************************************************************************/
-
-/*
-  returns a bookmark for thd-local variables, creating if necessary.
-  returns null for non thd-local variables.
-  Requires that a write lock is obtained on LOCK_system_variables_hash
-*/
-static st_bookmark *register_var(const char *plugin, const char *name,
-                                 int flags) {
-  const size_t length = strlen(plugin) + strlen(name) + 3;
-  size_t size = 0, offset, new_size;
-  st_bookmark *result;
-  char *varname, *p;
-
-  if (!(flags & PLUGIN_VAR_THDLOCAL)) return nullptr;
-
-  switch (flags & PLUGIN_VAR_TYPEMASK) {
-    case PLUGIN_VAR_BOOL:
-      size = sizeof(bool);
-      break;
-    case PLUGIN_VAR_INT:
-      size = sizeof(int);
-      break;
-    case PLUGIN_VAR_LONG:
-    case PLUGIN_VAR_ENUM:
-      size = sizeof(long);
-      break;
-    case PLUGIN_VAR_LONGLONG:
-    case PLUGIN_VAR_SET:
-      size = sizeof(ulonglong);
-      break;
-    case PLUGIN_VAR_STR:
-      size = sizeof(char *);
-      break;
-    case PLUGIN_VAR_DOUBLE:
-      size = sizeof(double);
-      break;
-    default:
-      assert(0);
-      return nullptr;
-  };
-
-  varname = ((char *)my_alloca(length));
-  strxmov(varname + 1, plugin, "_", name, NullS);
-  for (p = varname + 1; *p; p++)
-    if (*p == '-') *p = '_';
-
-  if (!(result = find_bookmark(nullptr, varname + 1, flags))) {
-    result =
-        (st_bookmark *)plugin_mem_root.Alloc(sizeof(st_bookmark) + length - 1);
-    varname[0] = flags & PLUGIN_VAR_TYPEMASK;
-    memcpy(result->key, varname, length);
-    result->name_len = length - 2;
-    result->offset = -1;
-
-    assert(size && !(size & (size - 1))); /* must be power of 2 */
-
-    offset = global_system_variables.dynamic_variables_size;
-    offset = (offset + size - 1) & ~(size - 1);
-    result->offset = (int)offset;
-
-    new_size = (offset + size + 63) & ~63;
-
-    if (new_size > global_variables_dynamic_size) {
-      global_system_variables.dynamic_variables_ptr = (char *)my_realloc(
-          key_memory_global_system_variables,
-          global_system_variables.dynamic_variables_ptr, new_size,
-          MYF(MY_WME | MY_FAE | MY_ALLOW_ZERO_PTR));
-      max_system_variables.dynamic_variables_ptr = (char *)my_realloc(
-          key_memory_global_system_variables,
-          max_system_variables.dynamic_variables_ptr, new_size,
-          MYF(MY_WME | MY_FAE | MY_ALLOW_ZERO_PTR));
-      /*
-        Clear the new variable value space. This is required for string
-        variables. If their value is non-NULL, it must point to a valid
-        string.
-      */
-      memset(global_system_variables.dynamic_variables_ptr +
-                 global_variables_dynamic_size,
-             0, new_size - global_variables_dynamic_size);
-      memset(max_system_variables.dynamic_variables_ptr +
-                 global_variables_dynamic_size,
-             0, new_size - global_variables_dynamic_size);
-      global_variables_dynamic_size = new_size;
-    }
-
-    global_system_variables.dynamic_variables_head = offset;
-    max_system_variables.dynamic_variables_head = offset;
-    global_system_variables.dynamic_variables_size = offset + size;
-    max_system_variables.dynamic_variables_size = offset + size;
-    global_system_variables.dynamic_variables_version++;
-    max_system_variables.dynamic_variables_version++;
-
-    result->version = global_system_variables.dynamic_variables_version;
-
-    /* this should succeed because we have already checked if a dup exists */
-    std::string key(result->key, result->name_len + 1);
-    bookmark_hash->emplace(key, result);
-
-    /*
-      Hashing vars of string type with MEMALLOC flag.
-    */
-    if (((flags & PLUGIN_VAR_TYPEMASK) == PLUGIN_VAR_STR) &&
-        (flags & PLUGIN_VAR_MEMALLOC) &&
-        !malloced_string_type_sysvars_bookmark_hash->emplace(key, result)
-             .second) {
-      fprintf(stderr,
-              "failed to add placeholder to"
-              " hash of malloced string type sysvars");
-      assert(0);
-    }
-  }
-  return result;
-}
-
 static void restore_pluginvar_names(sys_var *first) {
   for (sys_var *var = first; var; var = var->next) {
     sys_var_pluginvar *pv = var->cast_pluginvar();
@@ -3005,42 +2862,6 @@ void alloc_and_copy_thd_dynamic_variables(THD *thd, bool global_lock) {
       global_system_variables.dynamic_variables_size;
 
   mysql_rwlock_unlock(&LOCK_system_variables_hash);
-}
-
-/**
-  For correctness and simplicity's sake, a pointer to a function
-  must be compatible with pointed-to type, that is, the return and
-  parameters types must be the same. Thus, a callback function is
-  defined for each scalar type. The functions are assigned in
-  construct_options to their respective types.
-*/
-
-static bool *mysql_sys_var_bool(THD *thd, int offset) {
-  return (bool *)intern_sys_var_ptr(thd, offset, true);
-}
-
-static int *mysql_sys_var_int(THD *thd, int offset) {
-  return (int *)intern_sys_var_ptr(thd, offset, true);
-}
-
-static unsigned int *mysql_sys_var_uint(THD *thd, int offset) {
-  return (unsigned int *)intern_sys_var_ptr(thd, offset, true);
-}
-
-static unsigned long *mysql_sys_var_ulong(THD *thd, int offset) {
-  return (unsigned long *)intern_sys_var_ptr(thd, offset, true);
-}
-
-static unsigned long long *mysql_sys_var_ulonglong(THD *thd, int offset) {
-  return (unsigned long long *)intern_sys_var_ptr(thd, offset, true);
-}
-
-static char **mysql_sys_var_str(THD *thd, int offset) {
-  return (char **)intern_sys_var_ptr(thd, offset, true);
-}
-
-static double *mysql_sys_var_double(THD *thd, int offset) {
-  return (double *)intern_sys_var_ptr(thd, offset, true);
 }
 
 void plugin_thdvar_init(THD *thd, bool enable_plugins) {
@@ -3238,7 +3059,7 @@ static int construct_options(MEM_ROOT *mem_root, st_plugin_int *tmp,
   char *comment = (char *)mem_root->Alloc(max_comment_len + 1);
   char *optname;
 
-  int index = 0, offset = 0;
+  int offset = 0;
   SYS_VAR *opt, **plugin_option;
   st_bookmark *v;
 
@@ -3304,7 +3125,7 @@ static int construct_options(MEM_ROOT *mem_root, st_plugin_int *tmp,
   */
 
   for (plugin_option = tmp->plugin->system_vars;
-       plugin_option && *plugin_option; plugin_option++, index++) {
+       plugin_option && *plugin_option; plugin_option++) {
     opt = *plugin_option;
     if (!(opt->flags & PLUGIN_VAR_THDLOCAL)) continue;
     if (!(register_var(plugin_name_ptr, opt->name, opt->flags))) continue;
@@ -3352,7 +3173,7 @@ static int construct_options(MEM_ROOT *mem_root, st_plugin_int *tmp,
   }
 
   for (plugin_option = tmp->plugin->system_vars;
-       plugin_option && *plugin_option; plugin_option++, index++) {
+       plugin_option && *plugin_option; plugin_option++) {
     switch ((opt = *plugin_option)->flags & PLUGIN_VAR_TYPEMASK) {
       case PLUGIN_VAR_BOOL:
         if (!opt->check) opt->check = check_func_bool;
@@ -3567,11 +3388,10 @@ static int test_plugin_options(
        (force_load_option.value() != PLUGIN_FORCE &&
         force_load_option.value() != PLUGIN_FORCE_PLUS_PERMANENT));
 
-  tmp->load_option = force_load_option.has_value()
-                         ? force_load_option.value()
-                         : (tmp->plugin->flags & PLUGIN_OPT_DEFAULT_OFF)
-                               ? PLUGIN_OFF
-                               : PLUGIN_ON;
+  tmp->load_option = force_load_option.has_value() ? force_load_option.value()
+                     : (tmp->plugin->flags & PLUGIN_OPT_DEFAULT_OFF)
+                         ? PLUGIN_OFF
+                         : PLUGIN_ON;
 
   for (opt = tmp->plugin->system_vars; opt && *opt; opt++)
     count += 2; /* --{plugin}-{optname} and --plugin-{plugin}-{optname} */

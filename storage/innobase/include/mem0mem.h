@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1994, 2023, Oracle and/or its affiliates.
+Copyright (c) 1994, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -454,7 +455,7 @@ struct Scoped_heap {
   @param[in] n                  Initial size of the heap to allocate.
   @param[in] location           Location from where called. */
   void create(size_t n, ut::Location location) noexcept {
-    ut_a(get() == nullptr);
+    ut_a(is_null());
     auto ptr = mem_heap_create(n, location, MEM_HEAP_DYNAMIC);
     reset(ptr);
   }
@@ -464,19 +465,22 @@ struct Scoped_heap {
   bool is_null() const noexcept { return m_ptr.get() == nullptr; }
 
   /** @return the heap pointer. */
-  Type *get() noexcept { return m_ptr.get(); }
+  Type *get() noexcept {
+    ut_ad(!is_null());
+    return m_ptr.get();
+  }
 
   /** Set the pointer to p.
   @param[in] p                  New pointer value. */
   void reset(Type *p) {
-    if (get() != p) {
+    if (m_ptr.get() != p) {
       m_ptr.reset(p);
     }
   }
 
   /** Empty the heap. */
   void clear() noexcept {
-    if (get() != nullptr) {
+    if (!is_null()) {
       mem_heap_empty(get());
     }
   }

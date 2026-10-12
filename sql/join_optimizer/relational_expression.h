@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,18 +24,28 @@
 #ifndef SQL_JOIN_OPTIMIZER_RELATIONAL_EXPRESSION_H
 #define SQL_JOIN_OPTIMIZER_RELATIONAL_EXPRESSION_H
 
-#include <stdint.h>
+#include <sys/types.h>
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <string>
+#include <type_traits>
+#include <utility>
 
+#include "my_table_map.h"
+#include "sql/field.h"
 #include "sql/item.h"
 #include "sql/join_optimizer/bit_utils.h"
-#include "sql/join_optimizer/estimate_selectivity.h"
+#include "sql/join_optimizer/make_join_hypergraph.h"
 #include "sql/join_optimizer/node_map.h"
 #include "sql/join_optimizer/overflow_bitset.h"
 #include "sql/join_type.h"
 #include "sql/mem_root_array.h"
+#include "sql/nested_join.h"
 #include "sql/sql_class.h"
+#include "sql/sql_const.h"
+#include "sql/table.h"
 
-struct AccessPath;
 class Item_eq_base;
 class Item_func_eq;
 
@@ -42,8 +53,8 @@ class Item_func_eq;
 // have available in order to avoid computing it anew for each use of that
 // predicate.
 struct CachedPropertiesForPredicate {
-  Mem_root_array<ContainedSubquery> contained_subqueries;
-  double selectivity;
+  Mem_root_array<ContainedSubquery> contained_subqueries{};
+  double selectivity{};
 
   // For equijoins only: A bitmap of which sargable predicates
   // are part of the same multi-equality as this one (except the
@@ -51,7 +62,7 @@ struct CachedPropertiesForPredicate {
   // against it. This is used in AlreadyAppliedThroughSargable()
   // to quickly find out if we already have applied any of them
   // as a join condition.
-  OverflowBitset redundant_against_sargable_predicates;
+  OverflowBitset redundant_against_sargable_predicates{};
 };
 
 // Describes a rule disallowing specific joins; if any tables from
@@ -84,8 +95,8 @@ class CompanionSet final {
   CompanionSet(const CompanionSet &) = delete;
   CompanionSet &operator=(const CompanionSet &) = delete;
 
-  /// Add the set of equal fields specified by 'func_eq'.
-  void AddEquijoinCondition(THD *thd, const Item_func_eq &eq);
+  /// Add the set of equal fields specified by 'eq'.
+  void AddEquijoinCondition(THD *thd, const Item_eq_base &eq);
 
   /**
      If 'field' is part of an equijoin predicate in this CompanionSet, return a
@@ -145,7 +156,11 @@ struct RelationalExpression {
   enum Type {
     INNER_JOIN = static_cast<int>(JoinType::INNER),
     LEFT_JOIN = static_cast<int>(JoinType::OUTER),
+
+    /// Left semijoin.
     SEMIJOIN = static_cast<int>(JoinType::SEMI),
+
+    /// Left antijoin.
     ANTIJOIN = static_cast<int>(JoinType::ANTI),
 
     // STRAIGHT_JOIN is an inner join that the user has specified
@@ -175,7 +190,8 @@ struct RelationalExpression {
         join_conditions(thd->mem_root),
         equijoin_conditions(thd->mem_root),
         properties_for_join_conditions(thd->mem_root),
-        properties_for_equijoin_conditions(thd->mem_root) {}
+        properties_for_equijoin_conditions(thd->mem_root),
+        m_pushable_conditions(thd->mem_root) {}
 
   table_map tables_in_subtree;
 
@@ -186,7 +202,6 @@ struct RelationalExpression {
 
   // If type == TABLE.
   const Table_ref *table;
-  Mem_root_array<Item *> join_conditions_pushable_to_this;
 
   // The CompanionSet that this object is part of.
   CompanionSet *companion_set{nullptr};
@@ -229,6 +244,33 @@ struct RelationalExpression {
   // out of this join; this is in addition to the regular connectivity
   // check. See FindHyperedgeAndJoinConflicts() for more details.
   Mem_root_array<ConflictRule> conflict_rules;
+  uint sj_enabled_strategies{0};
+
+  void enable_semijoin_strategies(const Table_ref *tl) {
+    sj_enabled_strategies = tl->nested_join->sj_enabled_strategies;
+  }
+
+  const Mem_root_array<PushableJoinCondition> &pushable_conditions() const {
+    return m_pushable_conditions;
+  }
+
+  /// Add a condition that can be pushed down to the access path for 'table'.
+  void AddPushable(Item *cond, const RelationalExpression *from) {
+    assert(type == TABLE);
+    assert(from->type != TABLE);
+    assert(table->map() && cond->used_tables() != 0);
+    // Don't add duplicates.
+    if (std::ranges::none_of(m_pushable_conditions,
+                             [&](const PushableJoinCondition &other) {
+                               return ItemsAreEqual(cond, other.cond);
+                             })) {
+      m_pushable_conditions.push_back({.cond = cond, .from = from});
+    }
+  }
+
+ private:
+  /// Conditions that can be pushed down to the access path for 'table'
+  Mem_root_array<PushableJoinCondition> m_pushable_conditions;
 };
 
 // Check conflict rules; usually, they will be empty, but the hyperedges are
@@ -253,8 +295,11 @@ inline bool OperatorIsCommutative(const RelationalExpression &expr) {
 
 // Call the given functor on each non-table operator in the tree below expr,
 // including expr itself, in post-traversal order.
-template <class Func>
-void ForEachJoinOperator(RelationalExpression *expr, Func &&func) {
+template <class Operator, class Func>
+  requires std::is_same_v<RelationalExpression,
+                          std::remove_const_t<Operator>> &&
+           std::is_invocable_v<Func, Operator *>
+void ForEachJoinOperator(Operator *expr, Func &&func) {
   if (expr->type == RelationalExpression::TABLE) {
     return;
   }

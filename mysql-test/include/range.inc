@@ -1985,9 +1985,11 @@ let $query_ba=SELECT * FROM t1, t2 WHERE b=a ORDER BY BINARY a, BINARY b;
 --echo # See BUG#13814468 about 'Range checked for each record'
 --echo
 eval EXPLAIN $query_ab;
+--skip_if_hypergraph  # Hypergraph produces some different warnings.
 eval $query_ab;
 --echo
 eval EXPLAIN $query_ba;
+--skip_if_hypergraph  # Hypergraph produces some different warnings.
 eval $query_ba;
 
 --echo
@@ -2502,7 +2504,7 @@ DROP TABLE t1;
 --echo #
 
 CREATE TABLE t1 (
-  v1 VARCHAR(20) CHARACTER SET utf8 NOT NULL,
+  v1 VARCHAR(20) CHARACTER SET utf8mb3 NOT NULL,
   pk INTEGER NOT NULL,
   PRIMARY KEY (pk),
   KEY v1_key (v1(10))
@@ -2685,7 +2687,7 @@ CREATE TABLE `giant_table` (
   `other_id` bigint(20) NOT NULL DEFAULT '0',
   `some_other_id` int(11) DEFAULT 0 NOT NULL,
   `something` double NOT NULL DEFAULT '0',
-  `comment` text COLLATE utf8_unicode_ci,
+  `comment` text COLLATE utf8mb3_unicode_ci,
   `flags` int(11) NOT NULL DEFAULT '0',
   `time_created` int(11) NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
@@ -2694,7 +2696,7 @@ CREATE TABLE `giant_table` (
   KEY `one_other_idx` (`one_id`,`other_id`),
   KEY `other_id` (`other_id`,`time_created`)
 ) ENGINE=InnoDB AUTO_INCREMENT=101651329
-DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci ;
+DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_unicode_ci ;
 
 CREATE TABLE t1 (c1 INT);
 INSERT INTO t1 VALUES (66136540), (68983250), (89627210), (77869520),
@@ -3781,3 +3783,149 @@ WHERE NOT EXISTS (SELECT *
 eval explain format=tree $query;
 
 DROP TABLE t;
+
+--echo #
+--echo # Bug#36705030: prepared statement encounter performance degradation
+--echo #               compared with normal select
+--echo #
+
+CREATE TABLE tt(
+  id INT PRIMARY KEY,
+  p_id VARCHAR(36),
+  o_id VARCHAR(36),
+  tag INT,
+  status INT,
+  update_time DATETIME,
+  KEY idx_1 (o_id, status, update_time),
+  KEY idx_2 (o_id, p_id, tag, status));
+
+SET optimizer_switch='index_condition_pushdown=off';
+
+EXPLAIN
+SELECT id, p_id, tag, status, update_time
+FROM tt
+WHERE o_id = '054a579e5ea7415ab3afd2eeb14038c1' AND
+      status = 0 AND
+      update_time BETWEEN '2024-02-15 00:00:00' AND '2024-02-21 23:59:59'
+ORDER BY update_time, id
+LIMIT 0, 100;
+
+PREPARE stmt1 FROM '
+EXPLAIN
+SELECT id, p_id, tag, status, update_time
+FROM tt
+WHERE o_id = ? AND status = ? AND update_time BETWEEN ? AND ?
+ORDER BY update_time, id
+LIMIT 0, 100';
+
+SET @v1 = '054a579e5ea7415ab3afd2eeb14038c1';
+SET @v2 = 0;
+SET @v3 = '2024-02-15 00:00:00';
+SET @v4 = '2024-02-21 23:59:59';
+
+EXECUTE stmt1 USING @v1,@v2,@v3,@v4;
+
+SET optimizer_switch=default;
+
+DROP TABLE tt;
+
+--echo #
+--echo # Bug#37808260: Performance degradation in MySQL>=8.4 vs MySQL 8.0
+--echo #               due to redundant condition not optimized away
+--echo #
+
+CREATE TABLE t1 (f1 INTEGER NOT NULL, f2 INTEGER NOT NULL,
+f3 INTEGER NOT NULL, KEY(f1,f2,f3));
+INSERT INTO t1 VALUES (1,1,1), (1,2,1), (2,3,4), (2,4,5), (3,3,6), (3,4,7);
+ANALYZE TABLE t1;
+let query= SELECT f1 FROM t1 WHERE (f1,f2,f3) IN ((1,1,NULL),(2,2,NULL));
+--replace_regex $elide_costs
+--skip_if_hypergraph # Final filters are different
+eval EXPLAIN FORMAT=tree $query;
+eval $query;
+let query = SELECT f1 FROM t1 WHERE (f1,f2,f3) IN ((1,1,NULL),(2,2,NULL)) AND f1 = 1;
+--replace_regex $elide_costs
+--skip_if_hypergraph #Final filters are different
+eval EXPLAIN FORMAT=tree $query;
+eval $query;
+let query = SELECT f1 FROM t1 WHERE (f1,f2,f3) IN ((1,1,NULL),(2,2,NULL), (1,1,1));
+--replace_regex $elide_costs
+--skip_if_hypergraph #Final filters are different
+eval EXPLAIN FORMAT=tree $query;
+eval $query;
+let query = SELECT f1 FROM t1 WHERE (f1,f2,f3) IN ((1,1,NULL),(2,2,NULL), (1,1,1)) AND f1 = 1;
+--replace_regex $elide_costs
+--skip_if_hypergraph # Final filters are different
+eval EXPLAIN FORMAT=tree $query;
+eval $query;
+DROP TABLE t1;
+
+--echo #
+--echo # Bug#37849917: SELECT query on primary key column deteriorates to full
+--echo #               table scan when filter involves too longstring
+--echo #
+
+CREATE TABLE t1 (f1 VARCHAR(16) NOT NULL, PRIMARY KEY (f1));
+INSERT INTO t1(f1) VALUES ('a'),('b'),('c'), ('d'), ('e'), ('f'), ('g');
+ANALYZE TABLE t1;
+
+let query = SELECT * FROM t1 WHERE f1 IN ('012345678901234567');
+--replace_regex $elide_costs
+--skip_if_hypergraph # Final filters are different
+eval EXPLAIN FORMAT=tree $query;
+eval $query;
+
+let query = SELECT * FROM t1 WHERE f1 IN ('012345678901234567', 'a');
+--replace_regex $elide_costs
+--skip_if_hypergraph # Final filters are different
+eval EXPLAIN FORMAT=tree $query;
+eval $query;
+
+DROP TABLE t1;
+
+--echo #
+--echo # Bug #119770: MySQL 8.4 optimizer uses full table scan for
+--echo #              IN (...) on prefix index, but works in 8.0
+--echo #
+
+CREATE TABLE t1 (f1 VARCHAR(16) NOT NULL, f2 VARCHAR(20), KEY k1 (f1(4)));
+INSERT INTO t1 (f1, f2) VALUES ('abcd1', 'x'), ('bcde2', 'x'), ('cdef3', 'x'),
+('defg4', 'x'), ('efgh5', 'x'), ('fghi6', 'x'), ('ghij7', 'x'), ('hijk8', 'x'),
+('ijkl9', 'x'), ('jklm0', 'x');
+
+ANALYZE TABLE t1;
+
+let query = SELECT f1, f2 FROM t1 WHERE f1 IN ('defg4', 'efgh5');
+--replace_regex $elide_costs
+--skip_if_hypergraph # Final filters are different
+eval EXPLAIN FORMAT=tree $query;
+eval $query;
+
+let query = SELECT f1, f2 FROM t1 FORCE INDEX(k1) WHERE f1 IN ('defg4', 'efgh5');
+--replace_regex $elide_costs
+--skip_if_hypergraph # Final filters are different
+eval EXPLAIN FORMAT=tree $query;
+eval $query;
+
+DROP TABLE t1;
+
+--echo #
+--echo # Bug#35912840: Conditions refering to const table were not added to
+--echo #               RANGE SCAN.
+--echo #
+
+CREATE TABLE t1 (f1 INTEGER, f2 INTEGER, PRIMARY KEY (f1));
+CREATE TABLE t2 (f1 INTEGER, f2 INTEGER, PRIMARY KEY (f1,f2));
+INSERT INTO t1 VALUES (1, 1), (2, 2);
+INSERT INTO t2 VALUES (2, 1), (2, 2), (2, 3), (2, 4);
+ANALYZE TABLE t1, t2;
+
+let $query=
+SELECT t2.f2 FROM t1 JOIN t2
+WHERE t2.f1 = 2 AND t2.f2 <= t1.f2 + 2
+      AND t2.f1 = t1.f1 AND t2.f2 >= t1.f2;
+--skip_if_hypergraph # Different plan
+eval EXPLAIN FORMAT=tree $query;
+eval $query;
+
+DROP TABLE t1, t2;

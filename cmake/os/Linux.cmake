@@ -1,15 +1,16 @@
-# Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 # 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -42,14 +43,11 @@ ENDIF()
 
 IF(EXISTS "/etc/fedora-release")
   SET(LINUX_FEDORA 1)
-  FILE(READ "/etc/fedora-release" FEDORA_RELEASE)
-  IF(FEDORA_RELEASE MATCHES "Fedora" AND
-      FEDORA_RELEASE MATCHES "28")
-    SET(LINUX_FEDORA_28 1)
-  ENDIF()
-  IF(FEDORA_RELEASE MATCHES "Fedora" AND
-      FEDORA_RELEASE MATCHES "34")
-    SET(LINUX_FEDORA_34 1)
+  IF(IS_SYMLINK "/usr/sbin")
+    FILE(READ_SYMLINK "/usr/sbin" USR_SBIN)
+    IF(USR_SBIN STREQUAL "bin")
+      SET(LINUX_FEDORA_SBIN_MERGE 1)
+    ENDIF()
   ENDIF()
 ENDIF()
 
@@ -65,17 +63,17 @@ IF(LINUX_FEDORA OR LINUX_RHEL OR LINUX_SUSE)
   SET(LINUX_RPM_PLATFORM 1)
 ENDIF()
 
-# We require at least GCC 10 Clang 10
+# We require at least GCC 10 Clang 14
 IF(NOT FORCE_UNSUPPORTED_COMPILER)
   IF(MY_COMPILER_IS_GNU)
-    # gcc9 is known to fail
-    IF(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 10)
-      MESSAGE(FATAL_ERROR "GCC 10 or newer is required")
+    # gcc10 is known to fail
+    IF(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11)
+      MESSAGE(FATAL_ERROR "GCC 11 or newer is required")
     ENDIF()
   ELSEIF(MY_COMPILER_IS_CLANG)
     # This is the lowest version tested
-    IF(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 10)
-      MESSAGE(FATAL_ERROR "Clang 10 or newer is required!")
+    IF(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
+      MESSAGE(FATAL_ERROR "Clang 16 or newer is required!")
     ENDIF()
   ELSE()
     MESSAGE(FATAL_ERROR "Unsupported compiler!")

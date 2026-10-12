@@ -1,15 +1,16 @@
-/* Copyright (c) 2009, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2009, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -40,7 +41,7 @@ struct MYSQL_LEX_STRING;
 struct MYSQL_LEX_CSTRING;
 
 /**
-  What type of Sql_cmd we're dealing with (DML, DDL, other).
+  What type of Sql_cmd we're dealing with (DML, DDL, ...).
 
   "Other" may be used for commands that are neither DML or DDL, such as
   shutdown.
@@ -53,7 +54,8 @@ enum enum_sql_cmd_type {
   SQL_CMD_UNDETERMINED = 0,
   SQL_CMD_DDL = 1,
   SQL_CMD_DML = 2,
-  SQL_CMD_OTHER = 4
+  SQL_CMD_DCL = 4,
+  SQL_CMD_OTHER = 8
 };
 
 /**
@@ -132,6 +134,14 @@ class Sql_cmd {
   virtual bool execute(THD *thd) = 0;
 
   /**
+    Some SQL commands currently require re-preparation on re-execution of a
+    prepared statement or stored procedure. For example, a CREATE TABLE command
+    containing an index expression.
+    @return true if re-preparation is required, false otherwise.
+  */
+  virtual bool reprepare_on_execute_required() const { return false; }
+
+  /**
     Command-specific reinitialization before execution of prepared statement
 
     param thd  Current THD.
@@ -188,6 +198,9 @@ class Sql_cmd {
 
   /** @return true if the operation is BULK LOAD. */
   virtual bool is_bulk_load() const { return false; }
+
+  /** @return true if dynamic parameters are allowed. */
+  virtual bool are_dynamic_parameters_allowed() const { return false; }
 
   /**
     Disable use of secondary storage engines in this statement. After

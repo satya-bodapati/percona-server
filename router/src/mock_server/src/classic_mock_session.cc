@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -36,12 +37,14 @@
 #include <openssl/x509.h>
 
 #include "hexify.h"
+#include "mysql/harness/logging/logger.h"
 #include "mysql/harness/logging/logging.h"
 #include "mysql/harness/net_ts/buffer.h"
 #include "mysql/harness/net_ts/impl/socket_constants.h"
 #include "mysql/harness/net_ts/socket.h"
 #include "mysql/harness/stdx/expected.h"
 #include "mysql/harness/tls_error.h"
+#include "mysql/harness/utility/string.h"
 #include "mysqld_error.h"
 #include "mysqlrouter/classic_protocol.h"
 #include "mysqlrouter/classic_protocol_codec_error.h"
@@ -49,9 +52,10 @@
 #include "mysqlrouter/classic_protocol_constants.h"
 #include "mysqlrouter/classic_protocol_message.h"
 #include "mysqlrouter/classic_protocol_session_track.h"
+#include "router/src/mock_server/src/authentication.h"
 #include "router/src/mock_server/src/statement_reader.h"
 
-IMPORT_LOG_FUNCTIONS()
+using namespace std::string_literals;
 
 namespace server_mock {
 
@@ -66,11 +70,11 @@ static std::string duration_to_us_string(
 
 stdx::expected<size_t, std::error_code> MySQLClassicProtocol::read_packet(
     std::vector<uint8_t> &payload) {
-  net::const_buffer buf = net::buffer(recv_buffer_);
+  net::const_buffer buf = net::buffer(recv_buffer());
 
   auto decode_res =
       classic_protocol::decode<classic_protocol::frame::Header>(buf, {});
-  if (!decode_res) return decode_res.get_unexpected();
+  if (!decode_res) return stdx::unexpected(decode_res.error());
 
   const auto hdr_frame = decode_res.value();
 
@@ -80,7 +84,7 @@ stdx::expected<size_t, std::error_code> MySQLClassicProtocol::read_packet(
   const auto payload_size = hdr.payload_size();
 
   if (payload_size == 0xffffff) {
-    return stdx::make_unexpected(
+    return stdx::unexpected(
         make_error_code(std::errc::operation_not_supported));
   }
 
@@ -89,7 +93,7 @@ stdx::expected<size_t, std::error_code> MySQLClassicProtocol::read_packet(
 
   if (buf.size() < payload_size) {
     // not enough data.
-    return stdx::make_unexpected(
+    return stdx::unexpected(
         make_error_code(classic_protocol::codec_errc::not_enough_input));
   }
 
@@ -97,7 +101,7 @@ stdx::expected<size_t, std::error_code> MySQLClassicProtocol::read_packet(
   net::buffer_copy(net::buffer(payload), buf, payload_size);
 
   // remove the bytes from the recv-buffer
-  net::dynamic_buffer(recv_buffer_).consume(hdr_size + payload_size);
+  net::dynamic_buffer(recv_buffer()).consume(hdr_size + payload_size);
 
   return payload_size;
 }
@@ -127,7 +131,8 @@ void MySQLServerMockSessionClassic::server_greeting() {
   exec_timer.async_wait([this, greeting, started](std::error_code ec) {
     if (ec) {
       if (ec != std::errc::operation_canceled) {
-        log_warning("wait for exec-time failed: %s", ec.message().c_str());
+        logger_.warning(
+            [ec]() { return "wait for exec-time failed: " + ec.message(); });
       }
 
       disconnect();
@@ -139,28 +144,29 @@ void MySQLServerMockSessionClassic::server_greeting() {
     if (auth_method_data.size() == 21) {
       auth_method_data.pop_back();  // strip last char
     }
-    protocol_.auth_method_data(auth_method_data);
+    protocol_.server_auth_method_data(auth_method_data);
+    protocol_.server_auth_method_name(greeting.auth_method_name());
     protocol_.encode_server_greeting(greeting);
 
-    protocol_.async_send(
-        [this, started, to_send = protocol_.send_buffer().size()](
-            std::error_code ec, size_t transferred) {
-          if (ec) {
-            disconnect();
-            return;
-          }
+    protocol_.async_send([this, started,
+                          to_send = protocol_.send_buffer().size()](
+                             std::error_code ec, size_t transferred) {
+      if (ec) {
+        disconnect();
+        return;
+      }
 
-          if (to_send < transferred) {
-            std::terminate();
-          } else {
-            auto now = std::chrono::steady_clock::now();
+      if (to_send < transferred) {
+        std::terminate();
+      } else {
+        auto now = std::chrono::steady_clock::now();
 
-            log_info("(%s)+< greeting",
-                     duration_to_us_string(now - started).c_str());
+        logger_.info(mysql_harness::utility::string_format(
+            "(%s)+< greeting", duration_to_us_string(now - started).c_str()));
 
-            client_greeting();
-          }
-        });
+        client_greeting();
+      }
+    });
   });
 }
 
@@ -177,12 +183,13 @@ void MySQLServerMockSessionClassic::client_greeting() {
           [this](std::error_code ec, size_t /* transferred */) {
             if (ec) {
               if (ec != std::errc::operation_canceled &&
-                  ec != make_error_condition(std::errc::connection_reset)) {
+                  ec != make_error_condition(std::errc::connection_reset) &&
+                  ec != net::stream_errc::eof) {
                 // op-cancelled: .cancel() was called
                 // connection-reset: client closed the connection after
                 // handshake was sent.
-                log_warning("receiving client-greeting failed: %s",
-                            ec.message().c_str());
+                logger_.warning("receiving client-greeting failed: " +
+                                ec.message());
               }
               disconnect();
               return;
@@ -194,14 +201,13 @@ void MySQLServerMockSessionClassic::client_greeting() {
       return;
     }
 
-    log_warning("decoding client-greeting frame failed: : %s",
-                ec.message().c_str());
+    logger_.warning("decoding client-greeting frame failed: " + ec.message());
     disconnect();
 
     return;
   }
 
-  if (auto *ssl = protocol_.ssl()) {
+  if (auto *ssl = protocol_.connection().ssl()) {
     json_reader_->set_session_ssl_info(ssl);
   }
 
@@ -211,7 +217,7 @@ void MySQLServerMockSessionClassic::client_greeting() {
   if (!decode_res) {
     auto ec = decode_res.error();
 
-    log_warning("decoding client-greeting failed: %s", ec.message().c_str());
+    logger_.warning("decoding client-greeting failed: " + ec.message());
 
     disconnect();
 
@@ -224,13 +230,13 @@ void MySQLServerMockSessionClassic::client_greeting() {
 
   if (protocol_.shared_capabilities().test(
           classic_protocol::capabilities::pos::ssl) &&
-      !protocol_.is_tls()) {
-    protocol_.init_tls();
+      !protocol_.connection().is_tls()) {
+    protocol_.connection().init_tls();
 
-    protocol_.async_tls_accept([&](std::error_code ec) {
+    protocol_.connection().async_tls_accept([&](std::error_code ec) {
       if (ec) {
         if (ec != std::errc::operation_canceled) {
-          log_warning("TLS accept failed: %s", ec.message().c_str());
+          logger_.warning("TLS accept failed: " + ec.message());
         }
 
         disconnect();
@@ -243,11 +249,96 @@ void MySQLServerMockSessionClassic::client_greeting() {
     return;
   }
 
+  // check what the test expects from the authentication
+
+  auto handshake_data_res =
+      json_reader_->handshake(false /* not is_greeting */);
+  if (!handshake_data_res) {
+    protocol_.encode_error(handshake_data_res.error());
+
+    send_response_then_disconnect();
+
+    return;
+  }
+
+  expected_handshake_ = handshake_data_res.value();
+
   protocol_.username(greeting.username());
 
   if (greeting.capabilities().test(
           classic_protocol::capabilities::pos::plugin_auth)) {
     protocol_.auth_method_name(greeting.auth_method_name());
+
+    if (auto expected_auth_method_name =
+            expected_handshake_->auth_method_name) {
+      if (protocol_.auth_method_name() != *expected_auth_method_name) {
+        // switch to the expected method.
+        protocol_.auth_method_data(std::string(20, 'a'));
+        protocol_.auth_method_name(*expected_auth_method_name);
+
+        protocol_.encode_auth_switch_message(
+            {protocol_.auth_method_name(),
+             protocol_.auth_method_data() + std::string(1, '\0')});
+
+        protocol_.async_send([this, to_send = protocol_.send_buffer().size()](
+                                 std::error_code ec, size_t transferred) {
+          if (ec) {
+            if (ec != std::errc::operation_canceled) {
+              logger_.warning("send auth result failed: " + ec.message());
+            }
+
+            disconnect();
+            return;
+          }
+
+          if (to_send < transferred) {
+            std::terminate();
+          } else {
+            auth_switched();
+          }
+        });
+        return;
+      }
+    }
+
+    /**
+     * if the client client wants to switch to a method the server does not
+     * understand, force the server's method.
+     */
+    if (protocol_.auth_method_name() != protocol_.server_auth_method_name()) {
+      // auth_response() should be empty
+      //
+      // ask for the real full authentication
+      protocol_.auth_method_data(std::string(20, 'a'));
+
+      if (!(protocol_.auth_method_name() == CachingSha2Password::name ||
+            protocol_.auth_method_name() == ClearTextPassword::name)) {
+        protocol_.auth_method_name(CachingSha2Password::name);
+      }
+
+      protocol_.encode_auth_switch_message(
+          {protocol_.auth_method_name(),
+           protocol_.auth_method_data() + std::string(1, '\0')});
+
+      protocol_.async_send([this, to_send = protocol_.send_buffer().size()](
+                               std::error_code ec, size_t transferred) {
+        if (ec) {
+          if (ec != std::errc::operation_canceled) {
+            logger_.warning("send auth result failed: " + ec.message());
+          }
+
+          disconnect();
+          return;
+        }
+
+        if (to_send < transferred) {
+          std::terminate();
+        } else {
+          auth_switched();
+        }
+      });
+      return;
+    }
   } else {
     // 4.1 or so
     protocol_.auth_method_name(MySQLNativePassword::name);
@@ -267,7 +358,7 @@ void MySQLServerMockSessionClassic::client_greeting() {
                              std::error_code ec, size_t transferred) {
       if (ec) {
         if (ec != std::errc::operation_canceled) {
-          log_warning("send auto result failed: %s", ec.message().c_str());
+          logger_.warning("send auth result failed: " + ec.message());
         }
 
         disconnect();
@@ -288,7 +379,7 @@ void MySQLServerMockSessionClassic::client_greeting() {
     std::vector<uint8_t> auth_method_data_vec(client_auth_method_data.begin(),
                                               client_auth_method_data.end());
 
-    auto auth_res = authenticate(auth_method_data_vec);
+    auto auth_res = authenticate(*expected_handshake_, auth_method_data_vec);
 
     if (!auth_res) {
       protocol_.encode_error(auth_res.error());
@@ -328,7 +419,7 @@ void MySQLServerMockSessionClassic::client_greeting() {
                              std::error_code ec, size_t transferred) {
       if (ec) {
         if (ec != std::errc::operation_canceled) {
-          log_warning("send auto result failed: %s", ec.message().c_str());
+          logger_.warning("send auto result failed: " + ec.message());
         }
 
         disconnect();
@@ -374,8 +465,8 @@ void MySQLServerMockSessionClassic::auth_switched() {
   // -> authenticate expects {}
   // -> client expects OK, instead of AUTH_FAST in this case
   bool empty_password = payload == std::vector<uint8_t>{0};
-  auto auth_res =
-      authenticate(empty_password ? std::vector<uint8_t>{} : payload);
+  auto auth_res = authenticate(
+      *expected_handshake_, empty_password ? std::vector<uint8_t>{} : payload);
 
   if (!auth_res) {
     protocol_.encode_error(auth_res.error());
@@ -410,7 +501,7 @@ void MySQLServerMockSessionClassic::send_response_then_disconnect() {
                            std::error_code ec, size_t transferred) {
     if (ec) {
       if (ec != std::errc::operation_canceled) {
-        log_warning("sending response failed: %s", ec.message().c_str());
+        logger_.warning("sending response failed: " + ec.message());
       }
 
       disconnect();
@@ -432,7 +523,7 @@ void MySQLServerMockSessionClassic::send_response_then_idle() {
                            std::error_code ec, size_t transferred) {
     if (ec) {
       if (ec != std::errc::operation_canceled) {
-        log_warning("sending response failed: %s", ec.message().c_str());
+        logger_.warning("sending response failed: " + ec.message());
       }
 
       disconnect();
@@ -457,20 +548,19 @@ void MySQLServerMockSessionClassic::idle() {
     auto ec = frame_decode_res.error();
 
     if (ec == classic_protocol::codec_errc::not_enough_input) {
-      protocol_.async_receive(
-          [this](std::error_code ec, size_t /* transferred */) {
-            if (ec) {
-              if (ec != std::errc::operation_canceled &&
-                  ec != net::stream_errc::eof) {
-                log_warning("receiving command-frame failed: %s",
-                            ec.message().c_str());
-              }
-              disconnect();
-              return;
-            }
+      protocol_.async_receive([this](std::error_code ec,
+                                     size_t /* transferred */) {
+        if (ec) {
+          if (ec != std::errc::operation_canceled &&
+              ec != net::stream_errc::eof) {
+            logger_.warning("receiving command-frame failed: " + ec.message());
+          }
+          disconnect();
+          return;
+        }
 
-            idle();
-          });
+        idle();
+      });
 
       return;
     }
@@ -481,7 +571,7 @@ void MySQLServerMockSessionClassic::idle() {
   }
 
   if (payload.empty()) {
-    log_debug("message was empty, closing conneciton.");
+    logger_.debug("message was empty, closing connection.");
 
     disconnect();
 
@@ -503,32 +593,32 @@ void MySQLServerMockSessionClassic::idle() {
         json_reader_->handle_statement(statement_received, &protocol_);
 
         // handle_statement will set the exec-timer.
-        protocol_.exec_timer().async_wait([this, started,
-                                           statement = statement_received](
-                                              std::error_code ec) {
-          // wait until exec-time passed.
-          if (ec) {
-            if (ec != std::errc::operation_canceled) {
-              log_warning("wait exec-time failed: %s", ec.message().c_str());
-            }
-            disconnect();
-            return;
-          }
+        protocol_.exec_timer().async_wait(
+            [this, started,
+             statement = statement_received](std::error_code ec) {
+              // wait until exec-time passed.
+              if (ec) {
+                if (ec != std::errc::operation_canceled) {
+                  logger_.warning("wait exec-time failed: " + ec.message());
+                }
+                disconnect();
+                return;
+              }
 
-          auto now = std::chrono::steady_clock::now();
-          log_info("(%s)> %s", duration_to_us_string(now - started).c_str(),
-                   statement.c_str());
+              auto now = std::chrono::steady_clock::now();
+              logger_.info(mysql_harness::utility::string_format(
+                  "(%s)> %s", duration_to_us_string(now - started).c_str(),
+                  statement.c_str()));
 
-          send_response_then_idle();
-        });
+              send_response_then_idle();
+            });
 
       } catch (const std::exception &e) {
         // handling statement failed. Return the error to the client
-        log_error("executing statement failed: %s", e.what());
+        logger_.error("executing statement failed: "s + e.what());
 
         protocol_.encode_error(
-            {ER_PARSE_ERROR,
-             std::string("executing statement failed: ") + e.what()});
+            {ER_PARSE_ERROR, "executing statement failed: "s + e.what()});
 
         send_response_then_idle();
 
@@ -547,12 +637,12 @@ void MySQLServerMockSessionClassic::idle() {
           // EOF is expected, don't log it.
           if (ec != net::stream_errc::eof &&
               ec != std::errc::operation_canceled) {
-            log_warning("receive connection-close failed: %s",
-                        ec.message().c_str());
+            logger_.warning("receive connection-close failed: " + ec.message());
           }
         } else {
           // something _was_ sent? log it.
-          log_debug("data after QUIT: %zu", transferred);
+          logger_.debug(mysql_harness::utility::string_format(
+              "data after QUIT: %zu", transferred));
         }
 
         disconnect();
@@ -605,7 +695,8 @@ void MySQLServerMockSessionClassic::idle() {
       send_response_then_idle();
       break;
     default:
-      log_info("received unsupported command from the client: %d", cmd);
+      logger_.info("received unsupported command from the client: " +
+                   std::to_string(cmd));
 
       protocol_.encode_error({ER_PARSE_ERROR,
                               "Unsupported command: " + std::to_string(cmd),
@@ -625,7 +716,11 @@ void MySQLClassicProtocol::encode_auth_fast_message() {
   auto encode_res = classic_protocol::encode<classic_protocol::frame::Frame<
       classic_protocol::message::server::AuthMethodData>>(
       {seq_no_++, {"\x03"}}, shared_capabilities(),
-      net::dynamic_buffer(send_buffer_));
+      net::dynamic_buffer(send_buffer()));
+
+  if (!encode_res) {
+    // ignore
+  }
 }
 
 void MySQLClassicProtocol::encode_auth_switch_message(
@@ -633,7 +728,10 @@ void MySQLClassicProtocol::encode_auth_switch_message(
   auto encode_res = classic_protocol::encode<classic_protocol::frame::Frame<
       classic_protocol::message::server::AuthMethodSwitch>>(
       {seq_no_++, msg}, shared_capabilities(),
-      net::dynamic_buffer(send_buffer_));
+      net::dynamic_buffer(send_buffer()));
+  if (!encode_res) {
+    // ignore
+  }
 }
 
 void MySQLClassicProtocol::encode_server_greeting(
@@ -643,7 +741,10 @@ void MySQLClassicProtocol::encode_server_greeting(
   auto encode_res = classic_protocol::encode<classic_protocol::frame::Frame<
       classic_protocol::message::server::Greeting>>(
       {seq_no_++, greeting}, server_capabilities(),
-      net::dynamic_buffer(send_buffer_));
+      net::dynamic_buffer(send_buffer()));
+  if (!encode_res) {
+    // ignore
+  }
 }
 
 stdx::expected<std::string, std::error_code> cert_get_name(X509_NAME *name) {
@@ -654,7 +755,7 @@ stdx::expected<std::string, std::error_code> cert_get_name(X509_NAME *name) {
 #if 0
   int res = X509_NAME_print_ex(bio.get(), name, 0, XN_FLAG_ONELINE);
   if (res <= 0) {
-    return stdx::make_unexpected(make_tls_error());
+    return stdx::unexpected(make_tls_error());
   }
 
   BUF_MEM *buf;
@@ -665,7 +766,8 @@ stdx::expected<std::string, std::error_code> cert_get_name(X509_NAME *name) {
 #else
   std::array<char, 256> buf;
 
-  return {std::in_place, X509_NAME_oneline(name, buf.data(), buf.size())};
+  return stdx::expected<std::string, std::error_code>{
+      std::in_place, X509_NAME_oneline(name, buf.data(), buf.size())};
 #endif
 }
 
@@ -678,18 +780,11 @@ stdx::expected<std::string, std::error_code> cert_get_issuer_name(X509 *cert) {
 }
 
 stdx::expected<void, ErrorResponse> MySQLServerMockSessionClassic::authenticate(
+    const StatementReaderBase::handshake_data &handshake,
     const std::vector<uint8_t> &client_auth_method_data) {
-  auto handshake_data_res =
-      json_reader_->handshake(false /* not is_greeting */);
-  if (!handshake_data_res) {
-    return stdx::make_unexpected(handshake_data_res.error());
-  }
-
-  auto handshake = handshake_data_res.value();
-
   if (handshake.username.has_value()) {
     if (handshake.username.value() != protocol_.username()) {
-      return stdx::make_unexpected(ErrorResponse{
+      return stdx::unexpected(ErrorResponse{
           ER_ACCESS_DENIED_ERROR,  // 1045
           "Access Denied for user '" + protocol_.username() + "'@'localhost'",
           "28000"});
@@ -697,10 +792,10 @@ stdx::expected<void, ErrorResponse> MySQLServerMockSessionClassic::authenticate(
   }
 
   if (handshake.password.has_value()) {
-    if (!protocol_.authenticate(
+    if (!MySQLClassicProtocol::authenticate(
             protocol_.auth_method_name(), protocol_.auth_method_data(),
             handshake.password.value(), client_auth_method_data)) {
-      return stdx::make_unexpected(ErrorResponse{
+      return stdx::unexpected(ErrorResponse{
           ER_ACCESS_DENIED_ERROR,  // 1045
           "Access Denied for user '" + protocol_.username() + "'@'localhost'",
           "28000"});
@@ -708,13 +803,13 @@ stdx::expected<void, ErrorResponse> MySQLServerMockSessionClassic::authenticate(
   }
 
   if (handshake.cert_required) {
-    auto *ssl = protocol_.ssl();
+    auto *ssl = protocol_.connection().ssl();
 
     std::unique_ptr<X509, decltype(&X509_free)> client_cert{
         SSL_get_peer_certificate(ssl), &X509_free};
     if (!client_cert) {
-      log_info("cert required, no cert received.");
-      return stdx::make_unexpected(ErrorResponse{
+      logger_.info("cert required, no cert received.");
+      return stdx::unexpected(ErrorResponse{
           ER_ACCESS_DENIED_ERROR,  // 1045
           "Access Denied for user '" + protocol_.username() + "'@'localhost'",
           "28000"});
@@ -725,10 +820,10 @@ stdx::expected<void, ErrorResponse> MySQLServerMockSessionClassic::authenticate(
       if (!subject_res) {
         throw std::system_error(subject_res.error(), "cert_get_subject_name");
       }
-      log_debug("client-cert::subject: %s", subject_res.value().c_str());
+      logger_.debug("client-cert::subject: " + subject_res.value());
 
       if (handshake.cert_subject.value() != subject_res.value()) {
-        return stdx::make_unexpected(ErrorResponse{
+        return stdx::unexpected(ErrorResponse{
             ER_ACCESS_DENIED_ERROR,  // 1045
             "Access Denied for user '" + protocol_.username() + "'@'localhost'",
             "28000"});
@@ -740,22 +835,22 @@ stdx::expected<void, ErrorResponse> MySQLServerMockSessionClassic::authenticate(
       if (!issuer_res) {
         throw std::system_error(issuer_res.error(), "cert_get_issuer_name");
       }
-      log_debug("client-cert::issuer: %s", issuer_res.value().c_str());
+      logger_.debug("client-cert::issuer: " + issuer_res.value());
 
       if (handshake.cert_issuer.value() != issuer_res.value()) {
-        return stdx::make_unexpected(ErrorResponse{
+        return stdx::unexpected(ErrorResponse{
             ER_ACCESS_DENIED_ERROR,  // 1045
             "Access Denied for user '" + protocol_.username() + "'@'localhost'",
             "28000"});
       }
     }
 
-    const auto verify_res = SSL_get_verify_result(protocol_.ssl());
+    const auto verify_res = SSL_get_verify_result(protocol_.connection().ssl());
 
     if (verify_res != X509_V_OK) {
-      log_info("ssl-verify failed: %ld", verify_res);
+      logger_.info("ssl-verify failed: " + std::to_string(verify_res));
 
-      return stdx::make_unexpected(ErrorResponse{
+      return stdx::unexpected(ErrorResponse{
           ER_ACCESS_DENIED_ERROR,  // 1045
           "Access Denied for user '" + protocol_.username() + "'@'localhost'",
           "28000"});
@@ -769,7 +864,7 @@ void MySQLClassicProtocol::encode_error(const ErrorResponse &msg) {
   auto encode_res = classic_protocol::encode<
       classic_protocol::frame::Frame<classic_protocol::message::server::Error>>(
       {seq_no_++, msg}, shared_capabilities(),
-      net::dynamic_buffer(send_buffer_));
+      net::dynamic_buffer(send_buffer()));
 
   if (!encode_res) {
     //
@@ -790,7 +885,7 @@ void MySQLClassicProtocol::encode_ok(const OkResponse &msg) {
   auto encode_res = classic_protocol::encode<
       classic_protocol::frame::Frame<classic_protocol::message::server::Ok>>(
       {seq_no_++, tmp_msg}, shared_capabilities(),
-      net::dynamic_buffer(send_buffer_));
+      net::dynamic_buffer(send_buffer()));
 
   if (!encode_res) {
     //
@@ -804,7 +899,7 @@ void MySQLClassicProtocol::encode_resultset(const ResultsetResponse &response) {
   auto encode_res = classic_protocol::encode<
       classic_protocol::frame::Frame<classic_protocol::wire::VarInt>>(
       {seq_no_++, {static_cast<long>(response.columns.size())}}, shared_caps,
-      net::dynamic_buffer(send_buffer_));
+      net::dynamic_buffer(send_buffer()));
   if (!encode_res) {
     //
     return;
@@ -813,7 +908,7 @@ void MySQLClassicProtocol::encode_resultset(const ResultsetResponse &response) {
   for (const auto &column : response.columns) {
     encode_res = classic_protocol::encode<classic_protocol::frame::Frame<
         classic_protocol::message::server::ColumnMeta>>(
-        {seq_no_++, column}, shared_caps, net::dynamic_buffer(send_buffer_));
+        {seq_no_++, column}, shared_caps, net::dynamic_buffer(send_buffer()));
     if (!encode_res) {
       //
       return;
@@ -824,7 +919,7 @@ void MySQLClassicProtocol::encode_resultset(const ResultsetResponse &response) {
                             text_result_with_session_tracking)) {
     encode_res = classic_protocol::encode<
         classic_protocol::frame::Frame<classic_protocol::message::server::Eof>>(
-        {seq_no_++, {}}, shared_caps, net::dynamic_buffer(send_buffer_));
+        {seq_no_++, {}}, shared_caps, net::dynamic_buffer(send_buffer()));
     if (!encode_res) {
       //
       return;
@@ -834,7 +929,7 @@ void MySQLClassicProtocol::encode_resultset(const ResultsetResponse &response) {
   for (auto const &row : response.rows) {
     encode_res = classic_protocol::encode<
         classic_protocol::frame::Frame<classic_protocol::message::server::Row>>(
-        {seq_no_++, {row}}, shared_caps, net::dynamic_buffer(send_buffer_));
+        {seq_no_++, {row}}, shared_caps, net::dynamic_buffer(send_buffer()));
     if (!encode_res) {
       //
       return;
@@ -844,7 +939,7 @@ void MySQLClassicProtocol::encode_resultset(const ResultsetResponse &response) {
   encode_res = classic_protocol::encode<
       classic_protocol::frame::Frame<classic_protocol::message::server::Eof>>(
       {seq_no_++, response.end_of_rows}, shared_caps,
-      net::dynamic_buffer(send_buffer_));
+      net::dynamic_buffer(send_buffer()));
   if (!encode_res) {
     //
     return;

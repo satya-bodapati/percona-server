@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -119,7 +120,9 @@ int Primary_election_primary_process::launch_primary_election_process(
   while (election_process_thd_state.is_alive_not_running()) {
     DBUG_PRINT("sleep",
                ("Waiting for the Primary election process thread to start"));
-    mysql_cond_wait(&election_cond, &election_lock);
+    struct timespec abstime;
+    set_timespec(&abstime, 1);
+    mysql_cond_timedwait(&election_cond, &election_lock, &abstime);
   }
   mysql_mutex_unlock(&election_lock);
 
@@ -195,7 +198,9 @@ int Primary_election_primary_process::primary_election_process_handler() {
   mysql_mutex_lock(&election_lock);
   while (!primary_ready && !election_process_aborted) {
     DBUG_PRINT("sleep", ("Waiting for the primary member to be ready message"));
-    mysql_cond_wait(&election_cond, &election_lock);
+    struct timespec abstime;
+    set_timespec(&abstime, 1);
+    mysql_cond_timedwait(&election_cond, &election_lock, &abstime);
   }
   mysql_mutex_unlock(&election_lock);
 
@@ -240,7 +245,7 @@ int Primary_election_primary_process::primary_election_process_handler() {
       primary changes we do enabled `super_read_only` on all members and
       then run the member actions on the new primary.
     */
-    if (enable_server_read_mode()) {
+    if (enable_server_read_mode("(GR) new primary elected")) {
       /* purecov: begin inspected */
       LogPluginErr(WARNING_LEVEL, ER_GRP_RPL_ENABLE_READ_ONLY_FAILED);
       /* purecov: end */
@@ -289,7 +294,9 @@ int Primary_election_primary_process::primary_election_process_handler() {
   mysql_mutex_lock(&election_lock);
   while (!group_in_read_mode && !election_process_aborted) {
     DBUG_PRINT("sleep", ("Waiting for the group to be in read mode."));
-    mysql_cond_wait(&election_cond, &election_lock);
+    struct timespec abstime;
+    set_timespec(&abstime, 1);
+    mysql_cond_timedwait(&election_cond, &election_lock, &abstime);
   }
   mysql_mutex_unlock(&election_lock);
 
@@ -334,7 +341,9 @@ wait_for_queued_message:
   mysql_mutex_lock(&election_lock);
   while (!waiting_on_queue_applied_message && !election_process_aborted) {
     DBUG_PRINT("sleep", ("Waiting for own message about queued applied"));
-    mysql_cond_wait(&election_cond, &election_lock);
+    struct timespec abstime;
+    set_timespec(&abstime, 1);
+    mysql_cond_timedwait(&election_cond, &election_lock, &abstime);
   }
   mysql_mutex_unlock(&election_lock);
 
@@ -499,7 +508,9 @@ int Primary_election_primary_process::terminate_election_process(bool wait) {
     while (election_process_thd_state.is_thread_alive()) {
       DBUG_PRINT("sleep",
                  ("Waiting for the Primary election process thread to finish"));
-      mysql_cond_wait(&election_cond, &election_lock);
+      struct timespec abstime;
+      set_timespec(&abstime, 1);
+      mysql_cond_timedwait(&election_cond, &election_lock, &abstime);
     }
 
     assert(election_process_thd_state.is_thread_dead());
@@ -521,7 +532,9 @@ void Primary_election_primary_process::wait_on_election_process_termination() {
   while (election_process_thd_state.is_thread_alive()) {
     DBUG_PRINT("sleep",
                ("Waiting for the Primary election process thread to finish"));
-    mysql_cond_wait(&election_cond, &election_lock);
+    struct timespec abstime;
+    set_timespec(&abstime, 1);
+    mysql_cond_timedwait(&election_cond, &election_lock, &abstime);
   }
   assert(election_process_thd_state.is_thread_dead());
 

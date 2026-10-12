@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,18 +23,16 @@
 
 #include "sql-common/json_syntax_check.h"
 
+#include <cassert>
+#include <string>
+#include <utility>
+
 #include "my_rapidjson_size_t.h"  // IWYU pragma: keep
 
-#include <assert.h>
 #include <rapidjson/error/en.h>
 #include <rapidjson/error/error.h>
 #include <rapidjson/memorystream.h>
 #include <rapidjson/reader.h>
-#include <string>
-#include <utility>
-
-#include "my_sys.h"
-#include "mysqld_error.h"
 
 bool Syntax_check_handler::StartObject() {
   m_too_deep_error_raised = check_json_depth(++m_depth, m_depth_handler);
@@ -88,6 +87,11 @@ bool check_json_depth(size_t depth, const JsonErrorHandler &handler) {
     return true;
   }
   return false;
+}
+
+bool check_json_depth(size_t depth,
+                      const JsonSerializationErrorHandler &handler) {
+  return check_json_depth(depth, [&handler]() { handler.TooDeep(); });
 }
 
 std::pair<std::string, size_t> get_error_from_reader(

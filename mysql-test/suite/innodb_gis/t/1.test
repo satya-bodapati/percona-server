@@ -858,7 +858,7 @@ SELECT ST_ISCLOSED(CONVERT(CONCAT('     ', 0x2), BINARY(20)));
 --echo #
 --replace_regex /non geometric .* value/non geometric '' value/
 --error ER_ILLEGAL_VALUE_FOR_TYPE
-SELECT GEOMETRYCOLLECTION((SELECT @@OLD));
+SELECT GEOMETRYCOLLECTION((SELECT @@CORE_FILE));
 
 
 --echo End of 5.1 tests
@@ -1429,4 +1429,4 @@ DROP DATABASE gis_ogs;
 --echo #
 
 --error ER_GIS_INVALID_DATA
-SELECT ST_Union('', ''), md5(1);
+SELECT ST_Union('', ''), SHA2(1,256);

@@ -1,6 +1,11 @@
 # InnoDB transparent encrypted tablespace
 # This test case will test basic encryption support features.
 
+if(!$ROTATE_MASTER_KEY_TIMES)
+{
+    --let $ROTATE_MASTER_KEY_TIMES=500
+}
+
 --disable_query_log
 call mtr.add_suppression("\\[ERROR\\] .*MY-\\d+.* Encryption can't find master key, please check the keyring is loaded.");
 call mtr.add_suppression("Can't generate new master key for tablespace encryption, please check the keyring is loaded.");
@@ -94,9 +99,7 @@ SELECT c4,c5,c6,ST_AsText(c7) FROM tde_db.t_encrypt LIMIT 10;
 -- send_shutdown
 --source include/wait_until_disconnected.inc
 --exec echo "restart: $PLUGIN_DIR_OPT" > $MYSQLTEST_VARDIR/tmp/mysqld.1.expect
---enable_reconnect
 --source include/wait_until_connected_again.inc
---disable_reconnect
 
 SELECT c4,c5,c6,ST_AsText(c7) FROM tde_db.t_encrypt LIMIT 10;
 
@@ -386,11 +389,11 @@ begin
                 set i = i + 1;
         end while;
 end|
-CREATE PROCEDURE tde_db.rotate_master_key()
+eval CREATE PROCEDURE tde_db.rotate_master_key()
 begin
         declare i int default 1;
         declare has_error int default 0;
-        while (i <= 500) DO
+        while (i <= $ROTATE_MASTER_KEY_TIMES) DO
                 ALTER INSTANCE ROTATE INNODB MASTER KEY;
                 set i = i + 1;
         end while;
@@ -408,7 +411,6 @@ begin
         end while;
 end|
 DELIMITER ;|
-
 
 SHOW CREATE TABLE tde_db.t_encrypt;
 --echo # In connection con1 - Running insert

@@ -1,15 +1,16 @@
-# Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -50,13 +51,13 @@ IF(LINUX OR SOLARIS)
   SET(PLUGIN_VERSION_FILE
     ${CMAKE_CURRENT_SOURCE_DIR}/authentication_oci_client.ver)
   IF(SOLARIS)
-    MY_TARGET_LINK_OPTIONS(authentication_oci_client
-      "LINKER:-z,gnu-version-script-compat")
+    TARGET_LINK_OPTIONS(authentication_oci_client PRIVATE
+      LINKER:-z,gnu-version-script-compat)
   ENDIF()
   # hide all symbols in mysys, to avoid ODR violations.
   # There is *one* visible symbol: _mysql_client_plugin_declaration_
-  MY_TARGET_LINK_OPTIONS(authentication_oci_client
-    "LINKER:--version-script=${PLUGIN_VERSION_FILE}"
+  TARGET_LINK_OPTIONS(authentication_oci_client PRIVATE
+    LINKER:--version-script=${PLUGIN_VERSION_FILE}
     )
   SET_TARGET_PROPERTIES(authentication_oci_client
     PROPERTIES LINK_DEPENDS ${PLUGIN_VERSION_FILE})

@@ -22,8 +22,8 @@ select * from t1;
 delete from t1;
 
 --echo # restore data from wl946_pre with promote
---exec $NDB_RESTORE -b 1 -n 1 -r --promote-attributes $NDB_SAVED_BACKUPS/wl946_pre >> $NDB_TOOLS_OUTPUT
---exec $NDB_RESTORE -b 1 -n 2 -r --promote-attributes $NDB_SAVED_BACKUPS/wl946_pre >> $NDB_TOOLS_OUTPUT
+--exec $NDB_RESTORE $NDB_RESTORE_NO_ENCR -b 1 -n 1 -r --promote-attributes $NDB_SAVED_BACKUPS/wl946_pre >> $NDB_TOOLS_OUTPUT
+--exec $NDB_RESTORE $NDB_RESTORE_NO_ENCR -b 1 -n 2 -r --promote-attributes $NDB_SAVED_BACKUPS/wl946_pre >> $NDB_TOOLS_OUTPUT
 
 --echo # check contents
 select count(*), sum(crc32(concat(a,b,c,d,e,f))) from t1;
@@ -53,7 +53,7 @@ drop table t1;
 
 # restore table with old types
 --echo # restore meta wl946_pre
---exec $NDB_RESTORE -b 1 -n 1 -m --print-meta $NDB_SAVED_BACKUPS/wl946_pre >> $NDB_TOOLS_OUTPUT
+--exec $NDB_RESTORE $NDB_RESTORE_NO_ENCR -b 1 -n 1 -m --print-meta $NDB_SAVED_BACKUPS/wl946_pre >> $NDB_TOOLS_OUTPUT
 
 # datetime,timestamp default wrong on solaris (probably bug#53818)
 # show create table t1;
@@ -70,6 +70,9 @@ drop table t1;
 # table metadata is not supported
 --disable_query_log
 call mtr.add_suppression("Table upgrade required");
+call mtr.add_suppression("Incorrect information in file: .*t1.frm");
+call mtr.add_suppression("Error in reading file .*t1.frm");
+call mtr.add_suppression("Error in creating TABLE_SHARE from t1.frm file");
 --enable_query_log
 --error ER_NO_SUCH_TABLE
 select count(*), sum(crc32(concat(a,b,c,d,e,f))) from t1;

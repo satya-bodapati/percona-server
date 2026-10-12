@@ -1,15 +1,16 @@
-/* Copyright (c) 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,23 +21,21 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
-#ifndef BINARY_LOG_TRANSACTION_COMPRESSION_PAYLOAD_EVENT_BUFFER_ISTREAM_H_
-#define BINARY_LOG_TRANSACTION_COMPRESSION_PAYLOAD_EVENT_BUFFER_ISTREAM_H_
-
+#ifndef MYSQL_BINLOG_EVENT_COMPRESSION_PAYLOAD_EVENT_BUFFER_ISTREAM_H
+#define MYSQL_BINLOG_EVENT_COMPRESSION_PAYLOAD_EVENT_BUFFER_ISTREAM_H
 #include <memory>
 #include <string>
 
-#include "mysql/binlog/event/compression/buffer/managed_buffer.h"  // mysql::binlog::event::compression::buffer::Managed_buffer
 #include "mysql/binlog/event/compression/decompressor.h"  // mysqlns::compression::Decompressor
 #include "mysql/binlog/event/compression/factory.h"  // mysqlns::compression::Factory
 #include "mysql/binlog/event/control_events.h"  // Transaction_payload_event
 #include "mysql/binlog/event/event_reader.h"    // Event_reader
-#include "mysql/binlog/event/nodiscard.h"       // NODISCARD
+#include "mysql/containers/buffers/managed_buffer.h"  // mysql::containers::buffers::Managed_buffer
 
 /// @addtogroup GroupLibsMysqlBinlogEvent
 /// @{
 ///
-/// @file payload_event_buffer_istream.h
+/// @file
 ///
 /// Stream class that yields decompressed event byte buffers from a
 /// Transaction_payload_log_event.
@@ -58,21 +57,18 @@ namespace mysql::binlog::event::compression {
 class Payload_event_buffer_istream {
  public:
   using Char_t = unsigned char;
-  using Size_t =
-      mysql::binlog::event::compression::buffer::Buffer_view<Char_t>::Size_t;
-  using Grow_calculator_t =
-      mysql::binlog::event::compression::buffer::Grow_calculator;
-  using Managed_buffer_t =
-      mysql::binlog::event::compression::buffer::Managed_buffer<Char_t>;
+  using Size_t = mysql::containers::buffers::Buffer_view<Char_t>::Size_t;
+  using Grow_calculator_t = mysql::containers::buffers::Grow_calculator;
+  using Managed_buffer_t = mysql::containers::buffers::Managed_buffer<Char_t>;
   using Decompressor_t = Decompressor;
   using Status_t = Decompress_status;
   using Factory_t = Factory;
   using Buffer_view_t = Managed_buffer_t::Buffer_view_t;
   using Buffer_ptr_t = std::shared_ptr<Buffer_view_t>;
   using Managed_buffer_ptr_t = std::shared_ptr<Managed_buffer_t>;
-  using Memory_resource_t = mysql::binlog::event::resource::Memory_resource;
+  using Memory_resource_t = mysql::allocators::Memory_resource;
   template <class T>
-  using Allocator_t = mysql::binlog::event::resource::Allocator<T>;
+  using Allocator_t = mysql::allocators::Allocator<T>;
 
   /// Construct the stream from the raw compressed data.
   ///
@@ -237,8 +233,6 @@ class Payload_event_buffer_istream {
   ///
   /// @param[out] out The target buffer where this function will store
   /// the event data.
-  ///
-  /// @retval this
   Payload_event_buffer_istream &operator>>(Buffer_ptr_t &out);
 
   /// Read the next event into a Managed_buffer.
@@ -376,4 +370,4 @@ class Payload_event_buffer_istream {
 /// @}
 
 #endif  // ifndef
-        // BINARY_LOG_TRANSACTION_COMPRESSION_PAYLOAD_EVENT_BUFFER_ISTREAM_H_
+        // MYSQL_BINLOG_EVENT_COMPRESSION_PAYLOAD_EVENT_BUFFER_ISTREAM_H

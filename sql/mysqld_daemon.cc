@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,10 +25,10 @@
 
 #include "my_config.h"
 
-#include <errno.h>
 #include <fcntl.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
 
 #include "mysql/components/services/log_builtins.h"
 #include "mysqld_error.h"
@@ -42,7 +43,7 @@
 
 namespace {
 bool is_daemon_proc = false;
-}
+}  // namespace
 
 /**
   Prediacate to test if we're currently executing
@@ -56,7 +57,7 @@ int mysqld::runtime::mysqld_daemonize() {
   int pipe_fd[2];
   if (pipe(pipe_fd) < 0) return -2;
 
-  pid_t pid = fork();
+  pid_t const pid = fork();
   if (pid == -1) {
     // Error
     close(pipe_fd[0]);
@@ -91,40 +92,40 @@ int mysqld::runtime::mysqld_daemonize() {
     if (rc != 1) {
       LogErr(ERROR_LEVEL, ER_FAILED_TO_FIND_MYSQLD_STATUS, strerror(errno), rc);
       return -2;
-    } else if (waitstatus != 1) {
+    }
+    if (waitstatus != 1) {
       return -2;
     }
     // Parent should return to calling function (mysqld_main) and not
     // call exit() directly.
     return -1;
+  }
+  // Child, close read end of pipe file descriptor.
+  close(pipe_fd[0]);
+
+  int stdinfd;
+  if ((stdinfd = open("/dev/null", O_RDONLY)) <= STDERR_FILENO) {
+    close(pipe_fd[1]);
+    exit(MYSQLD_ABORT_EXIT);
+  }
+
+  if (!(dup2(stdinfd, STDIN_FILENO) != STDIN_FILENO) && (setsid() > -1)) {
+    close(stdinfd);
+    pid_t const grand_child_pid = fork();
+    switch (grand_child_pid) {
+      case 0:  // Grand child
+        is_daemon_proc = true;
+        return pipe_fd[1];
+      case -1:
+        close(pipe_fd[1]);
+        _exit(MYSQLD_FAILURE_EXIT);
+      default:
+        _exit(MYSQLD_SUCCESS_EXIT);
+    }
   } else {
-    // Child, close read end of pipe file descriptor.
-    close(pipe_fd[0]);
-
-    int stdinfd;
-    if ((stdinfd = open("/dev/null", O_RDONLY)) <= STDERR_FILENO) {
-      close(pipe_fd[1]);
-      exit(MYSQLD_ABORT_EXIT);
-    }
-
-    if (!(dup2(stdinfd, STDIN_FILENO) != STDIN_FILENO) && (setsid() > -1)) {
-      close(stdinfd);
-      pid_t grand_child_pid = fork();
-      switch (grand_child_pid) {
-        case 0:  // Grand child
-          is_daemon_proc = true;
-          return pipe_fd[1];
-        case -1:
-          close(pipe_fd[1]);
-          _exit(MYSQLD_FAILURE_EXIT);
-        default:
-          _exit(MYSQLD_SUCCESS_EXIT);
-      }
-    } else {
-      close(stdinfd);
-      close(pipe_fd[1]);
-      _exit(MYSQLD_SUCCESS_EXIT);
-    }
+    close(stdinfd);
+    close(pipe_fd[1]);
+    _exit(MYSQLD_SUCCESS_EXIT);
   }
 }
 

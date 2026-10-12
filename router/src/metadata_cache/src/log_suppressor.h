@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2023, Oracle and/or its affiliates.
+  Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -50,14 +51,14 @@ class LogSuppressor {
     /* incorrect JSON for instance_type from the last query */
     kInstanceType,
 
-    /* incorrect JSON or value for read_only_targets */
-    kReadOnlyTargets,
-
-    /* incorrect JSON or value for unreachable_quorum_allowed_traffic */
-    kUnreachableQuorumAllowedTraffic,
+    /* incorrect JSON or value for router option in the metadata */
+    kRouterOption,
 
     /* deprecated version of Cluster Metadata */
-    kDeprecatedMetadataVersion
+    kDeprecatedMetadataVersion,
+
+    /* incorrect JSON for instance tags in the metadata from the last query */
+    kServerTags,
   };
 
   static LogSuppressor &instance() {
@@ -65,7 +66,7 @@ class LogSuppressor {
     return instance_;
   }
 
-  void log_message(const MessageId id, const std::string &uuid,
+  void log_message(const MessageId id, const std::string &key,
                    const std::string &message, bool invalid_condition,
                    mysql_harness::logging::LogLevel invalid_condition_level =
                        mysql_harness::logging::LogLevel::kWarning,

@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -110,12 +111,13 @@ void row_mysql_prebuilt_free_compress_heap(row_prebuilt_t *prebuilt) noexcept;
 @param[in,out]	len	in: data length, out: length of decomprssed data
 @param[in]	dict_data	optional dictionary data used for decompression
 @param[in]	dict_data_len	optional dictionary data length
-@param[in]	compress_heap
+@param[in]	compress_heap   memory heap used to compress/decompress
+                                blob column
 @return pointer to the uncompressed data */
-MY_NODISCARD
-const byte *row_decompress_column(const byte *data, ulint *len,
-                                  const byte *dict_data, ulint dict_data_len,
-                                  mem_heap_t **compress_heap);
+[[nodiscard]] const byte *row_decompress_column(const byte *data, ulint *len,
+                                                const byte *dict_data,
+                                                ulint dict_data_len,
+                                                mem_heap_t **compress_heap);
 
 /** Compress blob/text/varchar column using zlib
 @param[in]	data	data in MySQL (uncompressed) format
@@ -123,12 +125,13 @@ const byte *row_decompress_column(const byte *data, ulint *len,
 @param[in]	lenlen	bytes used to store the length of data
 @param[in]	dict_data	optional dictionary data used for compression
 @param[in]	dict_data_len	optional dictionary data length
-@param[in]	compress_heap
+@param[in]	compress_heap   memory heap used to compress/decompress
+                                blob column
 @return pointer to the compressed data */
-MY_NODISCARD
-byte *row_compress_column(const byte *data, ulint *len, ulint lenlen,
-                          const byte *dict_data, ulint dict_data_len,
-                          mem_heap_t **compress_heap);
+[[nodiscard]] byte *row_compress_column(const byte *data, ulint *len,
+                                        ulint lenlen, const byte *dict_data,
+                                        ulint dict_data_len,
+                                        mem_heap_t **compress_heap);
 
 /** Stores a >= 5.0.3 format true VARCHAR length to dest, in the MySQL row
  format.
@@ -159,7 +162,9 @@ remember also to set the null bit in the mysql record header!
 @param[in] need_decompression If the data need to be compressed
 @param[in] dict_data Optional compression dictionary
 @param[in] dict_data_len Optional compression dictionary data
-@param[in] compress_heap */
+@param[in] compress_heap Memory heap used to compress/decompress
+                         blob column
+*/
 void row_mysql_store_blob_ref(byte *dest, ulint col_len, const void *data,
                               ulint len, bool need_decompression,
                               const byte *dict_data, ulint dict_data_len,
@@ -172,7 +177,8 @@ void row_mysql_store_blob_ref(byte *dest, ulint col_len, const void *data,
 @param[in] need_compression     if the data need to be compressed
 @param[in] dict_data            optional compression dictionary data
 @param[in] dict_data_len        optional compression dictionary data length
-@param[in] compress_heap
+@param[in] compress_heap        memory heap used to compress/decompress
+                                blob column
 @return pointer to BLOB data */
 const byte *row_mysql_read_blob_ref(ulint *len, const byte *ref, ulint col_len,
                                     bool need_compression,
@@ -235,10 +241,10 @@ byte *row_mysql_store_col_in_innobase_format(
     bool need_compression,
     /*!< in: if the data need to be
     compressed */
-    const byte *dict_data,     /*!< in: optional compression
-                               dictionary data */
-    ulint dict_data_len,       /*!< in: optional compression
-                               dictionary data length */
+    const byte *dict_data,       /*!< in: optional compression
+                                 dictionary data */
+    ulint dict_data_len,         /*!< in: optional compression
+                                 dictionary data length */
     mem_heap_t **compress_heap); /*!< in: compress_heap */
 /** Handles user errors and lock waits detected by the database engine.
  @return true if it was a lock wait and we should continue running the
@@ -575,10 +581,12 @@ constexpr uint32_t ROW_PREBUILT_FREED = 26423527;
 handle used within MySQL; these are used to save CPU time. */
 
 struct row_prebuilt_t {
-  ulint magic_n;               /*!< this magic number is set to
-                               ROW_PREBUILT_ALLOCATED when created,
-                               or ROW_PREBUILT_FREED when the
-                               struct has been freed */
+  ulint magic_n; /*!< this magic number is set to
+                 ROW_PREBUILT_ALLOCATED when created,
+                 or ROW_PREBUILT_FREED when the
+                 struct has been freed */
+  space_id_t space_id() const { return table->space; }
+
   dict_table_t *table;         /*!< Innobase table handle */
   dict_index_t *index;         /*!< current index for a search, if
                                any */
@@ -706,27 +714,6 @@ struct row_prebuilt_t {
   row is visited. */
   bool m_stop_tuple_found;
 
- private:
-  /** Set to true iff we are inside read_range_first() or read_range_next() */
-  bool m_is_reading_range;
-
- public:
-  bool is_reading_range() const { return m_is_reading_range; }
-
-  class row_is_reading_range_guard_t : private ut::bool_scope_guard_t {
-   public:
-    explicit row_is_reading_range_guard_t(row_prebuilt_t &prebuilt)
-        : ut::bool_scope_guard_t(prebuilt.m_is_reading_range) {}
-  };
-
-  row_is_reading_range_guard_t get_is_reading_range_guard() {
-    /* We implement row_is_reading_range_guard_t as a simple bool_scope_guard_t
-    because we trust that scopes are never nested and thus we don't need to
-    count their "openings" and "closings", so we assert that.*/
-    ut_ad(!m_is_reading_range);
-    return row_is_reading_range_guard_t(*this);
-  }
-
   byte row_id[DATA_ROW_ID_LEN];
   /*!< if the clustered index was
   generated, the row id of the
@@ -738,6 +725,14 @@ struct row_prebuilt_t {
                                 but in the future we must only fetch
                                 it when FTS columns are being
                                 updated */
+  /** The label read out of the hidden percona_vec_aux_id column of the
+  record last stored into the MySQL buffer, or 0 when the table has no
+  such column. The vector-index read path compares it against the node id
+  the graph returned; a mismatch means the row the node described is no
+  longer the version this reader sees. Filled the way fts_doc_id is,
+  straight from the record, so the hidden column need not join the
+  read set. */
+  uint64_t vec_aux_id;
   dtuple_t *clust_ref;          /*!< prebuilt dtuple used in
                                 sel/upd/del */
   ulint select_lock_type;       /*!< LOCK_NONE, LOCK_S, or LOCK_X */
@@ -797,8 +792,8 @@ struct row_prebuilt_t {
                              in fetch_cache */
   mem_heap_t *blob_heap;     /*!< in SELECTS BLOB fields are copied
                              to this heap */
-  mem_heap_t *compress_heap;          /*!< memory heap used to compress
-                                        /decompress blob column*/
+  mem_heap_t *compress_heap; /*!< memory heap used to compress
+                               /decompress blob column*/
   mem_heap_t *old_vers_heap; /*!< memory heap where a previous
                              version is built in consistent read */
   enum {
@@ -899,11 +894,15 @@ struct row_prebuilt_t {
   table index tree. In this case, it could be split, but no shrink. */
   bool m_temp_tree_modified;
 
+  bool has_gcol() const { return m_mysql_table->has_gcol(); }
+
   /** The MySQL table object */
   TABLE *m_mysql_table;
 
   /** The MySQL handler object. */
   ha_innobase *m_mysql_handler;
+
+  THD *m_thd;
 
   /** limit value to avoid fts result overflow */
   ulonglong m_fts_limit;
@@ -976,9 +975,8 @@ struct row_prebuilt_t {
   /** @return true iff the operation can skip concurrency ticket. */
   bool skip_concurrency_ticket() const;
 
-  /** It is unsafe to copy this struct, and moving it would be non-trivial,
-  because we want to keep in sync with row_is_reading_range_guard_t. Therefore
-  it is much safer/easier to just forbid such operations.  */
+  /** It is unsafe to copy this struct, and we don't need to move it.
+  Therefore it is much safer/easier to just forbid such operations. */
   row_prebuilt_t(row_prebuilt_t const &) = delete;
   row_prebuilt_t &operator=(row_prebuilt_t const &) = delete;
   row_prebuilt_t &operator=(row_prebuilt_t &&) = delete;
@@ -995,35 +993,45 @@ struct SysIndexCallback {
   virtual void operator()(mtr_t *mtr, btr_pcur_t *pcur) noexcept = 0;
 };
 
-/** Get the updated parent field value from the update vector for the
-given col_no.
-@param[in]      foreign         foreign key information
-@param[in]      update          updated parent vector.
-@param[in]      col_no          base column position of the child table to check
-@return updated field from the parent update vector, else NULL */
-dfield_t *innobase_get_field_from_update_vector(dict_foreign_t *foreign,
-                                                upd_t *update, uint32_t col_no);
-
 /** Get the computed value by supplying the base column values.
+@param[in]      compress_heap   memory heap used to compress/decompress
+                                blob column
 @param[in,out]  row             the data row
 @param[in]      col             virtual column
-@param[in]      index           index on the virtual column
+@param[in]      table           the table on which the virtual column is
+                                defined
 @param[in,out]  local_heap      heap memory for processing large data etc.
 @param[in,out]  heap            memory heap that copies the actual index row
-@param[in]      ifield          index field
 @param[in]      thd             MySQL thread handle
 @param[in,out]  mysql_table     mysql table object
+@param[in]      ifield          metadata for secondary index field into which
+                                the computed value is to be materialized,
+                                nullptr if not applicable
 @param[in]      old_table       during ALTER TABLE, this is the old table
-                                or NULL.
-@param[in]      parent_update   update vector for the parent row
-@param[in]      foreign         foreign key information
-@return the field filled with computed value, or NULL if just want
-to store the value in passed in "my_rec" */
+                                or nullptr.
+@param[in]      row_update      update vector for the row, supersedes row
+                                values
+@return the field filled with computed value, or nullptr on failure */
 dfield_t *innobase_get_computed_value(
-    const dtuple_t *row, const dict_v_col_t *col, const dict_index_t *index,
-    mem_heap_t **local_heap, mem_heap_t *heap, const dict_field_t *ifield,
-    THD *thd, TABLE *mysql_table, const dict_table_t *old_table,
-    upd_t *parent_update, dict_foreign_t *foreign, mem_heap_t **compress_heap);
+    mem_heap_t **compress_heap, const dtuple_t *row, const dict_v_col_t *col,
+    const dict_table_t *table, mem_heap_t **local_heap, mem_heap_t *heap,
+    THD *thd, TABLE *mysql_table, const dict_field_t *ifield = nullptr,
+    const dict_table_t *old_table = nullptr, upd_t *row_update = nullptr);
+
+/** This is similar to the function innobase_get_computed_value(), but for
+stored generated columns (gcol).
+@param[in]     compress_heap  memory heap used to compress/decompress
+                              blob column.
+@param[in,out] row    data tuple object.
+@param[in]     col        stored gcol
+@param[in]     table      table on which the stored gcol is defined
+@param[in,out] heap      heap used for evaluating gcol
+@param[in]     thd    MySQL thread handle
+@param[in]     mysql_table  MySQL table object.
+@return the field filled with computed value or nullptr on failure */
+dfield_t *innobase_compute_stored_gcol(
+    mem_heap_t **compress_heap, const dtuple_t *row, const dict_s_col_t &col,
+    const dict_table_t *table, mem_heap_t *heap, THD *thd, TABLE *mysql_table);
 
 /** Parse out multi-values from a MySQL record
 @param[in]      mysql_table     MySQL table structure

@@ -1,15 +1,16 @@
-/* Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -176,14 +177,14 @@ struct PFS_connection_slice {
   }
 
  protected:
-  bool m_has_memory_stats;
+  bool m_has_memory_stats{false};
 
  private:
-  bool m_has_waits_stats;
-  bool m_has_stages_stats;
-  bool m_has_statements_stats;
-  bool m_has_transactions_stats;
-  bool m_has_errors_stats;
+  bool m_has_waits_stats{false};
+  bool m_has_stages_stats{false};
+  bool m_has_statements_stats{false};
+  bool m_has_transactions_stats{false};
+  bool m_has_errors_stats{false};
 
   /**
     Per connection slice waits aggregated statistics.
@@ -191,7 +192,7 @@ struct PFS_connection_slice {
     PERFORMANCE_SCHEMA.EVENTS_WAITS_SUMMARY_BY_*_BY_EVENT_NAME.
     Immutable, safe to use without internal lock.
   */
-  PFS_single_stat *m_instr_class_waits_stats;
+  PFS_single_stat *m_instr_class_waits_stats{nullptr};
 
   /**
     Per connection slice stages aggregated statistics.
@@ -199,7 +200,7 @@ struct PFS_connection_slice {
     PERFORMANCE_SCHEMA.EVENTS_STAGES_SUMMARY_BY_*_BY_EVENT_NAME.
     Immutable, safe to use without internal lock.
   */
-  PFS_stage_stat *m_instr_class_stages_stats;
+  PFS_stage_stat *m_instr_class_stages_stats{nullptr};
 
   /**
     Per connection slice statements aggregated statistics.
@@ -207,7 +208,7 @@ struct PFS_connection_slice {
     PERFORMANCE_SCHEMA.EVENTS_STATEMENTS_SUMMARY_BY_*_BY_EVENT_NAME.
     Immutable, safe to use without internal lock.
   */
-  PFS_statement_stat *m_instr_class_statements_stats;
+  PFS_statement_stat *m_instr_class_statements_stats{nullptr};
 
   /**
     Per connection slice transactions aggregated statistics.
@@ -215,7 +216,7 @@ struct PFS_connection_slice {
     PERFORMANCE_SCHEMA.EVENTS_TRANSACTIONS_SUMMARY_BY_*_BY_EVENT_NAME.
     Immutable, safe to use without internal lock.
   */
-  PFS_transaction_stat *m_instr_class_transactions_stats;
+  PFS_transaction_stat *m_instr_class_transactions_stats{nullptr};
 
   /**
     Per connection slice error aggregated statistics.
@@ -223,7 +224,7 @@ struct PFS_connection_slice {
     PERFORMANCE_SCHEMA.EVENTS_ERRORS_SUMMARY_BY_*_BY_ERROR.
     Immutable, safe to use without internal lock.
   */
-  PFS_error_stat *m_instr_class_errors_stats;
+  PFS_error_stat *m_instr_class_errors_stats{nullptr};
 
  public:
   void aggregate_status_stats(const System_status_var *status_vars) {

@@ -1,15 +1,16 @@
-/* Copyright (c) 2012, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -96,11 +97,11 @@ struct st_mysql_client_plugin_TRACE test_trace_plugin = {
     "A plugin for testing protocol tracing infrastructure",
     {0, 1, 0},
     "GPL",
-    NULL,
+    nullptr,
     test_trace::plugin_init,
     test_trace::plugin_deinit,
-    NULL,  // option handling
-    NULL,
+    nullptr,  // option handling
+    nullptr,
     test_trace::trace_start,
     test_trace::trace_stop,
     test_trace::trace_event};
@@ -189,7 +190,7 @@ class Logger {
 
 Logger::Logger(MYSQL *conn) : end(buffer) {
   connection_id = mysql_thread_id(conn);
-};
+}
 
 size_t Logger::header() {
   size_t len = 0;
@@ -198,7 +199,7 @@ size_t Logger::header() {
   end = buffer + len;
 
   if (connection_id) {
-    len += snprintf(end, sizeof(buffer) - len, "%03zu: ", connection_id);
+    len += snprintf(end, sizeof(buffer) - len, "%03lu: ", connection_id);
     end = buffer + len;
   }
 
@@ -220,7 +221,7 @@ void Logger::dump(const char *key, const void *data, size_t data_len) {
   const size_t len = header();
   const unsigned char *ptr = static_cast<const unsigned char *>(data);
 
-  end += snprintf(end, sizeof(buffer) - len, "%s: %lu bytes", key, data_len);
+  end += snprintf(end, sizeof(buffer) - len, "%s: %zu bytes", key, data_len);
 
   /*
     Dump max 2 rows with 16 bytes each. The dump format is like this:
@@ -818,20 +819,6 @@ int check_event_READY_FOR_COMMAND(MYSQL *conn, struct st_trace_data *data,
           return 1;
 
         /*
-          After COM_PROCESS_INFO server sends a regular result set.
-        */
-        case COM_PROCESS_INFO:
-          NEXT_STAGE(WAIT_FOR_RESULT);
-          break;
-
-        /*
-          After COM_FIELD_LIST server directly sends field descriptions.
-        */
-        case COM_FIELD_LIST:
-          NEXT_STAGE(WAIT_FOR_FIELD_DEF);
-          break;
-
-        /*
           Server replies to COM_STATISTICS with a single packet
           containing a string with statistics information.
         */
@@ -1019,12 +1006,11 @@ int check_event_WAIT_FOR_FIELD_DEF(MYSQL *conn, struct st_trace_data *data,
       */
       const bool new_client =
           (conn->server_capabilities & CLIENT_DEPRECATE_EOF);
-      const bool metadata_eof = (data->last_cmd != COM_FIELD_LIST &&
-                                 data->col_count == 1 && new_client);
-      bool eof_packet =
+      const bool metadata_eof = (data->col_count == 1 && new_client);
+      bool const eof_packet =
           (EOF_PACKET(args.pkt) && args.pkt_len < MAX_PACKET_LENGTH);
       if (!eof_packet && !metadata_eof) {
-        if (data->last_cmd != COM_FIELD_LIST) data->col_count--;
+        data->col_count--;
         LOG(("Received next field definition"));
         return 0;
       }
@@ -1039,7 +1025,6 @@ int check_event_WAIT_FOR_FIELD_DEF(MYSQL *conn, struct st_trace_data *data,
       */
       switch (data->last_cmd) {
         case COM_STMT_PREPARE:
-        case COM_FIELD_LIST:
           NEXT_STAGE(READY_FOR_COMMAND);
           break;
         default:
@@ -1232,7 +1217,7 @@ int check_event_WAIT_FOR_PARAM_DEF(MYSQL *conn, struct st_trace_data *data,
       const bool new_client =
           (conn->server_capabilities & CLIENT_DEPRECATE_EOF);
       const bool param_eof = (data->param_count == 1 && new_client);
-      bool eof_packet =
+      bool const eof_packet =
           (EOF_PACKET(args.pkt) && args.pkt_len < 6 && !new_client);
 
       if (!eof_packet && !param_eof) {

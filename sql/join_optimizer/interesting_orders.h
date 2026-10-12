@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -51,7 +52,7 @@
     [Sim96] Simmen et al: “Fundamental Techniques for Order Optimization”
 
   All three papers deal with the issue of _logical_ orderings, where any
-  row stream may follow more than one order simultaneously, as inferred
+  tuple stream may follow more than one order simultaneously, as inferred
   through functional dependencies (FDs). For instance, if we have an ordering
   (ab) but also an active FD {a} → c (c is uniquely determined by a,
   for instance because a is a primary key in the same table as c), this means
@@ -146,8 +147,10 @@
 #include "sql/sql_array.h"
 
 #include <bitset>
+#include <sstream>
 #include <string>
 
+class Field;
 class LogicalOrderings;
 class Window;
 
@@ -270,9 +273,9 @@ struct FunctionalDependency {
     // Must be the first in the edge list.
     DECAY,
 
-    // A standard functional dependency {a} → b; if a row tuple
+    // A standard functional dependency {a} → b; if a tuple stream
     // is ordered on all elements of a and this FD is applied,
-    // it is also ordered on b. A typical example is if {a}
+    // it is also ordered on (a,b). A typical example is if {a}
     // is an unique key in a table, and b is a column of the
     // same table. head can be empty.
     FD,
@@ -320,7 +323,13 @@ class LogicalOrderings {
   // inserting new ones if needed.
   ItemHandle GetHandle(Item *item);
 
+  // Maps the Field to an opaque integer handle. Equivalent to calling
+  // GetHandle(new Item_field(field)), except the Item_field is only allocated
+  // if no existing handle can be reused.
+  ItemHandle GetHandle(Field *field);
+
   Item *item(ItemHandle item) const { return m_items[item].item; }
+  int num_items() const { return m_items.size(); }
 
   // These are only available before Build() has been called.
 
@@ -402,10 +411,7 @@ class LogicalOrderings {
   // actual interesting order later, after the FDs have been applied). These are
   // usually at the end, but may also be deduplicated against uninteresting
   // orders, which will then be marked as interesting.
-  //
-  // trace can be nullptr; if not, it get human-readable optimizer trace
-  // appended to it.
-  void Build(THD *thd, std::string *trace);
+  void Build(THD *thd);
 
   // These are only available after Build() has been called.
   // They are stateless and used in the actual planning phase.
@@ -844,10 +850,10 @@ class LogicalOrderings {
   std::string PrintOrdering(const Ordering &ordering) const;
   std::string PrintFunctionalDependency(const FunctionalDependency &fd,
                                         bool html) const;
-  void PrintFunctionalDependencies(std::string *trace);
-  void PrintInterestingOrders(std::string *trace);
-  void PrintNFSMDottyGraph(std::string *trace) const;
-  void PrintDFSMDottyGraph(std::string *trace) const;
+  void PrintFunctionalDependencies(std::ostream *trace);
+  void PrintInterestingOrders(std::ostream *trace);
+  void PrintNFSMDottyGraph(std::ostream *trace) const;
+  void PrintDFSMDottyGraph(std::ostream *trace) const;
 };
 
 inline bool operator==(const LogicalOrderings::NFSMEdge &a,

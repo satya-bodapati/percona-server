@@ -1,4 +1,4 @@
-include/master-slave.inc
+include/rpl/init_source_replica.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
@@ -21,12 +21,12 @@ a	b	ts
 2	bbb	2
 3	ccc	3
 SET @@GLOBAL.rocksdb_alter_table_comment_inplace = OFF;
-SET GLOBAL rocksdb_max_row_locks = 0;
+SET session rocksdb_max_row_locks = 0;
 Warnings:
 Warning	1292	Truncated incorrect rocksdb_max_row_locks value: '0'
 ALTER TABLE t0 comment = 'ttl_duration=2000';
 ERROR HY000: Got error 10 'Operation aborted: Failed to acquire lock due to rocksdb_max_row_locks limit' from ROCKSDB
-SET GLOBAL rocksdb_max_row_locks = default;
+SET session rocksdb_max_row_locks = default;
 ALTER TABLE t0 comment = 'ttl_duration=2000;', ALGORITHM=INPLACE;
 ERROR 0A000: ALGORITHM=INPLACE is not supported for this operation. Try ALGORITHM=COPY.
 SET @@GLOBAL.rocksdb_alter_table_comment_inplace = ON;
@@ -52,7 +52,7 @@ SELECT * from t0;
 a	b	ts
 ALTER TABLE t0 comment = 'abadfas;dfikajps;ttl_duration=30;aspipwrqp3948r', ALGORITHM=INPLACE;
 DROP TABLE t0;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Test inplace ALTER when changing TABLE comment --- explicit TTL 
 
@@ -99,7 +99,7 @@ SELECT a,b,c from t1;
 a	b	c
 ALTER TABLE t1 comment = 'abadfas;dfikajps;ttl_duration=1000;ttl_col=ts;aspipwrqp3948r', ALGORITHM=INPLACE;
 DROP TABLE t1;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Test inplace ALTER when changing TABLE comment --- partition with implicit TTL 
 
@@ -169,7 +169,7 @@ c1
 8
 9
 DROP TABLE t2;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Test inplace ALTER when changing TABLE comment --- partition with explicit TTL 
 
@@ -237,7 +237,7 @@ c1
 8
 9
 DROP TABLE t3;
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 
 # Cleanup
 
@@ -245,4 +245,4 @@ include/sync_slave_sql_with_master.inc
 SET @@GLOBAL.rocksdb_alter_table_comment_inplace=default;
 [connection master]
 SET @@GLOBAL.rocksdb_alter_table_comment_inplace=default;
-include/rpl_end.inc
+include/rpl/deinit.inc

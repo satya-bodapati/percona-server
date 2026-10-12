@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,6 +29,7 @@
 #include <new>
 
 #include "my_inttypes.h"
+#include "routine_impl.h"
 #include "sql/dd/impl/raw/raw_record.h"
 #include "sql/dd/impl/types/entity_object_impl.h"
 #include "sql/dd/impl/types/routine_impl.h"  // dd::Routine_impl
@@ -322,6 +324,14 @@ class Function_impl : public Routine_impl, public Function {
   }
   bool update_name_key(Name_key *key) const override {
     return Function::update_name_key(key);
+  }
+  const Properties &options() const override { return Routine_impl::options(); }
+  Properties &options() override { return Routine_impl::options(); }
+  bool set_options(const Properties &options) override {
+    return Routine_impl::set_options(options);
+  }
+  bool set_options(const String_type &options_raw) override {
+    return Routine_impl::set_options(options_raw);
   }
 
  private:

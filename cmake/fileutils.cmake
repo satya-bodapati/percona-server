@@ -1,15 +1,16 @@
-# Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -32,9 +33,11 @@ FUNCTION(GET_FILE_SIZE FILE_NAME OUTPUT_SIZE)
       OUTPUT_STRIP_TRAILING_WHITESPACE)
 
   ELSEIF(APPLE OR FREEBSD)
-    EXEC_PROGRAM(stat ARGS -f '%z' ${FILE_NAME} OUTPUT_VARIABLE RESULT)
+    EXECUTE_PROCESS(
+      COMMAND stat -f '%z' ${FILE_NAME} OUTPUT_VARIABLE RESULT)
   ELSE()
-    EXEC_PROGRAM(stat ARGS -c '%s' ${FILE_NAME} OUTPUT_VARIABLE RESULT)
+    EXECUTE_PROCESS(
+      COMMAND stat -c '%s' ${FILE_NAME} OUTPUT_VARIABLE RESULT)
   ENDIF()
   SET(${OUTPUT_SIZE} ${RESULT} PARENT_SCOPE)
 ENDFUNCTION()
@@ -94,8 +97,8 @@ IF(APPLE)
       MESSAGE(FATAL_ERROR "obool -L ${FILE_NAME} result: ${OTOOL_RESULT}")
     ENDIF()
     STRING(REPLACE "\n" ";" OTOOL_OUTPUT_LIST "${OTOOL_OUTPUT}")
-    # Skip header, and the library itself
-    LIST(REMOVE_AT OTOOL_OUTPUT_LIST 0 1)
+    # Skip header
+    LIST(REMOVE_AT OTOOL_OUTPUT_LIST 0)
     SET(DEPENDENCIES)
     FOREACH(LINE ${OTOOL_OUTPUT_LIST})
       IF(${LINE} MATCHES "@rpath")
@@ -116,6 +119,27 @@ IF(APPLE)
 ENDIF(APPLE)
 
 IF(LINUX)
+  # Parse output of 'ldd ${FILE_NAME}' and return anything starting with lib.
+  FUNCTION(FIND_LIBRARY_DEPENDENCIES FILE_NAME RETURN_VALUE)
+    SET(${RETURN_VALUE} PARENT_SCOPE)
+    EXECUTE_PROCESS(COMMAND
+      ldd "${FILE_NAME}"
+      OUTPUT_VARIABLE LDD_OUTPUT
+      RESULT_VARIABLE LDD_RESULT
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      )
+    STRING(REPLACE "\n" ";" LDD_OUTPUT_LIST "${LDD_OUTPUT}")
+    SET(DEPENDENCIES)
+    FOREACH(LINE ${LDD_OUTPUT_LIST})
+      STRING(REGEX MATCH "^[\t ]+(lib[-+_A-Za-z0-9\\.]+).*" UNUSED ${LINE})
+      IF(CMAKE_MATCH_1)
+        # MESSAGE(STATUS "xxx ${FILE_NAME} ${CMAKE_MATCH_1}")
+        LIST(APPEND DEPENDENCIES ${CMAKE_MATCH_1})
+      ENDIF()
+    ENDFOREACH()
+    SET(${RETURN_VALUE} ${DEPENDENCIES} PARENT_SCOPE)
+  ENDFUNCTION(FIND_LIBRARY_DEPENDENCIES)
+
   FUNCTION(FIND_OBJECT_DEPENDENCIES FILE_NAME RETURN_VALUE)
     SET(${RETURN_VALUE} PARENT_SCOPE)
     EXECUTE_PROCESS(COMMAND

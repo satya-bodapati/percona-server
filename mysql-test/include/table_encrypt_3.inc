@@ -3,6 +3,7 @@
 
 --source include/no_valgrind_without_big.inc
 --source include/have_innodb_max_16k.inc
+--source include/have_component_keyring_file.inc
 
 --disable_query_log
 call mtr.add_suppression("\\[ERROR\\] .*MY-\\d+.* Encryption can't find master key, please check the keyring is loaded.");
@@ -10,7 +11,6 @@ call mtr.add_suppression("Can't generate new master key for tablespace encryptio
 call mtr.add_suppression("The error means that another program is using InnoDB's files");
 call mtr.add_suppression("Operating system error number .* in a file operation");
 call mtr.add_suppression("\\[ERROR\\] \\[[^]]*\\] Check keyring fail, please check the keyring is loaded.");
-call mtr.add_suppression("\\[Warning\\] .*MY-\\d+.* Cannot add field.*");
 --enable_query_log
 let $innodb_file_per_table = `SELECT @@innodb_file_per_table`;
 
@@ -37,9 +37,7 @@ ALTER INSTANCE ROTATE INNODB MASTER KEY;
 
 --echo # Starting server with keyring plugin
 # restart with keying
---let $restart_parameters = $keyring_restart_param
---let $do_not_echo_parameters = 1
---source include/restart_mysqld.inc
+--source suite/component_keyring_file/inc/setup_component.inc
 
 
 #------------------------------------------------------------------------------
@@ -761,6 +759,7 @@ connection default;
 disconnect con10;
 DROP USER encryption_admin@localhost;
 DROP TABLE t1;
+--source suite/component_keyring_file/inc/teardown_component.inc
 
 # Normal restart
 --let $restart_parameters = restart:

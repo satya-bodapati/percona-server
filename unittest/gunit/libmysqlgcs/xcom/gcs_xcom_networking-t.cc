@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -66,7 +67,7 @@ TEST_F(GcsXComNetworking, SockProbeInvalid) {
       .WillOnce(Return(-1));
 
   std::map<std::string, int> out_value;
-  bool result = get_local_addresses(m_sock_probe_mock, out_value);
+  bool const result = get_local_addresses(m_sock_probe_mock, out_value);
 
   ASSERT_TRUE(result);
 }
@@ -83,13 +84,13 @@ TEST_F(GcsXComNetworking, NoInterfaces) {
       .WillOnce(Return(0));
 
   std::map<std::string, int> out_value;
-  bool result = get_local_addresses(m_sock_probe_mock, out_value);
+  bool const result = get_local_addresses(m_sock_probe_mock, out_value);
 
   ASSERT_TRUE(result);
 }
 
 TEST_F(GcsXComNetworking, ErrorRetrievingSockaddr) {
-  std::string if_name("interface");
+  std::string const if_name("interface");
 
   EXPECT_CALL(m_sock_probe_mock, init_sock_probe(_))
       .Times(1)
@@ -115,14 +116,14 @@ TEST_F(GcsXComNetworking, ErrorRetrievingSockaddr) {
       .WillOnce(Return(const_cast<char *>(if_name.c_str())));
 
   std::map<std::string, int> out_value;
-  bool result = get_local_addresses(m_sock_probe_mock, out_value);
+  bool const result = get_local_addresses(m_sock_probe_mock, out_value);
 
   ASSERT_TRUE(result);
 }
 
 TEST_F(GcsXComNetworking, ResolveAllIPV6) {
   std::vector<std::pair<sa_family_t, std::string>> out_value;
-  bool retval = resolve_all_ip_addr_from_hostname("::1", out_value);
+  bool const retval = resolve_all_ip_addr_from_hostname("::1", out_value);
 
   ASSERT_FALSE(retval);
 }

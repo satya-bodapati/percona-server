@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -113,7 +114,7 @@ void trace_basic_info_rowid_intersection(THD *thd, const AccessPath *path,
                                          Opt_trace_object *trace_object) {
   trace_object->add_alnum("type", "index_roworder_intersect")
       .add("rows", path->num_output_rows())
-      .add("cost", path->cost)
+      .add("cost", path->cost())
       .add("covering", path->rowid_intersection().is_covering)
       .add("clustered_pk_scan",
            path->rowid_intersection().cpk_child != nullptr);
@@ -239,7 +240,7 @@ void find_intersect_order(Mem_root_array<ROR_SCAN_INFO *> *ror_scans,
     for (uint i : BitsSetIn((*ror_scans)[index]->covered_fields))
       fields_to_be_covered.ClearBit(i);
     needed_fields = std::move(fields_to_be_covered);
-    if (needed_fields.empty()) break;
+    if (IsEmpty(needed_fields)) break;
   }
 }
 
@@ -249,7 +250,7 @@ ROR_intersect_plan::ROR_intersect_plan(const RANGE_OPT_PARAM *param,
       m_ror_scans(param->return_mem_root, 0),
       m_out_rows(m_param->table->file->stats.records),
       m_covered_fields(
-          MutableOverflowBitset(param->temp_mem_root, num_fields)) {}
+          OverflowBitset::EmptySet(param->temp_mem_root, num_fields)) {}
 
 ROR_intersect_plan &ROR_intersect_plan::operator=(
     const ROR_intersect_plan &plan) {
@@ -587,8 +588,9 @@ AccessPath *MakeRowIdOrderedIndexScanAccessPath(ROR_SCAN_INFO *scan,
 
   // TODO(sgunders): The initial cost is high (it needs to read all rows and
   // sort), so we should not have zero init_cost.
-  path->cost = path->cost_before_filter = scan->index_read_cost.total_cost();
-  path->init_cost = 0.0;
+  path->set_cost_before_filter(scan->index_read_cost.total_cost());
+  path->set_cost(path->cost_before_filter());
+  path->set_init_cost(0.0);
   path->set_num_output_rows(scan->records);
   path->num_output_rows_before_filter = path->num_output_rows();
   path->index_range_scan().used_key_part = used_key_part;
@@ -641,21 +643,24 @@ AccessPath *MakeRowIdOrderedIndexScanAccessPath(ROR_SCAN_INFO *scan,
       order R by (E(#records_matched) * key_record_length).
 
       S= first(R); -- set of scans that will be used for ROR-intersection
-      R= R-first(S);
+      R= R - S;
       min_cost= cost(S);
       min_scan= make_scan(S);
       while (R is not empty)
       {
-        firstR= R - first(R);
-        if (!selectivity(S + firstR < selectivity(S)))
+        firstR= first(R);
+        if (!selectivity(S + firstR) < selectivity(S))
+        {
+          R= R - firstR;
           continue;
-
+        }
         S= S + first(R);
         if (cost(S) < min_cost)
         {
           min_cost= cost(S);
           min_scan= make_scan(S);
         }
+        R= R - firstR; --  Remove the processed scan from R
       }
       return min_scan;
     }
@@ -844,7 +849,9 @@ AccessPath *get_best_ror_intersect(THD *thd, const RANGE_OPT_PARAM *param,
     // Create AccessPaths from the ROR child scans.
     auto *children = new (param->return_mem_root)
         Mem_root_array<AccessPath *>(param->return_mem_root);
-    children->resize(num_scans);
+    if (children == nullptr || children->resize(num_scans)) {
+      return nullptr;
+    }
     for (unsigned i = 0; i < num_scans; ++i) {
       (*children)[i] = MakeRowIdOrderedIndexScanAccessPath(
           best_plan.m_ror_scans[i], table,
@@ -860,7 +867,7 @@ AccessPath *get_best_ror_intersect(THD *thd, const RANGE_OPT_PARAM *param,
 
     AccessPath *path = new (param->return_mem_root) AccessPath;
     path->type = AccessPath::ROWID_INTERSECTION;
-    path->cost = best_plan.m_total_cost.total_cost();
+    path->set_cost(best_plan.m_total_cost.total_cost());
     /* Prevent divisons by zero */
     double best_rows = max(best_plan.m_out_rows, 1.0);
     table->quick_condition_rows =
@@ -879,13 +886,13 @@ AccessPath *get_best_ror_intersect(THD *thd, const RANGE_OPT_PARAM *param,
     path->rowid_intersection().is_covering = best_plan.m_is_covering;
 
     trace_ror.add("rows", path->num_output_rows())
-        .add("cost", path->cost)
+        .add("cost", path->cost())
         .add("covering", best_plan.m_is_covering)
         .add("chosen", true);
 
     DBUG_PRINT("info", ("Returning non-covering ROR-intersect plan:"
                         "cost %g, records %g",
-                        path->cost, path->num_output_rows()));
+                        path->cost(), path->num_output_rows()));
     return path;
   } else {
     trace_ror.add("chosen", false)

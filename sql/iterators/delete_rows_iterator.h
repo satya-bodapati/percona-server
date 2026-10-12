@@ -1,18 +1,19 @@
 #ifndef SQL_ITERATORS_DELETE_ROWS_ITERATOR_H_
 #define SQL_ITERATORS_DELETE_ROWS_ITERATOR_H_
 
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -42,8 +43,6 @@ class DeleteRowsIterator final : public RowIterator {
   DeleteRowsIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source,
                      JOIN *join, table_map tables_to_delete_from,
                      table_map immediate_tables);
-  bool Init() override;
-  int Read() override;
   void StartPSIBatchMode() override { m_source->StartPSIBatchMode(); }
   void EndPSIBatchModeIfStarted() override {
     m_source->EndPSIBatchModeIfStarted();
@@ -86,6 +85,8 @@ class DeleteRowsIterator final : public RowIterator {
   /// True if any row ID has been stored in one of the m_tempfiles.
   bool m_has_delayed_deletes{false};
 
+  bool DoInit() override;
+  int DoRead() override;
   /// Perform all the immediate deletes for the current row returned by the
   /// join, and buffer row IDs for the non-immediate tables.
   bool DoImmediateDeletesAndBufferRowIds();

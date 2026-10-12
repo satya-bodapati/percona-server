@@ -1,15 +1,16 @@
-/* Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -47,13 +48,13 @@ constexpr int default_zstd_compression_level = 3;
 
 /* Helper functions to validate compression algorithm and level */
 enum_compression_algorithm get_compression_algorithm(
-    std::string name = std::string());
+    const std::string &name = std::string());
 std::string get_compression_algorithm_name(enum_compression_algorithm);
-void parse_compression_algorithms_list(std::string name,
+void parse_compression_algorithms_list(const std::string &name,
                                        std::vector<std::string> &list);
 bool is_zstd_compression_level_valid(uint level);
-bool validate_compression_attributes(std::string algorithm_names,
-                                     std::string channel_name,
+bool validate_compression_attributes(const std::string &algorithm_names,
+                                     const std::string &channel_name,
                                      bool ignore_errors);
 
 #endif /* COMPRESSION_INCLUDED */

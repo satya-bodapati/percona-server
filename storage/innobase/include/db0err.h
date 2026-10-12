@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -205,6 +206,8 @@ enum dberr_t {
   DB_DATA_NOT_SORTED,
   /** The record size is too big for LOAD BULK DATA operation. */
   DB_BULK_TOO_BIG_RECORD,
+  /** The data in CSV file for gcol is invalid */
+  DB_BULK_GCOL_INVALID_DATA,
 
   /* The following are partial failure codes */
 
@@ -220,6 +223,29 @@ enum dberr_t {
 
   /** Generic error code for "Not found" type of errors */
   DB_NOT_FOUND,
+
+  /** A vector index could not get the memory it needed - either
+  innodb_hnsw_max_memory is spent or an allocation genuinely failed.
+
+  Distinct from DB_OUT_OF_MEMORY for one reason: row_mysql_handle_errors
+  does not list that code, so it reaches the ib::fatal arm there and a
+  failed allocation on the INSERT path would take the server down. This
+  one is listed, so the statement fails instead. Both map to
+  HA_ERR_OUT_OF_MEM, so the client sees no difference; where the cause is
+  the configured ceiling rather than real exhaustion, the caller says so
+  itself with ER_CAPACITY_EXCEEDED before returning this.
+
+  Appended here so no existing code is renumbered. */
+  DB_VEC_OUT_OF_MEMORY,
+
+  /** A row's vector has a different number of dimensions than its vector
+  index. VECTOR(n) stores a shorter value, so the index is where it is
+  found. Maps to HA_ERR_VECTOR_WRONG_DIMENSIONS. */
+  DB_VEC_WRONG_DIMENSIONS,
+
+  /** A vector index build reached innodb_hnsw_max_memory. Only a build
+  returns it; the ALTER reports ER_CAPACITY_EXCEEDED for it. */
+  DB_VEC_MEMORY_LIMIT,
 
   /* The following are API only error codes. */
 

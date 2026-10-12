@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,8 +28,12 @@
 
 #include <mysql/plugin.h>
 
+#include <cstddef>
+#include <limits>
 #include <memory>
+#include <new>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 #include "my_compiler.h"  // NOLINT(build/include_subdir)
@@ -38,28 +43,47 @@
 namespace ngs {
 
 namespace detail {
-// PSF instrumented allocator class that can be used with STL objects
+// PSI instrumented allocator class that can be used with STL objects
 template <class T>
-class PFS_allocator : public std::allocator<T> {
+class PFS_allocator {
  public:
-  PFS_allocator() = default;
+  using value_type = T;
+  using size_type = std::size_t;
+  using difference_type = std::ptrdiff_t;
+  using is_always_equal = std::true_type;
+
+  constexpr PFS_allocator() noexcept = default;
 
   template <class U>
-  PFS_allocator(PFS_allocator<U> const &) {}
+  constexpr PFS_allocator(PFS_allocator<U> const &) noexcept {}  // NOLINT
 
   template <class U>
   struct rebind {
-    typedef PFS_allocator<U> other;
+    using other = PFS_allocator<U>;
   };
 
-  T *allocate(size_t n, const void *hint [[maybe_unused]] = nullptr) {
-    return reinterpret_cast<T *>(my_malloc(
+  [[nodiscard]] T *allocate(size_type n) {
+    if (n > std::numeric_limits<size_type>::max() / sizeof(T)) [[unlikely]] {
+      throw std::bad_array_new_length();
+    }
+
+    auto *ptr = static_cast<T *>(my_malloc(
         IS_PSI_AVAILABLE(KEY_memory_x_objects, 0), sizeof(T) * n, MYF(MY_WME)));
+    if (ptr == nullptr) [[unlikely]] {
+      throw std::bad_alloc();
+    }
+
+    return ptr;
   }
 
-  void deallocate(T *ptr, size_t) { my_free(ptr); }
+  void deallocate(T *ptr, size_type) noexcept { my_free(ptr); }
 };
 
+template <class T, class U>
+constexpr bool operator==(const PFS_allocator<T> & /*lhs*/,
+                          const PFS_allocator<U> & /*rhs*/) noexcept {
+  return true;
+}
 }  // namespace detail
 
 // instrumented deallocator
@@ -73,13 +97,13 @@ void free_object(T *ptr) {
 
 // set of instrumented object allocators for different parameters number
 template <typename T, typename... Args>
-T *allocate_object(Args &&... args) {
+T *allocate_object(Args &&...args) {
   return new (my_malloc(IS_PSI_AVAILABLE(KEY_memory_x_objects, 0), sizeof(T),
                         MYF(MY_WME))) T(std::forward<Args>(args)...);
 }
 
 template <typename T, typename... Args>
-std::shared_ptr<T> allocate_shared(Args &&... args) {
+std::shared_ptr<T> allocate_shared(Args &&...args) {
   return std::allocate_shared<T>(detail::PFS_allocator<T>(),
                                  std::forward<Args>(args)...);
 }

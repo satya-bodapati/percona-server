@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -209,6 +210,13 @@ bool Group_check::check_query(THD *thd) {
     if (check_expression(thd, select->having_cond(), false)) goto err;
   }
 
+  // Validate QUALIFY condition
+  if (select->qualify_cond()) {
+    number_in_list = 1;
+    place = "QUALIFY clause";
+    if (check_expression(thd, select->qualify_cond(), false)) goto err;
+  }
+
   // Validate windows' ORDER BY and PARTITION BY clauses.
   char buff[STRING_BUFFER_USUAL_SIZE];
   {
@@ -283,7 +291,7 @@ bool Group_check::check_expression(THD *thd, Item *expr, bool in_select_list) {
   expr = unwrap_rollup_group(expr);
 
   for (ORDER *grp = select->group_list.first; grp; grp = grp->next) {
-    if ((*grp->item)->eq(expr, false))
+    if ((*grp->item)->eq(expr))
       return false;  // Expression is in GROUP BY so is ok
   }
 
@@ -352,7 +360,7 @@ bool Group_check::is_fd_on_source(Item *item) {
         It's just an optimization.
       */
       for (ORDER *grp = select->group_list.first; grp; grp = grp->next) {
-        if ((*grp->item)->eq(item, false)) return true;
+        if ((*grp->item)->eq(item)) return true;
       }
       // It didn't suffice. Let's start the search for FDs: build E1.
       for (ORDER *grp = select->group_list.first; grp; grp = grp->next) {
@@ -362,7 +370,7 @@ bool Group_check::is_fd_on_source(Item *item) {
     }
   }
 
-  if (select->olap != UNSPECIFIED_OLAP_TYPE) {
+  if (select->is_non_primitive_grouped()) {
     /*
       - the syntactical transformation of ROLLUP is to make a union of
       queries, and in each such query, some group column references are
@@ -391,7 +399,7 @@ bool Group_check::is_fd_on_source(Item *item) {
 
       Item_field *const item_field = down_cast<Item_field *>(item2);
       /**
-        @todo make table_ref non-NULL for gcols, then use it for 'tl'.
+        @todo make m_table_ref non-NULL for gcols, then use it for 'tl'.
         Do the same in Item_field::used_tables_for_level().
       */
       Table_ref *const tl = item_field->field->table->pos_in_table_list;
@@ -562,7 +570,7 @@ void Group_check::find_group_in_fd(Item *item) {
         Item *grp_item = *grp->item;
         if ((local_column(grp_item) &&
              (grp_item->used_tables() & ~whole_tables_fd) == 0) ||
-            (item && grp_item->eq(item, false)))
+            (item != nullptr && grp_item->eq(item)))
           group_in_fd |= (1ULL << j);
         else
           missing = true;
@@ -616,7 +624,7 @@ void Group_check::add_to_source_of_mat_table(Item_field *item_field,
   Query_block *const mat_query_block =
       mat_query_expression->first_query_block();
   if (mat_query_expression->is_set_operation() ||
-      mat_query_block->olap != UNSPECIFIED_OLAP_TYPE)
+      mat_query_block->is_non_primitive_grouped())
     return;  // If UNION, EXCEPT, INTERSECT or ROLLUP, no FD
   // Grab Group_check for this subquery.
   Group_check *mat_gc = nullptr;
@@ -704,7 +712,7 @@ bool Group_check::is_in_fd(Item *item) {
   }
   for (uint j = 0; j < fd.size(); j++) {
     Item *const item2 = fd.at(j);
-    if (item2->eq(item, false)) return true;
+    if (item2->eq(item)) return true;
     /*
       Say that we have view:
       create view v1 as select i, 2*i as z from t1; and we do:
@@ -718,7 +726,7 @@ bool Group_check::is_in_fd(Item *item) {
       reach to real_item() of v1.i.
     */
     Item *const real_it2 = item2->real_item();
-    if (real_it2 != item2 && real_it2->eq(item, false)) return true;
+    if (real_it2 != item2 && real_it2->eq(item)) return true;
   }
   if (!search_in_underlying) return false;
   return is_in_fd_of_underlying(down_cast<Item_ident *>(item));
@@ -759,11 +767,7 @@ bool Group_check::is_in_fd_of_underlying(Item_ident *item) {
     Used_tables ut(select);
     (void)item->walk(&Item::used_tables_for_level, enum_walk::POSTFIX,
                      pointer_cast<uchar *>(&ut));
-    /*
-      todo When we eliminate all uses of cached_table, we can probably add a
-      derived_table_ref field to Item_view_ref objects and use it here.
-    */
-    Table_ref *const tl = item->cached_table;
+    Table_ref *const tl = item->m_table_ref;
     assert(tl->is_view_or_derived());
     /*
       We might find expression-based FDs in the result of the view's query
@@ -793,7 +797,7 @@ bool Group_check::is_in_fd_of_underlying(Item_ident *item) {
   else if (item->type() == Item::FIELD_ITEM) {
     Item_field *const item_field = down_cast<Item_field *>(item);
     /**
-      @todo make table_ref non-NULL for gcols, then use it for 'tl'.
+      @todo make m_table_ref non-NULL for gcols, then use it for 'tl'.
       Do the same in Item_field::used_tables_for_level().
     */
     Table_ref *const tl = item_field->field->table->pos_in_table_list;
@@ -869,9 +873,9 @@ bool Group_check::is_in_fd_of_underlying(Item_ident *item) {
 Item *Group_check::get_fd_equal(Item *item) {
   for (uint j = 0; j < fd.size(); j++) {
     Item *const item2 = fd.at(j);
-    if (item2->eq(item, false)) return item2;
+    if (item2->eq(item)) return item2;
     Item *const real_it2 = item2->real_item();
-    if (real_it2 != item2 && real_it2->eq(item, false)) return item2;
+    if (real_it2 != item2 && real_it2->eq(item)) return item2;
   }
   return nullptr;
 }
@@ -1208,7 +1212,7 @@ bool Group_check::do_ident_check(Item_ident *i, table_map tm,
   switch (type) {
     case CHECK_GROUP:
       if (i->type() == Item::FIELD_ITEM &&
-          down_cast<Item_field *>(i)->table_ref->m_was_scalar_subquery) {
+          down_cast<Item_field *>(i)->m_table_ref->m_was_scalar_subquery) {
         // The table has exactly one row, thus this column is FD
         return false;
       }

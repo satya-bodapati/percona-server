@@ -12,6 +12,7 @@ if (`SELECT @@global.log_bin AND @@global.binlog_format = 'ROW'`)
   --enable_query_log
 }
 
+--source include/not_asan_mac.inc
 --source include/have_example_plugin.inc
 --source include/have_debug.inc
 --source include/have_debug_sync.inc
@@ -137,7 +138,7 @@ set session sql_mode=@old_sql_mode;
 # finally, show that conditions that already raised an error are not
 # adversely affected (error was already sent, do nothing)
 --error ER_INCORRECT_GLOBAL_LOCAL_VAR
-set session old=bla;
+set session core_file=bla;
 
 UNINSTALL PLUGIN example;
 
@@ -227,7 +228,7 @@ DROP TABLE t10, t20;
 UNINSTALL PLUGIN example;
 
 --echo #
---echo # BUG#24344026 - SIG 11 IN MY_VALID_MBCHARLEN_UTF8 AT STRINGS/CTYPE-UTF8.CC:9437
+--echo # BUG#24344026 - SIG 11 IN MY_VALID_MBCHARLEN_UTF8 AT STRINGS/CTYPE-utf8mb3.CC:9437
 --echo #
 SET GLOBAL DEBUG='+d,set_uninstall_sync_point';
 connect(con1, localhost, root,,);

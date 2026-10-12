@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -137,6 +138,21 @@ const CodecParam<classic_protocol::message::server::Ok>
          {1, 3, classic_protocol::status::autocommit, 4},
          classic_protocol::capabilities::protocol_41,
          {0x00, 0x01, 0x03, 0x02, 0x00, 0x04, 0x00}},
+        {"with_message",
+         {
+             0x01,                                        // affected
+             0x00,                                        // last-insert-id
+             classic_protocol::status::autocommit,        // status
+             4,                                           // warning-count
+             "Rows matched: 1  Changed: 0  Warnings: 0",  // message
+             {},                                          // no session-info
+         },
+         classic_protocol::capabilities::protocol_41,
+         {0x00, 0x01, 0x00, 0x02, 0x00, 0x04, 0x00, 0x28, 0x52, 0x6f,
+          0x77, 0x73, 0x20, 0x6d, 0x61, 0x74, 0x63, 0x68, 0x65, 0x64,
+          0x3a, 0x20, 0x31, 0x20, 0x20, 0x43, 0x68, 0x61, 0x6e, 0x67,
+          0x65, 0x64, 0x3a, 0x20, 0x30, 0x20, 0x20, 0x57, 0x61, 0x72,
+          0x6e, 0x69, 0x6e, 0x67, 0x73, 0x3a, 0x20, 0x30}},
         {"with_session_state_info",
          {1,
           3,
@@ -423,9 +439,9 @@ TEST(MessageServerError, sql_state) {
 }
 
 TEST(MessageServerError, short_sql_state) {
-  std::array<uint8_t, 6> packet{
-      0xff, 0x12, 0x34, '#', 'F', 'O',
-  };
+  constexpr auto packet =
+      std::to_array<uint8_t>({0xff, 0x12, 0x34, '#', 'F', 'O'});
+
   auto decode_res =
       classic_protocol::Codec<classic_protocol::message::server::Error>::decode(
           net::buffer(packet), {classic_protocol::capabilities::protocol_41});
@@ -1512,13 +1528,13 @@ TEST(CodecMessageClientStmtExecuteFail, param_count_less_than_num_params) {
 
   auto caps = classic_protocol::capabilities::query_attributes;
 
-  std::array<uint8_t, 11> encoded{
+  auto encoded = std::to_array<uint8_t>({
       0x17,                    // cmd
       0x01, 0x00, 0x00, 0x00,  // stmt-id
       0x10,                    // flags: param-count-available
       0x01, 0x00, 0x00, 0x00,  // iteration-count
       0x00,                    // param-count
-  };
+  });
 
   auto decode_res = classic_protocol::Codec<msg_type>::decode(
       net::buffer(encoded), caps,

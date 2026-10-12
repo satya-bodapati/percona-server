@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1997, 2023, Oracle and/or its affiliates.
+Copyright (c) 1997, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -241,7 +242,7 @@ introduced where a call to log_free_check() is bypassed. */
     after it had been completely inserted. Therefore, we
     are passing rollback=false, just like purge does. */
 
-    btr_cur_pessimistic_delete(&err, false, btr_cur, 0, false, node->trx->id,
+    btr_cur_pessimistic_delete(&err, false, btr_cur, 0, false, node->trx.id,
                                node->undo_no, node->rec_type, mtr, &node->pcur,
                                nullptr);
 
@@ -266,8 +267,8 @@ introduced where a call to log_free_check() is bypassed. */
   dict_index_t *index;
   bool online;
 
-  ut_ad(thr_get_trx(thr) == node->trx);
-  ut_ad(node->trx->in_rollback);
+  ut_ad(thr_get_trx(thr) == &node->trx);
+  ut_ad(node->trx.in_rollback);
 
   log_free_check();
   pcur = &node->pcur;
@@ -520,7 +521,7 @@ introduced where a call to log_free_check() is bypassed. */
       the distinction only matters when deleting a
       record that contains externally stored columns. */
       ut_ad(!index->is_clustered());
-      btr_cur_pessimistic_delete(&err, false, btr_cur, 0, false, node->trx->id,
+      btr_cur_pessimistic_delete(&err, false, btr_cur, 0, false, node->trx.id,
                                  node->undo_no, node->rec_type, &mtr,
                                  &node->pcur, nullptr);
       /* The delete operation may fail if we have little
@@ -566,10 +567,11 @@ func_exit_no_pcur:
   return (err);
 }
 
-/** Delete unmarks a secondary index entry which must be found. It might not be
- delete-marked at the moment, but it does not harm to unmark it anyway. We also
- need to update the fields of the secondary index record if we updated its
- fields but alphabetically they stayed the same, e.g., 'abc' -> 'aBc'.
+/** Delete unmarks a secondary index entry if found, otherwise inserts.
+ It might not be delete-marked at the moment, but it does not harm to
+ unmark it anyway. We also need to update the fields of the secondary
+ index record if we updated its fields but alphabetically they stayed
+ the same, e.g., 'abc' -> 'aBc'.
  @retval DB_SUCCESS on success
  @retval DB_FAIL if BTR_MODIFY_TREE should be tried
  @retval DB_OUT_OF_FILE_SPACE when running out of tablespace
@@ -679,8 +681,9 @@ try_again:
             << " at: " << rec_index_print(btr_cur_get_rec(btr_cur), index);
       }
 
-      if (btr_cur->up_match >= dict_index_get_n_unique(index) ||
-          btr_cur->low_match >= dict_index_get_n_unique(index)) {
+      if ((btr_cur->up_match >= dict_index_get_n_unique(index) ||
+           btr_cur->low_match >= dict_index_get_n_unique(index)) &&
+          (index->n_nullable == 0 || !dtuple_contains_null(entry))) {
         if (index->is_committed()) {
           ib::warn(ER_IB_MSG_1040) << "Record in index " << index->name
                                    << " was not found on rollback, and"
@@ -839,7 +842,7 @@ This is the specific function to handle the modify on multi-value indexes.
     dict_index_t *index = node->index;
     dtuple_t *entry;
 
-    if (index->type & DICT_FTS) {
+    if ((index->type & DICT_FTS) || index->is_vector()) {
       dict_table_next_uncorrupted_index(node->index);
       continue;
     }
@@ -951,7 +954,7 @@ This is the specific function to handle the modify on multi-value indexes.
     dict_index_t *index = node->index;
     dtuple_t *entry;
 
-    if (index->type == DICT_FTS) {
+    if (index->type == DICT_FTS || index->is_vector()) {
       dict_table_next_uncorrupted_index(node->index);
       continue;
     }
@@ -1093,7 +1096,7 @@ static dberr_t row_undo_mod_upd_exist_multi_sec(undo_node_t *node,
         continue;
       }
     } else {
-      if (index->type == DICT_FTS ||
+      if (index->type == DICT_FTS || index->is_vector() ||
           !row_upd_changes_ord_field_binary(
               index, node->update, thr, node->row, node->ext,
               (index->is_multi_value() ? &non_mv_upd : nullptr))) {
@@ -1202,7 +1205,6 @@ static dberr_t row_undo_mod_upd_exist_multi_sec(undo_node_t *node,
 static void row_undo_mod_parse_undo_rec(undo_node_t *node, THD *thd,
                                         MDL_ticket **mdl) {
   dict_index_t *clust_index;
-  byte *ptr;
   undo_no_t undo_no;
   table_id_t table_id;
   trx_id_t trx_id;
@@ -1213,8 +1215,9 @@ static void row_undo_mod_parse_undo_rec(undo_node_t *node, THD *thd,
   bool dummy_extern;
   type_cmpl_t type_cmpl;
 
-  ptr = trx_undo_rec_get_pars(node->undo_rec, &type, &cmpl_info, &dummy_extern,
-                              &undo_no, &table_id, type_cmpl);
+  auto ptr =
+      trx_undo_rec_get_pars(node->undo_rec, &type, &cmpl_info, &dummy_extern,
+                            &undo_no, &table_id, type_cmpl);
   node->rec_type = type;
 
   /* Although table IX lock is held now, DROP TABLE could still be
@@ -1278,10 +1281,10 @@ dberr_t row_undo_mod(undo_node_t *node, /*!< in: row undo node */
   ut_ad(node != nullptr);
   ut_ad(thr != nullptr);
   ut_ad(node->state == UNDO_NODE_MODIFY);
-  ut_ad(node->trx->in_rollback);
+  ut_ad(node->trx.in_rollback);
   ut_ad(!trx_undo_roll_ptr_is_insert(node->roll_ptr));
 
-  ut_ad(thr_get_trx(thr) == node->trx);
+  ut_ad(thr_get_trx(thr) == &node->trx);
 
   THD *thd = dd_thd_for_undo(node->trx);
 

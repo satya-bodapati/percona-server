@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -33,11 +34,8 @@
 #include <vector>
 
 #include "connection.h"
-#include "destination.h"
-#include "mysql_routing_common.h"
-#include "mysqlrouter/datatypes.h"
 #include "mysqlrouter/routing_component.h"
-#include "tcp_address.h"
+#include "routing_guidelines/routing_guidelines.h"
 
 class MySQLRoutingConnectionBase;
 
@@ -174,22 +172,16 @@ class ConnectionContainer {
   std::vector<ConnData> get_all_connections_info() {
     std::vector<ConnData> connection_datas;
 
-    auto l =
+    connections_.for_each(
         [&connection_datas](const decltype(connections_)::value_type &conn) {
           const auto stats = conn.second->get_stats();
 
-          connection_datas.push_back({
-              conn.second->get_client_address(),
-              conn.second->get_server_address(),
-              stats.bytes_up,
-              stats.bytes_down,
-              stats.started,
-              stats.connected_to_server,
-              stats.last_sent_to_server,
-              stats.last_received_from_server,
-          });
-        };
-    connections_.for_each(l);
+          connection_datas.emplace_back(
+              stats.client_address, stats.server_address, stats.bytes_up,
+              stats.bytes_down, stats.started, stats.connected_to_server,
+              stats.last_sent_to_server, stats.last_received_from_server);
+        });
+
     return connection_datas;
   }
   /**
@@ -233,6 +225,10 @@ class ConnectionContainer {
    * @param connection The connection to remove from container
    */
   void remove_connection(MySQLRoutingConnectionBase *connection);
+
+  void disconnect_on_routing_guidelines_update(
+      const routing_guidelines::Routing_guidelines_engine::RouteChanges
+          &affected_routing_sources);
 
   /** number of active client threads. */
   std::condition_variable connection_removed_cond_;

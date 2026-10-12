@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2019, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -78,9 +79,11 @@ class Validator {
       @retval true   value is correct
       @retval false  value is incorrect
     */
-  virtual bool valid_value(const Argument_value &value) { return true; }
+  virtual bool valid_value(const Argument_value &value [[maybe_unused]]) {
+    return true;
+  }
 
-  virtual void store(void *context, const Argument_value &value) {}
+  virtual void store(void * /*context*/, const Argument_value & /*value*/) {}
 };
 
 /**
@@ -141,7 +144,7 @@ class Array_of_strings_validator : public Validator {
  private:
   class Is_valid_array_visitor : public Default_visitor {
    public:
-    void visit_string(const std::string &value) override {
+    void visit_string(const std::string & /*value*/) override {
       DBUG_TRACE;
       m_valid = true;
     }

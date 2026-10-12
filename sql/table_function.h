@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -131,7 +132,7 @@ class Table_function {
   /**
     Return table_map of tables used by the function
   */
-  virtual table_map used_tables() { return 0; }
+  virtual table_map used_tables() const { return 0; }
   /**
     Print table function
 
@@ -157,6 +158,17 @@ class Table_function {
 
   virtual bool walk(Item_processor processor, enum_walk walk, uchar *arg) = 0;
 
+  /**
+    Fix after tables have been moved from one query_block level to the parent
+    level, e.g by semijoin conversion.
+
+    @param parent_query_block  query_block that tables are moved to.
+    @param removed_query_block query_block that tables are moved away from,
+                          child of parent_query_block.
+  */
+  void fix_after_pullout(Query_block *parent_query_block,
+                         Query_block *removed_query_block);
+
  private:
   /**
     Get the list of fields to create the result table
@@ -172,6 +184,8 @@ class Table_function {
   virtual bool do_init_args() = 0;
   friend bool Table_ref::setup_table_function(THD *thd);
   virtual void do_cleanup() {}
+  virtual void do_fix_after_pullout(Query_block *parent_query_block,
+                                    Query_block *removed_query_block) = 0;
 };
 
 /****************************************************************************
@@ -346,6 +360,11 @@ class Table_function_json final : public Table_function {
     Returns function's name
   */
   const char *func_name() const override { return "json_table"; }
+
+  List<Json_table_column> get_columns() { return *m_columns; }
+
+  Item *get_source() { return source; }
+
   /**
     Initialize the table function before creation of result table
 
@@ -367,7 +386,7 @@ class Table_function_json final : public Table_function {
   /**
     Return table_map of tables used by function's data source
   */
-  table_map used_tables() override;
+  table_map used_tables() const override;
 
   /**
     JSON_TABLE printout
@@ -430,6 +449,8 @@ class Table_function_json final : public Table_function {
   List<Create_field> *get_field_list() override;
   bool do_init_args() override;
   void do_cleanup() override;
+  void do_fix_after_pullout(Query_block *parent_query_block,
+                            Query_block *removed_query_block) override;
 };
 
 class Table_function_sequence final : public Table_function {
@@ -441,7 +462,7 @@ class Table_function_sequence final : public Table_function {
   /**
     Returns function's name
   */
-  const char *func_name() const override { return "sequence_table"; }
+  const char *func_name() const override { return "percona_sequence_table"; }
   /**
     Initialize the table function before creation of result table
 
@@ -463,10 +484,10 @@ class Table_function_sequence final : public Table_function {
   /**
     Return table_map of tables used by function's data source
   */
-  virtual table_map used_tables() override;
+  virtual table_map used_tables() const override;
 
   /**
-    SEQUENCE_TABLE printout
+    PERCONA_SEQUENCE_TABLE printout
 
     @param str        string to print to
     @param query_type type of query
@@ -482,10 +503,10 @@ class Table_function_sequence final : public Table_function {
                     uchar *arg) override;
 
  private:
-  /// SEQUENCE_TABLE's alias, for error reporting
+  /// PERCONA_SEQUENCE_TABLE's alias, for error reporting
   const char *m_table_alias;
 
-  /// SEQUENCE_TABLE's data source expression
+  /// PERCONA_SEQUENCE_TABLE's data source expression
   Item *m_source;
 
   Create_field m_value_field;
@@ -500,6 +521,8 @@ class Table_function_sequence final : public Table_function {
   virtual List<Create_field> *get_field_list() override;
   virtual bool do_init_args() override;
   virtual void do_cleanup() override;
+  void do_fix_after_pullout(Query_block *parent_query_block,
+                            Query_block *removed_query_block) override;
 
   ulonglong calculate_upper_bound() const;
 };

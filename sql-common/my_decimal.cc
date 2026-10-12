@@ -1,15 +1,16 @@
-/* Copyright (c) 2005, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2005, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,7 +25,7 @@
 
 #include "my_config.h"
 
-#include <stdio.h>
+#include <cstdio>
 
 #ifdef HAVE_SYS_TIME_H
 #include <sys/time.h>
@@ -115,11 +116,11 @@ int my_decimal::check_result(uint mask, int result) const {
   @param[in]   fixed_dec   number of decimal places (if fixed_prec != 0)
   @param[out]  str         where to store the resulting string
 
-  @return error coce
-    @retval E_DEC_OK
-    @retval E_DEC_TRUNCATED
-    @retval E_DEC_OVERFLOW
-    @retval E_DEC_OOM
+  @return error code
+    @retval E_DEC_OK         ok
+    @retval E_DEC_TRUNCATED  truncated
+    @retval E_DEC_OVERFLOW   overflow
+    @retval E_DEC_OOM        out-of-memory
 */
 
 int my_decimal2string(uint mask, const my_decimal *d, uint fixed_prec,
@@ -159,10 +160,10 @@ int my_decimal2string(uint mask, const my_decimal *d, uint fixed_prec,
   @param[in]   decimals    round to desired number of decimals
 
   @return error code
-    @retval E_DEC_OK
-    @retval E_DEC_TRUNCATED
-    @retval E_DEC_OVERFLOW
-    @retval E_DEC_OOM
+    @retval E_DEC_OK         ok
+    @retval E_DEC_TRUNCATED  truncated
+    @retval E_DEC_OVERFLOW   overflow
+    @retval E_DEC_OOM        out-of-memory
 
   Would be great to make it a method of the String class,
   but this would need to include
@@ -180,22 +181,21 @@ bool str_set_decimal(uint mask, const my_decimal *val, String *str,
     my_decimal2string(mask, val, str);
     str->set_charset(cs);
     return false;
-  } else {
-    /*
-      For ASCII-incompatible character sets (like UCS2) we
-      call my_decimal2string() on a temporary buffer first,
-      and then convert the result to the target character
-      with help of str->copy().
-    */
-    StringBuffer<DECIMAL_MAX_STR_LENGTH + 1> tmp(&my_charset_latin1);
-    if (static_cast<int>(decimals) < val->frac) {
-      my_decimal_round(E_DEC_FATAL_ERROR, val, decimals, false, &dec_buf);
-      val = &dec_buf;
-    }
-    my_decimal2string(mask, val, &tmp);
-    uint errors;
-    return str->copy(tmp.ptr(), tmp.length(), &my_charset_latin1, cs, &errors);
   }
+  /*
+  For ASCII-incompatible character sets (like UCS2) we
+  call my_decimal2string() on a temporary buffer first,
+  and then convert the result to the target character
+  with help of str->copy().
+  */
+  StringBuffer<DECIMAL_MAX_STR_LENGTH + 1> tmp(&my_charset_latin1);
+  if (static_cast<int>(decimals) < val->frac) {
+    my_decimal_round(E_DEC_FATAL_ERROR, val, decimals, false, &dec_buf);
+    val = &dec_buf;
+  }
+  my_decimal2string(mask, val, &tmp);
+  uint errors;
+  return str->copy(tmp.ptr(), tmp.length(), &my_charset_latin1, cs, &errors);
 }
 
 /*
@@ -303,35 +303,56 @@ static my_decimal *lldiv_t2my_decimal(const lldiv_t *lld, bool neg,
 }
 
 /**
-  Convert datetime value to my_decimal in format YYYYMMDDhhmmss.ffffff
-  @param ltime  Date value to convert from.
-  @param dec    Decimal value to convert to.
+  Convert date value to my_decimal in format YYYYMMDD
+
+  @param      date  Date value to convert from.
+  @param[out] dec   Decimal value to convert to.
+
+  @returns pointer to decimal value
 */
-my_decimal *date2my_decimal(const MYSQL_TIME *ltime, my_decimal *dec) {
+my_decimal *date_to_decimal(const Date_val date, my_decimal *dec) {
   lldiv_t lld;
-  lld.quot = ltime->time_type > MYSQL_TIMESTAMP_DATE
-                 ? TIME_to_ulonglong_datetime(*ltime)
-                 : TIME_to_ulonglong_date(*ltime);
-  lld.rem = (longlong)ltime->second_part * 1000;
-  return lldiv_t2my_decimal(&lld, ltime->neg, dec);
+  lld.quot = date.to_int();
+  lld.rem = 0;
+  return lldiv_t2my_decimal(&lld, false, dec);
+}
+
+/**
+  Convert datetime value to my_decimal in format YYYYMMDDhhmmss.ffffff
+
+  @param      dt  Datetime value to convert from.
+  @param[out] dec Decimal value to convert to.
+
+  @returns pointer to decimal value
+*/
+my_decimal *datetime_to_decimal(const Datetime_val *dt, my_decimal *dec) {
+  lldiv_t lld;
+  assert(dt->time_type == MYSQL_TIMESTAMP_DATETIME ||
+         dt->time_type == MYSQL_TIMESTAMP_DATETIME_TZ);
+  lld.quot = TIME_to_ulonglong_datetime(*dt);
+  lld.rem = (longlong)dt->second_part * 1000;
+  return lldiv_t2my_decimal(&lld, dt->neg, dec);
 }
 
 /**
   Convert time value to my_decimal in format hhmmss.ffffff
-  @param ltime  Date value to convert from.
+  @param time   Time value to convert from.
   @param dec    Decimal value to convert to.
 */
-my_decimal *time2my_decimal(const MYSQL_TIME *ltime, my_decimal *dec) {
+my_decimal *time_to_decimal(const Time_val time, my_decimal *dec) {
   lldiv_t lld;
-  lld.quot = TIME_to_ulonglong_time(*ltime);
-  lld.rem = (longlong)ltime->second_part * 1000;
-  return lldiv_t2my_decimal(&lld, ltime->neg, dec);
+  lld.quot = time.to_int_truncated();
+  if (time.is_negative()) {
+    lld.quot = -lld.quot;
+  }
+  lld.rem = static_cast<longlong>(time.microsecond() * 1000);
+  return lldiv_t2my_decimal(&lld, time.is_negative(), dec);
 }
 
 /**
   Convert timeval value to my_decimal.
 */
-my_decimal *timeval2my_decimal(const my_timeval *tm, my_decimal *dec) {
+my_decimal *timeval_to_decimal(const my_timeval *tm, my_decimal *dec) {
   lldiv_t lld;
   lld.quot = tm->m_tv_sec;
   lld.rem = tm->m_tv_usec * 1000;

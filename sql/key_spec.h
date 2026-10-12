@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,6 +25,7 @@
 #define KEY_SPEC_INCLUDED
 
 #include <sys/types.h>
+#include <utility>
 
 #include "lex_string.h"
 #include "my_base.h"
@@ -36,6 +38,9 @@ class Item;
 class THD;
 struct MEM_ROOT;
 
+using Vector_index_params_YY =
+    Mem_root_array_YY<std::pair<LEX_CSTRING, LEX_CSTRING>>;
+
 enum keytype {
   KEYTYPE_PRIMARY = 0,
   KEYTYPE_UNIQUE = 1,
@@ -43,7 +48,7 @@ enum keytype {
   KEYTYPE_FULLTEXT = 4,
   KEYTYPE_SPATIAL = 8,
   KEYTYPE_FOREIGN = 16,
-  KEYTYPE_CLUSTERING = 32
+  KEYTYPE_VECTOR = 32,
 };
 
 enum fk_option {
@@ -75,6 +80,8 @@ class KEY_CREATE_INFO {
   ulong block_size = 0;
   LEX_CSTRING parser_name = {NullS, 0};
   LEX_CSTRING comment = {NullS, 0};
+  LEX_CSTRING vector_index_type = {NullS, 0};
+  Vector_index_params_YY vector_index_params{};
   bool is_visible = true;
 
   KEY_CREATE_INFO() = default;
@@ -299,6 +306,21 @@ class Foreign_key_spec : public Key_spec {
    */
   bool validate(THD *thd, const char *table_name,
                 List<Create_field> &table_fields) const;
+
+  /**
+    Set referenced column list for a FK from the referenced table PK columns.
+
+    @param thd                     Thread handle.
+    @param is_self_referencing_fk  Represents self referencing foreign key.
+    @param key_list                key info list of parent/referenced table.
+
+    @retval false   when ref_columns list is populated successfully or when
+                    ref_columns list is empty since parent table or PK in
+                    parent table is missing.
+    @retval true    if any error
+  */
+  bool set_ref_columns_for_implicit_pk(THD *thd, bool is_self_referencing_fk,
+                                       Mem_root_array<Key_spec *> &key_list);
 };
 
 /**

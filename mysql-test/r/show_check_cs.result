@@ -1,3 +1,4 @@
+include/rpl/set_gtid_mode_off.inc
 SET @old_log_output= @@global.log_output;
 SET GLOBAL log_output="FILE,TABLE";
 drop table if exists t1,t2;
@@ -524,6 +525,8 @@ Warnings:
 Warning	1287	'|| as a synonym for OR' is deprecated and will be removed in a future release. Please use OR instead
 Warning	1287	'|| as a synonym for OR' is deprecated and will be removed in a future release. Please use OR instead
 flush privileges;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 CREATE TABLE t1(
 field1 text NOT NULL,
 PRIMARY KEY(field1(750))
@@ -653,7 +656,7 @@ show table status;
 show open tables;
 show plugins;
 show columns in t1;
-show slave hosts;
+SHOW REPLICAS;
 show keys in t1;
 show storage engines;
 show privileges;
@@ -670,7 +673,7 @@ show create database test;
 show create table t1;
 show create view v1;
 show binary log status;
-show slave status;
+SHOW REPLICA STATUS;
 show create procedure p1;
 show create function f1;
 show create trigger tr1;
@@ -696,20 +699,21 @@ CREATE TRIGGER t1_bi BEFORE INSERT ON t1 FOR EACH ROW SET @a = 1;
 CREATE VIEW v1 AS SELECT 1;
 CREATE PROCEDURE p1() SELECT 1;
 CREATE FUNCTION f1() RETURNS INT RETURN 1;
-set names utf8;
+set names utf8mb3;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 -- Here we enable metadata just to check that the collation of the
 -- resultset is non-binary for string type. This should be changed
 -- after Bug#29394 is implemented.
 ----------------------------------------------------------------
-SHOW CHARACTER SET LIKE 'utf8';
+SHOW CHARACTER SET LIKE 'utf8mb3';
 Catalog	Database	Table	Table_alias	Column	Column_alias	Type	Length	Max length	Is_null	Flags	Decimals	Charsetnr
-def	information_schema	cs	CHARACTER_SETS	Charset	Charset	253	192	0	N	20485	0	33
-def	information_schema	cs	CHARACTER_SETS	Description	Description	253	6144	0	N	4097	0	33
-def	information_schema	col	CHARACTER_SETS	Default collation	Default collation	253	192	0	N	20485	0	33
-def	information_schema	cs	CHARACTER_SETS	Maxlen	Maxlen	3	10	0	N	36897	0	63
+def	information_schema	cs	CHARACTER_SETS	Charset	Charset	253	192	7	N	20485	0	33
+def	information_schema	cs	CHARACTER_SETS	Description	Description	253	6144	13	N	4097	0	33
+def	information_schema	col	CHARACTER_SETS	Default collation	Default collation	253	192	18	N	20485	0	33
+def	information_schema	cs	CHARACTER_SETS	Maxlen	Maxlen	3	10	1	N	36897	0	63
 Charset	Description	Default collation	Maxlen
+utf8mb3	UTF-8 Unicode	utf8mb3_general_ci	3
 ----------------------------------------------------------------
 SHOW COLLATION LIKE 'latin1_bin';
 Catalog	Database	Table	Table_alias	Column	Column_alias	Type	Length	Max length	Is_null	Flags	Decimals	Charsetnr
@@ -851,7 +855,7 @@ def		tables	TRIGGERS	Table	Table	253	192	2	N	4225	0	33
 def		triggers	TRIGGERS	Statement	Statement	252	4294967295	10	N	4241	0	33
 def		triggers	TRIGGERS	Timing	Timing	254	18	6	N	4481	0	33
 def		triggers	TRIGGERS	Created	Created	7	22	22	N	4225	2	63
-def		triggers	TRIGGERS	sql_mode	sql_mode	254	1560	117	N	6273	0	33
+def		triggers	TRIGGERS	sql_mode	sql_mode	254	1638	117	N	6273	0	33
 def		triggers	TRIGGERS	Definer	Definer	253	864	14	N	4225	0	33
 def		character_sets	TRIGGERS	character_set_client	character_set_client	253	192	6	N	4097	0	33
 def		collations	TRIGGERS	collation_connection	collation_connection	253	192	6	N	4097	0	33
@@ -895,7 +899,7 @@ def		TRIGGERS	TRIGGERS	ACTION_REFERENCE_OLD_TABLE	ACTION_REFERENCE_OLD_TABLE	6	0
 def		TRIGGERS	TRIGGERS	ACTION_REFERENCE_NEW_TABLE	ACTION_REFERENCE_NEW_TABLE	6	0	0	Y	32896	0	63
 def		TRIGGERS	TRIGGERS	ACTION_REFERENCE_OLD_ROW	ACTION_REFERENCE_OLD_ROW	253	9	3	N	1	31	33
 def		TRIGGERS	TRIGGERS	ACTION_REFERENCE_NEW_ROW	ACTION_REFERENCE_NEW_ROW	253	9	3	N	1	31	33
-def	information_schema	TRIGGERS	TRIGGERS	SQL_MODE	SQL_MODE	254	1560	117	N	6273	0	33
+def	information_schema	TRIGGERS	TRIGGERS	SQL_MODE	SQL_MODE	254	1638	117	N	6273	0	33
 def	information_schema	TRIGGERS	TRIGGERS	DEFINER	DEFINER	253	864	14	N	20617	0	33
 TRIGGER_CATALOG	TRIGGER_SCHEMA	TRIGGER_NAME	EVENT_MANIPULATION	EVENT_OBJECT_CATALOG	EVENT_OBJECT_SCHEMA	EVENT_OBJECT_TABLE	ACTION_CONDITION	ACTION_STATEMENT	ACTION_ORIENTATION	ACTION_TIMING	ACTION_REFERENCE_OLD_TABLE	ACTION_REFERENCE_NEW_TABLE	ACTION_REFERENCE_OLD_ROW	ACTION_REFERENCE_NEW_ROW	SQL_MODE	DEFINER
 def	test	t1_bi	INSERT	def	test	t1	NULL	SET @a = 1	ROW	BEFORE	NULL	NULL	OLD	NEW	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	root@localhost
@@ -975,7 +979,7 @@ def		ROUTINES	ROUTINES	IS_DETERMINISTIC	IS_DETERMINISTIC	253	9	2	N	1	31	33
 def	information_schema	ROUTINES	ROUTINES	SQL_DATA_ACCESS	SQL_DATA_ACCESS	254	51	12	N	4481	0	33
 def		ROUTINES	ROUTINES	SQL_PATH	SQL_PATH	6	0	0	Y	32896	0	63
 def	information_schema	ROUTINES	ROUTINES	SECURITY_TYPE	SECURITY_TYPE	254	21	7	N	4481	0	33
-def	information_schema	ROUTINES	ROUTINES	SQL_MODE	SQL_MODE	254	1560	117	N	6273	0	33
+def	information_schema	ROUTINES	ROUTINES	SQL_MODE	SQL_MODE	254	1638	117	N	6273	0	33
 def	information_schema	ROUTINES	ROUTINES	ROUTINE_COMMENT	ROUTINE_COMMENT	252	196605	0	N	4241	0	33
 def	information_schema	ROUTINES	ROUTINES	DEFINER	DEFINER	253	864	14	N	20617	0	33
 SPECIFIC_NAME	ROUTINE_CATALOG	ROUTINE_SCHEMA	ROUTINE_NAME	ROUTINE_TYPE	DTD_IDENTIFIER	ROUTINE_BODY	ROUTINE_DEFINITION	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	IS_DETERMINISTIC	SQL_DATA_ACCESS	SQL_PATH	SECURITY_TYPE	SQL_MODE	ROUTINE_COMMENT	DEFINER
@@ -1030,7 +1034,7 @@ def		ROUTINES	ROUTINES	IS_DETERMINISTIC	IS_DETERMINISTIC	253	9	2	N	1	31	33
 def	information_schema	ROUTINES	ROUTINES	SQL_DATA_ACCESS	SQL_DATA_ACCESS	254	51	12	N	4481	0	33
 def		ROUTINES	ROUTINES	SQL_PATH	SQL_PATH	6	0	0	Y	32896	0	63
 def	information_schema	ROUTINES	ROUTINES	SECURITY_TYPE	SECURITY_TYPE	254	21	7	N	4481	0	33
-def	information_schema	ROUTINES	ROUTINES	SQL_MODE	SQL_MODE	254	1560	117	N	6273	0	33
+def	information_schema	ROUTINES	ROUTINES	SQL_MODE	SQL_MODE	254	1638	117	N	6273	0	33
 def	information_schema	ROUTINES	ROUTINES	ROUTINE_COMMENT	ROUTINE_COMMENT	252	196605	0	N	4241	0	33
 def	information_schema	ROUTINES	ROUTINES	DEFINER	DEFINER	253	864	14	N	20617	0	33
 SPECIFIC_NAME	ROUTINE_CATALOG	ROUTINE_SCHEMA	ROUTINE_NAME	ROUTINE_TYPE	DTD_IDENTIFIER	ROUTINE_BODY	ROUTINE_DEFINITION	EXTERNAL_NAME	EXTERNAL_LANGUAGE	PARAMETER_STYLE	IS_DETERMINISTIC	SQL_DATA_ACCESS	SQL_PATH	SECURITY_TYPE	SQL_MODE	ROUTINE_COMMENT	DEFINER
@@ -1076,6 +1080,8 @@ delete from mysql.user where user='mysqltest_4';
 delete from mysql.db where user='mysqltest_4';
 delete from mysql.tables_priv where user='mysqltest_4';
 flush privileges;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 drop database mysqltest;
 show plugins;
 create database `mysqlttest\1`;
@@ -1107,9 +1113,9 @@ show engine csv logs;
 Type	Name	Status
 show engine csv mutex;
 Type	Name	Status
-set names utf8;
+set names utf8mb3;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 drop table if exists `√©t√©`;
 create table `√©t√©` (field1 int);
 show full tables;
@@ -1220,9 +1226,9 @@ CREATE TRIGGER t1_bi BEFORE INSERT ON t1
 FOR EACH ROW
 SET NEW.c1 = '‘≈”‘';
 CREATE EVENT ev1 ON SCHEDULE AT '2030-01-01 00:00:00' DO SELECT '‘≈”‘' AS test;
-set names utf8;
+set names utf8mb3;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 SHOW CREATE VIEW v1;
 View	Create View	character_set_client	collation_connection
 v1	CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW `v1` AS select '—Ç–µ—Å—Ç' AS `test`	koi8r	koi8r_general_ci
@@ -1291,9 +1297,9 @@ t1	CREATE TABLE `t1` (
   `a` int DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 # Connection con1
-ALTER TABLE t1 CHARACTER SET = utf8;
+ALTER TABLE t1 CHARACTER SET = utf8mb3;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 UNLOCK TABLES;
 # Connection default
 COMMIT;
@@ -1320,9 +1326,9 @@ SHOW CREATE TRIGGER t1_bi;
 Trigger	sql_mode	SQL Original Statement	character_set_client	collation_connection	Database Collation	Created
 t1_bi	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`localhost` TRIGGER `t1_bi` BEFORE INSERT ON `t1` FOR EACH ROW SET new.a = 1	utf8mb3	utf8mb3_general_ci	utf8mb4_0900_ai_ci	#
 # Connection con1
-ALTER TABLE t1 CHARACTER SET = utf8;
+ALTER TABLE t1 CHARACTER SET = utf8mb3;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 # Connection default
 COMMIT;
 DROP TRIGGER t1_bi;
@@ -1343,9 +1349,9 @@ Id	User	Host	db	Command	Time	State	Info	Time_ms	Rows_sent	Rows_examined
 ###	root	###	test	Query	###	###	SELECT GET_LOCK('t',1000) AS '√≥√≥√≥√≥'	###	###	###
 ###	root	###	test	Query	###	###	SHOW PROCESSLIST	###	###	###
 Warnings:
-SET NAMES utf8;
+SET NAMES utf8mb3;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 SHOW PROCESSLIST;
 Id	User	Host	db	Command	Time	State	Info	Time_ms	Rows_sent	Rows_examined
 ###	1287	###
@@ -1389,23 +1395,23 @@ ERROR 42000: You have an error in your SQL syntax; check the manual that corresp
 #               SHOW CREATE TABLE
 #
 CREATE TABLE t1 (i CHAR(3),
-n CHAR(20) CHARACTER SET utf8 GENERATED ALWAYS AS (md5(i)));
+n CHAR(20) CHARACTER SET utf8mb3 GENERATED ALWAYS AS (sha2(i,256)));
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 # Use SHOW CREATE TABLE output below unmodified to re-create table
 SHOW CREATE TABLE t1;
 Table	Create Table
 t1	CREATE TABLE `t1` (
   `i` char(3) DEFAULT NULL,
-  `n` char(20) CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci GENERATED ALWAYS AS (md5(`i`)) VIRTUAL
+  `n` char(20) CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci GENERATED ALWAYS AS (sha2(`i`,256)) VIRTUAL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 DROP TABLE t1;
 CREATE TABLE `t1` (
 `i` char(3) DEFAULT NULL,
-`n` char(20) CHARACTER SET utf8 GENERATED ALWAYS AS (md5(i)) VIRTUAL
+`n` char(20) CHARACTER SET utf8mb3 GENERATED ALWAYS AS (sha2(i,256)) VIRTUAL
 ) ENGINE=InnoDB DEFAULT CHARSET=latin1;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 DROP TABLE t1;
 #
 # Bug#24800048 - SHOW TABLES FROM DATABASE HANGS ON WINDOWS PLATFORM
@@ -1529,7 +1535,7 @@ DROP TABLE t1;
 # COLLATION IS THE DEFAU
 #
 CREATE TABLE t1 (f1 CHAR(1),
-f2 CHAR(1) COLLATE UTF8_BIN,
+f2 CHAR(1) COLLATE utf8mb3_BIN,
 f3 CHAR(1) CHARSET UTF8MB3,
 f4 CHAR(1) CHARSET UTF8MB4);
 Warnings:
@@ -1587,3 +1593,4 @@ DROP TABLE t3;
 SET @@global.log_output = @old_log_output;
 TRUNCATE TABLE mysql.general_log;
 TRUNCATE TABLE mysql.slow_log;
+include/rpl/set_gtid_mode_on.inc

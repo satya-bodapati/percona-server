@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2007, 2023, Oracle and/or its affiliates.
+Copyright (c) 2007, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -33,6 +34,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #ifndef INNOBASE_FTS0TYPES_H
 #define INNOBASE_FTS0TYPES_H
 
+#include <cstdint>
 #include "fts0fts.h"
 #include "fut0fut.h"
 #include "pars0pars.h"
@@ -310,66 +312,46 @@ extern const fts_index_selector_t fts_index_selector[];
 /** It's defined in fts/fts0fts.c */
 extern const fts_index_selector_t fts_index_selector_5_7[];
 
-/** Compare two fts_trx_row_t instances doc_ids.
-@param[in]      p1      id1
-@param[in]      p2      id2
-@return < 0 if n1 < n2, < 0 if n1 < n2, > 0 if n1 > n2 */
-static inline int fts_trx_row_doc_id_cmp(const void *p1, const void *p2);
-
-/** Compare two fts_ranking_t instances doc_ids.
-@param[in]      p1      id1
-@param[in]      p2      id2
-@return < 0 if n1 < n2, < 0 if n1 < n2, > 0 if n1 > n2 */
-static inline int fts_ranking_doc_id_cmp(const void *p1, const void *p2);
-
-/** Compare two fts_update_t instances doc_ids.
-@param[in]      p1      id1
-@param[in]      p2      id2
-@return < 0 if n1 < n2, < 0 if n1 < n2, > 0 if n1 > n2 */
-static inline int fts_update_doc_id_cmp(const void *p1, const void *p2);
-
-/** Decode and return the integer that was encoded using our VLC scheme.*/
-static inline ulint fts_decode_vlc(
-    /*!< out: value decoded */
-    byte **ptr); /*!< in: ptr to decode from, this ptr is
-                 incremented by the number of bytes decoded */
+/** Decode and return the integer that was encoded using our VLC scheme.
+@param[in,out]  ptr     ptr to decode from, this ptr is incremented
+                        by the number of bytes decoded
+@return value decoded */
+inline uint64_t fts_decode_vlc(byte **ptr);
 
 /** Duplicate a string.
 @param[in]      dst     dup to here
 @param[in]      src     src string
 @param[in]      heap    heap to use
 */
-static inline void fts_string_dup(fts_string_t *dst, const fts_string_t *src,
-                                  mem_heap_t *heap);
+inline void fts_string_dup(fts_string_t *dst, const fts_string_t *src,
+                           mem_heap_t *heap);
 
-/** Return length of val if it were encoded using our VLC scheme. */
-static inline ulint fts_get_encoded_len(
-    /*!< out: length of value
-     encoded, in bytes */
-    ulint val); /*!< in: value to encode */
+/** Return length of val if it were encoded using our VLC scheme.
+@param[in]     val      value to encode
+@return length of value encoded, in bytes */
+inline unsigned int fts_get_encoded_len(uint64_t val);
 
 /** Encode an integer using our VLC scheme and return the length in bytes.
 @param[in]      val     value to encode
 @param[in]      buf     buffer, must have enough space
 @return length of value encoded, in bytes */
-static inline ulint fts_encode_int(ulint val, byte *buf);
+inline unsigned int fts_encode_int(uint64_t val, byte *buf);
 
 /** Get the selected FTS aux INDEX suffix. */
-static inline const char *fts_get_suffix(
-    ulint selected); /*!< in: selected index */
+inline const char *fts_get_suffix(ulint selected); /*!< in: selected index */
 
 /** Return the selected FTS aux index suffix in 5.7 compatible format
 @param[in]      selected        selected index
 @return the suffix name */
-static inline const char *fts_get_suffix_5_7(ulint selected);
+inline const char *fts_get_suffix_5_7(ulint selected);
 
-/** Select the FTS auxiliary index for the given character.
+/** Select the FTS auxiliary table for the given character.
 @param[in]      cs      charset
 @param[in]      str     string
 @param[in]      len     string length in bytes
-@return the index to use for the string */
-static inline ulint fts_select_index(const CHARSET_INFO *cs, const byte *str,
-                                     ulint len);
+@retval the auxiliary table number to use for the string, zero-based */
+inline ulint fts_select_index(const CHARSET_INFO *cs, const byte *str,
+                              ulint len);
 
 #include "fts0types.ic"
 #include "fts0vlc.ic"

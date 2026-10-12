@@ -1,16 +1,17 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
    Copyright (c) 2018, Percona and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -54,6 +55,7 @@
 
 #include <atomic>  // error_handler_hook
 #include <cstring>
+#include <string>
 
 #include "my_compiler.h"
 #include "my_compress.h"
@@ -64,7 +66,9 @@
 #include "my_psi_config.h" /* IWYU pragma: keep */
 
 #include "my_sharedlib.h"
+// IWYU pragma: begin_exports
 #include "mysql/components/services/bits/my_io_bits.h"
+#include "mysql/components/services/bits/my_syslog_bits.h"
 #include "mysql/components/services/bits/mysql_cond_bits.h"
 #include "mysql/components/services/bits/mysql_mutex_bits.h"
 #include "mysql/components/services/bits/psi_bits.h"
@@ -72,7 +76,8 @@
 #include "mysql/components/services/bits/psi_memory_bits.h"
 #include "mysql/components/services/bits/psi_metric_bits.h"
 #include "mysql/components/services/bits/psi_stage_bits.h"
-#include "sql/stream_cipher.h"
+#include "mysql/components/services/bits/server_telemetry_logs_client_bits.h"
+// IWYU pragma: end_exports
 #include "string_with_len.h"
 
 class MY_CHARSET_LOADER;
@@ -85,6 +90,7 @@ struct PSI_data_lock_bootstrap;
 struct PSI_error_bootstrap;
 struct PSI_file_bootstrap;
 struct PSI_idle_bootstrap;
+struct PSI_logs_client_bootstrap;
 struct PSI_mdl_bootstrap;
 struct PSI_memory_bootstrap;
 struct PSI_metric_bootstrap;
@@ -147,9 +153,10 @@ struct MEM_ROOT;
 
 #define MYF_RW MYF(MY_WME + MY_NABP) /* For my_read & my_write */
 
-#define MY_CHECK_ERROR 1    /* Params to my_end; Check open-close */
-#define MY_GIVE_INFO 2      /* Give time info about process*/
-#define MY_DONT_FREE_DBUG 4 /* Do not call DBUG_END() in my_end() */
+#define MY_CHECK_ERROR 1        /* Params to my_end; Check open-close */
+#define MY_GIVE_INFO 2          /* Give time info about process*/
+#define MY_DONT_FREE_DBUG 4     /* Do not call DBUG_END() in my_end() */
+#define MY_END_PROXY_MAIN_THD 8 /* Free resources for main thread */
 
 /* Flags for my_error() */
 #define ME_BELL 4          /* DEPRECATED: Ring bell then printing message */
@@ -205,14 +212,8 @@ extern DebugSyncCallbackFp debug_sync_C_callback_ptr;
     if (debug_sync_C_callback_ptr != NULL)                              \
       (*debug_sync_C_callback_ptr)(STRING_WITH_LEN(_sync_point_name_)); \
   } while (0)
-#define DEBUG_SYNC_C_IF_THD(thd, _sync_point_name_)                     \
-  do {                                                                  \
-    if (debug_sync_C_callback_ptr != NULL && thd)                       \
-      (*debug_sync_C_callback_ptr)(STRING_WITH_LEN(_sync_point_name_)); \
-  } while (0)
 #else
 #define DEBUG_SYNC_C(_sync_point_name_)
-#define DEBUG_SYNC_C_IF_THD(thd, _sync_point_name_)
 #endif /* defined(ENABLED_DEBUG_SYNC) */
 
 #ifdef HAVE_LINUX_LARGE_PAGES
@@ -305,14 +306,6 @@ enum flush_type {
   FLUSH_FORCE_WRITE
 };
 
-struct DYNAMIC_ARRAY {
-  uchar *buffer{nullptr};
-  uint elements{0}, max_element{0};
-  uint alloc_increment{0};
-  uint size_of_element{0};
-  PSI_memory_key m_psi_key{PSI_NOT_INSTRUMENTED};
-};
-
 struct MY_TMPDIR {
   char **list{nullptr};
   uint cur{0}, max{0};
@@ -342,6 +335,7 @@ struct IO_CACHE_SHARE {
   int error;           /* Last error. */
 };
 
+class Stream_cipher;
 struct IO_CACHE /* Used when caching files */
 {
   /* Offset in file corresponding to the first byte of uchar* buffer. */
@@ -528,22 +522,22 @@ inline int my_b_get(IO_CACHE *info) {
   return _my_b_get(info);
 }
 
-MY_NODISCARD
+[[nodiscard]]
 inline my_off_t my_b_tell(const IO_CACHE *info) {
   return info->pos_in_file + *info->current_pos - info->request_pos;
 }
 
-MY_NODISCARD
+[[nodiscard]]
 inline uchar *my_b_get_buffer_start(const IO_CACHE *info) {
   return info->request_pos;
 }
 
-MY_NODISCARD
+[[nodiscard]]
 inline size_t my_b_get_bytes_in_buffer(const IO_CACHE *info) {
   return info->read_end - my_b_get_buffer_start(info);
 }
 
-MY_NODISCARD
+[[nodiscard]]
 inline my_off_t my_b_get_pos_in_file(const IO_CACHE *info) {
   return info->pos_in_file;
 }
@@ -551,7 +545,7 @@ inline my_off_t my_b_get_pos_in_file(const IO_CACHE *info) {
 /* tell write offset in the SEQ_APPEND cache */
 int my_b_copy_to_file(IO_CACHE *cache, FILE *file);
 
-MY_NODISCARD
+[[nodiscard]]
 inline size_t my_b_bytes_in_cache(const IO_CACHE *info) {
   return *info->current_end - *info->current_pos;
 }
@@ -574,6 +568,10 @@ struct USED_MEM {
 
 /* Prototypes for mysys and my_func functions */
 
+extern size_t escape_string_for_mysql(const CHARSET_INFO *charset_info,
+                                      char *to, size_t to_length,
+                                      const char *from, size_t length);
+
 extern int my_copy(const char *from, const char *to, myf MyFlags);
 extern int my_delete(const char *name, myf MyFlags);
 extern int my_getwd(char *buf, size_t size, myf MyFlags);
@@ -592,6 +590,9 @@ extern int my_close(File fd, myf MyFlags);
 extern int my_mkdir(const char *dir, int Flags, myf MyFlags);
 extern int my_readlink(char *to, const char *filename, myf MyFlags);
 extern int my_is_symlink(const char *filename, ST_FILE_ID *file_id);
+extern bool my_rm_dir_w_symlink(const char *directory_path, bool send_error,
+                                bool send_intermediate_errors,
+                                bool &directory_deletion_failed);
 extern int my_realpath(char *to, const char *filename, myf MyFlags);
 extern int my_is_same_file(File file, const ST_FILE_ID *file_id);
 extern File my_create_with_symlink(const char *linkname, const char *filename,
@@ -618,17 +619,11 @@ extern size_t my_fwrite(FILE *stream, const uchar *Buffer, size_t Count,
                         myf MyFlags);
 extern my_off_t my_fseek(FILE *stream, my_off_t pos, int whence);
 extern my_off_t my_ftell(FILE *stream);
-#if !defined(HAVE_MEMSET_S)
-void memset_s(void *dest, size_t dest_max, int c, size_t n);
-#endif
 
 /* implemented in my_syslog.c */
 
 // Maximum size of message  that will be logged.
 #define MAX_SYSLOG_MESSAGE_SIZE 1024
-
-/* Platform-independent SysLog support */
-enum my_syslog_options { MY_SYSLOG_PIDS = 1 };
 
 extern int my_openlog(const char *eventSourceName, int option, int facility);
 extern int my_closelog();
@@ -721,7 +716,9 @@ extern void free_tmpdir(MY_TMPDIR *tmpdir);
 
 extern size_t dirname_part(char *to, const char *name, size_t *to_res_length);
 extern size_t dirname_length(const char *name);
-#define base_name(A) (A + dirname_length(A))
+ALWAYS_INLINE const char *base_name(const char *A) {
+  return A + dirname_length(A);
+}
 extern int test_if_hard_path(const char *dir_name);
 extern bool has_path(const char *name);
 extern char *convert_dirname(char *to, const char *from, const char *from_end);
@@ -747,31 +744,31 @@ extern bool array_append_string_unique(const char *str, const char **array,
 
 void my_store_ptr(uchar *buff, size_t pack_length, my_off_t pos);
 my_off_t my_get_ptr(uchar *ptr, size_t pack_length);
-MY_NODISCARD
+[[nodiscard]]
 extern int init_io_cache_ext(IO_CACHE *info, File file, size_t cachesize,
                              enum cache_type type, my_off_t seek_offset,
                              bool use_async_io, myf cache_myflags,
                              PSI_file_key file_key);
-MY_NODISCARD
+[[nodiscard]]
 extern int init_io_cache(IO_CACHE *info, File file, size_t cachesize,
                          enum cache_type type, my_off_t seek_offset,
                          bool use_async_io, myf cache_myflags);
-MY_NODISCARD
+[[nodiscard]]
 extern bool reinit_io_cache(IO_CACHE *info, enum cache_type type,
                             my_off_t seek_offset, bool use_async_io,
                             bool clear_cache);
 extern void setup_io_cache(IO_CACHE *info);
-MY_NODISCARD
+[[nodiscard]]
 extern int _my_b_read(IO_CACHE *info, uchar *Buffer, size_t Count);
-MY_NODISCARD
+[[nodiscard]]
 extern int _my_b_read_r(IO_CACHE *info, uchar *Buffer, size_t Count);
 extern void init_io_cache_share(IO_CACHE *read_cache, IO_CACHE_SHARE *cshare,
                                 IO_CACHE *write_cache, uint num_threads);
 extern void remove_io_thread(IO_CACHE *info);
-MY_NODISCARD
+[[nodiscard]]
 extern int _my_b_seq_read(IO_CACHE *info, uchar *Buffer, size_t Count);
 extern int _my_b_net_read(IO_CACHE *info, uchar *Buffer, size_t Count);
-MY_NODISCARD
+[[nodiscard]]
 extern int _my_b_write(IO_CACHE *info, const uchar *Buffer, size_t Count);
 extern int my_b_append(IO_CACHE *info, const uchar *Buffer, size_t Count);
 extern int my_b_safe_write(IO_CACHE *info, const uchar *Buffer, size_t Count);
@@ -807,20 +804,6 @@ const size_t MY_MAX_TEMP_FILENAME_LEN = 19;
 #endif
 File create_temp_file(char *to, const char *dir, const char *pfx, int mode,
                       UnlinkOrKeepFile unlink_or_keep, myf MyFlags);
-
-// Use Prealloced_array or std::vector or something similar in C++
-extern bool my_init_dynamic_array(DYNAMIC_ARRAY *array, PSI_memory_key key,
-                                  uint element_size, void *init_buffer,
-                                  uint init_alloc, uint alloc_increment);
-/* init_dynamic_array() function is deprecated */
-
-#define dynamic_element(array, array_index, type) \
-  ((type)((array)->buffer) + (array_index))
-
-/* Some functions are still in use in C++, because HASH uses DYNAMIC_ARRAY */
-extern bool insert_dynamic(DYNAMIC_ARRAY *array, const void *element);
-extern void *alloc_dynamic(DYNAMIC_ARRAY *array);
-extern void delete_dynamic(DYNAMIC_ARRAY *array);
 
 extern bool init_dynamic_string(DYNAMIC_STRING *str, const char *init_str,
                                 size_t init_alloc);
@@ -908,7 +891,7 @@ extern uint get_collation_number(const char *name);
 extern const char *get_collation_name(uint charset_number);
 
 extern CHARSET_INFO *get_charset(uint cs_number, myf flags);
-extern CHARSET_INFO *get_charset_by_name(const char *cs_name, myf flags);
+extern CHARSET_INFO *get_charset_by_name(const char *collation_name, myf flags);
 extern CHARSET_INFO *my_collation_get_by_name(const char *collation_name,
                                               myf flags, MY_CHARSET_ERRMSG *);
 extern CHARSET_INFO *get_charset_by_csname(const char *cs_name, uint cs_flags,
@@ -921,19 +904,12 @@ extern bool resolve_collation(const char *cl_name,
                               const CHARSET_INFO *default_cl,
                               const CHARSET_INFO **cl);
 extern char *get_charsets_dir(char *buf);
-extern bool init_compiled_charsets(myf flags);
-extern size_t escape_string_for_mysql(const CHARSET_INFO *charset_info,
-                                      char *to, size_t to_length,
-                                      const char *from, size_t length);
+
 extern void charset_uninit();
 #ifdef _WIN32
 /* File system character set */
 extern CHARSET_INFO *fs_character_set(void);
-#endif
-extern size_t escape_quotes_for_mysql(CHARSET_INFO *charset_info, char *to,
-                                      size_t to_length, const char *from,
-                                      size_t length, char quote);
-#ifdef _WIN32
+
 extern bool have_tcpip; /* Is set if tcpip is used */
 
 /* implemented in my_windac.c */
@@ -977,6 +953,8 @@ extern void set_psi_memory_service(void *psi);
 extern MYSQL_PLUGIN_IMPORT PSI_mutex_bootstrap *psi_mutex_hook;
 extern void set_psi_metric_service(void *psi);
 extern MYSQL_PLUGIN_IMPORT PSI_metric_bootstrap *psi_metric_hook;
+extern void set_psi_logs_client_service(void *psi);
+extern MYSQL_PLUGIN_IMPORT PSI_logs_client_bootstrap *psi_logs_client_hook;
 extern void set_psi_mutex_service(void *psi);
 extern MYSQL_PLUGIN_IMPORT PSI_rwlock_bootstrap *psi_rwlock_hook;
 extern void set_psi_rwlock_service(void *psi);
@@ -997,6 +975,11 @@ extern void set_psi_transaction_service(void *psi);
 extern MYSQL_PLUGIN_IMPORT PSI_tls_channel_bootstrap *psi_tls_channel_hook;
 extern void set_psi_tls_channel_service(void *psi);
 #endif /* HAVE_PSI_INTERFACE */
+
+/* Compare versions and determine if clone is allowed */
+[[nodiscard]] extern bool are_versions_clone_compatible(
+    const std::string &recipient, const std::string &donor,
+    const bool is_recipient_lts = false, const bool is_donor_lts = false);
 
 /**
   @} (end of group MYSYS)

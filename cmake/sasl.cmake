@@ -1,15 +1,16 @@
-# Copyright (c) 2017, 2023, Oracle and/or its affiliates.
-# 
+# Copyright (c) 2017, 2026, Oracle and/or its affiliates.
+#
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -120,8 +121,11 @@ MACRO(FIND_SYSTEM_SASL)
   IF (SASL_SYSTEM_LIBRARY)
     SET(SASL_LIBRARY ${SASL_SYSTEM_LIBRARY})
     MESSAGE(STATUS "SASL_LIBRARY ${SASL_LIBRARY}")
+    IF(APPLE)
+      SET(SASL_WITHOUT_KERBEROS 1)
+    ENDIF()
   ENDIF()
-ENDMACRO()
+ENDMACRO(FIND_SYSTEM_SASL)
 
 # Lookup and copy all plugins
 #   lib/sasl2/libanonymous.so
@@ -230,6 +234,13 @@ MACRO(FIND_CUSTOM_SASL)
       NO_CMAKE_ENVIRONMENT_PATH
       NO_SYSTEM_ENVIRONMENT_PATH
       )
+    FIND_FILE(SASL_GSSAPI_PLUGIN
+      NAMES saslGSSAPI.dll
+      PATHS ${WITH_SASL}/lib
+      NO_CMAKE_PATH
+      NO_CMAKE_ENVIRONMENT_PATH
+      NO_SYSTEM_ENVIRONMENT_PATH
+      )
     # SCRAM library found, setting SCRAM_LIB_CONFIGURED to 1.
     # SCRAM_LIB_CONFIGURED will be used to construct supported SASL methods.
     IF(SASL_SCRAM_PLUGIN)
@@ -239,7 +250,7 @@ MACRO(FIND_CUSTOM_SASL)
 ENDMACRO()
 
 MACRO(MYSQL_CHECK_SASL)
-  IF(NOT WITH_SASL)
+  IF(NOT WIN32 AND NOT WITH_SASL)
     SET(WITH_SASL "system" CACHE STRING "${WITH_SASL_DOC_STRING}" FORCE)
   ENDIF()
 
@@ -251,7 +262,11 @@ MACRO(MYSQL_CHECK_SASL)
   ENDIF()
 
   IF(WITH_SASL STREQUAL "system")
-    FIND_SYSTEM_SASL()
+    IF(WIN32)
+      MESSAGE(FATAL_ERROR "-DWITH_SASL=system not supported on this platform")
+    ELSE()
+      FIND_SYSTEM_SASL()
+    ENDIF()
   ELSEIF(WITH_SASL_PATH)
     IF(LINUX_STANDALONE OR WIN32)
       FIND_CUSTOM_SASL()
@@ -260,7 +275,9 @@ MACRO(MYSQL_CHECK_SASL)
     ENDIF()
   ELSE()
     RESET_SASL_VARIABLES()
-    MESSAGE(FATAL_ERROR "Could not find SASL")
+    IF(NOT WIN32)
+      MESSAGE(FATAL_ERROR "Could not find SASL")
+    ENDIF()
   ENDIF()
 
   IF(HAVE_SASL_SASL_H AND SASL_LIBRARY)
@@ -268,8 +285,10 @@ MACRO(MYSQL_CHECK_SASL)
     SET(SASL_FOUND TRUE)
   ELSE()
     SET(SASL_FOUND FALSE)
-    # FATAL_ERROR later if WITH_AUTHENTICATION_LDAP == ON
-    MESSAGE(WARNING "Could not find SASL")
+    IF(WITH_SASL)
+      # FATAL_ERROR later if WITH_AUTHENTICATION_LDAP == ON
+      MESSAGE(WARNING "Could not find SASL")
+    ENDIF()
   ENDIF()
 
 ENDMACRO()

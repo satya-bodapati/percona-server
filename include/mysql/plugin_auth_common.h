@@ -1,16 +1,17 @@
 #ifndef MYSQL_PLUGIN_AUTH_COMMON_INCLUDED
-/* Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -41,6 +42,20 @@
   return values of the plugin authenticate_user() method.
 */
 
+/**
+  Authentication failed, account locked error.
+  The account is locked.
+  These errors are reported in table performance_schema.host_cache,
+  column COUNT_ACCOUNT_LOCKED_ERRORS.
+*/
+#define CR_AUTH_ACCOUNT_LOCKED_ERROR 5
+/**
+  Authentication failed, temporary account locked error.
+  The account is temporarily locked.
+  These errors are reported in table performance_schema.host_cache,
+  column COUNT_TEMPORARY_ACCOUNT_LOCKED_ERRORS.
+*/
+#define CR_AUTH_TEMPORARY_ACCOUNT_LOCKED_ERROR 4
 /**
   Authentication failed, plugin internal error.
   An error occurred in the authentication plugin itself.
@@ -101,6 +116,12 @@
 */
 #define CR_OK_AUTH_IN_SANDBOX_MODE -3
 /**
+  Authentication was successful with limited operations.
+  User should change the password.
+*/
+#define CR_OK_FORCE_PASSWORD_CHANGE -4
+
+/**
 Flag to be passed back to server from authentication plugins via
 authenticated_as when proxy mapping should be done by the server.
 */
@@ -126,6 +147,7 @@ struct MYSQL_PLUGIN_VIO_INFO {
     MYSQL_VIO_MEMORY
   } protocol;
   int socket; /**< it's set, if the protocol is SOCKET or TCP */
+  bool is_tls_established;
 #if defined(_WIN32) && !defined(MYSQL_ABI_CHECK)
   HANDLE handle; /**< it's set, if the protocol is PIPE or MEMORY */
 #endif

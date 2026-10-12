@@ -1,15 +1,16 @@
-/* Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -56,6 +57,7 @@ struct ORDER;
 struct Parse_context;
 class Table_ref;
 union COM_DATA;
+enum class enum_sp_type;
 
 extern "C" int test_if_data_home_dir(const char *dir);
 
@@ -101,9 +103,15 @@ bool is_explainable_query(enum enum_sql_command command);
 bool is_log_table_write_query(enum enum_sql_command command);
 bool alloc_query(THD *thd, const char *packet, size_t packet_length);
 void dispatch_sql_command(THD *thd, Parser_state *parser_state,
-                          bool update_userstat);
+                          bool update_userstat,
+                          bool is_retry = false);
 void mysql_reset_thd_for_next_command(THD *thd);
 void create_table_set_open_action_and_adjust_tables(LEX *lex);
+void add_automatic_sp_privileges(THD *thd, enum_sp_type sp_type,
+                                 const char *db_name, const char *sp_name);
+bool remove_automatic_sp_privileges(THD *thd, enum_sp_type sp_type,
+                                    bool sp_did_not_exist, const char *db_name,
+                                    const char *sp_name);
 int mysql_execute_command(THD *thd, bool first_level = false);
 bool do_command(THD *thd);
 bool dispatch_command(THD *thd, const COM_DATA *com_data,
@@ -294,6 +302,8 @@ bool set_default_charset(HA_CREATE_INFO *create_info,
 // TODO: remove after refactoring of ALTER DATABASE:
 bool set_default_collation(HA_CREATE_INFO *create_info,
                            const CHARSET_INFO *value);
+
+bool sp_process_definer(THD *);
 
 /* Bits in sql_command_flags */
 

@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -35,8 +36,8 @@ using namespace mycrc32;
 namespace mysys_my_checksum {
 std::uint32_t VerifyChecksumFuncs(const unsigned char *buf,
                                   std::size_t length) {
-  std::uint32_t crc_seed = 0xbadcafe;
-  std::uint32_t expected_crc = crc32_z(crc_seed, buf, length);
+  std::uint32_t const crc_seed = 0xbadcafe;
+  std::uint32_t const expected_crc = crc32_z(crc_seed, buf, length);
 
   EXPECT_EQ(expected_crc, my_checksum(crc_seed, buf, length));
   EXPECT_EQ(expected_crc, PunnedCrc32<std::uint64_t>(crc_seed, buf, length));
@@ -71,17 +72,17 @@ TEST(MysysMyChecksum, ThirtyOneBytes) {
 }
 
 TEST(MysysMyChecksum, IntegerCrc32_8bit) {
-  unsigned char b = 0xba;
-  std::uint32_t crc = 0xff;
-  std::uint32_t zres = crc32_z(~crc, &b, 1U);
+  unsigned char const b = 0xba;
+  std::uint32_t const crc = 0xff;
+  std::uint32_t const zres = crc32_z(~crc, &b, 1U);
   EXPECT_EQ(IntegerCrc32(crc, b), ~zres);
 }
 
 TEST(MysysMyChecksum, IntegerCrc32_16bit) {
   unsigned char value_bytes[] = {0xaa, 0xbb};
 
-  std::uint32_t crc = 0xbadcafe;
-  std::uint32_t zres = crc32_z(~crc, value_bytes, sizeof(value_bytes));
+  std::uint32_t const crc = 0xbadcafe;
+  std::uint32_t const zres = crc32_z(~crc, value_bytes, sizeof(value_bytes));
 
   std::uint16_t value;
   memcpy(&value, value_bytes, sizeof(value_bytes));
@@ -91,8 +92,8 @@ TEST(MysysMyChecksum, IntegerCrc32_16bit) {
 
 TEST(MysysMyChecksum, IntegerCrc32_32bit) {
   unsigned char value_bytes[] = {0xaa, 0xbb, 0xcc, 0xdd};
-  std::uint32_t crc = 0xbadcafe;
-  std::uint32_t zres = crc32_z(~crc, value_bytes, sizeof(value_bytes));
+  std::uint32_t const crc = 0xbadcafe;
+  std::uint32_t const zres = crc32_z(~crc, value_bytes, sizeof(value_bytes));
   std::uint32_t value;
   memcpy(&value, value_bytes, sizeof(value_bytes));
   EXPECT_EQ(IntegerCrc32(crc, value), ~zres);
@@ -101,13 +102,13 @@ TEST(MysysMyChecksum, IntegerCrc32_32bit) {
 TEST(MysysMyChecksum, IntegerCrc32_double_32bit) {
   unsigned char value_bytes[] = {0x99, 0x11, 0xaa, 0xbb,
                                  0xcc, 0xdd, 0xee, 0xff};
-  std::uint32_t crc = 0xbadcafe;
-  std::uint32_t zres = crc32_z(~crc, value_bytes, sizeof(value_bytes));
+  std::uint32_t const crc = 0xbadcafe;
+  std::uint32_t const zres = crc32_z(~crc, value_bytes, sizeof(value_bytes));
   std::uint32_t value1, value2;
   memcpy(&value1, value_bytes, sizeof(value1));
   memcpy(&value2, value_bytes + sizeof(value1), sizeof(value2));
 
-  std::uint32_t crc1 = IntegerCrc32(crc, value1);
+  std::uint32_t const crc1 = IntegerCrc32(crc, value1);
   EXPECT_EQ(IntegerCrc32(crc1, value2), ~zres);
 }
 
@@ -116,8 +117,8 @@ TEST(MysysMyChecksum, IntegerCrc32_64bit) {
                                  0x55, 0x66, 0x77, 0x88};
   std::uint64_t value;
   memcpy(&value, value_bytes, sizeof(value));
-  std::uint32_t crc = 0xbadcafe;
-  std::uint32_t zres = crc32_z(~crc, value_bytes, sizeof(value_bytes));
+  std::uint32_t const crc = 0xbadcafe;
+  std::uint32_t const zres = crc32_z(~crc, value_bytes, sizeof(value_bytes));
   EXPECT_EQ(IntegerCrc32(crc, value), ~zres);
 }
 

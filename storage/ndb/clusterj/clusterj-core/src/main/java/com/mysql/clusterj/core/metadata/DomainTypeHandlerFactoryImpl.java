@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -58,9 +59,12 @@ public class DomainTypeHandlerFactoryImpl implements DomainTypeHandlerFactory {
                 DomainTypeHandlerFactory.class, 
                 DOMAIN_TYPE_HANDLER_FACTORY_IMPL_CLASS_LOADER,
                 domainTypeHandlerFactoryErrorMessages);
-        logger.info("Found " + domainTypeHandlerFactories.size() + " DomainTypeHandlerFactories");
-        for (DomainTypeHandlerFactory factory: domainTypeHandlerFactories) {
-            logger.info(factory.toString());
+        if(logger.isDebugEnabled()) {
+            String msg = "Found " + domainTypeHandlerFactories.size() +
+                         " DomainTypeHandlerFactories:";
+            for (DomainTypeHandlerFactory factory: domainTypeHandlerFactories)
+                msg += " " + factory.toString();
+            logger.debug(msg);
         }
     }
 
@@ -95,15 +99,6 @@ public class DomainTypeHandlerFactoryImpl implements DomainTypeHandlerFactory {
         } catch (Exception e) {
             errorMessages.append(e.toString());
             throw new ClusterJUserException(errorMessages.toString(), e);
-        } finally {
-            // if handler is null, there may be a problem with the schema, so remove it from the local dictionary
-            if (handler == null) {
-                String tableName = DomainTypeHandlerImpl.getTableName(domainClass);
-                if (tableName != null) {
-                    logger.info(local.message("MSG_Removing_Schema", tableName, domainClass.getName()));
-                    dictionary.removeCachedTable(tableName);                    
-                }
-            }
         }
     }
 

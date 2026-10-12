@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -49,8 +50,9 @@ this program; if not, write to the Free Software Foundation, Inc.,
 @param[in]  end_ptr  buffer end
 @param[out] index    own: dummy index
 @return parsed record end, NULL if not a complete record */
-[[nodiscard]] static byte *mlog_parse_index_v1(byte *ptr, const byte *end_ptr,
-                                               dict_index_t **index);
+[[nodiscard]] static const byte *mlog_parse_index_v1(const byte *ptr,
+                                                     const byte *end_ptr,
+                                                     dict_index_t **index);
 
 /** Catenates n bytes to the mtr log.
 @param[in] mtr Mini-transaction
@@ -99,9 +101,10 @@ void mlog_write_initial_log_record(
 @param[out]     id              table id
 @param[out]     version         table dynamic metadata version
 @return parsed record end, NULL if not a complete record */
-byte *mlog_parse_initial_dict_log_record(const byte *ptr, const byte *end_ptr,
-                                         mlog_id_t *type, table_id_t *id,
-                                         uint64_t *version) {
+const byte *mlog_parse_initial_dict_log_record(const byte *ptr,
+                                               const byte *end_ptr,
+                                               mlog_id_t *type, table_id_t *id,
+                                               uint64_t *version) {
   if (end_ptr < ptr + 1) {
     return (nullptr);
   }
@@ -123,12 +126,12 @@ byte *mlog_parse_initial_dict_log_record(const byte *ptr, const byte *end_ptr,
 
   *version = mach_parse_u64_much_compressed(&ptr, end_ptr);
 
-  return (const_cast<byte *>(ptr));
+  return ptr;
 }
 
 /** Parses an initial log record written by mlog_write_initial_log_record.
  @return parsed record end, NULL if not a complete record */
-byte *mlog_parse_initial_log_record(
+const byte *mlog_parse_initial_log_record(
     const byte *ptr,     /*!< in: buffer */
     const byte *end_ptr, /*!< in: buffer end */
     mlog_id_t *type,     /*!< out: log record type: MLOG_1BYTE, ... */
@@ -154,12 +157,12 @@ byte *mlog_parse_initial_log_record(
     *page_no = mach_parse_compressed(&ptr, end_ptr);
   }
 
-  return (const_cast<byte *>(ptr));
+  return ptr;
 }
 
 /** Parses a log record written by mlog_write_ulint or mlog_write_ull.
  @return parsed record end, NULL if not a complete record or a corrupt record */
-byte *mlog_parse_nbytes(
+const byte *mlog_parse_nbytes(
     mlog_id_t type,      /*!< in: log record type: MLOG_1BYTE, ... */
     const byte *ptr,     /*!< in: buffer */
     const byte *end_ptr, /*!< in: buffer end */
@@ -201,7 +204,7 @@ byte *mlog_parse_nbytes(
       mach_write_to_8(page + offset, dval);
     }
 
-    return (const_cast<byte *>(ptr));
+    return ptr;
   }
 
   val = mach_parse_compressed(&ptr, end_ptr);
@@ -247,7 +250,7 @@ byte *mlog_parse_nbytes(
       ptr = nullptr;
   }
 
-  return (const_cast<byte *>(ptr));
+  return ptr;
 }
 
 /** Writes 1, 2 or 4 bytes to a file page. Writes the corresponding log
@@ -371,11 +374,11 @@ void mlog_log_string(byte *ptr,  /*!< in: pointer written to */
 
 /** Parses a log record written by mlog_write_string.
  @return parsed record end, NULL if not a complete record */
-byte *mlog_parse_string(
-    byte *ptr,      /*!< in: buffer */
-    byte *end_ptr,  /*!< in: buffer end */
-    byte *page,     /*!< in: page where to apply the log record, or NULL */
-    void *page_zip) /*!< in/out: compressed page, or NULL */
+const byte *mlog_parse_string(
+    const byte *ptr,     /*!< in: buffer */
+    const byte *end_ptr, /*!< in: buffer end */
+    byte *page,          /*!< in: page where to apply the log record, or NULL */
+    void *page_zip)      /*!< in/out: compressed page, or NULL */
 {
   ulint offset;
   ulint len;
@@ -413,99 +416,6 @@ byte *mlog_parse_string(
   return (ptr + len);
 }
 
-byte *mlog_parse_index_8027(byte *ptr, const byte *end_ptr, bool comp,
-                            dict_index_t **index) {
-  ulint i;
-  dict_table_t *table;
-  dict_index_t *ind;
-  bool instant = false;
-  uint16_t n, n_uniq;
-  uint16_t n_inst_cols = 0;
-
-  if (comp) {
-    if (end_ptr < ptr + 4) {
-      return (nullptr);
-    }
-    n = mach_read_from_2(ptr);
-    ptr += 2;
-    if ((n & 0x8000) != 0) {
-      /* This is instant fields,
-      see also mlog_open_and_write_index() */
-      instant = true;
-      n_inst_cols = n & ~0x8000;
-      n = mach_read_from_2(ptr);
-      ptr += 2;
-      ut_ad((n & 0x8000) == 0);
-      ut_ad(n_inst_cols <= n);
-
-      if (end_ptr < ptr + 2) {
-        return (nullptr);
-      }
-    }
-    n_uniq = mach_read_from_2(ptr);
-    ptr += 2;
-    ut_ad(n_uniq <= n);
-    if (end_ptr < ptr + n * 2) {
-      return (nullptr);
-    }
-  } else {
-    n = n_uniq = 1;
-  }
-  table = dict_mem_table_create("LOG_DUMMY", DICT_HDR_SPACE, n, 0, 0,
-                                comp ? DICT_TF_COMPACT : 0, 0);
-  if (instant) {
-    table->set_instant_cols(n_inst_cols);
-  }
-
-  ind = dict_mem_index_create("LOG_DUMMY", "LOG_DUMMY", DICT_HDR_SPACE, 0, n);
-  ind->table = table;
-  ind->n_uniq = (unsigned int)n_uniq;
-  if (n_uniq != n) {
-    ut_a(n_uniq + DATA_ROLL_PTR <= n);
-    ind->type = DICT_CLUSTERED;
-  }
-  if (comp) {
-    for (i = 0; i < n; i++) {
-      ulint len = mach_read_from_2(ptr);
-      ptr += 2;
-      /* The high-order bit of len is the NOT NULL flag;
-      the rest is 0 or 0x7fff for variable-length fields,
-      and 1..0x7ffe for fixed-length fields. */
-      dict_mem_table_add_col(
-          table, nullptr, nullptr,
-          ((len + 1) & 0x7fff) <= 1 ? DATA_BINARY : DATA_FIXBINARY,
-          len & 0x8000 ? DATA_NOT_NULL : 0, len & 0x7fff, true);
-
-      /* The is_ascending flag does not matter during
-      redo log apply, because we do not compare for
-      "less than" or "greater than". */
-      dict_index_add_col(ind, table, table->get_col(i), 0, true);
-    }
-    dict_table_add_system_columns(table, table->heap);
-    if (n_uniq != n) {
-      /* Identify DB_TRX_ID and DB_ROLL_PTR in the index. */
-      ut_a(DATA_TRX_ID_LEN == ind->get_col(DATA_TRX_ID - 1 + n_uniq)->len);
-      ut_a(DATA_ROLL_PTR_LEN == ind->get_col(DATA_ROLL_PTR - 1 + n_uniq)->len);
-      ind->fields[DATA_TRX_ID - 1 + n_uniq].col = &table->cols[n + DATA_TRX_ID];
-      ind->fields[DATA_ROLL_PTR - 1 + n_uniq].col =
-          &table->cols[n + DATA_ROLL_PTR];
-    }
-
-    if (ind->is_clustered() && ind->table->has_instant_cols()) {
-      ind->instant_cols = true;
-      ind->n_instant_nullable =
-          ind->get_n_nullable_before(ind->get_instant_fields());
-    } else {
-      ind->instant_cols = false;
-      ind->n_instant_nullable = ind->n_nullable;
-    }
-  }
-  /* avoid ut_ad(index->cached) in dict_index_get_n_unique_in_tree */
-  ind->cached = true;
-  *index = ind;
-  return (ptr);
-}
-
 #ifndef UNIV_HOTBACKUP
 /* logical_pos 2 bytes, phy_pos 2 bytes, v_added 1 byte, v_dropped 1 byte */
 constexpr size_t inst_col_info_size = 6;
@@ -517,12 +427,15 @@ constexpr size_t inst_col_info_size = 6;
 @param[in]   is_comp       true if COMP
 @param[in]   is_versioned  if table has row versions
 @param[in]   is_instant    true if table has INSTANT cols
+@param[in]   fields_with_changed_order bitmap to indicate fields with changed
+                                       order
 @param[out]  size_needed   total size needed on REDO LOG */
 static void log_index_get_size_needed(const dict_index_t *index, size_t size,
                                       uint16_t n, bool is_comp,
                                       bool is_versioned, bool is_instant,
+                                      const bool *fields_with_changed_order,
                                       size_t &size_needed) {
-  auto size_for_versioned_fields = [](const dict_index_t *ind) {
+  auto size_for_versioned_fields = [&](const dict_index_t *ind) {
     size_t _size = 0;
     /* 2 bytes for number of columns with version */
     _size += 2;
@@ -532,6 +445,16 @@ static void log_index_get_size_needed(const dict_index_t *index, size_t size,
     ut_ad(n_versioned_fields != 0);
 
     _size += n_versioned_fields * inst_col_info_size;
+
+    /* For fields with changed order */
+    size_t n_changed_order_fields = 0;
+    for (size_t i = 0; i < n; i++) {
+      if (fields_with_changed_order[i]) {
+        n_changed_order_fields++;
+      }
+    }
+    _size += n_changed_order_fields * inst_col_info_size;
+
     return (_size);
   };
 
@@ -624,12 +547,9 @@ static void log_index_column_counts(const dict_index_t *index, uint16_t n,
   }
 
   /* log n_uniq */
-  uint16_t n_uniq;
-  if (page_is_leaf(page_align(rec))) {
-    n_uniq = dict_index_get_n_unique_in_tree(index);
-  } else {
-    n_uniq = dict_index_get_n_unique_in_tree_nonleaf(index);
-  }
+  const auto n_uniq = page_is_leaf(page_align(rec))
+                          ? dict_index_get_n_unique_in_tree(index)
+                          : dict_index_get_n_unique_in_tree_nonleaf(index);
   ut_ad(n_uniq <= n);
   mach_write_to_2(log_ptr, n_uniq);
   log_ptr += 2;
@@ -670,11 +590,12 @@ template <typename F>
 @param[in]  n             number of fields
 @param[in]  is_versioned  true if table has row versions
 @param[in,out]  f         vector of fields with versions
+@param[in]  changed_order array indicating fields changed position
 @param[in]  log_ptr       log buffer pointer
 @param[in]  func          callback to check size reopen log buffer */
 static bool log_index_fields(const dict_index_t *index, uint16_t n,
                              bool is_versioned, std::vector<dict_field_t *> &f,
-                             byte *&log_ptr, F &func) {
+                             bool *changed_order, byte *&log_ptr, F &func) {
   /* Write metadata for each field. Log the fields in their logical order. */
   for (size_t i = 0; i < n; i++) {
     dict_field_t *field = index->get_field(i);
@@ -699,7 +620,8 @@ static bool log_index_fields(const dict_index_t *index, uint16_t n,
     log_ptr += 2;
 
     if (is_versioned) {
-      if (col->is_instant_added() || col->is_instant_dropped()) {
+      if (col->is_instant_added() || col->is_instant_dropped() ||
+          changed_order[i]) {
         f.push_back(field);
       }
     }
@@ -741,7 +663,7 @@ static bool log_index_versioned_fields(const std::vector<dict_field_t *> &f,
            | 16th bit indicates add version info follows. */
     uint16_t phy_pos = field->get_phy_pos();
 
-    ut_ad(field->col->is_instant_added() || field->col->is_instant_dropped());
+    /* It also might be accompanying column order change (!added&&!dropped) */
 
     if (field->col->is_instant_added()) {
       /* Set 16th bit in phy_pos to indicate presence of version added */
@@ -799,9 +721,33 @@ bool mlog_open_and_write_index(mtr_t *mtr, const byte *rec,
     n = DICT_INDEX_SPATIAL_NODEPTR_SIZE;
   }
 
+  /* Ordinal position of an existing field can't be changed with INSTANT
+  algorithm. But when it is combined with ADD/DROP COLUMN, ordinal position
+  of a filed can be changed. This bool array of size #fields in index,
+  represents if ordinal position of an existing filed is changed. */
+  bool *fields_with_changed_order = nullptr;
+  if (is_versioned) {
+    fields_with_changed_order = new bool[n];
+    memset(fields_with_changed_order, false, (sizeof(bool) * n));
+
+    uint16_t phy_pos = 0;
+    for (size_t i = 0; i < n; i++) {
+      dict_field_t *field = index->get_field(i);
+      const dict_col_t *col = field->col;
+
+      if (col->is_instant_added() || col->is_instant_dropped()) {
+        continue;
+      } else if (field->get_phy_pos() >= phy_pos) {
+        phy_pos = field->get_phy_pos();
+      } else {
+        fields_with_changed_order[i] = true;
+      }
+    }
+  }
+
   size_t size_needed = 0;
   log_index_get_size_needed(index, size, n, is_comp, is_versioned, is_instant,
-                            size_needed);
+                            fields_with_changed_order, size_needed);
   size_t total = size_needed;
   size_t alloc = total;
   if (alloc > mtr_buf_t::MAX_DATA_SIZE) {
@@ -809,6 +755,9 @@ bool mlog_open_and_write_index(mtr_t *mtr, const byte *rec,
   }
 
   if (!mlog_open(mtr, alloc, log_ptr)) {
+    if (is_versioned) {
+      delete[] fields_with_changed_order;
+    }
     /* logging is disabled */
     return (false);
   }
@@ -849,17 +798,25 @@ bool mlog_open_and_write_index(mtr_t *mtr, const byte *rec,
   if (is_comp) {
     /* Write fields info. */
     if (!log_index_fields(index, n, is_versioned, instant_fields_to_log,
-                          log_ptr, f)) {
+                          fields_with_changed_order, log_ptr, f)) {
+      if (is_versioned) {
+        delete[] fields_with_changed_order;
+      }
       return false;
     }
   } else if (is_versioned) {
     for (size_t i = 0; i < n; i++) {
       dict_field_t *field = index->get_field(i);
       const dict_col_t *col = field->col;
-      if (col->is_instant_added() || col->is_instant_dropped()) {
+      if (col->is_instant_added() || col->is_instant_dropped() ||
+          fields_with_changed_order[i]) {
         instant_fields_to_log.push_back(field);
       }
     }
+  }
+
+  if (is_versioned) {
+    delete[] fields_with_changed_order;
   }
 
   if (!instant_fields_to_log.empty()) {
@@ -889,7 +846,8 @@ bool mlog_open_and_write_index(mtr_t *mtr, const byte *rec,
 @param[in]   ptr      pointer to buffer
 @param[in]   end_ptr  pointer to end of buffer
 @param[out]  val      read 2 bytes value */
-static byte *read_2_bytes(byte *ptr, const byte *end_ptr, uint16_t &val) {
+static const byte *read_2_bytes(const byte *ptr, const byte *end_ptr,
+                                uint16_t &val) {
   if (end_ptr < ptr + 2) {
     return (nullptr);
   }
@@ -898,11 +856,12 @@ static byte *read_2_bytes(byte *ptr, const byte *end_ptr, uint16_t &val) {
   return ptr;
 }
 
-/** Read 1 bytes from log buffer.
+/** Read 1 byte from log buffer.
 @param[in]   ptr      pointer to buffer
 @param[in]   end_ptr  pointer to end of buffer
-@param[out]  val      read 2 bytes value */
-static byte *read_1_bytes(byte *ptr, const byte *end_ptr, uint8_t &val) {
+@param[out]  val      read 1 byte value */
+static const byte *read_1_byte(const byte *ptr, const byte *end_ptr,
+                               uint8_t &val) {
   if (end_ptr < ptr + 1) {
     return (nullptr);
   }
@@ -921,10 +880,11 @@ static byte *read_1_bytes(byte *ptr, const byte *end_ptr, uint8_t &val) {
 @param[out]  n_uniq        n_uniq for index
 @param[out]  inst_cols     number of column before first instant add was done.
 @return pointer to buffer. */
-static byte *parse_index_column_counts(byte *ptr, const byte *end_ptr,
-                                       bool is_comp, bool is_versioned,
-                                       bool is_instant, uint16_t &n,
-                                       uint16_t &n_uniq, uint16_t &inst_cols) {
+static const byte *parse_index_column_counts(const byte *ptr,
+                                             const byte *end_ptr, bool is_comp,
+                                             bool is_versioned, bool is_instant,
+                                             uint16_t &n, uint16_t &n_uniq,
+                                             uint16_t &inst_cols) {
   if (!is_versioned && !is_comp) {
     n = n_uniq = 1;
     inst_cols = 0;
@@ -967,9 +927,10 @@ static byte *parse_index_column_counts(byte *ptr, const byte *end_ptr,
 @param[in,out]   ind      dummy index
 @param[in,out]   table    dummy table
 @return pointer to log buffer */
-static byte *parse_index_fields(byte *ptr, const byte *end_ptr, uint16_t n,
-                                uint16_t n_uniq, bool is_versioned,
-                                dict_index_t *&ind, dict_table_t *&table) {
+static const byte *parse_index_fields(const byte *ptr, const byte *end_ptr,
+                                      uint16_t n, uint16_t n_uniq,
+                                      bool is_versioned, dict_index_t *&ind,
+                                      dict_table_t *&table) {
   for (size_t i = 0; i < n; i++) {
     /* For redundant, col len metadata isn't needed for recovery as it is
     part of record itself. */
@@ -980,8 +941,8 @@ static byte *parse_index_fields(byte *ptr, const byte *end_ptr, uint16_t n,
     }
 
     uint32_t phy_pos = UINT32_UNDEFINED;
-    uint8_t v_added = UINT8_UNDEFINED;
-    uint8_t v_dropped = UINT8_UNDEFINED;
+    row_version_t v_added = INVALID_ROW_VERSION;
+    row_version_t v_dropped = INVALID_ROW_VERSION;
 
     /* The high-order bit of len is the NOT NULL flag;
     the rest is 0 or 0x7fff for variable-length fields,
@@ -1022,8 +983,8 @@ static byte *parse_index_fields(byte *ptr, const byte *end_ptr, uint16_t n,
 struct Field_instant_info {
   uint16_t logical_pos{UINT16_UNDEFINED};
   uint16_t phy_pos{UINT16_UNDEFINED};
-  uint8_t v_added{UINT8_UNDEFINED};
-  uint8_t v_dropped{UINT8_UNDEFINED};
+  row_version_t v_added{INVALID_ROW_VERSION};
+  row_version_t v_dropped{INVALID_ROW_VERSION};
 };
 
 using instant_fields_list_t = std::vector<Field_instant_info>;
@@ -1034,9 +995,11 @@ using instant_fields_list_t = std::vector<Field_instant_info>;
 @param[out]  f         vector of fields with versions
 @param[out]  crv       current row version
 @param[out]  n_dropped number of dropped columns */
-static byte *parse_index_versioned_fields(byte *ptr, const byte *end_ptr,
-                                          instant_fields_list_t &f,
-                                          uint16_t &crv, size_t &n_dropped) {
+static const byte *parse_index_versioned_fields(const byte *ptr,
+                                                const byte *end_ptr,
+                                                instant_fields_list_t &f,
+                                                uint16_t &crv,
+                                                size_t &n_dropped) {
   uint16_t n_inst = 0;
   ptr = read_2_bytes(ptr, end_ptr, n_inst);
   if (ptr == nullptr) return (nullptr);
@@ -1054,21 +1017,29 @@ static byte *parse_index_versioned_fields(byte *ptr, const byte *end_ptr,
     if ((info.phy_pos & 0x8000) != 0) {
       info.phy_pos &= ~0x8000;
 
+      uint8_t version{0};
       /* Read v_added */
-      ptr = read_1_bytes(ptr, end_ptr, info.v_added);
-      if (ptr == nullptr) return (nullptr);
-      ut_ad(info.v_added != UINT8_UNDEFINED);
-      crv = std::max(crv, (uint16_t)info.v_added);
+      ptr = read_1_byte(ptr, end_ptr, version);
+      if (ptr == nullptr) {
+        return nullptr;
+      }
+
+      info.v_added = static_cast<row_version_t>(version);
+      crv = std::max(crv, info.v_added);
     }
 
     if ((info.phy_pos & 0x4000) != 0) {
       info.phy_pos &= ~0x4000;
 
+      uint8_t version{0};
       /* Read v_dropped */
-      ptr = read_1_bytes(ptr, end_ptr, info.v_dropped);
-      if (ptr == nullptr) return (nullptr);
-      ut_ad(info.v_dropped != UINT8_UNDEFINED);
-      crv = std::max(crv, (uint16_t)info.v_dropped);
+      ptr = read_1_byte(ptr, end_ptr, version);
+      if (ptr == nullptr) {
+        return nullptr;
+      }
+
+      info.v_dropped = static_cast<row_version_t>(version);
+      crv = std::max(crv, info.v_dropped);
       n_dropped++;
     }
 
@@ -1094,9 +1065,8 @@ static void update_instant_info(instant_fields_list_t f, dict_index_t *index) {
   size_t n_dropped = 0;
 
   for (auto field : f) {
-    bool is_added = field.v_added != UINT8_UNDEFINED;
-    bool is_dropped = field.v_dropped != UINT8_UNDEFINED;
-    ut_ad(is_added || is_dropped);
+    bool is_added = field.v_added != INVALID_ROW_VERSION;
+    bool is_dropped = field.v_dropped != INVALID_ROW_VERSION;
 
     dict_col_t *col = index->fields[field.logical_pos].col;
 
@@ -1133,8 +1103,8 @@ static void populate_dummy_fields(dict_index_t *index, dict_table_t *table,
   ut_ad(!is_comp);
 
   uint32_t phy_pos = UINT32_UNDEFINED;
-  uint8_t v_added = UINT8_UNDEFINED;
-  uint8_t v_dropped = UINT8_UNDEFINED;
+  row_version_t v_added = INVALID_ROW_VERSION;
+  row_version_t v_dropped = INVALID_ROW_VERSION;
   size_t dummy_len = 10;
 
   for (size_t i = 0; i < n; i++) {
@@ -1147,21 +1117,18 @@ static void populate_dummy_fields(dict_index_t *index, dict_table_t *table,
       n;
 }
 
-static byte *parse_index_log_version(byte *ptr, const byte *end_ptr,
-                                     uint8_t &version) {
-  ptr = read_1_bytes(ptr, end_ptr, version);
-  if (ptr == nullptr) return nullptr;
-
-  return ptr;
-}
-static byte *parse_index_flag(byte *ptr, const byte *end_ptr, uint8_t &flag) {
-  ptr = read_1_bytes(ptr, end_ptr, flag);
-  if (ptr == nullptr) return nullptr;
-
-  return ptr;
+static const byte *parse_index_log_version(const byte *ptr, const byte *end_ptr,
+                                           uint8_t &version) {
+  return read_1_byte(ptr, end_ptr, version);
 }
 
-byte *mlog_parse_index(byte *ptr, const byte *end_ptr, dict_index_t **index) {
+static const byte *parse_index_flag(const byte *ptr, const byte *end_ptr,
+                                    uint8_t &flag) {
+  return read_1_byte(ptr, end_ptr, flag);
+}
+
+const byte *mlog_parse_index(const byte *ptr, const byte *end_ptr,
+                             dict_index_t **index) {
   /* Read the 1 byte for index log version */
   uint8_t index_log_version = 0;
   ptr = parse_index_log_version(ptr, end_ptr, index_log_version);
@@ -1169,10 +1136,9 @@ byte *mlog_parse_index(byte *ptr, const byte *end_ptr, dict_index_t **index) {
     return nullptr;
   }
 
-  byte *ret = nullptr;
   switch (index_log_version) {
     case INDEX_LOG_VERSION_CURRENT:
-      ret = mlog_parse_index_v1(ptr, end_ptr, index);
+      ptr = mlog_parse_index_v1(ptr, end_ptr, index);
       break;
     case INDEX_LOG_VERSION_0:
       /* INDEX_LOG_VERSION_0 is used in 8.0.29 and in 8.0.30 REDO log format
@@ -1185,11 +1151,11 @@ byte *mlog_parse_index(byte *ptr, const byte *end_ptr, dict_index_t **index) {
                 (unsigned int)INDEX_LOG_VERSION_MAX);
   }
 
-  return ret;
+  return ptr;
 }
 
-static byte *mlog_parse_index_v1(byte *ptr, const byte *end_ptr,
-                                 dict_index_t **index) {
+static const byte *mlog_parse_index_v1(const byte *ptr, const byte *end_ptr,
+                                       dict_index_t **index) {
   /* Read the 1 byte flag */
   uint8_t flag = 0;
   ptr = parse_index_flag(ptr, end_ptr, flag);
@@ -1280,9 +1246,6 @@ static byte *mlog_parse_index_v1(byte *ptr, const byte *end_ptr,
         field->col->set_phy_pos(phy_pos);
         phy_pos_bitmap[phy_pos] = true;
       } else {
-        ut_ad(field->col->is_instant_added() ||
-              field->col->is_instant_dropped());
-
         if (field->col->is_instant_added() &&
             !field->col->is_instant_dropped()) {
           shift_count--;

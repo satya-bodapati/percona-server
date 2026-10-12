@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -30,11 +31,14 @@
 static SERVICE_TYPE_NO_CONST(pfs_plugin_table_v1) *pfs_table = nullptr;
 SERVICE_TYPE_NO_CONST(pfs_plugin_column_string_v2) *pfscol_string = nullptr;
 SERVICE_TYPE_NO_CONST(pfs_plugin_column_enum_v1) *pfscol_enum = nullptr;
+SERVICE_TYPE_NO_CONST(pfs_plugin_column_bigint_v1) *pfscol_bigint = nullptr;
 
 extern PFS_engine_table_share_proxy *ndb_sync_pending_objects_share;
 extern PFS_engine_table_share_proxy *ndb_sync_excluded_objects_share;
-static PFS_engine_table_share_proxy *pfs_proxy_shares[2] = {
-    ndb_sync_pending_objects_share, ndb_sync_excluded_objects_share};
+extern PFS_engine_table_share_proxy *ndb_replica_status_table_share;
+static PFS_engine_table_share_proxy *pfs_proxy_shares[3] = {
+    ndb_sync_pending_objects_share, ndb_sync_excluded_objects_share,
+    ndb_replica_status_table_share};
 
 PSI_memory_key key_memory_thd_ndb_batch_mem_root;
 PSI_memory_key key_memory_ndb_dd_client_mem_root;
@@ -62,17 +66,22 @@ bool ndb_pfs_init() {
     return true;
   if (services.acquire_service(pfscol_enum, "pfs_plugin_column_enum_v1"))
     return true;
+  if (services.acquire_service(pfscol_bigint, "pfs_plugin_column_bigint_v1"))
+    return true;
 
-  return pfs_table->add_tables(pfs_proxy_shares, 2);
+  return pfs_table->add_tables(pfs_proxy_shares,
+                               array_elements(pfs_proxy_shares));
 }
 
 void ndb_pfs_deinit() {
   if (pfs_table) {
-    static_cast<void>(pfs_table->delete_tables(pfs_proxy_shares, 2));
+    static_cast<void>(pfs_table->delete_tables(
+        pfs_proxy_shares, array_elements(pfs_proxy_shares)));
   }
 
   Ndb_mysql_services services;
   services.release_service(pfs_table);
   services.release_service(pfscol_string);
   services.release_service(pfscol_enum);
+  services.release_service(pfscol_bigint);
 }

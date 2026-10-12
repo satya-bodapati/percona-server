@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -43,18 +44,24 @@ MockNG::MockNG(
   ms1.port = 3306;
   ms1.xport = 33060;
   ms1.mode = metadata_cache::ServerMode::ReadWrite;
+  ms1.label = ms1.host + ":" + std::to_string(ms1.port);
+  ms1.tags = {};
 
   ms2.mysql_server_uuid = "instance-2";
   ms2.host = "host-2";
   ms2.port = 3306;
   ms2.xport = 33060;
   ms2.mode = metadata_cache::ServerMode::ReadOnly;
+  ms2.label = ms2.host + ":" + std::to_string(ms2.port);
+  ms2.tags = {};
 
   ms3.mysql_server_uuid = "instance-3";
   ms3.host = "host-3";
   ms3.port = 3306;
   ms3.xport = 33060;
   ms3.mode = metadata_cache::ServerMode::ReadOnly;
+  ms3.label = ms3.host + ":" + std::to_string(ms3.port);
+  ms3.tags = {};
 
   cluster_instances_vector.push_back(ms1);
   cluster_instances_vector.push_back(ms2);
@@ -89,7 +96,7 @@ MockNG::fetch_cluster_topology(
     const unsigned /*router_id*/,
     const metadata_cache::metadata_servers_list_t & /*metadata_servers*/,
     bool /* needs_writable_node */, const string & /*clusterset_id*/,
-    bool /*whole_topology*/, size_t & /*instance_id*/) {
+    size_t & /*instance_id*/, std::string & /*guidelines*/) {
   return cluster_topology;
 }
 

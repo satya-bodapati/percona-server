@@ -1,15 +1,16 @@
-/* Copyright (c) 2012, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -63,7 +64,10 @@ using std::string;
 using std::vector;
 using ::testing::NiceMock;
 
-static const uint MAX_TABLE_COLUMNS = sizeof(int) * 8;
+static const uint MAX_TABLE_COLUMNS = 1024;
+/// A buffer with enough space for a bit for every column.
+using BitSetBuffer = unsigned[(MAX_TABLE_COLUMNS + sizeof(unsigned) * 8 - 1) /
+                              (sizeof(unsigned) * 8)];
 
 /*
   A fake class for setting up Table_ref object, required for table id
@@ -79,7 +83,7 @@ class Fake_Table_ref : public Table_ref {
   A fake class to make setting up a TABLE object a little easier.
 */
 class Fake_TABLE_SHARE : public TABLE_SHARE {
-  uint32 all_set_buf;
+  BitSetBuffer all_set_buf;
 
  public:
   /**
@@ -92,13 +96,13 @@ class Fake_TABLE_SHARE : public TABLE_SHARE {
     fields = number_of_columns;
     db_create_options = 0;
     primary_key = 0;
-    column_bitmap_size = sizeof(int);
+    column_bitmap_size = sizeof(BitSetBuffer);
     tmp_table = NO_TMP_TABLE;
     db_low_byte_first = true;
     path.str = const_cast<char *>(fakepath);
     path.length = strlen(path.str);
 
-    EXPECT_EQ(0, bitmap_init(&all_set, &all_set_buf, fields));
+    EXPECT_EQ(0, bitmap_init(&all_set, all_set_buf, fields));
     bitmap_set_above(&all_set, 0, true);
   }
   ~Fake_TABLE_SHARE() = default;
@@ -117,16 +121,16 @@ class Fake_TABLE : public TABLE {
   KEY_PART_INFO m_key_part_infos[max_keys][8];
 
   uchar m_record[MAX_FIELD_WIDTH * MAX_TABLE_COLUMNS];
-  uchar m_null_flags[MAX_TABLE_COLUMNS + 7 / 8];
+  uchar m_null_flags[(MAX_TABLE_COLUMNS + 7) / 8];
 
   Fake_TABLE_SHARE table_share;
   // Storage space for the handler's handlerton
   Fake_handlerton fake_handlerton;
   MY_BITMAP write_set_struct;
-  uint32 write_set_buf;
+  BitSetBuffer write_set_buf;
   MY_BITMAP read_set_struct;
-  uint32 read_set_buf;
-  uint32 tmp_set_buf;
+  BitSetBuffer read_set_buf;
+  BitSetBuffer tmp_set_buf;
   Field *m_field_array[MAX_TABLE_COLUMNS]{};
 
   // Counter for creating unique index id's. See create_index().
@@ -149,9 +153,9 @@ class Fake_TABLE : public TABLE {
     pos_in_table_list->table = this;
     pos_in_table_list->query_block =
         new (&mem_root) Query_block(&mem_root, nullptr, nullptr);
-    EXPECT_EQ(0, bitmap_init(write_set, &write_set_buf, s->fields));
-    EXPECT_EQ(0, bitmap_init(read_set, &read_set_buf, s->fields));
-    EXPECT_EQ(0, bitmap_init(&tmp_set, &tmp_set_buf, s->fields));
+    EXPECT_EQ(0, bitmap_init(write_set, write_set_buf, s->fields));
+    EXPECT_EQ(0, bitmap_init(read_set, read_set_buf, s->fields));
+    EXPECT_EQ(0, bitmap_init(&tmp_set, tmp_set_buf, s->fields));
     read_set_internal = *read_set;
 
     const_table = false;
@@ -162,7 +166,7 @@ class Fake_TABLE : public TABLE {
     memset(record[0], 0, sizeof(m_record));
     null_flags = m_null_flags;
     memset(null_flags, 0, sizeof(m_null_flags));
-    s->null_bytes = sizeof(m_null_flags);
+    s->null_bytes = (s->fields + 7) / 8;
     for (int i = 0; i < max_keys; i++)
       key_info[i].key_part = m_key_part_infos[i];
     highest_index_id = 0;
@@ -170,6 +174,10 @@ class Fake_TABLE : public TABLE {
     set_handler(&mock_handler);
     mock_handler.change_table_ptr(this, &table_share);
     field = m_field_array;
+
+    // Set some reasonable default statistics.
+    file->stats.block_size = 16384;
+    s->rec_buff_length = 128;  // Used for estimating index height.
   }
 
  public:
@@ -216,7 +224,7 @@ class Fake_TABLE : public TABLE {
   Fake_TABLE(int column_count, bool cols_nullable)
       : table_share(column_count),
         mock_handler(&fake_handlerton, &table_share) {
-    assert(static_cast<size_t>(column_count) <= sizeof(int) * 8);
+    assert(column_count <= static_cast<int>(MAX_TABLE_COLUMNS));
     initialize();
     for (int i = 0; i < column_count; ++i) {
       std::stringstream str;
@@ -262,7 +270,9 @@ class Fake_TABLE : public TABLE {
     */
   }
 
-  // Defines an index over column and generates a unique id.
+  // Defines an index over column and generates a unique id. The KEY object is
+  // default constructed so rec_per_key info will have to be specified manually
+  // in unit tests.
   int create_index(Field *column, ulong key_flags = 0) {
     return create_index({column}, key_flags);
   }
@@ -281,6 +291,9 @@ class Fake_TABLE : public TABLE {
       }
       column->set_flag(PART_KEY_FLAG);
       column->part_of_key.set_bit(index_id);
+      if (column->is_nullable()) {
+        key_flags |= HA_NULL_PART_KEY;
+      }
     }
 
     KEY &key = m_keys[index_id];

@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -703,7 +704,7 @@ int check_func_bool(THD *, SYS_VAR *, void *save, st_mysql_value *value) {
   if (value->value_type(value) == MYSQL_VALUE_TYPE_STRING) {
     length = sizeof(buff);
     if (!(str = value->val_str(value, buff, &length)) ||
-        (result = find_type(&bool_typelib, str, length, true) - 1) < 0)
+        (result = find_type(&bool_typelib, str, length, false) - 1) < 0)
       goto err;
   } else {
     if (value->val_int(value, &tmp) < 0) goto err;
@@ -1036,6 +1037,157 @@ void plugin_opt_set_limits(struct my_option *options, const SYS_VAR *opt) {
   options->arg_type = REQUIRED_ARG;
   if (opt->flags & PLUGIN_VAR_NOCMDARG) options->arg_type = NO_ARG;
   if (opt->flags & PLUGIN_VAR_OPCMDARG) options->arg_type = OPT_ARG;
+}
+
+/****************************************************************************
+  System Variables support
+****************************************************************************/
+
+/*
+  returns a bookmark for thd-local variables, creating if necessary.
+  returns null for non thd-local variables.
+  Requires that a write lock is obtained on LOCK_system_variables_hash
+*/
+st_bookmark *register_var(const char *plugin, const char *name, int flags) {
+  const size_t length = strlen(plugin) + strlen(name) + 3;
+  size_t size = 0, offset, new_size;
+  st_bookmark *result;
+  char *varname, *p;
+
+  if (!(flags & PLUGIN_VAR_THDLOCAL)) return nullptr;
+
+  switch (flags & PLUGIN_VAR_TYPEMASK) {
+    case PLUGIN_VAR_BOOL:
+      size = sizeof(bool);
+      break;
+    case PLUGIN_VAR_INT:
+      size = sizeof(int);
+      break;
+    case PLUGIN_VAR_LONG:
+    case PLUGIN_VAR_ENUM:
+      size = sizeof(long);
+      break;
+    case PLUGIN_VAR_LONGLONG:
+    case PLUGIN_VAR_SET:
+      size = sizeof(ulonglong);
+      break;
+    case PLUGIN_VAR_STR:
+      size = sizeof(char *);
+      break;
+    case PLUGIN_VAR_DOUBLE:
+      size = sizeof(double);
+      break;
+    default:
+      assert(0);
+      return nullptr;
+  };
+
+  varname = ((char *)my_alloca(length));
+  strxmov(varname + 1, plugin, "_", name, NullS);
+  for (p = varname + 1; *p; p++)
+    if (*p == '-') *p = '_';
+
+  if (!(result = find_bookmark(nullptr, varname + 1, flags))) {
+    result =
+        (st_bookmark *)plugin_mem_root.Alloc(sizeof(st_bookmark) + length - 1);
+    varname[0] = flags & PLUGIN_VAR_TYPEMASK;
+    memcpy(result->key, varname, length);
+    result->name_len = length - 2;
+    result->offset = -1;
+
+    assert(size && !(size & (size - 1))); /* must be power of 2 */
+
+    offset = global_system_variables.dynamic_variables_size;
+    offset = (offset + size - 1) & ~(size - 1);
+    result->offset = (int)offset;
+
+    new_size = (offset + size + 63) & ~63;
+
+    if (new_size > global_variables_dynamic_size) {
+      global_system_variables.dynamic_variables_ptr = (char *)my_realloc(
+          key_memory_global_system_variables,
+          global_system_variables.dynamic_variables_ptr, new_size,
+          MYF(MY_WME | MY_FAE | MY_ALLOW_ZERO_PTR));
+      max_system_variables.dynamic_variables_ptr = (char *)my_realloc(
+          key_memory_global_system_variables,
+          max_system_variables.dynamic_variables_ptr, new_size,
+          MYF(MY_WME | MY_FAE | MY_ALLOW_ZERO_PTR));
+      /*
+        Clear the new variable value space. This is required for string
+        variables. If their value is non-NULL, it must point to a valid
+        string.
+      */
+      memset(global_system_variables.dynamic_variables_ptr +
+                 global_variables_dynamic_size,
+             0, new_size - global_variables_dynamic_size);
+      memset(max_system_variables.dynamic_variables_ptr +
+                 global_variables_dynamic_size,
+             0, new_size - global_variables_dynamic_size);
+      global_variables_dynamic_size = new_size;
+    }
+
+    global_system_variables.dynamic_variables_head = offset;
+    max_system_variables.dynamic_variables_head = offset;
+    global_system_variables.dynamic_variables_size = offset + size;
+    max_system_variables.dynamic_variables_size = offset + size;
+    global_system_variables.dynamic_variables_version++;
+    max_system_variables.dynamic_variables_version++;
+
+    result->version = global_system_variables.dynamic_variables_version;
+
+    /* this should succeed because we have already checked if a dup exists */
+    std::string key(result->key, result->name_len + 1);
+    bookmark_hash->emplace(key, result);
+
+    /*
+      Hashing vars of string type with MEMALLOC flag.
+    */
+    if (((flags & PLUGIN_VAR_TYPEMASK) == PLUGIN_VAR_STR) &&
+        (flags & PLUGIN_VAR_MEMALLOC) &&
+        !malloced_string_type_sysvars_bookmark_hash->emplace(key, result)
+             .second) {
+      fprintf(stderr,
+              "failed to add placeholder to"
+              " hash of malloced string type sysvars");
+      assert(0);
+    }
+  }
+  return result;
+}
+
+/**
+  For correctness and simplicity's sake, a pointer to a function
+  must be compatible with pointed-to type, that is, the return and
+  parameters types must be the same. Thus, a callback function is
+  defined for each scalar type. The functions are assigned in
+  construct_options to their respective types.
+*/
+bool *mysql_sys_var_bool(THD *thd, int offset) {
+  return (bool *)intern_sys_var_ptr(thd, offset, true);
+}
+
+int *mysql_sys_var_int(THD *thd, int offset) {
+  return (int *)intern_sys_var_ptr(thd, offset, true);
+}
+
+unsigned int *mysql_sys_var_uint(THD *thd, int offset) {
+  return (unsigned int *)intern_sys_var_ptr(thd, offset, true);
+}
+
+unsigned long *mysql_sys_var_ulong(THD *thd, int offset) {
+  return (unsigned long *)intern_sys_var_ptr(thd, offset, true);
+}
+
+unsigned long long *mysql_sys_var_ulonglong(THD *thd, int offset) {
+  return (unsigned long long *)intern_sys_var_ptr(thd, offset, true);
+}
+
+char **mysql_sys_var_str(THD *thd, int offset) {
+  return (char **)intern_sys_var_ptr(thd, offset, true);
+}
+
+double *mysql_sys_var_double(THD *thd, int offset) {
+  return (double *)intern_sys_var_ptr(thd, offset, true);
 }
 
 static Item *alloc_and_copy_string(const char *str) {

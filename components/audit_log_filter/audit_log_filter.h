@@ -85,12 +85,12 @@ class AuditLogFilter {
   AuditLogReader *get_log_reader() noexcept;
 
   /**
-   * @brief Send Audit event to log upon plugin initialization.
+   * @brief Send startup audit event to log upon component initialization.
    */
   void send_audit_start_event() noexcept;
 
   /**
-   * @brief Send NoAudit event to log upon plugin de-initialization.
+   * @brief Send shutdown audit event to log upon component de-initialization.
    */
   void send_audit_stop_event() noexcept;
 
@@ -98,9 +98,19 @@ class AuditLogFilter {
   /**
    * @brief Handle filters flush request.
    *
+   * @param error_message Out-parameter for a human-readable error
    * @return true in case filters reloaded successfully, false otherwise
    */
-  bool on_audit_rule_flush_requested() noexcept;
+  bool on_audit_rule_flush_requested(std::string &error_message) noexcept;
+
+  /**
+   * @brief Mark the rule registry for lazy reload on the next audit event.
+   *
+   * Unlike on_audit_rule_flush_requested(), this does not open tables and
+   * is safe to call from contexts that hold LOCK_plugin (e.g. sysvar update
+   * callbacks).
+   */
+  void invalidate_audit_rules() noexcept;
 
   /**
    * @brief Handle log files pruning request.
@@ -137,6 +147,58 @@ class AuditLogFilter {
    */
   bool get_connection_user(Security_context_handle &ctx, std::string &user_name,
                            std::string &user_host) noexcept;
+
+  /**
+   * @brief Retrieves a named option from a security context.
+   *
+   * This function queries the security context for a specific option (e.g.,
+   * "user", "host", "ip") and returns its value as a std::string. If the option
+   * is missing or cannot be retrieved, the function returns false.
+   *
+   * @param ctx   Security context handle from which to read the option.
+   * @param name  Name of the option to retrieve (e.g., "user", "host").
+   * @param value Output string that receives the option value on success.
+   *
+   * @return true on success, false if the option cannot be retrieved.
+   */
+  bool get_security_context_option(Security_context_handle &ctx,
+                                   const std::string &name,
+                                   std::string &value) noexcept;
+
+  /**
+   * @brief Retrieves the SQL text associated with a THD.
+   *
+   * This function accesses the "sql_text" THD attribute and returns the query
+   * text as a std::string. If the attribute is missing, null, or cannot be
+   * retrieved, an empty string is returned.
+   *
+   * @param thd Thread handle (THD) from which to extract SQL text.
+   *
+   * @return SQL text string, or an empty string on failure.
+   */
+  std::string get_sql_text(MYSQL_THD thd);
+
+  /**
+   * @brief Populates extended audit information for a record.
+   *
+   * This function extracts relevant information from the thread handle (THD)
+   * and security context and populates the `extended_info` fields of an
+   * audit record. Required attributes include user, host, and IP.
+   *
+   * @param thd    Thread handle associated with the audit event.
+   * @param sctx   Security context associated with the thread.
+   * @param record Audit record to be populated.
+   *
+   * @return true on success, false if required information cannot be retrieved.
+   */
+  bool set_extended_info(MYSQL_THD thd, Security_context_handle sctx,
+                         AuditRecordTableAccess &record);
+  bool set_extended_info(MYSQL_THD thd, Security_context_handle sctx,
+                         AuditRecordQuery &record);
+  bool set_extended_info(MYSQL_THD thd, Security_context_handle sctx,
+                         AuditRecordMessage &record);
+  bool set_extended_info(MYSQL_THD thd, Security_context_handle sctx,
+                         AuditRecordGeneral &record);
 
   /**
    * @brief Check if user has AUDIT_ABORT_EXEMPT privilege assigned

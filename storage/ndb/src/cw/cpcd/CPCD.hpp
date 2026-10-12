@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2003, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,7 +26,7 @@
 #ifndef CPCD_HPP
 #define CPCD_HPP
 
-#include <time.h>
+#include <ctime>
 
 #include <NdbCondition.h>
 #include <NdbThread.h>
@@ -153,8 +154,7 @@ class CPCD {
     /**
      * @brief Constructs and empty Process
      */
-    Process(const Properties &props, class CPCD *cpcd,
-            uintptr_t sessionid = 0);
+    Process(const Properties &props, class CPCD *cpcd, uintptr_t sessionid = 0);
     /**
      *  @brief Monitors the process
      *
@@ -403,7 +403,7 @@ class CPCD {
    *          - The RequestStatus will be filled in with a suitable error
    *            if an error occurred.
    */
-  bool undefineProcess(const int id, uintptr_t sessionid, RequestStatus *rs);
+  bool undefineProcess(int id, uintptr_t sessionid, RequestStatus *rs);
 
   /** Marks a Process for starting.
    *
@@ -417,7 +417,7 @@ class CPCD {
    *          - RequestStatus will be filled in with a suitable error
    *            if an error occurred.
    */
-  bool startProcess(const int id, uintptr_t sessionid, RequestStatus *rs);
+  bool startProcess(int id, uintptr_t sessionid, RequestStatus *rs);
 
   /** Marks a Process for stopping.
    *
@@ -427,7 +427,7 @@ class CPCD {
    *          - The RequestStatus will be filled in with a suitable error
    *            if an error occurred.
    */
-  bool stopProcess(const int id, uintptr_t sessionid, RequestStatus *rs);
+  bool stopProcess(int id, uintptr_t sessionid, RequestStatus *rs);
 
   /** Generates a list of processes, and sends them to the CPCD client */
   bool listProcesses(RequestStatus *rs, MutexVector<const char *> &);

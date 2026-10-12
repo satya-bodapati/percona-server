@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,9 +23,9 @@
 
 #include "sql/join_optimizer/online_cycle_finder.h"
 
-#include <assert.h>
-#include <stddef.h>
 #include <algorithm>
+#include <cassert>
+#include <cstddef>
 #include <numeric>
 #include <unordered_map>
 #include <utility>
@@ -54,8 +55,8 @@ bool OnlineCycleFinder::EdgeWouldCreateCycle(int a_idx, int b_idx) {
   if (a_idx == b_idx) {
     return true;
   }
-  int pos_of_a = m_position_of_node[a_idx];
-  int pos_of_b = m_position_of_node[b_idx];
+  int const pos_of_a = m_position_of_node[a_idx];
+  int const pos_of_b = m_position_of_node[b_idx];
   if (pos_of_a < pos_of_b) {
     // Already in the topologically desired order,
     // so we don't need to do any checks.
@@ -118,7 +119,7 @@ bool OnlineCycleFinder::DepthFirstSearch(int node_idx, int upper_bound,
   auto first_and_last = m_edges.equal_range(node_idx);
   for (auto dest_node_it = first_and_last.first;
        dest_node_it != first_and_last.second; ++dest_node_it) {
-    int dest_node_idx = dest_node_it->second;
+    int const dest_node_idx = dest_node_it->second;
     assert(m_position_of_node[dest_node_idx] > m_position_of_node[node_idx]);
     if (DepthFirstSearch(dest_node_idx, upper_bound, node_idx_to_avoid)) {
       // We found a cycle, so abort.
@@ -132,7 +133,7 @@ void OnlineCycleFinder::MoveAllMarked(int start_pos, int new_pos) {
   m_to_shift.clear();
 
   for (int i = start_pos; i < new_pos; ++i) {
-    int node_idx = m_order[i];
+    int const node_idx = m_order[i];
     if (m_visited[node_idx]) {
       // Needs to move to the right (after upper_bound).
       m_to_shift.push_back(node_idx);

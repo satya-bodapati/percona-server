@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -55,7 +56,7 @@
 */
 
 static bool my_realloc_str(NET *net, ulong length) {
-  const ulong buf_length = (ulong)(net->write_pos - net->buff);
+  const auto buf_length = (ulong)(net->write_pos - net->buff);
   bool res = false;
   DBUG_TRACE;
   if (buf_length + length > net->max_packet) {
@@ -112,7 +113,7 @@ static void store_param_type(unsigned char **pos, MYSQL_BIND *param) {
   DESCRIPTION
     These functions are invoked from mysql_stmt_execute() by
     MYSQL_BIND::store_param_func pointer. This pointer is set once per
-    many executions in mysql_stmt_bind_param(). The caller must ensure
+    many executions in mysql_stmt_bind_named_param(). The caller must ensure
     that network buffer have enough capacity to store parameter
     (MYSQL_BIND::buffer_length contains needed number of bytes).
 */
@@ -217,14 +218,15 @@ static void store_param_date(NET *net, MYSQL_BIND *param) {
 }
 
 static void store_param_datetime(NET *net, MYSQL_BIND *param) {
-  MYSQL_TIME *tm = (MYSQL_TIME *)param->buffer;
+  auto *tm = (MYSQL_TIME *)param->buffer;
   net_store_datetime(net, tm);
 }
 
 static void store_param_str(NET *net, MYSQL_BIND *param) {
-  /* param->length is always set in mysql_stmt_bind_param */
+  /* param->length is always set in mysql_stmt_bind_named_param */
   const ulong length = *param->length;
   uchar *to = net_store_length(net->write_pos, length);
+  assert(param->buffer != nullptr);
   memcpy(to, param->buffer, length);
   net->write_pos = to + length;
 }
@@ -520,6 +522,7 @@ bool fix_param_bind(MYSQL_BIND *param, uint idx) {
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_LONG_BLOB:
     case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_VECTOR:
     case MYSQL_TYPE_VARCHAR:
     case MYSQL_TYPE_VAR_STRING:
     case MYSQL_TYPE_STRING:

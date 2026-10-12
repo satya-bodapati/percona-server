@@ -1,15 +1,16 @@
-# Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,7 +21,8 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-# This file includes Windows specific hacks, mostly around compiler flags
+# This file contains our preferred compiler/linker flags for
+# Visual Studio and clang on Windows.
 
 INCLUDE (CheckCSourceCompiles)
 INCLUDE (CheckCXXSourceCompiles)
@@ -37,6 +39,8 @@ IF(MY_COMPILER_IS_CLANG)
   SET(CMAKE_INCLUDE_SYSTEM_FLAG_C "/imsvc ")
   SET(CMAKE_INCLUDE_SYSTEM_FLAG_CXX "/imsvc ")
   ADD_DEFINITIONS(-DWIN32_CLANG)
+ELSE()
+  SET(WIN32_VS 1)
 ENDIF()
 
 # avoid running system checks by using pre-cached check results
@@ -45,13 +49,12 @@ ENDIF()
 GET_FILENAME_COMPONENT(_SCRIPT_DIR ${CMAKE_CURRENT_LIST_FILE} PATH)
 INCLUDE(${_SCRIPT_DIR}/WindowsCache.cmake)
 
-# We require at least Visual Studio 2019 Update 9 (aka 16.9),
-# which has version nr 1928.
-# https://docs.microsoft.com/en-us/cpp/preprocessor/predefined-macros?view=msvc-160
+# We require at least Visual Studio 2019 Update 11 (aka 16.11),
+# which has version nr 1929.
 MESSAGE(STATUS "MSVC_VERSION is ${MSVC_VERSION}")
-IF(NOT FORCE_UNSUPPORTED_COMPILER AND MSVC_VERSION LESS 1928)
+IF(NOT FORCE_UNSUPPORTED_COMPILER AND MSVC_VERSION LESS 1929)
   MESSAGE(FATAL_ERROR
-    "Visual Studio 2019 Update 9 or newer is required!")
+    "Visual Studio 2019 Update 11 or newer is required!")
 ENDIF()
 
 # OS display name (version_compile_os etc).
@@ -67,6 +70,13 @@ ELSE()
       "Clean the build dir and rebuild using -G \"${CMAKE_GENERATOR} Win64\"")
   ENDIF()
 ENDIF()
+
+FUNCTION(FORCE_CMAKE_COMPILER_FLAG FLAG_VAR PATTERN)
+  IF(${FLAG_VAR} MATCHES ${PATTERN})
+    RETURN()
+  ENDIF()
+  SET(${FLAG_VAR} "${PATTERN} ${${FLAG_VAR}}" PARENT_SCOPE)
+ENDFUNCTION()
 
 # Target Windows 7 / Windows Server 2008 R2 or later, i.e _WIN32_WINNT_WIN7
 ADD_DEFINITIONS(-D_WIN32_WINNT=0x0601)
@@ -99,7 +109,11 @@ IF(MSVC)
   STRING_APPEND(WIN_STL_DEBUG_ITERATORS_DOC
     "debug checks, 1 for simple checks only, 0 for disabled.")
 
-  SET(WIN_STL_DEBUG_ITERATORS 2 CACHE STRING "${WIN_STL_DEBUG_ITERATORS_DOC}")
+  IF(WIN32_CLANG)
+    SET(WIN_STL_DEBUG_ITERATORS 0 CACHE STRING "${WIN_STL_DEBUG_ITERATORS_DOC}")
+  ELSE()
+    SET(WIN_STL_DEBUG_ITERATORS 2 CACHE STRING "${WIN_STL_DEBUG_ITERATORS_DOC}")
+  ENDIF()
   SET_PROPERTY(CACHE WIN_STL_DEBUG_ITERATORS PROPERTY STRINGS 0 1 2)
 
   OPTION(LINK_STATIC_RUNTIME_LIBRARIES "Link with /MT" OFF)
@@ -107,13 +121,15 @@ IF(MSVC)
     SET(LINK_STATIC_RUNTIME_LIBRARIES ON)
   ENDIF()
 
-  # Remove the /RTC1 debug compiler option that cmake includes by default for MSVC
-  # as its presence significantly slows MTR testing and rarely detects bugs.
+  # Remove the /RTC1 debug compiler option that cmake includes by default for
+  # MSVC as its significantly slows MTR testing and rarely detects bugs.
   IF (NOT WIN_DEBUG_RTC)
+    STRING(REPLACE "/RTC1"  "" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
     STRING(REPLACE "/RTC1"  "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
   ENDIF()
 
-  STRING_APPEND(CMAKE_CXX_FLAGS_DEBUG " -D_ITERATOR_DEBUG_LEVEL=${WIN_STL_DEBUG_ITERATORS}")
+  STRING_APPEND(CMAKE_CXX_FLAGS_DEBUG
+    " -D_ITERATOR_DEBUG_LEVEL=${WIN_STL_DEBUG_ITERATORS}")
 
   # Enable debug info also in Release build,
   # and create PDB to be able to analyze crashes.
@@ -122,21 +138,23 @@ IF(MSVC)
      "${CMAKE_${type}_LINKER_FLAGS_RELEASE} /debug")
   ENDFOREACH()
 
-  # For release types Debug Release RelWithDebInfo (but not MinSizeRel):
-  # - Choose C++ exception handling:
-  #     If /EH is not specified, the compiler will catch structured and
-  #     C++ exceptions, but will not destroy C++ objects that will go out of
-  #     scope as a result of the exception.
-  #     /EHsc catches C++ exceptions only and tells the compiler to assume that
-  #     extern C functions never throw a C++ exception.
+  # For all configuration types
   # - Choose debugging information:
   #     /Z7
-  #     Produces an .obj file containing full symbolic debugging
+  #     Used for non-PGO builds, as it embeds debug information in .obj
+  #     files which makes .lib files contain their own debug information.
+  #     /Zi
+  #     Used for PGO builds (of mysqld.exe)
+  #     Produces a .pdb file containing full symbolic debugging
   #     information for use with the debugger. The symbolic debugging
   #     information includes the names and types of variables, as well as
-  #     functions and line numbers. No .pdb file is produced by the compiler.
+  #     functions and line numbers.
   #     We can't use /ZI too since it's causing __LINE__ macros to be non-
   #     constant on visual studio and hence XCom stops building correctly.
+  #     We can't use /Z7 with PGO builds as that places debug information
+  #     in the .obj files which results in .lib and .exe files exceeding
+  #     file size limitsimposed by the linker and lib tools when PGO
+  #     builds are attempted.
   # - Enable explicit inline:
   #     /Ob1
   #     Expands explicitly inlined functions. By default /Ob0 is used,
@@ -144,42 +162,76 @@ IF(MSVC)
   #     Allowing inline reduces test time using the debug server by
   #     30% or so. If you do want to keep inlining off, set the
   #     cmake flag WIN_DEBUG_NO_INLINE.
+  # - Disable optimization
+  #     /Od
+  #     Turns off all optimizations in the program and speeds compilation.
   FOREACH(lang C CXX)
-    SET(CMAKE_${lang}_FLAGS_RELEASE "${CMAKE_${lang}_FLAGS_RELEASE} /Z7")
+    IF(FPROFILE_GENERATE OR FPROFILE_USE)
+      SET(CMAKE_${lang}_FLAGS_RELEASE "${CMAKE_${lang}_FLAGS_RELEASE} /Zi")
+    ELSE()
+      SET(CMAKE_${lang}_FLAGS_RELEASE "${CMAKE_${lang}_FLAGS_RELEASE} /Z7")
+    ENDIF()
   ENDFOREACH()
 
-  FOREACH(flag
-      CMAKE_C_FLAGS_MINSIZEREL
-      CMAKE_C_FLAGS_RELEASE    CMAKE_C_FLAGS_RELWITHDEBINFO
-      CMAKE_C_FLAGS_DEBUG      CMAKE_C_FLAGS_DEBUG_INIT
-      CMAKE_CXX_FLAGS_MINSIZEREL
-      CMAKE_CXX_FLAGS_RELEASE  CMAKE_CXX_FLAGS_RELWITHDEBINFO
-      CMAKE_CXX_FLAGS_DEBUG    CMAKE_CXX_FLAGS_DEBUG_INIT)
-    IF(LINK_STATIC_RUNTIME_LIBRARIES)
-      STRING(REPLACE "/MD"  "/MT" "${flag}" "${${flag}}")
-    ENDIF()
-    STRING(REPLACE "/Zi"  "/Z7" "${flag}" "${${flag}}")
-    STRING(REPLACE "/ZI"  "/Z7" "${flag}" "${${flag}}")
-    IF (NOT WIN_DEBUG_NO_INLINE)
-      STRING(REPLACE "/Ob0"  "/Ob1" "${flag}" "${${flag}}")
-    ENDIF()
-    SET("${flag}" "${${flag}} /EHsc")
-    # Due to a bug in VS2019 we need the full paths of files in error messages
-    # See bug #30255096 for details
-    SET("${flag}" "${${flag}} /FC")
+  # Defaults initialized by cmake:
+  # DEBUG          /MDd /Zi /Od  /Ob0 /RTC1
+  # RELWITHDEBINFO /MD  /Zi /O2  /Ob1 /DNDEBUG
+  # RELEASE        /MD      /O2  /Ob2 /DNDEBUG
+  # MINSIZEREL     /MD      /O1  /Ob1 /DNDEBUG
+  FOREACH(config DEBUG RELWITHDEBINFO RELEASE MINSIZEREL)
+    FOREACH(lang C CXX)
+      SET(flag "CMAKE_${lang}_FLAGS_${config}")
+      IF(LINK_STATIC_RUNTIME_LIBRARIES)
+        STRING(REPLACE "/MD"  "/MT" "${flag}" "${${flag}}")
+      ENDIF()
+      IF(FPROFILE_GENERATE OR FPROFILE_USE)
+        STRING(REPLACE "/ZI"  "/Zi" "${flag}" "${${flag}}")
+      ELSE()
+        STRING(REPLACE "/Zi"  "/Z7" "${flag}" "${${flag}}")
+        STRING(REPLACE "/ZI"  "/Z7" "${flag}" "${${flag}}")
+      ENDIF()
+      IF (NOT WIN_DEBUG_NO_INLINE)
+        STRING(REPLACE "/Ob0"  "/Ob1" "${flag}" "${${flag}}")
+      ENDIF()
+    ENDFOREACH()
   ENDFOREACH()
 
-  # Turn on c++17 mode explicitly so that using c++20 features is disabled.
-  FOREACH(flag
-      CMAKE_CXX_FLAGS_MINSIZEREL
-      CMAKE_CXX_FLAGS_RELEASE  CMAKE_CXX_FLAGS_RELWITHDEBINFO
-      CMAKE_CXX_FLAGS_DEBUG    CMAKE_CXX_FLAGS_DEBUG_INIT
-      )
-    SET("${flag}" "${${flag}} /std:c++17")
-  ENDFOREACH()
+  # cmake will initialize with:
+  # CMAKE_CXX_FLAGS  /DWIN32 /D_WINDOWS /GR /EHsc
+  # /GR: enable RTTI, it is now ON by default, so no need to set it.
+
+  # Ensure that these are always set for CMAKE_<lang>_FLAGS.
+  # This allows e.g. this for clang on win:
+  #   cmake . DCMAKE_CXX_FLAGS=-Wzero-as-null-pointer-constant
+  # rather than the full
+  #   cmake . -DCMAKE_CXX_FLAGS=
+  #      "/DWIN32 /D_WINDOWS /GR /EHsc -Wzero-as-null-pointer-constant"
+  FORCE_CMAKE_COMPILER_FLAG(CMAKE_C_FLAGS "/DWIN32")
+  FORCE_CMAKE_COMPILER_FLAG(CMAKE_CXX_FLAGS "/DWIN32")
+  FORCE_CMAKE_COMPILER_FLAG(CMAKE_C_FLAGS "/D_WINDOWS")
+  FORCE_CMAKE_COMPILER_FLAG(CMAKE_CXX_FLAGS "/D_WINDOWS")
+
+  # We PREPEND some flags here, in order to see them first on the command line.
+
+  # We have always built with the cmake default /W3
+  # With CMP0092 = NEW, we need to set it ourselves.
+  STRING_PREPEND(CMAKE_C_FLAGS "/W3 ")
+  STRING_PREPEND(CMAKE_CXX_FLAGS "/W3 ")
+
+  # Full path of source code file in diagnostics
+  STRING_PREPEND(CMAKE_C_FLAGS "/FC ")
+  STRING_PREPEND(CMAKE_CXX_FLAGS "/FC ")
+
+  # /EHsc catches C++ exceptions only and tells the compiler to assume that
+  # extern C functions never throw a C++ exception.
+  FORCE_CMAKE_COMPILER_FLAG(CMAKE_CXX_FLAGS "/EHsc")
+
+  # Turn on c++23 mode explicitly.
+  STRING_PREPEND(CMAKE_CXX_FLAGS "/std:c++23preview ")
 
   OPTION(WIN_INCREMENTAL_LINK "Enable incremental linking on Windows" OFF)
 
+  # The cmake default is /INCREMENTAL for Debug/RelWithDebInfo
   FOREACH(type EXE SHARED MODULE)
     FOREACH(config DEBUG RELWITHDEBINFO RELEASE MINSIZEREL)
       SET(flag "CMAKE_${type}_LINKER_FLAGS_${config}")
@@ -220,6 +272,10 @@ IF(MSVC)
 
   # Enable stricter standards conformance when using Visual Studio
   STRING_APPEND(CMAKE_CXX_FLAGS " /permissive-")
+
+  # Set a proper value in __cplusplus
+  # See https://learn.microsoft.com/en-us/cpp/build/reference/zc-cplusplus?view=msvc-170
+  STRING_APPEND(CMAKE_CXX_FLAGS " /Zc:__cplusplus")
 ENDIF()
 
 # Always link with socket library

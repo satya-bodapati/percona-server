@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -36,6 +37,7 @@
 #include <stdlib.h>
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <list>
 #include <random>  // std::uniform_real_distribution
@@ -45,7 +47,6 @@
 
 #include "keycache.h"
 #include "m_string.h"
-#include "my_bit.h"     // my_count_bits
 #include "my_bitmap.h"  // MY_BITMAP
 #include "my_check_opt.h"
 #include "my_dbug.h"
@@ -72,6 +73,7 @@
 #include "mysql_version.h"  // MYSQL_VERSION_ID
 #include "mysqld_error.h"
 #include "prealloced_array.h"
+#include "sd_notify.h"             // for sysd::notify() calls
 #include "sql/auth/auth_common.h"  // check_readonly() and SUPER_ACL
 #include "sql/binlog.h"            // mysql_bin_log
 #include "sql/check_stack.h"
@@ -87,7 +89,8 @@
 #include "sql/error_handler.h"               // Internal_error_handler
 #include "sql/field.h"
 #include "sql/item.h"
-#include "sql/lock.h"  // MYSQL_LOCK
+#include "sql/join_optimizer/cost_model.h"  // EstimateIndexRangeScanCost
+#include "sql/lock.h"                       // MYSQL_LOCK
 #include "sql/log.h"
 #include "sql/log_event.h"  // Write_rows_log_event
 #include "sql/mdl.h"
@@ -132,7 +135,6 @@
 #include "string_with_len.h"
 #include "template_utils.h"
 #include "uniques.h"  // Unique_on_insert
-#include "varlen_sort.h"
 
 /**
   @def MYSQL_TABLE_IO_WAIT
@@ -256,7 +258,13 @@ st_plugin_int *remove_hton2plugin(uint slot) {
 }
 
 const char *ha_resolve_storage_engine_name(const handlerton *db_type) {
-  return db_type == nullptr ? "UNKNOWN" : hton2plugin(db_type->slot)->name.str;
+  return db_type == nullptr ||
+                 // May happen in unit tests.
+                 num_hton2plugins() == 0 ||
+                 // May happen in unit tests.
+                 hton2plugin(db_type->slot) == nullptr
+             ? "UNKNOWN"
+             : hton2plugin(db_type->slot)->name.str;
 }
 
 static handlerton *installed_htons[128];
@@ -381,8 +389,10 @@ handlerton *ha_enforce_handlerton(THD *thd) {
   return nullptr;
 }
 
-static plugin_ref ha_default_temp_plugin(THD *thd) {
-  if (thd->variables.temp_table_plugin) return thd->variables.temp_table_plugin;
+plugin_ref ha_default_temp_plugin(THD *thd) {
+  if (thd->variables.temp_table_plugin != nullptr) {
+    return thd->variables.temp_table_plugin;
+  }
   return my_plugin_lock(thd, &global_system_variables.temp_table_plugin);
 }
 
@@ -746,6 +756,8 @@ int ha_init_errors(void) {
   SETMSG(HA_ERR_TOO_LONG_PATH, ER_DEFAULT(ER_TABLE_NAME_CAUSES_TOO_LONG_PATH));
   SETMSG(HA_ERR_FTS_TOO_MANY_NESTED_EXP,
          "Too many nested sub-expressions in a full-text search");
+  SETMSG(HA_ERR_VECTOR_WRONG_DIMENSIONS,
+         "A vector does not have the dimensions its vector index needs");
   /* Register the error messages for use with my_error(). */
   return my_error_register(get_handler_errmsg, HA_ERR_FIRST, HA_ERR_LAST);
 }
@@ -775,7 +787,7 @@ int ha_finalize_handlerton(st_plugin_int *plugin) {
       engine plugins.
     */
     DBUG_PRINT("info", ("Deinitializing plugin: '%s'", plugin->name.str));
-    if (plugin->plugin->deinit(nullptr)) {
+    if (plugin->plugin->deinit(plugin)) {
       DBUG_PRINT("warning", ("Plugin '%s' deinit function returned error.",
                              plugin->name.str));
     }
@@ -917,7 +929,7 @@ err_deinit:
     Let plugin do its inner deinitialization as plugin->init()
     was successfully called before.
   */
-  if (plugin->plugin->deinit) (void)plugin->plugin->deinit(nullptr);
+  if (plugin->plugin->deinit) (void)plugin->plugin->deinit(plugin);
 
 err:
   my_free(hton);
@@ -947,15 +959,58 @@ void ha_end() {
   my_free(handler_errmsgs);
 }
 
-static bool dropdb_handlerton(THD *, plugin_ref plugin, void *path) {
+static bool dropdb_handlerton(THD *, plugin_ref plugin, void *schema_name) {
   handlerton *hton = plugin_data<handlerton *>(plugin);
   if (hton->state == SHOW_OPTION_YES && hton->drop_database)
-    hton->drop_database(hton, (char *)path);
+    hton->drop_database(hton, static_cast<char *>(schema_name));
+
   return false;
 }
 
-void ha_drop_database(char *path) {
-  plugin_foreach(nullptr, dropdb_handlerton, MYSQL_STORAGE_ENGINE_PLUGIN, path);
+void ha_drop_database(const char *schema_name) {
+  plugin_foreach(nullptr, dropdb_handlerton, MYSQL_STORAGE_ENGINE_PLUGIN,
+                 const_cast<char *>(schema_name));
+}
+
+static bool log_ddl_drop_schema_handletron(THD *, plugin_ref plugin,
+                                           void *schema_name) {
+  handlerton *hton = plugin_data<handlerton *>(plugin);
+  if (hton->state == SHOW_OPTION_YES &&
+      (hton->log_ddl_drop_schema && hton->post_ddl && hton->is_dict_readonly)) {
+    if (hton->is_dict_readonly()) {
+      my_error(ER_READ_ONLY_MODE, MYF(0));
+      return true;
+    }
+    return hton->log_ddl_drop_schema(hton, static_cast<char *>(schema_name));
+  }
+  return false;
+}
+
+bool ha_log_ddl_drop_schema(const char *schema_name) {
+  return plugin_foreach(nullptr, log_ddl_drop_schema_handletron,
+                        MYSQL_STORAGE_ENGINE_PLUGIN,
+                        const_cast<char *>(schema_name));
+}
+
+static bool log_ddl_create_schema_handletron(THD *, plugin_ref plugin,
+                                             void *schema_name) {
+  handlerton *hton = plugin_data<handlerton *>(plugin);
+  if (hton->state == SHOW_OPTION_YES &&
+      (hton->log_ddl_create_schema && hton->post_ddl &&
+       hton->is_dict_readonly)) {
+    if (hton->is_dict_readonly()) {
+      my_error(ER_READ_ONLY_MODE, MYF(0));
+      return true;
+    }
+    return hton->log_ddl_create_schema(hton, static_cast<char *>(schema_name));
+  }
+  return false;
+}
+
+bool ha_log_ddl_create_schema(const char *schema_name) {
+  return plugin_foreach(nullptr, log_ddl_create_schema_handletron,
+                        MYSQL_STORAGE_ENGINE_PLUGIN,
+                        const_cast<char *>(schema_name));
 }
 
 static bool closecon_handlerton(THD *thd, plugin_ref plugin, void *) {
@@ -1011,8 +1066,21 @@ void ha_kill_connection(THD *thd) {
 @retval false (always) */
 static bool pre_dd_shutdown_handlerton(THD *, plugin_ref plugin, void *) {
   handlerton *hton = plugin_data<handlerton *>(plugin);
-  if (hton->state == SHOW_OPTION_YES && hton->pre_dd_shutdown)
+  if (hton->state == SHOW_OPTION_YES && hton->pre_dd_shutdown) {
+    /*
+      systemd notifications are added here to make the case of "InnoDB purge
+      thread taking a long time to shut down" externally visible. The message is
+      kept general to accommodate pre_dd_shutdown handlertons of other SEs (if
+      any).
+    */
+    sysd::notify("STATUS=Pre DD shutdown of MySQL SE plugin ",
+                 ha_resolve_storage_engine_name(hton), " in progress\n");
+
     hton->pre_dd_shutdown(hton);
+
+    sysd::notify("STATUS=Pre DD shutdown of MySQL SE plugin ",
+                 ha_resolve_storage_engine_name(hton), " completed\n");
+  }
   return false;
 }
 
@@ -1098,7 +1166,7 @@ void ha_pre_dd_shutdown(void) {
   Administrative and status information statements do not modify
   engine data, and thus do not start a statement transaction and
   also have no effect on the normal transaction. Examples of such
-  statements are SHOW STATUS and RESET SLAVE.
+  statements are SHOW STATUS and RESET REPLICA.
 
   Similarly DDL statements are not transactional,
   and therefore a transaction is [almost] never started for a DDL
@@ -1928,21 +1996,21 @@ int ha_commit_low(THD *thd, bool all, bool run_after_commit) {
       all ? Transaction_ctx::SESSION : Transaction_ctx::STMT;
   auto ha_list = trn_ctx->ha_trx_info(trx_scope);
 
+  /*
+    At execution of XA COMMIT .. ONE PHASE binlog or slave applier reattaches
+    the engine ha_data to THD, previously saved at XA START.
+  */
+  const bool need_restore_backup_ha_data =
+      all && thd->is_engine_ha_data_detached() &&
+      thd->lex->sql_command == SQLCOM_XA_COMMIT &&
+      static_cast<Sql_cmd_xa_commit *>(thd->lex->m_sql_cmd)->get_xa_opt() ==
+          XA_ONE_PHASE;
+
   DBUG_TRACE;
 
   if (ha_list) {
-    bool restore_backup_ha_data = false;
-    /*
-      At execution of XA COMMIT ONE PHASE binlog or slave applier
-      reattaches the engine ha_data to THD, previously saved at XA START.
-    */
-    if (all && thd->is_engine_ha_data_detached()) {
+    if (need_restore_backup_ha_data) {
       DBUG_PRINT("info", ("query='%s'", thd->query().str));
-      assert(thd->lex->sql_command == SQLCOM_XA_COMMIT);
-      assert(
-          static_cast<Sql_cmd_xa_commit *>(thd->lex->m_sql_cmd)->get_xa_opt() ==
-          XA_ONE_PHASE);
-      restore_backup_ha_data = true;
     }
 
     bool is_applier_wait_enabled = false;
@@ -1975,7 +2043,7 @@ int ha_commit_low(THD *thd, bool all, bool run_after_commit) {
       global_aggregated_stats.get_shard(thd->thread_id()).ha_commit_count++;
       ha_info.reset(); /* keep it conveniently zero-filled */
     }
-    if (restore_backup_ha_data) thd->rpl_reattach_engine_ha_data();
+    if (need_restore_backup_ha_data) thd->rpl_reattach_engine_ha_data();
     trn_ctx->reset_scope(trx_scope);
 
     /*
@@ -1994,6 +2062,8 @@ int ha_commit_low(THD *thd, bool all, bool run_after_commit) {
         Commit_order_manager::wait_and_finish(thd, error);
       }
     }
+  } else if (need_restore_backup_ha_data) {
+    thd->rpl_reattach_engine_ha_data();
   }
 
 err:
@@ -2028,36 +2098,32 @@ int ha_rollback_low(THD *thd, bool all) {
 
   (void)RUN_HOOK(transaction, before_rollback, (thd, all));
 
-  if (ha_list) {
-    bool restore_backup_ha_data = false;
-    /*
-      Similarly to the commit case, the binlog or slave applier
-      reattaches the engine ha_data to THD.
-    */
-    if (all && thd->is_engine_ha_data_detached()) {
-      assert(trn_ctx->xid_state()->get_state() != XID_STATE::XA_NOTR ||
-             thd->killed == THD::KILL_CONNECTION);
+  /*
+    Similar to the commit case, the binlog or slave applier reattaches the
+    engine ha_data to THD, previously saved at XA START.
+  */
+  const bool need_restore_backup_ha_data =
+      all && thd->is_engine_ha_data_detached() &&
+      (trn_ctx->xid_state()->get_state() != XID_STATE::XA_NOTR ||
+       thd->killed == THD::KILL_CONNECTION);
 
-      restore_backup_ha_data = true;
+  for (auto &ha_info : ha_list) {
+    int err;
+    auto ht = ha_info.ht();
+    if ((err = ht->rollback(ht, thd, all))) {  // cannot happen
+      char errbuf[MYSQL_ERRMSG_SIZE];
+      my_error(ER_ERROR_DURING_ROLLBACK, MYF(0), err,
+               my_strerror(errbuf, MYSQL_ERRMSG_SIZE, err));
+      error = 1;
     }
-
-    for (auto &ha_info : ha_list) {
-      int err;
-      auto ht = ha_info.ht();
-      if ((err = ht->rollback(ht, thd, all))) {  // cannot happen
-        char errbuf[MYSQL_ERRMSG_SIZE];
-        my_error(ER_ERROR_DURING_ROLLBACK, MYF(0), err,
-                 my_strerror(errbuf, MYSQL_ERRMSG_SIZE, err));
-        error = 1;
-      }
-      assert(!thd->status_var_aggregated);
-      thd->status_var.ha_rollback_count++;
-      global_aggregated_stats.get_shard(thd->thread_id()).ha_rollback_count++;
-      ha_info.reset(); /* keep it conveniently zero-filled */
-    }
-    if (restore_backup_ha_data) thd->rpl_reattach_engine_ha_data();
-    trn_ctx->reset_scope(trx_scope);
+    assert(!thd->status_var_aggregated);
+    thd->status_var.ha_rollback_count++;
+    global_aggregated_stats.get_shard(thd->thread_id()).ha_rollback_count++;
+    ha_info.reset(); /* keep it conveniently zero-filled */
   }
+
+  if (need_restore_backup_ha_data) thd->rpl_reattach_engine_ha_data();
+  if (ha_list) trn_ctx->reset_scope(trx_scope);
 
   /*
     Thanks to possibility of MDL deadlock rollback request can come even if
@@ -2577,7 +2643,7 @@ int ha_store_binlog_info(THD *thd) {
 
   assert(tc_log == &mysql_bin_log);
 
-  LOG_INFO li;
+  Log_info li;
   bool warn = true;
 
   /* Block commits to get consistent binlog coordinates */
@@ -2747,7 +2813,7 @@ int ha_delete_table(THD *thd, handlerton *table_type, const char *path,
     }
   }
 
-  destroy(file);
+  ::destroy_at(file);
 
 #ifdef HAVE_PSI_TABLE_INTERFACE
   if (likely(error == 0)) {
@@ -2820,6 +2886,49 @@ void HA_CREATE_INFO::init_create_options_from_share(const TABLE_SHARE *share,
   }
   secondary_load = share->secondary_load;
 
+  /* Copy the partitioning information that exists in the table share */
+  if (share->m_part_info != nullptr) {
+    part_info = share->m_part_info->get_clone(current_thd);
+    part_info->part_type = share->m_part_info->part_type;
+    /* copy the attribute names on which partitioning takes place */
+    part_info->list_of_part_fields = share->m_part_info->list_of_part_fields;
+    if (share->m_part_info->list_of_part_fields) {
+      part_info->part_func_string = nullptr;
+      part_info->part_field_list.clear();
+      for (auto &part_name : share->m_part_info->part_field_list) {
+        char *attr =
+            strmake_root(current_thd->mem_root, &part_name, strlen(&part_name));
+        part_info->part_field_list.push_back(attr);
+      }
+    } else {
+      // the arithmetic on part_func_string is to remove the surrounding ``
+      part_info->part_func_string = strmake_root(
+          current_thd->mem_root, share->m_part_info->part_func_string + 1,
+          share->m_part_info->part_func_len - 2);
+      part_info->part_func_len = share->m_part_info->part_func_len;
+    }
+    /* Subpartitioning-related info */
+    part_info->subpart_type = share->m_part_info->subpart_type;
+    part_info->num_subparts = share->m_part_info->num_subparts;
+    /* copy the attribute names on which subpartitioning takes place */
+    part_info->list_of_subpart_fields =
+        share->m_part_info->list_of_subpart_fields;
+    if (share->m_part_info->list_of_subpart_fields) {
+      part_info->subpart_func_string = nullptr;
+      part_info->subpart_field_list.clear();
+      for (auto &subpart_name : share->m_part_info->subpart_field_list) {
+        char *attr = strmake_root(current_thd->mem_root, &subpart_name,
+                                  strlen(&subpart_name));
+        part_info->subpart_field_list.push_back(attr);
+      }
+    } else if (share->m_part_info->subpart_func_string != nullptr) {
+      // the arithmetic on part_func_string is to remove the surrounding ``
+      part_info->subpart_func_string = strmake_root(
+          current_thd->mem_root, share->m_part_info->subpart_func_string + 1,
+          share->m_part_info->subpart_func_len - 2);
+    }
+  }
+
   if (!(used_fields & HA_CREATE_USED_AUTOEXTEND_SIZE)) {
     /* m_implicit_tablespace_autoextend_size = 0 is a valid value. Hence,
     we need a mechanism to indicate the value change. */
@@ -2832,6 +2941,19 @@ void HA_CREATE_INFO::init_create_options_from_share(const TABLE_SHARE *share,
 
   if (secondary_engine_attribute.str == nullptr)
     secondary_engine_attribute = share->secondary_engine_attribute;
+}
+
+bool HA_CREATE_INFO::set_db_type(THD *thd) {
+  if ((options & HA_LEX_CREATE_TMP_TABLE) != 0U) {
+    /* Temporary tables cannot have secondary engine at this stage. This will
+     * later be set if db_type is a secondary engine,
+     * at validate_secondary_engine_temporary_table. */
+    assert(secondary_engine.str == nullptr);
+    db_type = ha_default_temp_handlerton(thd);
+  } else {
+    db_type = ha_default_handlerton(thd);
+  }
+  return false;
 }
 
 /****************************************************************************
@@ -2871,7 +2993,7 @@ handler *handler::clone(const char *name, MEM_ROOT *mem_root) {
   return new_handler;
 
 err:
-  destroy(new_handler);
+  ::destroy_at(new_handler);
   return nullptr;
 }
 
@@ -3249,19 +3371,30 @@ int handler::ha_sample_init(void *&scan_ctx, double sampling_percentage,
   assert(sampling_percentage >= 0.0);
   assert(sampling_percentage <= 100.0);
   assert(inited == NONE);
+  assert(m_random_number_engine == nullptr);
 
-  // Initialise the random number generator.
-  m_random_number_engine.seed(sampling_seed);
+  // Initialize the random number generator.
+  // The common use case is: the random number generator is used only once.
+  // If we call ha_sample_init/ha_sample_end multiple times for a handler
+  // object, we may have changed MEM_ROOT, so we need to create a new one.
+  m_random_number_engine = new (*THR_MALLOC) std::mt19937;
+  if (m_random_number_engine == nullptr) return HA_ERR_OUT_OF_MEM;
+  m_random_number_engine->seed(sampling_seed);
   m_sampling_percentage = sampling_percentage;
 
   const int result = sample_init(scan_ctx, sampling_percentage, sampling_seed,
                                  sampling_method, tablesample);
   inited = (result != 0) ? NONE : SAMPLING;
+  // Reset pointer here, since ha_sample_end() will not be called.
+  if (result != 0) m_random_number_engine = nullptr;
   return result;
 }
 
 int handler::ha_sample_end(void *scan_ctx) {
   DBUG_TRACE;
+  // There is no need to ::destroy_at(m_random_number_engine).
+  // std::mersenne_twister_engine is documented to have no DTOR.
+  m_random_number_engine = nullptr;
   assert(inited == SAMPLING);
   inited = NONE;
   const int result = sample_end(scan_ctx);
@@ -3305,7 +3438,7 @@ int handler::sample_next(void *scan_ctx [[maybe_unused]], uchar *buf) {
   int res = rnd_next(buf);
 
   std::uniform_real_distribution<double> rnd(0.0, 1.0);
-  while (!res && rnd(m_random_number_engine) > (m_sampling_percentage / 100.0))
+  while (!res && rnd(*m_random_number_engine) > (m_sampling_percentage / 100.0))
     res = rnd_next(buf);
 
   return res;
@@ -4466,6 +4599,24 @@ bool handler::is_fatal_error(int error) {
     - table->s->path
     - table->alias
 */
+void my_error_vector_wrong_dimensions(const TABLE *table, myf errflag) {
+  /* A table has at most one vector index, so the column and the
+  dimensions it needs come from the definition, not from the row. */
+  for (uint k = 0; k < table->s->keys; k++) {
+    const KEY &key = table->key_info[k];
+    if (!(key.flags & HA_VECTOR)) continue;
+    /* The table's own field: KEY_PART_INFO::field is a key-image copy,
+    whose length is not the column's. */
+    const Field *field = table->field[key.key_part[0].fieldnr - 1];
+    assert(field->type() == MYSQL_TYPE_VECTOR);
+    my_error(ER_VECTOR_INDEX_WRONG_DIMENSIONS, errflag, field->field_name,
+             down_cast<const Field_vector *>(field)->get_max_dimensions());
+    return;
+  }
+  my_error(ER_GET_ERRNO, errflag, HA_ERR_VECTOR_WRONG_DIMENSIONS,
+           table->file->table_type());
+}
+
 void handler::print_error(int error, myf errflag) {
   THD *thd = current_thd;
   Foreign_key_error_handler foreign_key_error_handler(thd, this);
@@ -4495,6 +4646,12 @@ void handler::print_error(int error, myf errflag) {
       break;
     case HA_ERR_WRONG_MRG_TABLE_DEF:
       textno = ER_WRONG_MRG_TABLE;
+      break;
+    case HA_ERR_VECTOR_WRONG_DIMENSIONS:
+      if (table != nullptr) {
+        my_error_vector_wrong_dimensions(table, errflag);
+        return;
+      }
       break;
     case HA_ERR_FOUND_DUPP_KEY: {
       const uint key_nr = table ? get_dup_key(error) : -1;
@@ -4610,7 +4767,9 @@ void handler::print_error(int error, myf errflag) {
       */
       thd->push_internal_handler(&foreign_key_error_handler);
       get_error_message(error, &str);
-      my_error(ER_ROW_IS_REFERENCED_2, errflag, str.c_ptr_safe());
+      std::string err_msg = str.c_ptr_safe();
+      err_msg = " (" + err_msg + ")";
+      my_error(ER_ROW_IS_REFERENCED_2, errflag, err_msg.c_str());
       thd->pop_internal_handler();
       return;
     }
@@ -4622,7 +4781,9 @@ void handler::print_error(int error, myf errflag) {
       */
       thd->push_internal_handler(&foreign_key_error_handler);
       get_error_message(error, &str);
-      my_error(ER_NO_REFERENCED_ROW_2, errflag, str.c_ptr_safe());
+      std::string err_msg = str.c_ptr_safe();
+      err_msg = " (" + err_msg + ")";
+      my_error(ER_NO_REFERENCED_ROW_2, errflag, err_msg.c_str());
       thd->pop_internal_handler();
       return;
     }
@@ -4844,7 +5005,7 @@ int handler::ha_check_for_upgrade(HA_CHECK_OPT *check_opt) {
 }
 
 // Function identifies any old data type present in table.
-int check_table_for_old_types(const TABLE *table, bool check_temporal_upgrade) {
+int check_table_for_old_types(const TABLE *table) {
   Field **field;
 
   for (field = table->field; (*field); field++) {
@@ -4873,12 +5034,10 @@ int check_table_for_old_types(const TABLE *table, bool check_temporal_upgrade) {
     if ((*field)->type() == MYSQL_TYPE_YEAR && (*field)->field_length == 2)
       return HA_ADMIN_NEEDS_ALTER;  // obsolete YEAR(2) type
 
-    if (check_temporal_upgrade) {
-      if (((*field)->real_type() == MYSQL_TYPE_TIME) ||
-          ((*field)->real_type() == MYSQL_TYPE_DATETIME) ||
-          ((*field)->real_type() == MYSQL_TYPE_TIMESTAMP))
-        return HA_ADMIN_NEEDS_ALTER;
-    }
+    if (((*field)->real_type() == MYSQL_TYPE_TIME) ||
+        ((*field)->real_type() == MYSQL_TYPE_DATETIME) ||
+        ((*field)->real_type() == MYSQL_TYPE_TIMESTAMP))
+      return HA_ADMIN_NEEDS_ALTER;
   }
   return 0;
 }
@@ -4969,7 +5128,7 @@ void handler::drop_table(const char *name) {
   @retval
     HA_ADMIN_NEEDS_ALTER      Table has structures requiring ALTER TABLE
   @retval
-    HA_ADMIN_NOT_IMPLEMENTED
+    HA_ADMIN_NOT_IMPLEMENTED  Not implemented
 */
 int handler::ha_check(THD *thd, HA_CHECK_OPT *check_opt) {
   int error;
@@ -4980,18 +5139,16 @@ int handler::ha_check(THD *thd, HA_CHECK_OPT *check_opt) {
     return 0;
 
   if (table->s->mysql_version < MYSQL_VERSION_ID) {
-    // Check for old temporal format if avoid_temporal_upgrade is disabled.
-    mysql_mutex_lock(&LOCK_global_system_variables);
-    const bool check_temporal_upgrade = !avoid_temporal_upgrade;
-    mysql_mutex_unlock(&LOCK_global_system_variables);
-
-    if ((error = check_table_for_old_types(table, check_temporal_upgrade)))
-      return error;
+    if ((error = check_table_for_old_types(table))) return error;
     error = ha_check_for_upgrade(check_opt);
     if (error && (error != HA_ADMIN_NEEDS_CHECK)) return error;
     if (!error && (check_opt->sql_flags & TT_FOR_UPGRADE)) return 0;
   }
   return check(thd, check_opt);
+}
+
+int handler::ha_check_foreign_constraints(THD *thd, size_t n_threads) {
+  return check_foreign_constraints(thd, n_threads);
 }
 
 /**
@@ -5598,7 +5755,7 @@ int ha_create_table(THD *thd, const char *path, const char *db,
 #endif
 
   // When db_stat is 0, we can pass nullptr as dd::Table since it won't be used.
-  destroy(&table);
+  ::destroy_at(&table);
   if (open_table_from_share(thd, &share, "", 0, (uint)READ_ALL, 0, &table, true,
                             nullptr)) {
 #ifdef HAVE_PSI_TABLE_INTERFACE
@@ -6237,6 +6394,12 @@ int ha_binlog_index_purge_file(THD *thd, const char *file) {
   return 0;
 }
 
+void ha_binlog_index_purge_wait(THD *thd) {
+  assert(thd);
+  binlog_func_st bfn = {BFN_BINLOG_PURGE_WAIT, nullptr};
+  binlog_func_foreach(thd, &bfn);
+}
+
 struct binlog_log_query_st {
   enum_binlog_command binlog_command;
   const char *query;
@@ -6311,15 +6474,15 @@ void ha_acl_notify(THD *thd, class Acl_change_notification *data) {
   @return
     Estimated cost of 'index only' scan
 */
-
 double handler::index_only_read_time(uint keynr, double records) {
-  double read_time;
+  const uint index_bytes_per_record =
+      table_share->key_info[keynr].key_length + ref_length;
+
   const uint keys_per_block =
-      (stats.block_size / 2 /
-           (table_share->key_info[keynr].key_length + ref_length) +
-       1);
-  read_time = ((double)(records + keys_per_block - 1) / (double)keys_per_block);
-  return read_time;
+      1 + ((stats.block_size / 2) / index_bytes_per_record);
+
+  return static_cast<double>(records + keys_per_block - 1) /
+         static_cast<double>(keys_per_block);
 }
 
 double handler::table_in_memory_estimate() const {
@@ -6544,6 +6707,7 @@ static bool key_uses_partial_cols(TABLE *table, uint keyno) {
                          OUT: Size of the buffer that is expected to be actually
                               used, or 0 if buffer is not needed.
   @param [in,out] flags  A combination of HA_MRR_* flags
+  @param [out] force_default_mrr Force default MRR implementation
   @param [out] cost      Estimated cost of MRR access
 
   @note
@@ -6564,12 +6728,14 @@ ha_rows handler::multi_range_read_info_const(uint keyno, RANGE_SEQ_IF *seq,
                                              void *seq_init_param,
                                              uint n_ranges_arg [[maybe_unused]],
                                              uint *bufsz, uint *flags,
+                                             bool *force_default_mrr,
                                              Cost_estimate *cost) {
   KEY_MULTI_RANGE range;
   range_seq_t seq_it;
   ha_rows rows, total_rows = 0;
   uint n_ranges = 0;
   THD *thd = current_thd;
+  *force_default_mrr = false;
 
   /* Default MRR implementation doesn't need buffer */
   *bufsz = 0;
@@ -6590,6 +6756,17 @@ ha_rows handler::multi_range_read_info_const(uint keyno, RANGE_SEQ_IF *seq,
       max_endp = range.end_key.length ? &range.end_key : nullptr;
     }
 
+    /*
+      Allow multi-valued index for DS-MRR only for equality ranges.
+      For non-equality ranges, the storage engine might need to call
+      Field_typed_array::key_cmp(), which is not safe when doing an
+      index-only scan.
+    */
+    if (!*force_default_mrr &&
+        (table->key_info[keyno].flags & HA_MULTI_VALUED_KEY) &&
+        !(range.range_flag & EQ_RANGE)) {
+      *force_default_mrr = true;
+    }
     /*
       Return HA_POS_ERROR if the specified keyno is not capable of
       serving the specified range request. The cases checked for are:
@@ -6640,7 +6817,7 @@ ha_rows handler::multi_range_read_info_const(uint keyno, RANGE_SEQ_IF *seq,
     else if (range.range_flag & SKIP_RECORDS_IN_RANGE &&  // 2)
              !(range.range_flag & NULL_RANGE)) {
       if ((range.range_flag & EQ_RANGE) &&
-          (keyparts_used = my_count_bits(range.start_key.keypart_map)) &&
+          (keyparts_used = std::popcount(range.start_key.keypart_map)) &&
           table->key_info[keyno].has_records_per_key(keyparts_used - 1)) {
         rows = static_cast<ha_rows>(
             table->key_info[keyno].records_per_key(keyparts_used - 1));
@@ -6666,13 +6843,17 @@ ha_rows handler::multi_range_read_info_const(uint keyno, RANGE_SEQ_IF *seq,
   }
 
   assert(total_rows != HA_POS_ERROR);
-  {
+  *flags |= (HA_MRR_USE_DEFAULT_IMPL | HA_MRR_SUPPORT_SORTED);
+
+  // Cost computation.
+  assert(cost->is_zero());
+  if (thd->lex->using_hypergraph_optimizer()) {
+    cost->add_cpu(EstimateIndexRangeScanCost(
+        table, keyno, RangeScanType::kMultiRange, n_ranges, total_rows));
+  } else {
     const Cost_model_table *const cost_model = table->cost_model();
 
     /* The following calculation is the same as in multi_range_read_info(): */
-    *flags |= (HA_MRR_USE_DEFAULT_IMPL | HA_MRR_SUPPORT_SORTED);
-
-    assert(cost->is_zero());
     if (*flags & HA_MRR_INDEX_ONLY)
       *cost = index_scan_cost(keyno, static_cast<double>(n_ranges),
                               static_cast<double>(total_rows));
@@ -7092,7 +7273,7 @@ error:
   h2->ha_index_or_rnd_end();
   h2->ha_external_lock(thd, F_UNLCK);
   h2->ha_close();
-  destroy(h2);
+  ::destroy_at(h2);
   h2 = nullptr;
   assert(retval != 0);
   return retval;
@@ -7118,7 +7299,7 @@ void DsMrr_impl::reset() {
 
     // Close and delete the h2 handler
     h2->ha_close();
-    destroy(h2);
+    ::destroy_at(h2);
     h2 = nullptr;
   }
 }
@@ -7184,9 +7365,18 @@ int DsMrr_impl::dsmrr_fill_buffer() {
   const uint elem_size = h->ref_length + (int)is_mrr_assoc * sizeof(void *);
   assert((rowids_buf_cur - rowids_buf) % elem_size == 0);
 
-  varlen_sort(
-      rowids_buf, rowids_buf_cur, elem_size,
-      [this](const uchar *a, const uchar *b) { return h->cmp_ref(a, b) < 0; });
+  // Store the handler in a thread local variable so that it is available in the
+  // stateless comparator passed to qsort.
+  thread_local const handler *current_handler;
+  current_handler = h;
+
+  qsort(rowids_buf, (rowids_buf_cur - rowids_buf) / elem_size, elem_size,
+        [](const void *a, const void *b) {
+          return current_handler->cmp_ref(
+              static_cast<const unsigned char *>(a),
+              static_cast<const unsigned char *>(b));
+        });
+
   rowids_buf_last = rowids_buf_cur;
   rowids_buf_cur = rowids_buf;
   return 0;
@@ -7278,10 +7468,12 @@ ha_rows DsMrr_impl::dsmrr_info_const(uint keyno, RANGE_SEQ_IF *seq,
   ha_rows rows;
   uint def_flags = *flags;
   uint def_bufsz = *bufsz;
+  bool force_default_mrr = false;
 
   /* Get cost/flags/mem_usage of default MRR implementation */
   rows = h->handler::multi_range_read_info_const(
-      keyno, seq, seq_init_param, n_ranges, &def_bufsz, &def_flags, cost);
+      keyno, seq, seq_init_param, n_ranges, &def_bufsz, &def_flags,
+      &force_default_mrr, cost);
   if (rows == HA_POS_ERROR) {
     /* Default implementation can't perform MRR scan => we can't either */
     return rows;
@@ -7290,10 +7482,12 @@ ha_rows DsMrr_impl::dsmrr_info_const(uint keyno, RANGE_SEQ_IF *seq,
   /*
     If HA_MRR_USE_DEFAULT_IMPL has been passed to us, that is an order to
     use the default MRR implementation (we need it for UPDATE/DELETE).
-    Otherwise, make a choice based on cost and mrr* flags of
-    @@optimizer_switch.
+    Also, if multi_range_read_info_const() detected that "DS_MRR" cannot
+    be used (E.g. Using a multi-valued index for non-equality ranges), we
+    are mandated to use the default implementation. Else, make a choice
+    based on cost and mrr* flags of @@optimizer_switch.
   */
-  if ((*flags & HA_MRR_USE_DEFAULT_IMPL) ||
+  if ((*flags & HA_MRR_USE_DEFAULT_IMPL) || force_default_mrr ||
       choose_mrr_impl(keyno, rows, flags, bufsz, cost)) {
     DBUG_PRINT("info", ("Default MRR implementation choosen"));
     *flags = def_flags;
@@ -7450,10 +7644,7 @@ bool DsMrr_impl::get_disk_sweep_mrr_cost(uint keynr, ha_rows rows, uint flags,
 
   assert(cost->is_zero());
 
-  if (n_full_steps) {
-    get_sort_and_sweep_cost(table, max_buff_entries, cost);
-    cost->multiply(n_full_steps);
-  } else {
+  if (n_full_steps == 0) {
     /*
       Adjust buffer size since only parts of the buffer will be used:
       1. Adjust record estimate for the last scan to reduce likelihood
@@ -7466,6 +7657,17 @@ bool DsMrr_impl::get_disk_sweep_mrr_cost(uint keynr, ha_rows rows, uint flags,
         max<ha_rows>(static_cast<ha_rows>(1.2 * rows_in_last_step), 100);
     *buffer_size = min<ulong>(*buffer_size,
                               static_cast<ulong>(keys_in_buffer) * elem_size);
+  }
+
+  if (h->ha_thd()->lex->using_hypergraph_optimizer()) {
+    cost->add_cpu(EstimateIndexRangeScanCost(
+        table, keynr, RangeScanType::kMultiRange, 1, rows));
+    return false;
+  }
+
+  if (n_full_steps > 0) {
+    get_sort_and_sweep_cost(table, max_buff_entries, cost);
+    cost->multiply(n_full_steps);
   }
 
   Cost_estimate last_step_cost;
@@ -7845,14 +8047,20 @@ void handler::set_end_range(const key_range *range,
 int handler::compare_key(key_range *range) {
   int cmp = -1;
   if (!range || in_range_check_pushed_down) return 0;  // No max range
-  /*
-    Virtual fields are not updated during multi-valued index read in MRR.
-    Hence key comparison is skipped for MV index.
-    TODO: Disable MRR on MV index or implement a comparison logic.
-  */
-  if (!(table->key_info[active_index].flags & HA_MULTI_VALUED_KEY)) {
-    cmp = key_cmp(range_key_part, range->key, range->length);
+
+  if ((table->key_info[active_index].flags & HA_MULTI_VALUED_KEY) &&
+      table->key_read) {
+    // For multi-valued indexes, key_cmp() needs to read the virtual column
+    // backing the index. See Field_typed_array::key_cmp(). The virtual column
+    // is not available during index-only scans (typically used by DS-MRR), so
+    // skip the end of range scan in that case, and let the SQL layer do the
+    // filtering. Assuming the scan is ascending, returning -1 (less than range)
+    // makes the scan return the row to the next layer.
+    assert(range_scan_direction == RANGE_SCAN_ASC);
+    return -1;
   }
+  cmp = key_cmp(range_key_part, range->key, range->length,
+                /*is_reverse_multi_valued_index_scan=*/false);
   if (!cmp) cmp = key_compare_result_on_equal;
   return cmp;
 }
@@ -7880,7 +8088,8 @@ int handler::compare_key(key_range *range) {
 int handler::compare_key_icp(const key_range *range) const {
   int cmp;
   if (!range) return 0;  // no max range
-  cmp = key_cmp(range_key_part, range->key, range->length);
+  cmp = key_cmp(range_key_part, range->key, range->length,
+                /*is_reverse_multi_valued_index_scan=*/false);
   if (!cmp) cmp = key_compare_result_on_equal;
   if (range_scan_direction == RANGE_SCAN_DESC) cmp = -cmp;
   return cmp;
@@ -7921,7 +8130,8 @@ int handler::compare_key_in_buffer(const uchar *buf) const {
   if (diff != 0) move_key_field_offsets(end_range, range_key_part, diff);
 
   // Compare the key in buf against end_range.
-  int cmp = key_cmp(range_key_part, end_range->key, end_range->length);
+  int cmp = key_cmp(range_key_part, end_range->key, end_range->length,
+                    /*is_reverse_multi_valued_index_scan=*/false);
   if (cmp == 0) cmp = key_compare_result_on_equal;
 
   // Reset the field offsets.
@@ -8231,43 +8441,43 @@ int binlog_log_row(TABLE *table, const uchar *before_record,
   THD *const thd = table->in_use;
 
   if (check_table_binlog_row_based(thd, table)) {
-    if (thd->variables.transaction_write_set_extraction != HASH_ALGORITHM_OFF) {
-      try {
-        MY_BITMAP save_read_set;
-        MY_BITMAP save_write_set;
-        if (bitmap_init(&save_read_set, nullptr, table->s->fields) ||
-            bitmap_init(&save_write_set, nullptr, table->s->fields)) {
-          my_error(ER_OUT_OF_RESOURCES, MYF(0));
-          return HA_ERR_RBR_LOGGING_FAILED;
-        }
-
-        const Binlog_log_row_cleanup cleanup_sentry(*table, save_read_set,
-                                                    save_write_set);
-
-        if (thd->variables.binlog_row_image == 0) {
-          for (uint key_number = 0; key_number < table->s->keys; ++key_number) {
-            if (((table->key_info[key_number].flags & (HA_NOSAME)) ==
-                 HA_NOSAME)) {
-              table->mark_columns_used_by_index_no_reset(key_number,
-                                                         table->read_set);
-              table->mark_columns_used_by_index_no_reset(key_number,
-                                                         table->write_set);
-            }
-          }
-        }
-        std::array<const uchar *, 2> records{after_record, before_record};
-        for (auto rec : records) {
-          if (rec != nullptr) {
-            assert(rec == table->record[0] || rec == table->record[1]);
-            bool res = add_pke(table, thd, rec);
-            if (res) return HA_ERR_RBR_LOGGING_FAILED;
-          }
-        }
-      } catch (const std::bad_alloc &) {
+    // Transacction write-set extraction.
+    try {
+      MY_BITMAP save_read_set;
+      MY_BITMAP save_write_set;
+      if (bitmap_init(&save_read_set, nullptr, table->s->fields) ||
+          bitmap_init(&save_write_set, nullptr, table->s->fields)) {
         my_error(ER_OUT_OF_RESOURCES, MYF(0));
         return HA_ERR_RBR_LOGGING_FAILED;
       }
+
+      const Binlog_log_row_cleanup cleanup_sentry(*table, save_read_set,
+                                                  save_write_set);
+
+      if (thd->variables.binlog_row_image == 0) {
+        for (uint key_number = 0; key_number < table->s->keys; ++key_number) {
+          if (((table->key_info[key_number].flags & (HA_NOSAME)) ==
+               HA_NOSAME)) {
+            table->mark_columns_used_by_index_no_reset(key_number,
+                                                       table->read_set);
+            table->mark_columns_used_by_index_no_reset(key_number,
+                                                       table->write_set);
+          }
+        }
+      }
+      std::array<const uchar *, 2> records{after_record, before_record};
+      for (auto rec : records) {
+        if (rec != nullptr) {
+          assert(rec == table->record[0] || rec == table->record[1]);
+          bool res = add_pke(table, thd, rec);
+          if (res) return HA_ERR_RBR_LOGGING_FAILED;
+        }
+      }
+    } catch (const std::bad_alloc &) {
+      my_error(ER_OUT_OF_RESOURCES, MYF(0));
+      return HA_ERR_RBR_LOGGING_FAILED;
     }
+
     if (table->in_use->is_error()) return error ? HA_ERR_RBR_LOGGING_FAILED : 0;
 
     DBUG_DUMP("read_set 10", (uchar *)table->read_set->bitmap,
@@ -8437,6 +8647,10 @@ int handler::ha_delete_row(const uchar *buf) {
   */
   assert(buf == table->record[0] || buf == table->record[1]);
   DBUG_EXECUTE_IF("inject_error_ha_delete_row", return HA_ERR_INTERNAL_ERROR;);
+  DBUG_EXECUTE_IF("simulate_error_ha_delete_row_lock_wait_timeout", {
+    DBUG_SET("-d,simulate_error_ha_delete_row_lock_wait_timeout");
+    return HA_ERR_LOCK_WAIT_TIMEOUT;
+  });
 
   DBUG_EXECUTE_IF(
       "handler_crashed_table_on_usage",
@@ -8692,7 +8906,12 @@ bool handler::is_using_prohibited_gap_locks(TABLE *table,
                         After calling this function, it will be used to return
                         the value of generated column.
   @param in_purge   whether the function is called by purge thread
-
+  @param[out]    mv_data_ptr When given (not null) and the field
+                          needs to be calculated is a typed array field, it
+                          will contain pointer to field's calculated value.
+  @param[out]    mv_length Length of the data above
+  @param[in]   include_stored_gcols  if true, evaluate both stored and virtual
+                          gcols.  if false, evaluate only virtual gcol.
   @return true in case of error, false otherwise.
 */
 
@@ -8700,7 +8919,8 @@ static bool my_eval_gcolumn_expr_helper(THD *thd, TABLE *table,
                                         const MY_BITMAP *const fields,
                                         uchar *record, bool in_purge,
                                         const char **mv_data_ptr,
-                                        ulong *mv_length) {
+                                        ulong *mv_length,
+                                        bool include_stored_gcols) {
   DBUG_TRACE;
   assert(table && table->vfield);
   assert(!thd->is_error());
@@ -8765,28 +8985,28 @@ static bool my_eval_gcolumn_expr_helper(THD *thd, TABLE *table,
   dbug_tmp_use_all_columns(table, old_maps, table->read_set, table->write_set);
 
   for (Field **vfield_ptr = table->vfield; *vfield_ptr; vfield_ptr++) {
-    Field *field = *vfield_ptr;
+    Field *const field = *vfield_ptr;
+    assert(field->is_gcol());
 
-    // Check if we should evaluate this field
-    if (bitmap_is_set(&fields_to_evaluate, field->field_index()) &&
-        field->is_virtual_gcol()) {
-      assert(field->gcol_info && field->gcol_info->expr_item->fixed);
+    // Skip if not marked
+    if (!bitmap_is_set(&fields_to_evaluate, field->field_index())) continue;
 
-      const type_conversion_status save_in_field_status =
-          field->gcol_info->expr_item->save_in_field(field, false);
-      assert(!thd->is_error() || save_in_field_status != TYPE_OK);
+    // Skip if stored generated column is not asked to be evaluated
+    if (!field->is_virtual_gcol() && !include_stored_gcols) continue;
 
-      /*
-        save_in_field() may return non-zero even if there was no
-        error. This happens if a warning is raised, such as an
-        out-of-range warning when converting the result to the target
-        type of the virtual column. We should stop only if the
-        non-zero return value was caused by an actual error.
-      */
-      if (save_in_field_status != TYPE_OK && thd->is_error()) {
-        res = true;
-        break;
-      }
+    const type_conversion_status save_in_field_status =
+        field->gcol_info->expr_item->save_in_field(field, false);
+    assert(!thd->is_error() || save_in_field_status != TYPE_OK);
+
+    /*
+      save_in_field() may return non-zero if a warning is raised
+      (i.e. out-of-range warning when converting the result to the target
+      type of the virtual column). We should stop only if the
+      non-zero return value was caused by an actual error.
+    */
+    if (save_in_field_status != TYPE_OK && thd->is_error()) {
+      res = true;
+      break;
     }
   }
 
@@ -8886,7 +9106,7 @@ bool handler::my_eval_gcolumn_expr_with_open(THD *thd, const char *db_name,
 
   if (table) {
     retval = my_eval_gcolumn_expr_helper(thd, table, fields, record, true,
-                                         mv_data_ptr, mv_length);
+                                         mv_data_ptr, mv_length, false);
   }
 
   return retval;
@@ -8894,11 +9114,13 @@ bool handler::my_eval_gcolumn_expr_with_open(THD *thd, const char *db_name,
 
 bool handler::my_eval_gcolumn_expr(THD *thd, TABLE *table,
                                    const MY_BITMAP *const fields, uchar *record,
-                                   const char **mv_data_ptr, ulong *mv_length) {
+                                   const char **mv_data_ptr, ulong *mv_length,
+                                   bool include_stored_gcols) {
   DBUG_TRACE;
 
-  const bool res = my_eval_gcolumn_expr_helper(thd, table, fields, record,
-                                               false, mv_data_ptr, mv_length);
+  const bool res =
+      my_eval_gcolumn_expr_helper(thd, table, fields, record, false,
+                                  mv_data_ptr, mv_length, include_stored_gcols);
   return res;
 }
 
@@ -8919,7 +9141,7 @@ int handler::ha_extra(enum ha_extra_function operation) {
         (!(m_unique = new (*THR_MALLOC) Unique_on_insert(ref_length)) ||
          m_unique->init())) {
       /* purecov: begin inspected */
-      destroy(m_unique);
+      if (m_unique != nullptr) ::destroy_at(m_unique);
       return HA_ERR_OUT_OF_MEM;
       /* purecov: end */
     }
@@ -8928,7 +9150,7 @@ int handler::ha_extra(enum ha_extra_function operation) {
   } else if (operation == HA_EXTRA_DISABLE_UNIQUE_RECORD_FILTER) {
     if (m_unique) {
       m_unique->cleanup();
-      destroy(m_unique);
+      ::destroy_at(m_unique);
       m_unique = nullptr;
     }
   }
@@ -9232,6 +9454,56 @@ const handlerton *SecondaryEngineHandlerton(const THD *thd) {
     return nullptr;
   }
   return thd->lex->m_sql_cmd->secondary_engine();
+}
+
+std::atomic<const char *> default_secondary_engine_name;
+
+/**
+  Retrieves the secondary engine handlerton if possible.
+
+  @param  thd       Query thd.
+  @param  secondary_engine_in_name  Name of secondary engine if available.
+
+  @retval handlerton    if secondary engine handle found.
+  @retval nullptr       if secondary engine not found.
+*/
+const handlerton *EligibleSecondaryEngineHandlerton(
+    THD *thd, const LEX_CSTRING *secondary_engine_in_name) {
+  // 1st priority - retrieve handlerton cached already in thd.
+  const handlerton *secondary_engine =
+      thd->eligible_secondary_engine_handlerton();
+  if (secondary_engine == nullptr) {
+    // 2nd priority, if secondary engine name provided, then try to
+    // use that  to retrieve handlerton.
+    const LEX_CSTRING *secondary_engine_name = secondary_engine_in_name;
+    LEX_CSTRING cur_name;
+
+    if (secondary_engine_name == nullptr &&
+        default_secondary_engine_name != nullptr) {
+      /** 3rd priority - if no secondary secondary_engine_in_name provided,
+       * attempt to retrieve secondary engine name via
+       * default_secondary_engine_name, if available. */
+      cur_name = to_lex_cstring(default_secondary_engine_name);
+      secondary_engine_name = &cur_name;
+    } else if (secondary_engine_name == nullptr && (thd->lex != nullptr) &&
+               (thd->lex->m_sql_cmd != nullptr)) {
+      /** 4th priority - attempt to retrieve secondary engine name through
+       * eligible_secondary_storage_engine function */
+      secondary_engine_name =
+          thd->lex->m_sql_cmd->eligible_secondary_storage_engine(thd);
+    }
+    /* if secondary_engine_name found via 2,3 or 4th priority lookups, use the
+     * name to retrieve the handlerton */
+    if (secondary_engine_name != nullptr) {
+      plugin_ref ref = ha_resolve_by_name(thd, secondary_engine_name, false);
+      if (ref != nullptr) {
+        thd->set_eligible_secondary_engine_handlerton(
+            plugin_data<handlerton *>(ref));
+        secondary_engine = thd->eligible_secondary_engine_handlerton();
+      }
+    }
+  }
+  return secondary_engine;
 }
 
 /**

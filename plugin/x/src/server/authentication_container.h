@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2020, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -51,6 +52,12 @@ class Authentication_container : public iface::Authentication_container {
     m_auth_handlers.emplace_back(name, tls_required, Mech::create);
   }
 
+  template <typename Mech>
+  void add_legacy_authentication_mechanism(const std::string &name,
+                                           const bool tls_required) {
+    m_auth_handlers.emplace_back(name, tls_required, Mech::create, true);
+  }
+
   class Auth_entry {
    public:
     using Create = std::unique_ptr<iface::Authentication> (*)(
@@ -58,14 +65,16 @@ class Authentication_container : public iface::Authentication_container {
 
    public:
     Auth_entry(const std::string &name, const bool is_secure,
-               const Create create)
+               const Create create, const bool legacy = false)
         : m_name(name),
           m_must_be_secure_connection(is_secure),
-          m_create(create) {}
+          m_create(create),
+          m_legacy{legacy} {}
 
     const std::string m_name;
     const bool m_must_be_secure_connection;
     const Create m_create;
+    const bool m_legacy;
   };
 
   using Auth_entries = std::vector<Auth_entry>;

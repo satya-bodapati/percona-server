@@ -1,3 +1,5 @@
+SET explain_json_format_version = 1;
+call mtr.add_suppression("Failed to compress the gtid_executed table.");
 drop table if exists t1, t2;
 Warnings:
 Note	1051	Unknown table 'test.t1'
@@ -218,17 +220,17 @@ insert into t10 values
 (100, NULL, 3, '2000-02-09', '2000-02-09');
 create  table t11 (
 col_date_key date default null,
-col_varchar_10_utf8 varchar(10) CHARACTER SET utf8 default null,
+col_varchar_10_utf8 varchar(10) CHARACTER SET utf8mb3 default null,
 col_varchar_10_latin1 varchar(10) default null,
 col_varchar_10_latin1_key varchar(10) default null,
 col_datetime datetime default null,
-col_varchar_10_utf8_key varchar(10) CHARACTER SET utf8 default null,
+col_varchar_10_utf8_key varchar(10) CHARACTER SET utf8mb3 default null,
 col_varchar_1024_latin1_key varchar(1024) default null,
 col_varchar_1024_latin1 varchar(1024) default null,
-col_varchar_1024_utf8 varchar(1024) CHARACTER SET utf8 default null,
+col_varchar_1024_utf8 varchar(1024) CHARACTER SET utf8mb3 default null,
 col_int_key int(11) default null,
 col_date date default null,
-col_varchar_1024_utf8_key varchar(1024) CHARACTER SET utf8 default null,
+col_varchar_1024_utf8_key varchar(1024) CHARACTER SET utf8mb3 default null,
 col_int int(11) default null,
 pk int(11) not null auto_increment,
 col_datetime_key datetime default null,
@@ -242,11 +244,11 @@ key col_varchar_1024_utf8_key (col_varchar_1024_utf8_key(333)),
 key col_datetime_key (col_datetime_key)
 ) engine=myisam auto_increment=76 default charset=latin1;
 Warnings:
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 Warning	1681	Integer display width is deprecated and will be removed in a future release.
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 Warning	1681	Integer display width is deprecated and will be removed in a future release.
 Warning	1681	Integer display width is deprecated and will be removed in a future release.
 insert ignore into t11 values
@@ -355,6 +357,7 @@ test.t12	analyze	status	OK
 test.t13	analyze	status	OK
 test.t14	analyze	status	OK
 # restart: --big-tables=1
+SET explain_json_format_version = 1;
 SET @optimizer_switch_saved= @@optimizer_switch;
 SET @@optimizer_switch="derived_merge=off";
 explain format = json select sql_buffer_result * from t1;
@@ -2267,6 +2270,7 @@ x
 SET @@optimizer_switch=@optimizer_switch_saved;
 SET GLOBAL innodb_fast_shutdown = 0;
 # restart: --innodb-read-only --big-tables=1
+SET explain_json_format_version = 1;
 SET @optimizer_switch_saved= @@optimizer_switch;
 SET @@optimizer_switch="derived_merge=off";
 explain format = json select sql_buffer_result * from t1;

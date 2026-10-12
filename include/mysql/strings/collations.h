@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,6 +26,7 @@
 
 #include <cstddef>
 #include <string>
+#include <string_view>
 
 #include "mysql/strings/api.h"
 
@@ -74,28 +76,22 @@ class MYSQL_STRINGS_EXPORT Name {
     @note throws std::bad_alloc
   */
   Name(const char *name, size_t size);
+  ~Name() = default;
+
+  // These must be explicitly defined for clang on Windows due to
+  // __declspec(dllexport).
+  Name(const Name &) = default;
+  Name(Name &&) = default;
+  Name &operator=(const Name &) = default;
+  Name &operator=(Name &&) = default;
 
   /**
-    Constructor
-
-    @note throws std::bad_alloc
+    Returns normalized name as std::string_view.
   */
-  Name(const Name &);
-
-  Name(Name &&) noexcept;
-
-  ~Name();
-
-  Name &operator=(const Name &);
-  Name &operator=(Name &&) noexcept;
-
-  /**
-    Returns normalized name as std::string
-  */
-  std::string operator()() const { return m_normalized; }
+  std::string_view to_string_view() const { return m_normalized; }
 
  private:
-  const char *m_normalized{nullptr};
+  std::string m_normalized;
 };
 
 /**
@@ -148,28 +144,6 @@ MYSQL_STRINGS_EXPORT const CHARSET_INFO *find_primary(Name cs_name);
 */
 inline const CHARSET_INFO *find_primary(const char *cs_name) {
   return find_primary(Name{cs_name});
-}
-
-/**
-  Find binary collation by its character set name
-
-  @param cs_name        Character set name
-
-  @returns pointer to a collation object on success, nullptr if not found
-*/
-MYSQL_STRINGS_EXPORT const CHARSET_INFO *find_default_binary(
-    const Name &cs_name);
-
-/**
-  Find binary collation by its character set name
-
-  @param cs_name        '\0'-terminated character set name
-                        (not normalized name is fine)
-
-  @returns pointer to a collation object on success, nullptr if not found
-*/
-inline const CHARSET_INFO *find_default_binary(const char *cs_name) {
-  return find_default_binary(Name{cs_name});
 }
 
 }  // namespace collation

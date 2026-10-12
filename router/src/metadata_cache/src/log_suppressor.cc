@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2023, Oracle and/or its affiliates.
+  Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -32,15 +33,15 @@ namespace metadata_cache {
 LogSuppressor::~LogSuppressor() = default;
 
 void LogSuppressor::log_message(
-    const MessageId id, const std::string &uuid, const std::string &message,
+    const MessageId id, const std::string &key, const std::string &message,
     bool invalid_condition,
     mysql_harness::logging::LogLevel invalid_condition_level,
     mysql_harness::logging::LogLevel valid_condition_level,
     const bool log_initial_valid) {
-  const auto key = std::make_pair(uuid, id);
+  const auto msg_key = std::make_pair(key, id);
   std::string last_message;
-  if (messages_.count(key) != 0) {
-    last_message = messages_[key];
+  if (messages_.count(msg_key) != 0) {
+    last_message = messages_[msg_key];
   }
 
   if (last_message == message) {
@@ -48,7 +49,7 @@ void LogSuppressor::log_message(
     return;
   }
 
-  messages_[key] = message;
+  messages_[msg_key] = message;
 
   // the caller does not want to log anything in this scenario
   if (message.empty()) {

@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -623,8 +624,10 @@ ha_rows check_quick_select(THD *thd, RANGE_OPT_PARAM *param, uint idx,
 
   *bufsize = thd->variables.read_rnd_buff_size;
   // Sets is_ror_scan to false for some queries, e.g. multi-ranges
+  bool force_default_mrr = false;
   rows = file->multi_range_read_info_const(keynr, &seq_if, (void *)&seq, 0,
-                                           bufsize, mrr_flags, cost);
+                                           bufsize, mrr_flags,
+                                           &force_default_mrr, cost);
   if (rows != HA_POS_ERROR) {
     param->table->quick_rows[keynr] = rows;
     if (update_tbl_stats) {
@@ -974,7 +977,7 @@ AccessPath *get_key_scans_params(THD *thd, RANGE_OPT_PARAM *param,
 
   AccessPath *path = new (param->return_mem_root) AccessPath;
   path->type = AccessPath::INDEX_RANGE_SCAN;
-  path->cost = read_cost;
+  path->set_cost(read_cost);
   path->set_num_output_rows(best_records);
   path->index_range_scan().index = param->real_keynr[best_idx];
   path->index_range_scan().num_used_key_parts = used_key_parts;
@@ -993,7 +996,7 @@ AccessPath *get_key_scans_params(THD *thd, RANGE_OPT_PARAM *param,
   path->index_range_scan().reverse =
       false;  // May be changed by make_reverse() later.
   DBUG_PRINT("info", ("Returning range plan for key %s, cost %g, records %g",
-                      used_key->name, path->cost, path->num_output_rows()));
+                      used_key->name, path->cost(), path->num_output_rows()));
   return path;
 }
 
@@ -1018,13 +1021,6 @@ static bool null_part_in_key(KEY_PART *key_part, const uchar *key,
     if (key_part->null_bit && *key) return true;
   }
   return false;
-}
-
-// TODO(sgunders): This becomes a bit simpler with C++20's string_view
-// constructors.
-static inline std::basic_string_view<uchar> make_string_view(const uchar *start,
-                                                             const uchar *end) {
-  return {start, static_cast<size_t>(end - start)};
 }
 
 /**
@@ -1087,8 +1083,7 @@ static bool get_ranges_from_tree_given_base(
         node->next_key_part->type == SEL_ROOT::Type::KEY_RANGE &&
         node->next_key_part->root->part == part + 1) {
       if (node->min_flag == 0 && node->max_flag == 0 &&
-          make_string_view(min_key, tmp_min_key) ==
-              make_string_view(max_key, tmp_max_key)) {
+          std::equal(min_key, tmp_min_key, max_key, tmp_max_key)) {
         // This range was an equality predicate, and we have more
         // keyparts to scan, so use its range as a base for ranges on
         // the next keypart(s). E.g. if we have (a = 3) on this keypart,
@@ -1164,8 +1159,8 @@ static bool get_ranges_from_tree_given_base(
       else
         flag |= NO_MAX_RANGE;
     }
-    if (flag == 0 && make_string_view(base_min_key, tmp_min_key) ==
-                         make_string_view(base_max_key, tmp_max_key)) {
+    if (flag == 0 &&
+        std::equal(base_min_key, tmp_min_key, base_max_key, tmp_max_key)) {
       flag |= EQ_RANGE;
       /*
         Note that keys which are extended with PK parts have no

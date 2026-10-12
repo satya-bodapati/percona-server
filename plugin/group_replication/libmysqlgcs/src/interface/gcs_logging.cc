@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -61,7 +62,7 @@ const std::string Gcs_debug_options::m_debug_all(
 
 int64_t Gcs_debug_options::get_valid_debug_options() {
   int64_t ret = 0;
-  unsigned int num_options = get_number_debug_options();
+  unsigned int const num_options = get_number_debug_options();
 
   unsigned int i = 0;
   for (i = 0; i < num_options; i++) {
@@ -90,7 +91,7 @@ int64_t Gcs_debug_options::get_current_debug_options() {
 
 int64_t Gcs_debug_options::get_current_debug_options(
     std::string &res_debug_options) {
-  int64_t debug_options = load_debug_options();
+  int64_t const debug_options = load_debug_options();
   get_debug_options(debug_options, res_debug_options);
   return debug_options;
 }
@@ -98,7 +99,7 @@ int64_t Gcs_debug_options::get_current_debug_options(
 bool Gcs_debug_options::get_debug_options(const int64_t debug_options,
                                           std::string &res_debug_options) {
   unsigned int i = 0;
-  unsigned int num_options = get_number_debug_options();
+  unsigned int const num_options = get_number_debug_options();
 
   /*
     There are options that are not valid here so an error is returned.
@@ -135,7 +136,7 @@ bool Gcs_debug_options::get_debug_options(const std::string &debug_options,
   bool found;
   bool match = false;
   unsigned int i;
-  unsigned int num_options = get_number_debug_options();
+  unsigned int const num_options = get_number_debug_options();
 
   res_debug_options = GCS_DEBUG_NONE;
 
@@ -174,7 +175,7 @@ bool Gcs_debug_options::get_debug_options(const std::string &debug_options,
       return true;
   }
 
-  if (!match && (debug_options.find(",") != std::string::npos)) return true;
+  if (!match && (debug_options.find(',') != std::string::npos)) return true;
 
   return false;
 }

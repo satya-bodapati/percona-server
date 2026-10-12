@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,19 +27,14 @@
 #define MYSQLD_MOCK_MYSQL_SERVER_MOCK_INCLUDED
 
 #include <memory>
-#include <mutex>
-#include <set>
 
 #include "mock_session.h"
 #include "mysql.h"  // mysql_ssl_mode
-#include "mysql/harness/net_ts/internet.h"
+#include "mysql/harness/destination.h"
 #include "mysql/harness/net_ts/io_context.h"
-#include "mysql/harness/net_ts/local.h"
 #include "mysql/harness/plugin.h"
 #include "mysql/harness/stdx/monitor.h"
 #include "mysql/harness/tls_server_context.h"
-#include "mysqlrouter/mock_server_component.h"
-#include "statement_reader.h"
 
 namespace server_mock {
 
@@ -57,9 +53,8 @@ class MySQLServerMock {
    *                        of the expected SQL statements and responses
    * @param module_prefixes prefixes of javascript modules used by the nodejs
    * compatible module-loader
-   * @param bind_address Address on which the server accepts client connections
-   * @param bind_port Number of the port on which the server accepts clients
-   *                        connections
+   * @param bind_destination endpoint on which the server accepts client
+   * connections
    * @param protocol the protocol this mock instance speaks: "x" or "classic"
    * @param debug_mode Flag indicating if the handled queries should be printed
    * to the standard output
@@ -68,7 +63,7 @@ class MySQLServerMock {
    */
   MySQLServerMock(net::io_context &io_ctx, std::string expected_queries_file,
                   std::vector<std::string> module_prefixes,
-                  std::string bind_address, unsigned bind_port,
+                  mysql_harness::Destination bind_destination,
                   std::string protocol, bool debug_mode,
                   TlsServerContext &&tls_server_ctx, mysql_ssl_mode ssl_mode);
 
@@ -85,8 +80,7 @@ class MySQLServerMock {
   void close_all_connections();
 
  private:
-  std::string bind_address_;
-  unsigned bind_port_;
+  mysql_harness::Destination bind_destination_;
   bool debug_mode_;
   net::io_context &io_ctx_;
   std::string expected_queries_file_;

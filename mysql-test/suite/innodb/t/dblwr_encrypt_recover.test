@@ -1,5 +1,7 @@
 --source include/have_debug.inc
 --source include/not_valgrind.inc
+--source include/have_component_keyring_file.inc
+--source suite/component_keyring_file/inc/setup_component.inc
 
 create table t1 (f1 int primary key, f2 blob) ENCRYPTION='Y';
 
@@ -13,6 +15,8 @@ COMMIT WORK;
 
 --echo # Wait for purge to complete
 --source include/wait_innodb_all_purged.inc
+
+SET GLOBAL innodb_monitor_enable = module_log;
 
 --echo # Ensure that dirty pages of table t1 is flushed.
 FLUSH TABLES t1 FOR EXPORT;
@@ -50,27 +54,22 @@ SELECT @@session.innodb_interpreter_output INTO @space_page_size;
 SET SESSION innodb_interpreter = 'destroy';
 
 let MYSQLD_DATADIR=`SELECT @@datadir`;
-let PAGE_NO=`select @page_no`;
+let PAGE_NUM=`select @page_no`;
 let FILE_NAME=`select @space_file_name`;
-let PAGE_SIZE=`select @space_page_size`;
+let INNODB_PAGE_SIZE=`select @space_page_size`;
+
+# Wait till generated REDOs are synced to disk
+--let $wait_condition = SELECT COUNT =(SELECT COUNT FROM INFORMATION_SCHEMA.INNODB_METRICS WHERE NAME = 'log_lsn_current')  FROM INFORMATION_SCHEMA.INNODB_METRICS WHERE NAME = 'log_lsn_last_flush'
+--source include/wait_condition.inc
 
 --source include/kill_mysqld.inc
 
 --echo # Corrupt the root page of table t1 in the user tablespace.
-perl;
-use IO::Handle;
-my $fname= "$ENV{'MYSQLD_DATADIR'}/$ENV{'FILE_NAME'}";
-my $page_size = $ENV{'PAGE_SIZE'};
-my $nbytes = $ENV{'PAGE_NO'} * $ENV{'PAGE_SIZE'};
-open(FILE, "+<", $fname) or die;
-FILE->autoflush(1);
-binmode FILE;
-seek(FILE, $nbytes, SEEK_SET);
-print FILE chr(0) x 38;
-close FILE;
-EOF
+--let IBD_FILE=$MYSQLD_DATADIR/$FILE_NAME
+--let ALL_ZEROES=0
+--source ../include/corrupt_page.inc
 
---source include/start_mysqld.inc
+--source include/start_mysqld_no_echo.inc
 
 SET SESSION innodb_interpreter = 'init';
 SET SESSION innodb_interpreter = 'print_dblwr_has_encrypted_pages';
@@ -88,4 +87,5 @@ CHECK TABLE t1;
 SELECT f1, f2 FROM t1;
 
 DROP TABLE t1;
+--source suite/component_keyring_file/inc/teardown_component.inc
 --echo # Test End

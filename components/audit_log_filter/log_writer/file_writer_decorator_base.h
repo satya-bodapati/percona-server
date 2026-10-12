@@ -28,13 +28,6 @@ class FileWriterDecoratorBase : public FileWriterBase {
       : m_file_writer{std::move(file_writer)} {}
 
   /**
-   * @brief Init file writer.
-   *
-   * @return true in case of success, false otherwise
-   */
-  bool init() noexcept override;
-
-  /**
    * @brief Prepare writer for work with newly opened log file.
    *
    * @return true in case of success, false otherwise
@@ -51,9 +44,14 @@ class FileWriterDecoratorBase : public FileWriterBase {
    * @brief Write file.
    *
    * @param record Log record
-   * @param record Log record size
+   * @param size Log record size
    */
   void write(const char *record, size_t size) noexcept override;
+
+  /**
+   * @brief Flush any pending writer state and sync the active file.
+   */
+  void sync() noexcept override;
 
  private:
   std::unique_ptr<FileWriterBase> m_file_writer;

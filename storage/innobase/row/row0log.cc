@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -51,6 +52,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "row0mysql.h"
 #include "row0row.h"
 #include "row0upd.h"
+#include "scope_guard.h"
 #include "srv0mon.h"
 #include "srv0start.h"
 #include "trx0rec.h"
@@ -299,9 +301,9 @@ static bool encrypt_iv(byte *iv, os_offset_t offs, space_id_t space_id) {
 }
 
 /** Encrypt a temporary file block.
-@param[in]	src		block to encrypt
+@param[in]	src_block	block to encrypt
 @param[in]	size		size of the block
-@param[out]	dst		destination block
+@param[out]	dst_block	destination block
 @param[in]	offs		offset to block
 @param[in]	space_id	tablespace id
 @return whether the operation succeeded */
@@ -330,9 +332,9 @@ bool log_tmp_block_encrypt(const byte *src_block, ulint size, byte *dst_block,
 }
 
 /** Decrypt a temporary file block.
-@param[in]	src		block to decrypt
+@param[in]	src_block	block to decrypt
 @param[in]	size		size of the block
-@param[out]	dst		destination block
+@param[out]	dst_block	destination block
 @param[in]	offs		offset to block
 @param[in]	space_id	tablespace id
 @return whether the operation succeeded */
@@ -825,7 +827,7 @@ static void row_log_table_low_redundant(const rec_t *rec,
   ut_ad(!dict_table_is_comp(index->table)); /* redundant row format */
   ut_ad(new_index->is_clustered());
 
-  uint8_t rec_version = UINT8_UNDEFINED;
+  row_version_t rec_version = INVALID_ROW_VERSION;
   bool rec_has_version = false;
   if (rec_old_is_versioned(rec)) {
     rec_version = rec_get_instant_row_version_old(rec);
@@ -933,7 +935,7 @@ static void row_log_table_low_redundant(const rec_t *rec,
       *b++ = static_cast<byte>(old_pk_extra_size);
       /* It's PK fields for new table, version doesn't matter. */
       rec_serialize_dtuple(b + old_pk_extra_size, new_index, old_pk->fields,
-                           old_pk->n_fields, ventry, UINT8_UNDEFINED);
+                           old_pk->n_fields, ventry, INVALID_ROW_VERSION);
       b += old_pk_size;
     }
 
@@ -959,7 +961,8 @@ static void row_log_table_low_redundant(const rec_t *rec,
         rec_new_temp_set_versioned(temp_rec, true);
         /* Write the record version in 1 byte */
         byte *temp_version = temp_rec - 2;
-        memcpy(temp_version, &rec_version, sizeof(uint8_t));
+        *temp_version = static_cast<byte>(rec_version);
+        ut_ad(is_valid_row_version(*temp_version));
       } else {
         rec_new_temp_set_versioned(temp_rec, false);
       }
@@ -1683,6 +1686,21 @@ It is then unmarked. Otherwise, the entry is just inserted to the index.
   return (err);
 }
 
+/** No vector index reaches the row log: the only ALTER that may run with
+LOCK=NONE is the one dropping the last vector index, and the table it
+rebuilds has none. Applying the log knows B-trees and FTS, not a graph, so a
+vector index here fails the ALTER instead of being skipped or treated as a
+B-tree: debug stops, release logs it and returns an error.
+@param[in]  index  the vector index found in the rebuilt table
+@return DB_INDEX_CORRUPT */
+static dberr_t row_log_refuse_vector_index(const dict_index_t *index) {
+  ut_d(ut_error);
+  ib::error(ER_IB_MSG_456) << "Vector index " << index->name << " of table "
+                           << index->table->name
+                           << " reached the online ALTER log; the ALTER fails.";
+  return DB_INDEX_CORRUPT;
+}
+
 /** Replays an insert operation on a table that was rebuilt.
  @return DB_SUCCESS or error code */
 [[nodiscard]] static dberr_t row_log_table_apply_insert_low(
@@ -1731,6 +1749,11 @@ It is then unmarked. Otherwise, the entry is just inserted to the index.
     n_index++;
     index = index->next();
     if (!index) {
+      break;
+    }
+
+    if (index->is_vector()) {
+      error = row_log_refuse_vector_index(index);
       break;
     }
 
@@ -1933,6 +1956,11 @@ flag_ok:
   }
 
   while ((index = index->next()) != nullptr) {
+    if (index->is_vector()) {
+      error = row_log_refuse_vector_index(index);
+      break;
+    }
+
     if (index->type & DICT_FTS) {
       continue;
     }
@@ -1976,7 +2004,7 @@ flag_ok:
   ulint *offsets;
   ulint num_v = new_table->n_v_cols;
 
-  ut_ad(rec_offs_n_fields(moffsets) == dict_index_get_n_unique(index) + 2);
+  ut_ad(rec_offs_n_fields(moffsets) == dict_index_get_n_unique(index) + 2U);
   ut_ad(!rec_offs_any_extern(moffsets));
 
   /* Convert the row to a search tuple. */
@@ -1999,6 +2027,7 @@ flag_ok:
 
   pcur.open(index, 0, old_pk, PAGE_CUR_LE,
             BTR_MODIFY_TREE | BTR_LATCH_FOR_DELETE, &mtr, UT_LOCATION_HERE);
+  const auto guard = create_scope_guard([&pcur]() { pcur.close(); });
 #ifdef UNIV_DEBUG
   switch (pcur.get_btr_cur()->flag) {
     case BTR_CUR_UNSET:
@@ -2187,7 +2216,7 @@ flag_ok:
 
   ut_ad(dtuple_get_n_fields_cmp(old_pk) == dict_index_get_n_unique(index));
   ut_ad(dtuple_get_n_fields(old_pk) ==
-        dict_index_get_n_unique(index) + (log->same_pk ? 0 : 2));
+        dict_index_get_n_unique(index) + (log->same_pk ? 0U : 2U));
 
   row = row_log_table_apply_convert_mrec(mrec, dup->m_index, offsets, log, heap,
                                          &error);
@@ -2222,6 +2251,7 @@ flag_ok:
 
   pcur.open(index, 0, old_pk, PAGE_CUR_LE, BTR_MODIFY_TREE, &mtr,
             UT_LOCATION_HERE);
+  const auto guard = create_scope_guard([&pcur]() { pcur.close(); });
 #ifdef UNIV_DEBUG
   switch (pcur.get_btr_cur()->flag) {
     case BTR_CUR_UNSET:
@@ -2451,6 +2481,11 @@ flag_ok:
   while ((index = index->next()) != nullptr) {
     n_index++;
     if (error != DB_SUCCESS) {
+      break;
+    }
+
+    if (index->is_vector()) {
+      error = row_log_refuse_vector_index(index);
       break;
     }
 
@@ -2728,7 +2763,7 @@ flag_ok:
           dict_table_copy_v_types(old_pk, new_index->table);
         }
 
-        for (ulint i = 0; i < dict_index_get_n_unique(new_index) + 2; i++) {
+        for (ulint i = 0; i < dict_index_get_n_unique(new_index) + 2U; i++) {
           const void *field;
           ulint len;
           dfield_t *dfield;
@@ -2780,27 +2815,41 @@ flag_ok:
         }
         n_v_size = mach_read_from_2(next_mrec);
         next_mrec += n_v_size;
-
         if (next_mrec > mrec_end) {
           return (nullptr);
         }
 
-        /* if there is more than 2 bytes length info */
-        if (n_v_size > 2) {
-          if (next_mrec + 2 > mrec_end) {
-            return (nullptr);
+        /* Check whether any of the virtual columns are part of an index. */
+        bool virt_in_idx = false;
+        for (ulint col_no = 0;
+             col_no < dict_table_get_n_v_cols(new_index->table); col_no++) {
+          const dict_v_col_t *col =
+              dict_table_get_nth_v_col(new_index->table, col_no);
+          if (col->m_col.ord_part) {
+            virt_in_idx = true;
           }
-          o_v_size = mach_read_from_2(next_mrec);
-          if (next_mrec + o_v_size > mrec_end) {
-            return (nullptr);
-          }
-
-          trx_undo_read_v_cols(log->table, const_cast<byte *>(next_mrec),
-                               old_pk, false, true,
-                               &(log->col_map[log->n_old_col]), heap);
         }
 
-        next_mrec += o_v_size;
+        /* Values of only virtual columns that are in index are fully
+         serialized into undo log. */
+        if (virt_in_idx) {
+          /* if there is more than 2 bytes length info */
+          if (n_v_size > 2) {
+            if (next_mrec + 2 > mrec_end) {
+              return (nullptr);
+            }
+            o_v_size = mach_read_from_2(next_mrec);
+            if (next_mrec + o_v_size > mrec_end) {
+              return (nullptr);
+            }
+
+            trx_undo_read_v_cols(log->table, const_cast<byte *>(next_mrec),
+                                 old_pk, false, true,
+                                 &(log->col_map[log->n_old_col]), heap);
+          }
+
+          next_mrec += o_v_size;
+        }
         ut_ad(next_mrec <= mrec_end);
       }
 

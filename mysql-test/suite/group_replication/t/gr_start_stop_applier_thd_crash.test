@@ -31,6 +31,7 @@ call mtr.add_suppression("Info table is not ready to be used.*");
 call mtr.add_suppression("Error writing relay log configuration.");
 call mtr.add_suppression("Error writing source configuration");
 call mtr.add_suppression("Error reading source configuration");
+call mtr.add_suppression("The group replication applier thread has received KILL request.");
 call mtr.add_suppression("Fatal error during execution on the Applier process of Group Replication. The server will now leave the group.");
 call mtr.add_suppression("Unable to confirm whether the server has left the group or not. Check performance_schema.replication_group_members to check group membership information.");
 call mtr.add_suppression("The server was automatically set into read only mode after an error was detected.");
@@ -59,7 +60,7 @@ SET GLOBAL group_replication_bootstrap_group=ON;
 --echo #    group_replication_applier_thread_init_wait debug sync point.
 
 --let $rpl_connection_name= server_1
---source include/rpl_connection.inc
+--source include/connection.inc
 
 --let $wait_condition=SELECT COUNT(*)=1 FROM INFORMATION_SCHEMA.PROCESSLIST WHERE State = 'debug sync point: now'
 --source include/wait_condition.inc
@@ -80,13 +81,13 @@ SET GLOBAL group_replication_bootstrap_group=ON;
 --echo # 4. Reap the killed command and reset debug point.
 
 --let $rpl_connection_name= server1
---source include/rpl_connection.inc
+--source include/connection.inc
 
 --error CR_SERVER_LOST
 --reap
 
 --let $rpl_server_number= 1
---source include/rpl_reconnect.inc
+--source include/rpl/reconnect.inc
 
 
 --echo

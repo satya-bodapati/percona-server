@@ -1,15 +1,16 @@
-/* Copyright (c) 2008, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -38,6 +39,7 @@
 #include "storage/perfschema/unittest/stub_digest.h"
 #include "storage/perfschema/unittest/stub_pfs_global.h"
 #include "storage/perfschema/unittest/stub_pfs_plugin_table.h"
+#include "storage/perfschema/unittest/stub_server_logs.h"
 #include "storage/perfschema/unittest/stub_server_telemetry.h"
 #include "storage/perfschema/unittest/stub_telemetry_metrics.h"
 #include "unittest/mytap/tap.h"
@@ -119,19 +121,19 @@ static void test_oom() {
   PFS_socket_class dummy_socket_class;
   PFS_table_share dummy_table_share;
   PFS_mutex *mutex_1;
-  PFS_mutex *mutex_2;
+  const PFS_mutex *mutex_2;
   PFS_rwlock *rwlock_1;
-  PFS_rwlock *rwlock_2;
+  const PFS_rwlock *rwlock_2;
   PFS_cond *cond_1;
-  PFS_cond *cond_2;
+  const PFS_cond *cond_2;
   PFS_thread *thread_1;
-  PFS_thread *thread_2;
+  const PFS_thread *thread_2;
   PFS_file *file_1;
-  PFS_file *file_2;
+  const PFS_file *file_2;
   PFS_socket *socket_1;
-  PFS_socket *socket_2;
+  const PFS_socket *socket_2;
   PFS_table *table_1;
-  PFS_table *table_2;
+  const PFS_table *table_2;
 
   memset(&param, 0xFF, sizeof(param));
   param.m_enabled = true;
@@ -191,10 +193,10 @@ static void test_oom() {
   dummy_rwlock_class.m_timed = true;
   dummy_rwlock_class.m_volatility = PSI_VOLATILITY_UNKNOWN;
 
-  dummy_thread_class.m_enabled = 0;
+  dummy_thread_class.m_enabled = false;
   dummy_thread_class.m_flags = 0;
   dummy_thread_class.m_singleton = nullptr;
-  dummy_thread_class.m_history = 0;
+  dummy_thread_class.m_history = false;
   snprintf(dummy_thread_class.m_os_name, PFS_MAX_OS_NAME_LENGTH, "OS_NAME");
 
   dummy_cond_class.m_event_name_index = 2;
@@ -311,7 +313,7 @@ static void test_oom() {
   thread_2 = create_thread(&dummy_thread_class, 12, nullptr, 0);
   ok(thread_2 == nullptr, "oom (create thread)");
 
-  PSI_thread *thread;
+  const PSI_thread *thread;
 
   /* Per thread wait. */
   memset(&param, 0, sizeof(param));

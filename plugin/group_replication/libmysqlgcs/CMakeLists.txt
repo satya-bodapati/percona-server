@@ -1,15 +1,16 @@
-# Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -137,7 +138,6 @@ SET(GCS_SOURCES
   src/bindings/xcom/gcs_xcom_statistics_interface.cc
   src/bindings/xcom/gcs_xcom_proxy.cc
   src/bindings/xcom/gcs_xcom_communication_protocol_changer.cc
-  ${BUNDLED_LZ4_PATH}/xxhash.c # required by gcs_message_stage_split
   src/bindings/xcom/gcs_message_stage_split.cc
   src/bindings/xcom/gcs_xcom_synode.cc
   src/bindings/xcom/gcs_xcom_expels_in_progress.cc
@@ -217,11 +217,6 @@ MY_ADD_COMPILE_DEFINITIONS(
   ${GCS_SOURCES}
   COMPILE_DEFINITIONS MYSQL_DYNAMIC_PLUGIN)
 
-INCLUDE_DIRECTORIES(${BUNDLED_LZ4_PATH})
-
-MY_ADD_COMPILE_DEFINITIONS(${BUNDLED_LZ4_PATH}/xxhash.c
-  COMPILE_DEFINITIONS "XXH_NAMESPACE=GCS_")
-
 # Warn about variable shadowing
 IF(MYSQL_MAINTAINER_MODE)
   IF(MY_COMPILER_IS_CLANG)
@@ -232,12 +227,19 @@ IF(MYSQL_MAINTAINER_MODE)
 ENDIF()
 
 ADD_LIBRARY(mysqlgcs STATIC ${XCOM_SOURCES} ${GCS_SOURCES})
+TARGET_LINK_LIBRARIES(mysqlgcs PRIVATE ext::xxhash ext::lz4)
 # Dependency on mysys from gcs_logging_system.cc
 # but pick up symbols from the server:
 # TARGET_LINK_LIBRARIES(mysqlgcs mysys)
 
-IF(LINUX AND WITH_TIRPC STREQUAL "bundled")
-  ADD_DEPENDENCIES(mysqlgcs tirpc_ext)
+# Lots of C-style casting in the interface to XDR functions.
+#   xcom_xdr_free((xdrproc_t)proc ...)
+#   xdr_free((xdrproc_t)xdr_app_data_ptr
+# Add -Wno-cast-function-type-mismatch as a PUBLIC property,
+# since we have header files calling xdr_free().
+MY_CHECK_CXX_COMPILER_WARNING("-Wcast-function-type-mismatch" HAS_WARN_FLAG)
+IF(HAS_WARN_FLAG)
+  TARGET_COMPILE_OPTIONS(mysqlgcs PUBLIC ${HAS_WARN_FLAG})
 ENDIF()
 
 IF(CMAKE_VERSION VERSION_GREATER "3.19" AND NOT APPLE_XCODE)
@@ -256,12 +258,12 @@ IF(WIN32)
   TARGET_COMPILE_OPTIONS(mysqlgcs PRIVATE "/wd4005")
 ENDIF()
 
-IF(TIRPC_LIBRARIES)
-  TARGET_LINK_LIBRARIES(mysqlgcs ${TIRPC_LIBRARIES})
+IF(TARGET ext::rpc)
+  TARGET_LINK_LIBRARIES(mysqlgcs PUBLIC ext::rpc)
 ENDIF()
 
 IF(MSVC)
-  TARGET_LINK_LIBRARIES(mysqlgcs iphlpapi)
+  TARGET_LINK_LIBRARIES(mysqlgcs PRIVATE iphlpapi)
 ENDIF()
 
 # convenience target

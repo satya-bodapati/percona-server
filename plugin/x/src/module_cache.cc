@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2019, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -42,7 +43,7 @@ volatile bool Module_cache::m_is_sha256_password_cache_enabled = false;
   @returns Success always.
 */
 
-static int audit_cache_clean_event_notify(MYSQL_THD thd,
+static int audit_cache_clean_event_notify(MYSQL_THD thd [[maybe_unused]],
                                           mysql_event_class_t event_class,
                                           const void *event) {
   if (event_class == MYSQL_AUDIT_SERVER_STARTUP_CLASS) {
@@ -119,7 +120,7 @@ static struct st_mysql_audit sha2_cache_cleaner_plugin_descriptor = {
      // NOLINTNEXTLINE(runtime/int)
      static_cast<unsigned long>(MYSQL_AUDIT_AUTHENTICATION_ALL)}};
 
-int Module_cache::initialize(MYSQL_PLUGIN p) {
+int Module_cache::initialize(MYSQL_PLUGIN) {
   // If cache cleaner plugin is initialized before the X plugin we set this
   // flag so that we can enable cache when starting X plugin afterwards
   m_is_sha256_password_cache_enabled = true;
@@ -129,7 +130,7 @@ int Module_cache::initialize(MYSQL_PLUGIN p) {
   return 0;
 }
 
-int Module_cache::deinitialize(MYSQL_PLUGIN p) {
+int Module_cache::deinitialize(MYSQL_PLUGIN) {
   m_is_sha256_password_cache_enabled = false;
   auto sha256_password_cache =
       modules::Module_mysqlx::get_instance_sha256_password_cache();

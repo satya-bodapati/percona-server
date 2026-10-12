@@ -1,15 +1,16 @@
-/* Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,6 +25,7 @@
 
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <algorithm>
@@ -68,7 +70,6 @@
 #include "sql/trigger_def.h"
 #include "sql_string.h"
 #include "string_with_len.h"
-#include "varlen_sort.h"
 
 using std::string;
 
@@ -459,6 +460,7 @@ bool partition_info::can_prune_insert(
   @param info             COPY_INFO used for default values handling
   @param copy_default_values  True if we should copy default values
   @param used_partitions  Bitmap to set
+  @param tables_locked    True if tables are locked
 
   @returns Operational status
     @retval false  Success
@@ -467,20 +469,43 @@ bool partition_info::can_prune_insert(
   so caller must check thd->is_error().
 */
 
-bool partition_info::set_used_partition(THD *thd,
-                                        const mem_root_deque<Item *> &fields,
-                                        const mem_root_deque<Item *> &values,
-                                        COPY_INFO &info,
-                                        bool copy_default_values,
-                                        MY_BITMAP *used_partitions) {
+bool partition_info::set_used_partition(
+    THD *thd, const mem_root_deque<Item *> &fields,
+    const mem_root_deque<Item *> &values, COPY_INFO &info,
+    bool copy_default_values, MY_BITMAP *used_partitions, bool tables_locked) {
   uint32 part_id;
   longlong func_value;
 
   assert(thd);
 
-  /* Only allow checking of constant values */
-  for (Item *item : values) {
-    if (!item->const_item()) return true;
+  /*
+    In prepare phase, allow partition pruning from constant values.
+    In execution phase, allow partition pruning for values that are
+    const-for-execution.
+  */
+  if (!fields.empty()) {
+    auto value_it = values.begin();
+    for (Item *fld : fields) {
+      Item *value = *value_it++;
+      Item_field *field = fld->field_for_view_update();
+      if (bitmap_is_set(&full_part_field_set, field->field->field_index())) {
+        if (!(value->const_item() ||
+              (tables_locked && value->const_for_execution()))) {
+          return true;
+        }
+      }
+    }
+  } else {
+    Field *field = nullptr;
+    for (Item *value : values) {
+      field = *table->field++;
+      if (bitmap_is_set(&full_part_field_set, field->field_index())) {
+        if (!(value->const_item() ||
+              (tables_locked && value->const_for_execution()))) {
+          return true;
+        }
+      }
+    }
   }
 
   if (copy_default_values) restore_record(table, s->default_values);
@@ -500,8 +525,26 @@ bool partition_info::set_used_partition(THD *thd,
     TODO: avoid setting non partitioning fields default value, to avoid
     overhead. Not yet done, since mostly only one DEFAULT function per
     table, or at least very few such columns.
+
+    In case of prepared statements and stored routines we can't do pruning
+    for partition expression dependent on DEFAULT CURRENT_TIMESTAMP values
+    before tables are locked.
+
+    Doing so would result in partition_info::lock_partitions bitmap being
+    set at prepare/first-execution-of-procedure time based on current
+    timestamp value at this point. This bitmap would be also applied in
+    case of statement (re-)execution which might happen under different
+    current timestamp, resulting in correct target partition for insert
+    being erroneously pruned away.
+
+    So, instead, in such a case, we simply rely on pruning which is done
+    after tables are locked. It is re-done for each statement (re-)execution
+    and only affects partition_info::read_partitions, which is recalculated
+    for further re-executions.
   */
   if (info.function_defaults_apply_on_columns(&full_part_field_set)) {
+    if (!thd->stmt_arena->is_regular() && !tables_locked) return true;
+
     if (info.set_function_defaults(table)) return true;
   }
   {
@@ -1176,6 +1219,35 @@ range_not_increasing_error:
   goto end;
 }
 
+static int partition_info_compare_column_values(
+    const part_column_list_val *first, const part_column_list_val *second) {
+  for (Field **field = first->part_info->part_field_array; *field;
+       field++, first++, second++) {
+    /*
+      If both are maxvalue, they are equal (don't check the rest of the parts).
+      Otherwise, maxvalue > *.
+     */
+    if (first->max_value) {
+      return second->max_value ? 0 : 1;
+    } else if (second->max_value) {
+      return -1;
+    }
+
+    // NULLs sort before non-NULLs.
+    if (first->null_value != second->null_value) {
+      return first->null_value ? -1 : 1;
+    }
+
+    // For non-NULLs, compare the actual fields.
+    if (!first->null_value) {
+      int res = (*field)->cmp(first->column_value.field_image,
+                              second->column_value.field_image);
+      if (res != 0) return res;
+    }
+  }
+  return 0;
+}
+
 /*
   Compare two lists of column values in RANGE/LIST partitioning
   SYNOPSIS
@@ -1187,34 +1259,10 @@ range_not_increasing_error:
     false                    first >= second
 */
 
-static bool partition_info_compare_column_values(
-    const part_column_list_val *first, const part_column_list_val *second) {
-  for (Field **field = first->part_info->part_field_array; *field;
-       field++, first++, second++) {
-    /*
-      If both are maxvalue, they are equal (don't check the rest of the parts).
-      Otherwise, maxvalue > *.
-    */
-    if (first->max_value || second->max_value)
-      return first->max_value < second->max_value;
-
-    // NULLs sort before non-NULLs.
-    if (first->null_value != second->null_value) return first->null_value;
-
-    // For non-NULLs, compare the actual fields.
-    if (!first->null_value) {
-      int res = (*field)->cmp(first->column_value.field_image,
-                              second->column_value.field_image);
-      if (res != 0) return res < 0;
-    }
-  }
-  return false;
-}
-
 bool partition_info::compare_column_values(
     const part_column_list_val *first_arg,
     const part_column_list_val *second_arg) {
-  return partition_info_compare_column_values(first_arg, second_arg);
+  return partition_info_compare_column_values(first_arg, second_arg) < 0;
 }
 
 /*
@@ -1309,14 +1357,17 @@ bool partition_info::check_list_constants(THD *thd) {
       }
     } while (++part_id < num_parts);
 
-    varlen_sort(list_col_array,
-                list_col_array + num_list_values * num_column_values,
-                size_entries, partition_info_compare_column_values);
+    qsort(list_col_array, num_list_values, size_entries,
+          [](const void *a, const void *b) {
+            return partition_info_compare_column_values(
+                static_cast<const part_column_list_val *>(a),
+                static_cast<const part_column_list_val *>(b));
+          });
 
     for (uint i = 1; i < num_list_values; ++i) {
-      if (!partition_info_compare_column_values(
+      if (partition_info_compare_column_values(
               &list_col_array[num_column_values * (i - 1)],
-              &list_col_array[num_column_values * i])) {
+              &list_col_array[num_column_values * i]) >= 0) {
         my_error(ER_MULTIPLE_DEF_CONST_IN_LIST_PART_ERROR, MYF(0));
         goto end;
       }

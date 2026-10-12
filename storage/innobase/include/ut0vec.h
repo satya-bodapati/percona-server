@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -219,6 +220,35 @@ struct ib_vector_t {
   ulint sizeof_value;
 };
 
+/* A helper to make it easier to use the legacy ib_vector_t struct. */
+template <typename T>
+class Vector_wrapper {
+ private:
+  ib_vector_t &m_ib_vector;
+
+ public:
+  Vector_wrapper(ib_vector_t &ib_vector) : m_ib_vector(ib_vector) {}
+
+  size_t size() const { return ib_vector_size(&m_ib_vector); }
+
+  bool empty() const { return size() == 0; }
+
+  const T &operator[](size_t idx) const {
+    return *static_cast<const T *>(ib_vector_get(&m_ib_vector, idx));
+  }
+
+  T &operator[](size_t idx) {
+    return *static_cast<T *>(ib_vector_get(&m_ib_vector, idx));
+  }
+
+  T *begin() { return empty() ? nullptr : &((*this)[0]); }
+
+  T *end() { return empty() ? begin() : begin() + size(); }
+
+  const T *begin() const { return empty() ? nullptr : &((*this)[0]); }
+
+  const T *end() const { return empty() ? begin() : begin() + size(); }
+};
 #include "ut0vec.ic"
 
 #endif /* IB_VECTOR_H */

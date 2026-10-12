@@ -1,3 +1,4 @@
+include/rpl/set_gtid_mode_off.inc
 CALL mtr.add_suppression("Storage engine '.*' does not support system tables. \\[mysql.*\\]");
 CALL mtr.add_suppression("Column count of mysql.* is wrong. "
                          "Expected .*, found .*. "
@@ -103,7 +104,7 @@ DROP USER u1a@h, u2a@h, u3a@h;
 ########################################################################
 # A.4. Checking lock-wait-timeout with SET PASSWORD.
 ########################################################################
-CREATE USER u1@h IDENTIFIED WITH 'mysql_native_password';
+CREATE USER u1@h IDENTIFIED WITH 'caching_sha2_password';
 SELECT user, host FROM mysql.user WHERE host = 'h';
 user	host
 u1	h
@@ -121,8 +122,8 @@ ROLLBACK;
 # Connection: con1
 
 # Connection: default
-SELECT user, host, authentication_string = '*3D56A309CD04FA2EEF181462E59011F075C89548' FROM mysql.user WHERE host = 'h';
-user	host	authentication_string = '*3D56A309CD04FA2EEF181462E59011F075C89548'
+SELECT user, host, LENGTH(authentication_string)>0 FROM mysql.user WHERE host = 'h';
+user	host	LENGTH(authentication_string)>0
 u1	h	1
 DROP USER u1@h;
 
@@ -660,6 +661,8 @@ FLUSH PRIVILEGES;;
 COMMIT;
 
 # Connection: con1
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 
 # Connection: default
 SELECT user, host FROM mysql.user WHERE host = 'h';
@@ -731,15 +734,15 @@ DROP USER user2@localhost;
 SELECT user, host FROM mysql.user where user like 'user%';
 user	host
 DROP USER no_user@localhost;
-ERROR HY000: Operation DROP USER failed for 'no_user'@'localhost'
+ERROR HY000: Operation DROP USER failed for 'no_user'@'localhost' (User account does not exist)
 SHOW WARNINGS;
 Level	Code	Message
-Error	1396	Operation DROP USER failed for 'no_user'@'localhost'
+Error	1396	Operation DROP USER failed for 'no_user'@'localhost' (User account does not exist)
 CREATE USER user2@localhost, user3@localhost;
 DROP USER no_user@localhost, user3@localhost,
 no_user1@localhost, user2@localhost,
 no_user2@localhost;
-ERROR HY000: Operation DROP USER failed for 'no_user'@'localhost','no_user1'@'localhost','no_user2'@'localhost'
+ERROR HY000: Operation DROP USER failed for 'no_user'@'localhost' (User account does not exist),'no_user1'@'localhost' (User account does not exist),'no_user2'@'localhost' (User account does not exist)
 DROP USER user2@localhost, user3@localhost;
 SELECT user, host FROM mysql.user where user like 'user%';
 user	host
@@ -808,12 +811,12 @@ DROP USER user7@localhost;
 ####################################################################
 CREATE USER user2@localhost;
 CREATE USER user2@localhost;
-ERROR HY000: Operation CREATE USER failed for 'user2'@'localhost'
+ERROR HY000: Operation CREATE USER failed for 'user2'@'localhost' (User account already exists)
 CREATE USER user3@localhost, user2@localhost, user4@localhost;
-ERROR HY000: Operation CREATE USER failed for 'user3'@'localhost','user2'@'localhost'
+ERROR HY000: Operation CREATE USER failed for 'user3'@'localhost' (User account already exists),'user2'@'localhost' (User account already exists)
 SHOW WARNINGS;
 Level	Code	Message
-Error	1396	Operation CREATE USER failed for 'user3'@'localhost','user2'@'localhost'
+Error	1396	Operation CREATE USER failed for 'user3'@'localhost' (User account already exists),'user2'@'localhost' (User account already exists)
 SELECT user, host FROM mysql.user where user like 'user%';
 user	host
 user2	localhost
@@ -829,12 +832,12 @@ SELECT user, password_lifetime FROM mysql.user where USER like 'u_';
 user	password_lifetime
 u2	5
 ALTER USER u3@l PASSWORD EXPIRE INTERVAL 5 DAY;
-ERROR HY000: Operation ALTER USER failed for 'u3'@'l'
+ERROR HY000: Operation ALTER USER failed for 'u3'@'l' (User account does not exist)
 ALTER USER u3@l, u2@l, u4@l PASSWORD EXPIRE INTERVAL 7 DAY;
-ERROR HY000: Operation ALTER USER failed for 'u3'@'l','u4'@'l'
+ERROR HY000: Operation ALTER USER failed for 'u3'@'l' (User account does not exist),'u4'@'l' (User account does not exist)
 SHOW WARNINGS;
 Level	Code	Message
-Error	1396	Operation ALTER USER failed for 'u3'@'l','u4'@'l'
+Error	1396	Operation ALTER USER failed for 'u3'@'l' (User account does not exist),'u4'@'l' (User account does not exist)
 SELECT user, password_lifetime FROM mysql.user WHERE user LIKE 'u_';
 user	password_lifetime
 u2	5
@@ -986,6 +989,7 @@ FLUSH PRIVILEGES;
 ERROR HY000: The ACL operation failed due to the following error from SE: errcode 149 - Lock deadlock; Retry transaction
 SHOW WARNINGS;
 Level	Code	Message
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 Error	3501	The ACL operation failed due to the following error from SE: errcode 149 - Lock deadlock; Retry transaction
 Error	1105	Unknown error
 SET debug='-d,wl7158_grant_load_1';
@@ -994,6 +998,7 @@ FLUSH PRIVILEGES;
 ERROR HY000: The ACL operation failed due to the following error from SE: errcode 149 - Lock deadlock; Retry transaction
 SHOW WARNINGS;
 Level	Code	Message
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 Error	3501	The ACL operation failed due to the following error from SE: errcode 149 - Lock deadlock; Retry transaction
 Error	1105	Unknown error
 SET debug='-d,wl7158_grant_load_proc_1';
@@ -1002,6 +1007,7 @@ FLUSH PRIVILEGES;
 ERROR HY000: The ACL operation failed due to the following error from SE: errcode 149 - Lock deadlock; Retry transaction
 SHOW WARNINGS;
 Level	Code	Message
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 Error	3501	The ACL operation failed due to the following error from SE: errcode 149 - Lock deadlock; Retry transaction
 Error	1105	Unknown error
 SET debug='-d,wl7158_grant_load_2';
@@ -1010,20 +1016,26 @@ FLUSH PRIVILEGES;
 ERROR HY000: The ACL operation failed due to the following error from SE: errcode 149 - Lock deadlock; Retry transaction
 SHOW WARNINGS;
 Level	Code	Message
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 Error	3501	The ACL operation failed due to the following error from SE: errcode 149 - Lock deadlock; Retry transaction
 Error	1105	Unknown error
 SET debug="-d,wl7158_grant_load_proc_2";
 FLUSH PRIVILEGES;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 GRANT EXECUTE on PROCEDURE p to u1@h;
 SET debug="+d,wl7158_grant_load_proc_3";
 FLUSH PRIVILEGES;
 ERROR HY000: The ACL operation failed due to the following error from SE: errcode 149 - Lock deadlock; Retry transaction
 SHOW WARNINGS;
 Level	Code	Message
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 Error	3501	The ACL operation failed due to the following error from SE: errcode 149 - Lock deadlock; Retry transaction
 Error	1105	Unknown error
 SET debug="-d,wl7158_grant_load_proc_3";
 FLUSH PRIVILEGES;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 CREATE TABLE t1(a INT);
 GRANT SELECT ON t1 TO u1@h;
 SET debug='+d,wl7158_grant_load_3';
@@ -1031,6 +1043,7 @@ FLUSH PRIVILEGES;
 ERROR HY000: The ACL operation failed due to the following error from SE: errcode 149 - Lock deadlock; Retry transaction
 SHOW WARNINGS;
 Level	Code	Message
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 Error	3501	The ACL operation failed due to the following error from SE: errcode 149 - Lock deadlock; Retry transaction
 Error	1105	Unknown error
 SET debug='-d,wl7158_grant_load_3';
@@ -1539,27 +1552,27 @@ RENAME TABLE mysql.tables_priv TO mysql.tables_priv_bak;
 # Create exact structure of privilege tables as it is in 5.6
 CREATE TABLE IF NOT EXISTS mysql.db (   Host char(60) binary DEFAULT '' NOT NULL,
 Db char(64) binary DEFAULT '' NOT NULL, User char(16) binary DEFAULT '' NOT NULL,
-Select_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Insert_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Update_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Delete_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Create_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Drop_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Grant_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-References_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Index_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Alter_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Create_tmp_table_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Lock_tables_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Create_view_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Show_view_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Create_routine_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Alter_routine_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Execute_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Event_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Trigger_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
+Select_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Insert_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Update_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Delete_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Create_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Drop_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Grant_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+References_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Index_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Alter_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Create_tmp_table_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Lock_tables_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Create_view_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Show_view_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Create_routine_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Alter_routine_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Execute_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Event_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Trigger_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
 PRIMARY KEY Host (Host,Db,User), KEY User (User) ) engine=MyISAM
-CHARACTER SET utf8 COLLATE utf8_bin comment='Database privileges';
+CHARACTER SET utf8mb3 COLLATE utf8mb3_bin comment='Database privileges';
 Warnings:
 Warning	1287	'BINARY as attribute of a type' is deprecated and will be removed in a future release. Please use a CHARACTER SET clause with _bin collation instead
 Warning	1287	'BINARY as attribute of a type' is deprecated and will be removed in a future release. Please use a CHARACTER SET clause with _bin collation instead
@@ -1583,49 +1596,49 @@ Warning	3778	'utf8mb3_general_ci' is a collation of the deprecated character set
 Warning	3778	'utf8mb3_general_ci' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
 Warning	3778	'utf8mb3_general_ci' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
 Warning	3778	'utf8mb3_general_ci' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 Warning	3778	'utf8mb3_bin' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
 Warning	1726	Storage engine 'MyISAM' does not support system tables. [mysql.db]
 CREATE TABLE IF NOT EXISTS mysql.user (   Host char(60) binary DEFAULT '' NOT NULL,
 User char(16) binary DEFAULT '' NOT NULL, Password char(41) character set latin1
-collate latin1_bin DEFAULT '' NOT NULL, Select_priv enum('N','Y') COLLATE utf8_general_ci
-DEFAULT 'N' NOT NULL, Insert_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Update_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Delete_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Create_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Drop_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Reload_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Shutdown_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Process_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-File_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Grant_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-References_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Index_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Alter_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Show_db_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Super_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Create_tmp_table_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Lock_tables_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Execute_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Repl_slave_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Repl_client_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Create_view_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Show_view_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Create_routine_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Alter_routine_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Create_user_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Event_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Trigger_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-Create_tablespace_priv enum('N','Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-ssl_type enum('','ANY','X509', 'SPECIFIED') COLLATE utf8_general_ci DEFAULT '' NOT NULL,
+collate latin1_bin DEFAULT '' NOT NULL, Select_priv enum('N','Y') COLLATE utf8mb3_general_ci
+DEFAULT 'N' NOT NULL, Insert_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Update_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Delete_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Create_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Drop_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Reload_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Shutdown_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Process_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+File_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Grant_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+References_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Index_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Alter_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Show_db_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Super_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Create_tmp_table_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Lock_tables_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Execute_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Repl_slave_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Repl_client_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Create_view_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Show_view_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Create_routine_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Alter_routine_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Create_user_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Event_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Trigger_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+Create_tablespace_priv enum('N','Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+ssl_type enum('','ANY','X509', 'SPECIFIED') COLLATE utf8mb3_general_ci DEFAULT '' NOT NULL,
 ssl_cipher BLOB NOT NULL, x509_issuer BLOB NOT NULL, x509_subject BLOB NOT NULL,
 max_questions int(11) unsigned DEFAULT 0  NOT NULL,
 max_updates int(11) unsigned DEFAULT 0  NOT NULL,
 max_connections int(11) unsigned DEFAULT 0  NOT NULL,
 max_user_connections int(11) unsigned DEFAULT 0  NOT NULL,
 plugin char(64) DEFAULT 'caching_sha2_password', authentication_string TEXT,
-password_expired ENUM('N', 'Y') COLLATE utf8_general_ci DEFAULT 'N' NOT NULL,
-PRIMARY KEY Host (Host,User) ) engine=MyISAM CHARACTER SET utf8 COLLATE utf8_bin
+password_expired ENUM('N', 'Y') COLLATE utf8mb3_general_ci DEFAULT 'N' NOT NULL,
+PRIMARY KEY Host (Host,User) ) engine=MyISAM CHARACTER SET utf8mb3 COLLATE utf8mb3_bin
 comment='Users and global privileges';
 Warnings:
 Warning	1287	'BINARY as attribute of a type' is deprecated and will be removed in a future release. Please use a CHARACTER SET clause with _bin collation instead
@@ -1665,7 +1678,7 @@ Warning	1681	Integer display width is deprecated and will be removed in a future
 Warning	1681	Integer display width is deprecated and will be removed in a future release.
 Warning	1681	Integer display width is deprecated and will be removed in a future release.
 Warning	3778	'utf8mb3_general_ci' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 Warning	3778	'utf8mb3_bin' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
 Warning	1726	Storage engine 'MyISAM' does not support system tables. [mysql.user]
 CREATE TABLE IF NOT EXISTS mysql.tables_priv ( Host char(60) binary DEFAULT '' NOT NULL,
@@ -1673,10 +1686,10 @@ Db char(64) binary DEFAULT '' NOT NULL, User char(16) binary DEFAULT '' NOT NULL
 Table_name char(64) binary DEFAULT '' NOT NULL, Grantor char(77) DEFAULT '' NOT NULL,
 Timestamp timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 Table_priv set('Select','Insert','Update','Delete','Create','Drop','Grant','References',
-'Index','Alter','Create View','Show view','Trigger') COLLATE utf8_general_ci DEFAULT '' NOT NULL,
-Column_priv set('Select','Insert','Update','References') COLLATE utf8_general_ci DEFAULT ''
+'Index','Alter','Create View','Show view','Trigger') COLLATE utf8mb3_general_ci DEFAULT '' NOT NULL,
+Column_priv set('Select','Insert','Update','References') COLLATE utf8mb3_general_ci DEFAULT ''
  NOT NULL, PRIMARY KEY (Host,Db,User,Table_name), KEY Grantor (Grantor) )
-engine=MyISAM CHARACTER SET utf8 COLLATE utf8_bin   comment='Table privileges';
+engine=MyISAM CHARACTER SET utf8mb3 COLLATE utf8mb3_bin   comment='Table privileges';
 Warnings:
 Warning	1287	'BINARY as attribute of a type' is deprecated and will be removed in a future release. Please use a CHARACTER SET clause with _bin collation instead
 Warning	1287	'BINARY as attribute of a type' is deprecated and will be removed in a future release. Please use a CHARACTER SET clause with _bin collation instead
@@ -1684,16 +1697,16 @@ Warning	1287	'BINARY as attribute of a type' is deprecated and will be removed i
 Warning	1287	'BINARY as attribute of a type' is deprecated and will be removed in a future release. Please use a CHARACTER SET clause with _bin collation instead
 Warning	3778	'utf8mb3_general_ci' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
 Warning	3778	'utf8mb3_general_ci' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 Warning	3778	'utf8mb3_bin' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
 Warning	1726	Storage engine 'MyISAM' does not support system tables. [mysql.tables_priv]
 CREATE TABLE IF NOT EXISTS mysql.columns_priv ( Host char(60) binary DEFAULT '' NOT NULL,
 Db char(64) binary DEFAULT '' NOT NULL, User char(16) binary DEFAULT '' NOT NULL,
 Table_name char(64) binary DEFAULT '' NOT NULL, Column_name char(64) binary DEFAULT '' NOT NULL,
 Timestamp timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-Column_priv set('Select','Insert','Update','References') COLLATE utf8_general_ci
+Column_priv set('Select','Insert','Update','References') COLLATE utf8mb3_general_ci
 DEFAULT '' NOT NULL, PRIMARY KEY (Host,Db,User,Table_name,Column_name) )
-engine=MyISAM CHARACTER SET utf8 COLLATE utf8_bin   comment='Column privileges';
+engine=MyISAM CHARACTER SET utf8mb3 COLLATE utf8mb3_bin   comment='Column privileges';
 Warnings:
 Warning	1287	'BINARY as attribute of a type' is deprecated and will be removed in a future release. Please use a CHARACTER SET clause with _bin collation instead
 Warning	1287	'BINARY as attribute of a type' is deprecated and will be removed in a future release. Please use a CHARACTER SET clause with _bin collation instead
@@ -1701,24 +1714,24 @@ Warning	1287	'BINARY as attribute of a type' is deprecated and will be removed i
 Warning	1287	'BINARY as attribute of a type' is deprecated and will be removed in a future release. Please use a CHARACTER SET clause with _bin collation instead
 Warning	1287	'BINARY as attribute of a type' is deprecated and will be removed in a future release. Please use a CHARACTER SET clause with _bin collation instead
 Warning	3778	'utf8mb3_general_ci' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 Warning	3778	'utf8mb3_bin' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
 Warning	1726	Storage engine 'MyISAM' does not support system tables. [mysql.columns_priv]
 CREATE TABLE IF NOT EXISTS mysql.procs_priv ( Host char(60) binary DEFAULT '' NOT NULL,
 Db char(64) binary DEFAULT '' NOT NULL, User char(16) binary DEFAULT '' NOT NULL,
-Routine_name char(64) COLLATE utf8_general_ci DEFAULT '' NOT NULL,
+Routine_name char(64) COLLATE utf8mb3_general_ci DEFAULT '' NOT NULL,
 Routine_type enum('FUNCTION','PROCEDURE') NOT NULL, Grantor char(77) DEFAULT '' NOT NULL,
-Proc_priv set('Execute','Alter Routine','Grant') COLLATE utf8_general_ci DEFAULT '' NOT NULL,
+Proc_priv set('Execute','Alter Routine','Grant') COLLATE utf8mb3_general_ci DEFAULT '' NOT NULL,
 Timestamp timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 PRIMARY KEY (Host,Db,User,Routine_name,Routine_type), KEY Grantor (Grantor) )
-engine=MyISAM CHARACTER SET utf8 COLLATE utf8_bin   comment='Procedure privileges';
+engine=MyISAM CHARACTER SET utf8mb3 COLLATE utf8mb3_bin   comment='Procedure privileges';
 Warnings:
 Warning	1287	'BINARY as attribute of a type' is deprecated and will be removed in a future release. Please use a CHARACTER SET clause with _bin collation instead
 Warning	1287	'BINARY as attribute of a type' is deprecated and will be removed in a future release. Please use a CHARACTER SET clause with _bin collation instead
 Warning	1287	'BINARY as attribute of a type' is deprecated and will be removed in a future release. Please use a CHARACTER SET clause with _bin collation instead
 Warning	3778	'utf8mb3_general_ci' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
 Warning	3778	'utf8mb3_general_ci' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 Warning	3778	'utf8mb3_bin' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
 Warning	1726	Storage engine 'MyISAM' does not support system tables. [mysql.procs_priv]
 CREATE TABLE IF NOT EXISTS mysql.proxies_priv (Host char(60) binary DEFAULT '' NOT NULL,
@@ -1726,14 +1739,14 @@ User char(16) binary DEFAULT '' NOT NULL, Proxied_host char(60) binary DEFAULT '
 Proxied_user char(16) binary DEFAULT '' NOT NULL, With_grant BOOL DEFAULT 0 NOT NULL,
 Grantor char(77) DEFAULT '' NOT NULL, Timestamp timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
 ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY Host (Host,User,Proxied_host,Proxied_user),
-KEY Grantor (Grantor) ) engine=MyISAM CHARACTER SET utf8 COLLATE utf8_bin
+KEY Grantor (Grantor) ) engine=MyISAM CHARACTER SET utf8mb3 COLLATE utf8mb3_bin
 comment='User proxy privileges';
 Warnings:
 Warning	1287	'BINARY as attribute of a type' is deprecated and will be removed in a future release. Please use a CHARACTER SET clause with _bin collation instead
 Warning	1287	'BINARY as attribute of a type' is deprecated and will be removed in a future release. Please use a CHARACTER SET clause with _bin collation instead
 Warning	1287	'BINARY as attribute of a type' is deprecated and will be removed in a future release. Please use a CHARACTER SET clause with _bin collation instead
 Warning	1287	'BINARY as attribute of a type' is deprecated and will be removed in a future release. Please use a CHARACTER SET clause with _bin collation instead
-Warning	3719	'utf8' is currently an alias for the character set UTF8MB3, but will be an alias for UTF8MB4 in a future release. Please consider using UTF8MB4 in order to be unambiguous.
+Warning	1287	'utf8mb3' is deprecated and will be removed in a future release. Please use utf8mb4 instead
 Warning	3778	'utf8mb3_bin' is a collation of the deprecated character set UTF8MB3. Please consider using UTF8MB4 with an appropriate collation instead.
 Warning	1726	Storage engine 'MyISAM' does not support system tables. [mysql.proxies_priv]
 # Restore original content of privilege tables
@@ -1780,7 +1793,8 @@ call mtr.add_suppression("mysql.user has no `Event_priv` column at position 28")
 
 # Starting mysqld in the regular mode...
 
-# restart
+# restart:--loose-percona-telemetry-disable=1
+include/rpl/set_gtid_mode_off.inc
 
 # Check that any ACL statement is failed when privilege tables
 # have engine type MyISAM
@@ -1815,7 +1829,8 @@ tables_priv	MyISAM
 user	MyISAM
 
 # mysql_upgrade...
-# restart:--upgrade=FORCE
+# restart:--upgrade=FORCE --loose-percona-telemetry-disable=1
+include/rpl/set_gtid_mode_off.inc
 
 # The ACL tables must have been upgraded.
 SELECT table_name, engine FROM INFORMATION_SCHEMA.TABLES
@@ -1857,6 +1872,8 @@ GRANT SHUTDOWN ON *.* TO 'mysql.session'@localhost;
 GRANT CONNECTION_ADMIN ON *.* TO 'mysql.session'@localhost;
 GRANT SYSTEM_USER ON *.* TO 'mysql.session'@localhost;
 FLUSH PRIVILEGES;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 DROP USER u1@h;
 DROP TABLE t1;
 #
@@ -1877,3 +1894,4 @@ SET innodb_lock_wait_timeout= 1;
 GRANT ALL ON t1 TO 'u1';
 DROP USER u1;
 DROP TABLE t1;
+include/rpl/set_gtid_mode_on.inc

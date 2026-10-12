@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -31,10 +32,16 @@
 #include <fido.h>
 #include <string>
 
-/**
-  Capability bit to support resident keys(aka discoverable credentials)
-*/
-#define RESIDENT_KEYS 1
+enum capacity_bits {
+  /**
+    Capability bit to support resident keys(aka discoverable credentials)
+  */
+  RESIDENT_KEYS = 0x1,
+  /**
+    Capability bit is to support sending the full attestation blob
+  */
+  SEND_FULL_ATTESTATION_BLOB = 0x2
+};
 
 namespace client_registration {
 /**
@@ -46,9 +53,9 @@ class registration {
   virtual ~registration();
   bool make_credentials(const char *challenge);
   /* set rp id */
-  void set_rp_id(std::string rp_id);
+  void set_rp_id(const std::string &rp_id);
   /* set user name */
-  void set_user(std::string user);
+  void set_user(const std::string &user);
 
   /* get authenticator data details */
   size_t get_authdata_len();
@@ -63,6 +70,12 @@ class registration {
   const char *get_rp_id();
   /* check if authenticator has resident keys support */
   bool is_fido2();
+  /* the full attestation statement */
+  const unsigned char *get_attestation_statement_ptr();
+  size_t get_attestation_statement_length();
+
+  /* get the credentials format */
+  const char *get_fmt();
 
   /* abstract methods to be implemented by specific client plugins */
   virtual bool parse_challenge(const char *challenge) = 0;

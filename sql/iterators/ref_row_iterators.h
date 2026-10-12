@@ -1,18 +1,19 @@
 #ifndef SQL_ITERATORS_REF_ROW_ITERATORS_H_
 #define SQL_ITERATORS_REF_ROW_ITERATORS_H_
 
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -56,10 +57,10 @@ class RefIterator final : public TableRowIterator {
         m_examined_rows(examined_rows) {}
   ~RefIterator() override;
 
-  bool Init() override;
-  int Read() override;
-
  private:
+  bool DoInit() override;
+  int DoRead() override;
+
   Index_lookup *const m_ref;
   const bool m_use_order;
   const double m_expected_rows;
@@ -72,6 +73,30 @@ class RefIterator final : public TableRowIterator {
   Like RefIterator, but after it's returned all its rows, will also search for
   rows that match NULL, i.e., WHERE column=\<ref\> OR column IS NULL.
  */
+/**
+  Approximate ANN over a vector index: DoRead() returns base rows in
+  ascending distance from a constant query vector, via the handler's
+  vec_read_first/vec_read_next.
+*/
+class VectorSearchIterator final : public TableRowIterator {
+ public:
+  // "examined_rows", if not nullptr, is incremented for each successful
+  // Read().
+  VectorSearchIterator(THD *thd, TABLE *table, Index_lookup *ref, Item *item,
+                       ha_rows limit, ha_rows *examined_rows);
+  ~VectorSearchIterator() override;
+
+ private:
+  bool DoInit() override;
+  int DoRead() override;
+
+  Index_lookup *const m_ref;
+  ha_rows *const m_examined_rows;
+  bool m_first;
+  Item *const m_item;
+  const ha_rows m_limit;
+};
+
 class RefOrNullIterator final : public TableRowIterator {
  public:
   // "examined_rows", if not nullptr, is incremented for each successful Read().
@@ -79,10 +104,10 @@ class RefOrNullIterator final : public TableRowIterator {
                     double expected_rows, ha_rows *examined_rows);
   ~RefOrNullIterator() override;
 
-  bool Init() override;
-  int Read() override;
-
  private:
+  bool DoInit() override;
+  int DoRead() override;
+
   Index_lookup *const m_ref;
   const bool m_use_order;
   bool m_reading_first_row;
@@ -103,8 +128,6 @@ class EQRefIterator final : public TableRowIterator {
   EQRefIterator(THD *thd, TABLE *table, Index_lookup *ref,
                 ha_rows *examined_rows);
 
-  bool Init() override;
-  int Read() override;
   void UnlockRow() override;
 
   // Performance schema batch mode on EQRefIterator does not make any sense,
@@ -116,6 +139,8 @@ class EQRefIterator final : public TableRowIterator {
   void StartPSIBatchMode() override {}
 
  private:
+  bool DoInit() override;
+  int DoRead() override;
   Index_lookup *const m_ref;
   bool m_first_record_since_init;
   ha_rows *const m_examined_rows;
@@ -131,9 +156,6 @@ class ConstIterator final : public TableRowIterator {
   ConstIterator(THD *thd, TABLE *table, Index_lookup *table_ref,
                 ha_rows *examined_rows);
 
-  bool Init() override;
-  int Read() override;
-
   /**
     Rows from const tables are read once but potentially used
     multiple times during execution of a query.
@@ -142,6 +164,9 @@ class ConstIterator final : public TableRowIterator {
   void UnlockRow() override {}
 
  private:
+  bool DoInit() override;
+  int DoRead() override;
+
   Index_lookup *const m_ref;
   bool m_first_record_since_init;
   ha_rows *const m_examined_rows;
@@ -156,10 +181,10 @@ class FullTextSearchIterator final : public TableRowIterator {
                          bool use_limit, ha_rows *examined_rows);
   ~FullTextSearchIterator() override;
 
-  bool Init() override;
-  int Read() override;
-
  private:
+  bool DoInit() override;
+  int DoRead() override;
+
   Index_lookup *const m_ref;
   Item_func_match *const m_ft_func;
   const bool m_use_order;
@@ -187,10 +212,10 @@ class DynamicRangeIterator final : public TableRowIterator {
                        ha_rows *examined_rows);
   ~DynamicRangeIterator() override;
 
-  bool Init() override;
-  int Read() override;
-
  private:
+  bool DoInit() override;
+  int DoRead() override;
+
   QEP_TAB *m_qep_tab;
 
   // All quicks are allocated on this MEM_ROOT, which is cleared out
@@ -239,10 +264,10 @@ class PushedJoinRefIterator final : public TableRowIterator {
   PushedJoinRefIterator(THD *thd, TABLE *table, Index_lookup *ref,
                         bool use_order, bool is_unique, ha_rows *examined_rows);
 
-  bool Init() override;
-  int Read() override;
-
  private:
+  bool DoInit() override;
+  int DoRead() override;
+
   Index_lookup *const m_ref;
   const bool m_use_order;
   const bool m_is_unique;
@@ -268,10 +293,6 @@ class AlternativeIterator final : public RowIterator {
                       unique_ptr_destroy_only<RowIterator> table_scan_iterator,
                       Index_lookup *ref);
 
-  bool Init() override;
-
-  int Read() override { return m_iterator->Read(); }
-
   void SetNullRowFlag(bool is_null_row) override {
     // Init() may not have been called yet, so just forward to both iterators.
     m_source_iterator->SetNullRowFlag(is_null_row);
@@ -281,6 +302,9 @@ class AlternativeIterator final : public RowIterator {
   void UnlockRow() override { m_iterator->UnlockRow(); }
 
  private:
+  bool DoInit() override;
+  int DoRead() override { return m_iterator->Read(); }
+
   // If any of these are false during Init(), we are having a NULL IN ( ... ),
   // and need to fall back to table scan. Extracted from m_ref.
   std::vector<bool *> m_applicable_cond_guards;

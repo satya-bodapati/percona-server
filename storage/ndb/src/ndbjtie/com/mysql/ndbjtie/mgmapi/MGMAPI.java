@@ -1,15 +1,16 @@
-/* Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -286,7 +287,6 @@ import com.mysql.jtie.Wrapper;
     static public native NdbMgmHandle/*_ndb_mgm_handle *_*/ ndb_mgm_create_handle();
     static public native void ndb_mgm_destroy_handle(NdbMgmHandle[]/*_ndb_mgm_handle * *_*/ handle);
     static public native void ndb_mgm_set_name(NdbMgmHandle/*_ndb_mgm_handle *_*/ handle, String/*_const char *_*/ name);
-    static public native int ndb_mgm_set_ignore_sigpipe(NdbMgmHandle/*_ndb_mgm_handle *_*/ handle, int val);
     static public native int ndb_mgm_set_connectstring(NdbMgmHandle/*_ndb_mgm_handle *_*/ handle, String/*_const char *_*/ connect_string);
     static public native int ndb_mgm_number_of_mgmd_in_connect_string(NdbMgmHandle/*_ndb_mgm_handle *_*/ handle);
     static public native int ndb_mgm_set_configuration_nodeid(NdbMgmHandle/*_ndb_mgm_handle *_*/ handle, int nodeid);
@@ -402,7 +402,9 @@ import com.mysql.jtie.Wrapper;
             NDB_LE_EventBufferStatus = 58,
             NDB_LE_StartReport = 60,
             NDB_LE_SubscriptionStatus = 69,
-            NDB_LE_RedoStatus = 73;
+            NDB_LE_RedoStatus = 73,
+            // TODO: fill in missing
+            NDB_LE_LateHeartbeat = 88;
     }
     public interface /*_enum_*/ ndb_mgm_event_severity
     {
@@ -508,6 +510,8 @@ import com.mysql.jtie.Wrapper;
         StartReport _StartReport;
         SubscriptionStatus _SubscriptionStatus;
         RedoStatus _RedoStatus;
+        // TODO: fill in missing
+        LateHeartbeat _LateHeartbeat;
         // MMM }
         static public class /*_struct_*/ Connected {
             int/*_unsigned int_*/ node;
@@ -719,6 +723,10 @@ import com.mysql.jtie.Wrapper;
         static public class /*_struct_*/ MissedHeartbeat {
             int/*_unsigned int_*/ node;
             int/*_unsigned int_*/ count;
+        };
+        static public class /*_struct_*/ LateHeartbeat {
+            int/*_unsigned int_*/ node;
+            int/*_unsigned int_*/ ms;
         };
         static public class /*_struct_*/ DeadDueToHeartbeat {
             int/*_unsigned int_*/ node;

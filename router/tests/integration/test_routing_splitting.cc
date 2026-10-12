@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2023, Oracle and/or its affiliates.
+  Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -41,13 +42,14 @@
 #include <gtest/gtest-param-test.h>
 #include <gtest/gtest.h>
 
-#define RAPIDJSON_HAS_STDSTRING 1
-
+#ifdef RAPIDJSON_NO_SIZETYPEDEFINE
 #include "my_rapidjson_size_t.h"
+#endif
 
 #include <rapidjson/pointer.h>
 
 #include "hexify.h"
+#include "idc_metadata_schema.h"
 #include "mysql/harness/filesystem.h"
 #include "mysql/harness/net_ts/impl/socket.h"
 #include "mysql/harness/stdx/expected.h"
@@ -61,7 +63,6 @@
 #include "mysqlrouter/classic_protocol_codec_message.h"
 #include "mysqlrouter/classic_protocol_frame.h"
 #include "mysqlrouter/classic_protocol_message.h"
-#include "mysqlrouter/http_request.h"
 #include "mysqlrouter/utils.h"
 #include "openssl_version.h"  // ROUTER_OPENSSL_VERSION
 #include "process_manager.h"
@@ -133,11 +134,11 @@ static std::vector<std::vector<std::vector<std::string>>> result_as_vector(
 static stdx::expected<std::vector<std::vector<std::string>>, MysqlError>
 query_one_result(MysqlClient &cli, std::string_view stmt) {
   auto cmd_res = cli.query(stmt);
-  if (!cmd_res) return stdx::make_unexpected(cmd_res.error());
+  if (!cmd_res) return stdx::unexpected(cmd_res.error());
 
   auto results = result_as_vector(*cmd_res);
   if (results.size() != 1) {
-    return stdx::make_unexpected(MysqlError{1, "Too many results", "HY000"});
+    return stdx::unexpected(MysqlError{1, "Too many results", "HY000"});
   }
 
   return results.front();
@@ -149,7 +150,7 @@ static stdx::expected<uint64_t, std::error_code> from_string(
   uint64_t num;
   auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), num);
 
-  if (ec != std::errc{}) return stdx::make_unexpected(make_error_code(ec));
+  if (ec != std::errc{}) return stdx::unexpected(make_error_code(ec));
 
   return num;
 }
@@ -158,17 +159,16 @@ static stdx::expected<uint64_t, std::error_code> from_string(
 static stdx::expected<std::vector<std::pair<std::string, uint32_t>>, MysqlError>
 changed_event_counters_impl(MysqlClient &cli, std::string_view stmt) {
   auto query_res = cli.query(stmt);
-  if (!query_res) return stdx::make_unexpected(query_res.error());
+  if (!query_res) return stdx::unexpected(query_res.error());
 
   auto query_it = query_res->begin();
 
   if (!(query_it != query_res->end())) {
-    return stdx::make_unexpected(MysqlError(1234, "No resultset", "HY000"));
+    return stdx::unexpected(MysqlError(1234, "No resultset", "HY000"));
   }
 
   if (2 != query_it->field_count()) {
-    return stdx::make_unexpected(
-        MysqlError(1234, "Expected two fields", "HY000"));
+    return stdx::unexpected(MysqlError(1234, "Expected two fields", "HY000"));
   }
 
   std::vector<std::pair<std::string, uint32_t>> events;
@@ -176,7 +176,7 @@ changed_event_counters_impl(MysqlClient &cli, std::string_view stmt) {
   for (const auto *row : query_it->rows()) {
     auto num_res = from_string(row[1]);
     if (!num_res) {
-      return stdx::make_unexpected(MysqlError(
+      return stdx::unexpected(MysqlError(
           1234,
           "converting " + std::string(row[1] != nullptr ? row[1] : "<NULL>") +
               " to an <uint32_t> failed",
@@ -197,6 +197,51 @@ changed_event_counters(MysqlClient &cli) {
 WHERE t.PROCESSLIST_ID = CONNECTION_ID()
   AND COUNT_STAR > 0
 ORDER BY EVENT_NAME)");
+}
+
+static stdx::expected<std::vector<std::tuple<std::string, std::string>>,
+                      MysqlError>
+statement_history(MysqlClient &cli, bool to_read_write) {
+  {
+    auto set_res =
+        cli.query(to_read_write ? "ROUTER SET access_mode='read_write'"
+                                : "ROUTER SET access_mode='read_only'");
+    if (!set_res) return stdx::unexpected(set_res.error());
+  }
+
+  auto hist_res = query_one_result(
+      cli,
+      "SELECT event_name, digest_text "
+      "  FROM performance_schema.events_statements_history AS h"
+      "  JOIN performance_schema.threads AS t "
+      "    ON (h.thread_id = t.thread_id)"
+      " WHERE t.processlist_id = CONNECTION_ID()"
+      " ORDER BY event_id");
+
+  {
+    auto set_res = cli.query("ROUTER SET access_mode='auto'");
+    if (!set_res) return stdx::unexpected(set_res.error());
+  }
+
+  std::vector<std::tuple<std::string, std::string>> res;
+
+  for (auto row : *hist_res) {
+    res.emplace_back(row[0], row[1]);
+  }
+
+  return res;
+}
+
+static stdx::expected<std::vector<std::tuple<std::string, std::string>>,
+                      MysqlError>
+statement_history_from_read_write(MysqlClient &cli) {
+  return statement_history(cli, true);
+}
+
+static stdx::expected<std::vector<std::tuple<std::string, std::string>>,
+                      MysqlError>
+statement_history_from_read_only(MysqlClient &cli) {
+  return statement_history(cli, false);
 }
 
 static testing::AssertionResult json_pointer_eq(
@@ -398,8 +443,7 @@ class TestEnv : public ::testing::Environment {
         GTEST_SKIP() << "mysql-server failed to start.";
       }
 
-      seeds.emplace_back(srv->server_host() + ":"s +
-                         std::to_string(srv->server_port()));
+      seeds.emplace_back(srv->classic_tcp_destination().str());
     }
 
     for (auto [ndx, srv] : stdx::views::enumerate(shared_servers_)) {
@@ -408,6 +452,14 @@ class TestEnv : public ::testing::Environment {
       ASSERT_NO_ERROR(cli_res);
 
       auto cli = std::move(*cli_res);
+
+      auto install_res = SharedServer::local_install_plugin(
+          cli, "authentication_openid_connect");
+      if (install_res) srv->has_openid_connect(true);
+
+      if (srv->has_openid_connect()) {
+        ASSERT_NO_ERROR(SharedServer::local_set_openid_connect_config(cli));
+      }
 
       for (const auto &stmt :
            gr_node_init_stmts(ndx == 0 ? std::vector<std::string>{} : seeds)) {
@@ -432,30 +484,12 @@ class TestEnv : public ::testing::Environment {
     ASSERT_NO_ERROR(primary_cli_res);
     auto primary_cli = std::move(*primary_cli_res);
 
-    std::stringstream ss;
-    {
-      std::ifstream ifs(ProcessManager::get_data_dir()
-                            .join("metadata-model-2.1.0.sql")
-                            .str());
-
-      ASSERT_TRUE(ifs.good());
-      ss << ifs.rdbuf();
-    }
-
-    auto &proc_mgr = srv->process_manager();
-    {
-      auto &mysql_proc =
-          proc_mgr.spawner(proc_mgr.get_origin().join("mysql").str())
-              .wait_for_sync_point(ProcessManager::Spawner::SyncPoint::NONE)
-              .spawn({"--host", "127.0.0.1", "--port",
-                      std::to_string(srv->server_port()), "--user", "root",
-                      "--password=", "-e",
-                      "source " + ProcessManager::get_data_dir()
-                                      .join("metadata-model-2.1.0.sql")
-                                      .str()});
-      ASSERT_NO_THROW(mysql_proc.wait_for_exit(20s))
-          << mysql_proc.get_current_output();
-      ASSERT_EQ(mysql_proc.exit_code(), 0) << mysql_proc.get_full_output();
+    // create a metadata schema
+    const char **query_ptr;
+    for (query_ptr = &idc_metadata_schema[0]; *query_ptr != nullptr;
+         query_ptr++) {
+      const std::string query{*query_ptr};
+      ASSERT_NO_ERROR(primary_cli.query(query));
     }
 
     // create a cluster
@@ -486,10 +520,8 @@ class TestEnv : public ::testing::Environment {
       auto row = (*query_res)[0];
       auto [server_uuid, server_id] = std::make_pair(row[0], row[1]);
 
-      auto server_classic_address =
-          srv->server_host() + ":"s + std::to_string(srv->server_port());
-      auto server_x_address =
-          srv->server_host() + ":"s + std::to_string(srv->server_mysqlx_port());
+      auto server_classic_address = srv->classic_tcp_destination().str();
+      auto server_x_address = srv->x_tcp_destination().str();
 
       // add this instance to the cluster.
       ASSERT_NO_ERROR(primary_cli.query(
@@ -534,23 +566,36 @@ class TestEnv : public ::testing::Environment {
               return "";
             })
             .spawn({"--bootstrap",
-                    "root@127.0.0.1:" + std::to_string(srv->server_port()),
-                    "--account", "router",         //
-                    "--report-host", "127.0.0.1",  //
-                    "-d", router_dir_.name()});
+                    "root@" + srv->classic_tcp_destination().str(),  //
+                    "--account", "router",                           //
+                    "--report-host", "127.0.0.1",                    //
+                    "-d", router_dir_.name(),                        //
+                    "--conf-set-option",
+                    "DEFAULT.plugin_folder=" +
+                        ProcessManager::get_plugin_dir().str()});
     ASSERT_NO_THROW(bootstrap_proc.wait_for_exit(10s))
         << bootstrap_proc.get_current_output();
     ASSERT_EQ(bootstrap_proc.exit_code(), 0)
         << bootstrap_proc.get_full_output();
-
-    srv->setup_mysqld_accounts();
 
     // create a table used for insert/update/select.
     auto primary_cli_res = srv->admin_cli();
     ASSERT_NO_ERROR(primary_cli_res);
     auto primary_cli = std::move(*primary_cli_res);
 
+    SharedServer::setup_mysqld_accounts(primary_cli);
     ASSERT_NO_ERROR(primary_cli.query("CREATE TABLE testing.t1 (id SERIAL)"));
+
+    if (srv->has_openid_connect()) {
+      auto account = SharedServer::openid_connect_account();
+
+      ASSERT_NO_FATAL_FAILURE(
+          SharedServer::create_account(primary_cli, account));
+      ASSERT_NO_FATAL_FAILURE(SharedServer::grant_access(
+          primary_cli, account, "SELECT", "performance_schema"));
+      ASSERT_NO_FATAL_FAILURE(
+          SharedServer::grant_access(primary_cli, account, "ALL", "testing"));
+    }
   }
 
   std::array<SharedServer *, 3> servers() { return shared_servers_; }
@@ -560,12 +605,6 @@ class TestEnv : public ::testing::Environment {
   [[nodiscard]] bool run_slow_tests() const { return run_slow_tests_; }
 
   void TearDown() override {
-    if (testing::Test::HasFatalFailure()) {
-      for (auto &srv : shared_servers_) {
-        srv->process_manager().dump_logs();
-      }
-    }
-
     for (auto &srv : shared_servers_) {
       if (srv == nullptr || srv->mysqld_failed_to_start()) continue;
 
@@ -637,7 +676,8 @@ class SharedRouter {
                      {"backend", "file"},
                      {"filename", userfile},
                  })
-        .section("http_server", {{"port", std::to_string(rest_port_)}})
+        .section("http_server", {{"bind_address", "127.0.0.1"},
+                                 {"port", std::to_string(rest_port_)}})
         .section("metadata_cache:bootstrap",
                  {
                      {"cluster_type", "gr"},
@@ -746,19 +786,23 @@ class SharedRouter {
 
     if (auto *val = JsonPointer(pointer).Get(json_doc)) {
       if (!val->IsInt()) {
-        return stdx::make_unexpected(
-            make_error_code(std::errc::invalid_argument));
+        return stdx::unexpected(make_error_code(std::errc::invalid_argument));
       }
       return val->GetInt();
     }
 
-    return stdx::make_unexpected(
+    return stdx::unexpected(
         make_error_code(std::errc::no_such_file_or_directory));
   }
 
   stdx::expected<int, std::error_code> idle_server_connections() {
     return rest_get_int(rest_api_basepath + "/connection_pool/main/status",
                         "/idleServerConnections");
+  }
+
+  stdx::expected<int, std::error_code> stashed_server_connections() {
+    return rest_get_int(rest_api_basepath + "/connection_pool/main/status",
+                        "/stashedServerConnections");
   }
 
   stdx::expected<void, std::error_code> wait_for_idle_server_connections(
@@ -768,12 +812,31 @@ class SharedRouter {
     const auto end_time = clock_type::now() + timeout;
     do {
       auto int_res = idle_server_connections();
-      if (!int_res) return stdx::make_unexpected(int_res.error());
+      if (!int_res) return stdx::unexpected(int_res.error());
 
       if (*int_res == expected_value) return {};
 
       if (clock_type::now() > end_time) {
-        return stdx::make_unexpected(make_error_code(std::errc::timed_out));
+        return stdx::unexpected(make_error_code(std::errc::timed_out));
+      }
+
+      std::this_thread::sleep_for(kIdleServerConnectionsSleepTime);
+    } while (true);
+  }
+
+  stdx::expected<void, std::error_code> wait_for_stashed_server_connections(
+      int expected_value, std::chrono::seconds timeout) {
+    using clock_type = std::chrono::steady_clock;
+
+    const auto end_time = clock_type::now() + timeout;
+    do {
+      auto int_res = stashed_server_connections();
+      if (!int_res) return stdx::unexpected(int_res.error());
+
+      if (*int_res == expected_value) return {};
+
+      if (clock_type::now() > end_time) {
+        return stdx::unexpected(make_error_code(std::errc::timed_out));
       }
 
       std::this_thread::sleep_for(kIdleServerConnectionsSleepTime);
@@ -834,10 +897,11 @@ class TestWithSharedRouter {
 
 SharedRouter *TestWithSharedRouter::shared_router_ = nullptr;
 
-class SplittingConnectionTestBase : public RouterComponentTest {
+template <size_t S, size_t P>
+class SplittingConnectionTestBaseP : public RouterComponentTest {
  public:
-  static constexpr const size_t kNumServers = 3;
-  static constexpr const size_t kMaxPoolSize = 128;
+  static constexpr const size_t kNumServers = S;
+  static constexpr const size_t kMaxPoolSize = P;
 
   static void SetUpTestSuite() {
     for (const auto &srv : shared_servers()) {
@@ -848,7 +912,14 @@ class SplittingConnectionTestBase : public RouterComponentTest {
                                          shared_servers(), kMaxPoolSize);
   }
 
-  static void TearDownTestSuite() { TestWithSharedRouter::TearDownTestSuite(); }
+  static void TearDownTestSuite() {
+    TestWithSharedRouter::TearDownTestSuite();
+    if (testing::Test::HasFailure()) {
+      for (const auto &srv : shared_servers()) {
+        srv->process_manager().dump_logs();
+      }
+    }
+  }
 
   static std::array<SharedServer *, kNumServers> shared_servers() {
     std::array<SharedServer *, kNumServers> srvs;
@@ -866,7 +937,16 @@ class SplittingConnectionTestBase : public RouterComponentTest {
   static SharedRouter *shared_router() {
     return TestWithSharedRouter::router();
   }
+
+ protected:
+  static void wait_for_empty_router_connection_pool() {
+    ASSERT_NO_ERROR(shared_router()->wait_for_idle_server_connections(0, 10s));
+    ASSERT_NO_ERROR(
+        shared_router()->wait_for_stashed_server_connections(0, 10s));
+  }
 };
+
+using SplittingConnectionTestBase = SplittingConnectionTestBaseP<3, 128>;
 
 class SplittingConnectionTest
     : public SplittingConnectionTestBase,
@@ -879,16 +959,61 @@ class SplittingConnectionTest
       if (srv == nullptr || srv->mysqld_failed_to_start()) {
         GTEST_SKIP() << "failed to start mysqld";
       } else {
-        srv->close_all_connections();  // reset the router's connection-pool
+        ASSERT_NO_ERROR(srv->close_all_connections());  // reset the router's
+                                                        // connection-pool
       }
     }
+
+    ASSERT_NO_FATAL_FAILURE(wait_for_empty_router_connection_pool());
   }
 
   void TearDown() override {
-    if (HasFatalFailure()) {
+    if (HasFailure()) {
       shared_router()->process_manager().dump_logs();
     }
   }
+
+  const std::string stmt_type_sql_select{"statement/sql/select"};
+  const std::string stmt_type_sql_set_option{"statement/sql/set_option"};
+  const std::string stmt_type_sql_insert{"statement/sql/insert"};
+  const std::string stmt_type_sql_truncate{"statement/sql/truncate"};
+  const std::string stmt_type_com_reset_connection{
+      "statement/com/Reset Connection"};
+  const std::string stmt_type_com_set_option{"statement/com/Set option"};
+
+  const std::string stmt_select_session_vars{
+      "SELECT ? , @@SESSION . `collation_connection` UNION "
+      "SELECT ? , @@SESSION . `character_set_client` UNION "
+      "SELECT ? , @@SESSION . `sql_mode`"};
+  const std::string stmt_set_session_tracker{
+      "SET "
+      "@@SESSION . `session_track_system_variables` = ? , "
+      "@@SESSION . `session_track_gtids` = ? , "
+      "@@SESSION . `session_track_schema` = ? , "
+      "@@SESSION . `session_track_state_change` = ? , "
+      "@@SESSION . `session_track_transaction_info` = ?"};
+
+  const std::string stmt_restore_session_vars{
+      "SET "
+      "@@SESSION . `session_track_system_variables` = ? , "
+      "@@SESSION . `character_set_client` = ? , "
+      "@@SESSION . `collation_connection` = ? , "
+      "@@SESSION . `session_track_gtids` = ? , "
+      "@@SESSION . `session_track_schema` = ? , "
+      "@@SESSION . `session_track_state_change` = ? , "
+      "@@SESSION . `session_track_transaction_info` = ? , "
+      "@@SESSION . `sql_mode` = ?"};
+
+  const std::string stmt_select_history{
+      "SELECT `event_name` , `digest_text` "
+      "FROM `performance_schema` . `events_statements_history` AS `h` "
+      "JOIN `performance_schema` . `threads` AS `t` "
+      "ON ( `h` . `thread_id` = `t` . `thread_id` ) "
+      "WHERE `t` . `processlist_id` = `CONNECTION_ID` ( ) "
+      "ORDER BY `event_id`"};
+
+  const std::string stmt_select_wait_gtid{
+      "SELECT NOT `WAIT_FOR_EXECUTED_GTID_SET` (...)"};
 };
 
 /**
@@ -911,7 +1036,7 @@ TEST_P(SplittingConnectionTest, select_and_insert) {
       cli.connect(shared_router()->host(), shared_router()->port(GetParam())));
 
   // connection goes out of the pool and back to the pool again.
-  ASSERT_NO_ERROR(shared_router()->wait_for_idle_server_connections(1, 1s));
+  ASSERT_NO_ERROR(shared_router()->wait_for_stashed_server_connections(1, 1s));
 
   std::string primary_port;
 
@@ -1004,17 +1129,15 @@ TEST_P(SplittingConnectionTest, select_and_insert) {
              std::pair{"/events/1/events/0/name",
                        rapidjson::Value("mysql/prepare_server_connection")},
              std::pair{"/events/1/events/0/events/0/name",
-                       rapidjson::Value("mysql/from_pool_or_connect")},
-             std::pair{"/events/1/events/0/events/0/events/0/name",
-                       rapidjson::Value("mysql/from_pool")},
-             std::pair{"/events/1/events/0/events/0/events/0/attributes/"
+                       rapidjson::Value("mysql/from_stash")},
+             std::pair{"/events/1/events/0/events/0/attributes/"
                        "mysql.remote.is_connected",
                        rapidjson::Value(true)},
-             std::pair{"/events/1/events/0/events/0/events/0/attributes/"
+             std::pair{"/events/1/events/0/events/0/attributes/"
                        "mysql.remote.endpoint",
                        rapidjson::Value("127.0.0.1:" + primary_port,
                                         doc.GetAllocator())},
-             std::pair{"/events/1/events/0/events/0/events/0/attributes/"
+             std::pair{"/events/1/events/0/events/0/attributes/"
                        "db.name",
                        rapidjson::Value("")},
          }) {
@@ -1062,16 +1185,210 @@ TEST_P(SplittingConnectionTest, select_and_insert) {
              std::pair{"/events/1/events/0/name",
                        rapidjson::Value("mysql/prepare_server_connection")},
              std::pair{"/events/1/events/0/events/0/name",
-                       rapidjson::Value("mysql/from_pool_or_connect")},
-             std::pair{"/events/1/events/0/events/0/events/0/name",
-                       rapidjson::Value("mysql/from_pool")},
-             std::pair{"/events/1/events/0/events/0/events/0/attributes/"
+                       rapidjson::Value("mysql/from_stash")},
+             std::pair{"/events/1/events/0/events/0/attributes/"
                        "mysql.remote.is_connected",
                        rapidjson::Value(true)},
              // std::pair{"/events/1/events/0/events/0/events/0/attributes/"
              //           "mysql.remote.endpoint",
              //           rapidjson::Value("")},
-             std::pair{"/events/1/events/0/events/0/events/0/attributes/"
+             std::pair{"/events/1/events/0/events/0/attributes/"
+                       "db.name",
+                       rapidjson::Value("testing")},
+         }) {
+      // 11010 [the SECONDARY]
+      ASSERT_TRUE(json_pointer_eq(doc, rapidjson::Pointer(pntr), val))
+          << json_trace;
+    }
+  }
+}
+
+/**
+ * check connections can be shared after the connection is established.
+ *
+ * - connect
+ * - wait for connection be pooled
+ * - connect a 2nd connection to same backend
+ * - check they share the same connection
+ */
+TEST_P(SplittingConnectionTest, select_and_insert_with_ansi_quotes) {
+  RecordProperty("Bug", "116950");
+  RecordProperty("Description",
+                 "Check that read-write split works with ANSI_QUOTES sql_mode "
+                 "enabled. ANSI_QUOTES changes the meaning of double-quotes in "
+                 "statements from quotes-for-strings to quotes-for-fields");
+
+  MysqlClient cli;
+
+  auto account = SharedServer::caching_sha2_empty_password_account();
+
+  cli.username(account.username);
+  cli.password(account.password);
+
+  ASSERT_NO_ERROR(
+      cli.connect(shared_router()->host(), shared_router()->port(GetParam())));
+
+  // connection goes out of the pool and back to the pool again.
+  ASSERT_NO_ERROR(shared_router()->wait_for_stashed_server_connections(1, 1s));
+
+  std::string primary_port;
+
+  {
+    auto query_res = query_one_result(
+        cli, "SELECT * FROM performance_schema.replication_group_members");
+    ASSERT_NO_ERROR(query_res);
+
+    // 3 nodes
+    // - a PRIMARY and 2 SECONDARY
+    // - all ONLINE
+    EXPECT_THAT(
+        *query_res,
+        UnorderedElementsAre(
+            ElementsAre("group_replication_applier", testing::_, "127.0.0.1",
+                        testing::_, "ONLINE", "PRIMARY", testing::_, "MySQL"),
+            ElementsAre("group_replication_applier", testing::_, "127.0.0.1",
+                        testing::_, "ONLINE", "SECONDARY", testing::_, "MySQL"),
+            ElementsAre("group_replication_applier", testing::_, "127.0.0.1",
+                        testing::_, "ONLINE", "SECONDARY", testing::_,
+                        "MySQL")));
+
+    // find the port of the current PRIMARY.
+    for (auto const &row : *query_res) {
+      if (row[5] == "PRIMARY") primary_port = row[3];
+    }
+  }
+  ASSERT_THAT(primary_port, ::testing::Not(::testing::IsEmpty()));
+
+  // set the ANSI_QUOTES.
+  ASSERT_NO_ERROR(cli.query("SET sql_mode='ANSI_QUOTES'"));
+
+  // enable tracing to detect if the query went to the primary or secondary.
+  ASSERT_NO_ERROR(cli.query("ROUTER SET trace = 1"));
+
+  SCOPED_TRACE("// clean up from earlier runs");
+  ASSERT_NO_ERROR(cli.query("TRUNCATE TABLE testing.t1"));
+
+  {
+    auto query_res = query_one_result(cli, "SHOW WARNINGS");
+    ASSERT_NO_ERROR(query_res);
+    ASSERT_THAT(*query_res, ElementsAre(::testing::SizeIs(3)));
+
+    auto json_trace = query_res->operator[](0)[2];
+
+    rapidjson::Document doc;
+    doc.Parse(json_trace.data(), json_trace.size());
+
+    for (const auto &[pntr, val] : {
+             std::pair{"/name", rapidjson::Value("mysql/query")},
+             std::pair{"/attributes/mysql.sharing_blocked",
+                       rapidjson::Value(false)},
+             std::pair{"/events/0/name",
+                       rapidjson::Value("mysql/query_classify")},
+             std::pair{"/events/0/attributes/mysql.query.classification",
+                       rapidjson::Value("accept_session_state_from_"
+                                        "session_tracker")},
+             std::pair{"/events/1/name",
+                       rapidjson::Value("mysql/connect_and_forward")},
+             std::pair{"/events/1/attributes/mysql.remote.is_connected",
+                       rapidjson::Value(false)},
+         }) {
+      ASSERT_TRUE(json_pointer_eq(doc, rapidjson::Pointer(pntr), val))
+          << json_trace;
+    }
+  }
+
+  SCOPED_TRACE("// INSERT on PRIMARY");
+  ASSERT_NO_ERROR(cli.query("INSERT INTO testing.t1 VALUES ()"));
+  {
+    auto query_res = query_one_result(cli, "SHOW WARNINGS");
+    ASSERT_NO_ERROR(query_res);
+    ASSERT_THAT(*query_res, ElementsAre(::testing::SizeIs(3)));
+
+    auto json_trace = query_res->operator[](0)[2];
+
+    rapidjson::Document doc;
+    doc.Parse(json_trace.data(), json_trace.size());
+
+    for (const auto &[pntr, val] : {
+             std::pair{"/name", rapidjson::Value("mysql/query")},
+             std::pair{"/attributes/mysql.sharing_blocked",
+                       rapidjson::Value(false)},
+             std::pair{"/events/0/name",
+                       rapidjson::Value("mysql/query_classify")},
+             std::pair{"/events/0/attributes/mysql.query.classification",
+                       rapidjson::Value("accept_session_state_from_"
+                                        "session_tracker")},
+             std::pair{"/events/1/name",
+                       rapidjson::Value("mysql/connect_and_forward")},
+             std::pair{"/events/1/attributes/mysql.remote.is_connected",
+                       rapidjson::Value(false)},
+             std::pair{"/events/1/events/0/name",
+                       rapidjson::Value("mysql/prepare_server_connection")},
+             std::pair{"/events/1/events/0/events/0/name",
+                       rapidjson::Value("mysql/from_stash")},
+             std::pair{"/events/1/events/0/events/0/attributes/"
+                       "mysql.remote.is_connected",
+                       rapidjson::Value(true)},
+             std::pair{"/events/1/events/0/events/0/attributes/"
+                       "mysql.remote.endpoint",
+                       rapidjson::Value("127.0.0.1:" + primary_port,
+                                        doc.GetAllocator())},
+             std::pair{"/events/1/events/0/events/0/attributes/"
+                       "db.name",
+                       rapidjson::Value("")},
+         }) {
+      ASSERT_TRUE(json_pointer_eq(doc, rapidjson::Pointer(pntr), val))
+          << json_trace;
+    }
+  }
+
+  SCOPED_TRACE("// switch schema");
+  ASSERT_NO_ERROR(cli.query("USE testing"));
+
+  SCOPED_TRACE(
+      "// SELECT COUNT(): check schema-change is propagated, check the INSERT "
+      "was replicated.");
+  {
+    auto query_res = query_one_result(cli, "SELECT COUNT(*) FROM t1");
+    ASSERT_NO_ERROR(query_res);
+    EXPECT_THAT(*query_res, ElementsAre(ElementsAre("1")));
+  }
+
+  SCOPED_TRACE("// get trace for SELECT COUNT");
+  {
+    auto query_res = query_one_result(cli, "SHOW WARNINGS");
+    ASSERT_NO_ERROR(query_res);
+    ASSERT_THAT(*query_res, ElementsAre(::testing::SizeIs(3)));
+
+    auto json_trace = query_res->operator[](0)[2];
+
+    rapidjson::Document doc;
+    doc.Parse(json_trace.data(), json_trace.size());
+
+    for (const auto &[pntr, val] : {
+             std::pair{"/name", rapidjson::Value("mysql/query")},
+             std::pair{"/attributes/mysql.sharing_blocked",
+                       rapidjson::Value(false)},
+             std::pair{"/events/0/name",
+                       rapidjson::Value("mysql/query_classify")},
+             std::pair{"/events/0/attributes/mysql.query.classification",
+                       rapidjson::Value("accept_session_state_from_"
+                                        "session_tracker,read-only")},
+             std::pair{"/events/1/name",
+                       rapidjson::Value("mysql/connect_and_forward")},
+             std::pair{"/events/1/attributes/mysql.remote.is_connected",
+                       rapidjson::Value(false)},
+             std::pair{"/events/1/events/0/name",
+                       rapidjson::Value("mysql/prepare_server_connection")},
+             std::pair{"/events/1/events/0/events/0/name",
+                       rapidjson::Value("mysql/from_stash")},
+             std::pair{"/events/1/events/0/events/0/attributes/"
+                       "mysql.remote.is_connected",
+                       rapidjson::Value(true)},
+             // std::pair{"/events/1/events/0/events/0/events/0/attributes/"
+             //           "mysql.remote.endpoint",
+             //           rapidjson::Value("")},
+             std::pair{"/events/1/events/0/events/0/attributes/"
                        "db.name",
                        rapidjson::Value("testing")},
          }) {
@@ -1286,10 +1603,8 @@ TEST_P(SplittingConnectionTest, prepare_instance_local_statements_fails) {
            "SHUTDOWN",
            "START GROUP_REPLICATION",
            "START REPLICA",
-           "START SLAVE",
            "STOP GROUP_REPLICATION",
            "STOP REPLICA",
-           "STOP SLAVE",
            "UNLOCK TABLES",
        }) {
     SCOPED_TRACE(stmt);
@@ -1341,14 +1656,13 @@ TEST_P(SplittingConnectionTest,
 
 stdx::expected<std::string, MysqlError> executed_gtid(MysqlClient &cli) {
   auto query_res = query_one_result(cli, "SELECT @@gtid_executed");
-  if (!query_res) return stdx::make_unexpected(query_res.error());
+  if (!query_res) return stdx::unexpected(query_res.error());
 
   if ((*query_res).size() != 1) {
-    return stdx::make_unexpected(MysqlError{2013, "expected a row", "HY000"});
+    return stdx::unexpected(MysqlError{2013, "expected a row", "HY000"});
   }
   if ((*query_res)[0].size() != 1) {
-    return stdx::make_unexpected(
-        MysqlError{2013, "expected one column", "HY000"});
+    return stdx::unexpected(MysqlError{2013, "expected one column", "HY000"});
   }
 
   return ((*query_res)[0][0]);
@@ -1449,114 +1763,142 @@ TEST_P(SplittingConnectionTest, reset_connection_resets_last_executed_gtid) {
   cli.username(account.username);
   cli.password(account.password);
 
+  SCOPED_TRACE("// connect");
+
+  // primary or secondary
   ASSERT_NO_ERROR(
       cli.connect(shared_router()->host(), shared_router()->port(GetParam())));
+
+  std::vector<std::tuple<std::string, std::string>> initial_expected_stmts{
+      {stmt_type_sql_set_option, stmt_set_session_tracker},
+      {stmt_type_sql_select, stmt_select_session_vars},
+  };
+
+  std::vector<std::tuple<std::string, std::string>> switched_expected_stmts{
+      {stmt_type_sql_set_option, stmt_restore_session_vars},
+  };
+
+  std::vector<std::tuple<std::string, std::string>> rw_expected_stmts;
+  std::vector<std::tuple<std::string, std::string>> ro_expected_stmts;
+  bool started_on_rw{false};
+
+  {
+    auto stmt_hist_res = statement_history_from_read_write(cli);
+    ASSERT_NO_ERROR(stmt_hist_res);
+
+    // detect if router started on a RW or RO node.
+    started_on_rw = stmt_hist_res->size() == 2;
+
+    if (started_on_rw) {
+      rw_expected_stmts = initial_expected_stmts;
+      ro_expected_stmts = switched_expected_stmts;
+    } else {
+      ro_expected_stmts = initial_expected_stmts;
+      rw_expected_stmts = switched_expected_stmts;
+    }
+
+    EXPECT_THAT(*stmt_hist_res, ::testing::ElementsAreArray(rw_expected_stmts));
+    rw_expected_stmts.emplace_back(stmt_type_sql_select, stmt_select_history);
+  }
+
+  {
+    auto stmt_hist_res = statement_history_from_read_only(cli);
+    ASSERT_NO_ERROR(stmt_hist_res);
+
+    EXPECT_THAT(*stmt_hist_res, ::testing::ElementsAreArray(ro_expected_stmts));
+
+    ro_expected_stmts.emplace_back(stmt_type_sql_select, stmt_select_history);
+  }
+
+  ASSERT_NO_ERROR(shared_router()->wait_for_stashed_server_connections(2, 10s));
 
   // primary
   SCOPED_TRACE("// cleanup");
   ASSERT_NO_ERROR(cli.query("TRUNCATE TABLE testing.t1"));
 
+  rw_expected_stmts.emplace_back(stmt_type_sql_truncate,
+                                 "TRUNCATE TABLE `testing` . `t1`");
+
   // primary
   ASSERT_NO_ERROR(cli.query("INSERT INTO testing.t1 VALUES ()"));
 
-  // secondary, waits for executed gtid.
+  rw_expected_stmts.emplace_back(stmt_type_sql_insert,
+                                 "INSERT INTO `testing` . `t1` VALUES ( )");
+
+  {
+    auto stmt_hist_res = statement_history_from_read_write(cli);
+    ASSERT_NO_ERROR(stmt_hist_res);
+
+    EXPECT_THAT(*stmt_hist_res, ::testing::ElementsAreArray(rw_expected_stmts));
+
+    rw_expected_stmts.emplace_back(stmt_type_sql_select, stmt_select_history);
+  }
+
+  // secondary
   //
-  // executed on the secondary:
-  //
-  // - reset-connection
-  // - SET trackers
-  // - SELECT @@super_read_only
-  // - SELECT GTID...
-  // - SELECT * FROM testing...
+  // Router should wait for GTID_EXECUTED.
+  ro_expected_stmts.emplace_back(stmt_type_sql_select, stmt_select_wait_gtid);
+
   {
     auto stmt_res = query_one_result(cli, "SELECT * FROM testing.t1");
     ASSERT_NO_ERROR(stmt_res);
+
+    ro_expected_stmts.emplace_back(stmt_type_sql_select,
+                                   "SELECT * FROM `testing` . `t1`");
   }
 
-  // executed on the secondary:
-  //
-  // - reset-connection (from pool)
-  // - SET trackers
-  // - SELECT @@super_read_only
-  // - SELECT GTID...
-  // - SELECT * FROM performance_schema... [not seen by this query]
+  ro_expected_stmts.emplace_back(stmt_type_sql_select, stmt_select_wait_gtid);
+
   {
-    auto events_res = changed_event_counters(cli);
-    ASSERT_NO_ERROR(events_res);
+    auto stmt_hist_res = statement_history_from_read_only(cli);
+    ASSERT_NO_ERROR(stmt_hist_res);
 
-    EXPECT_THAT(*events_res,
-                AnyOf(
-                    // started on the read-write
-                    ElementsAre(Pair("statement/com/Reset Connection", 1),
-                                Pair("statement/sql/select", 5),
-                                Pair("statement/sql/set_option", 2)),
-                    // started on the read-only
-                    ElementsAre(Pair("statement/com/Reset Connection", 2),
-                                Pair("statement/sql/select", 7),
-                                Pair("statement/sql/set_option", 3))));
+    EXPECT_THAT(*stmt_hist_res, ::testing::ElementsAreArray(ro_expected_stmts));
+
+    ro_expected_stmts.emplace_back(stmt_type_sql_select, stmt_select_history);
   }
 
-  // executed on the secondary:
-  //
-  // - reset-connection (from pool)
-  // - SET trackers and session-vars
-  // - SELECT @@super_read_only
-  // - SELECT GTID...
-  // - reset-connection
-  // - SET trackers
+  // the RO and RW connections should be stashed now.
+  ASSERT_NO_ERROR(shared_router()->wait_for_stashed_server_connections(2, 10s));
+
   ASSERT_NO_ERROR(cli.reset_connection());
 
-  // check if server waits for GTID. It will issue a SELECT NOT WAIT_FOR...
-  //
-  // executed on the secondary:
-  //
-  // - reset-connection (from pool)
-  // - SET trackers
-  // - SELECT @@super_read_only
-  // - SELECT * FROM performance_schema... [not seen by this query]
-  {
-    auto events_res = changed_event_counters(cli);
-    ASSERT_NO_ERROR(events_res);
+  // reset-connection should also reset the last-executed GTID of the current
+  // client-side session. -> no select_wait_gtid query.
+  ro_expected_stmts.emplace_back(stmt_type_com_reset_connection, "<NULL>");
+  ro_expected_stmts.emplace_back(stmt_type_sql_set_option,
+                                 stmt_set_session_tracker);
+  ro_expected_stmts.emplace_back(stmt_type_sql_select,
+                                 stmt_select_session_vars);
 
-    EXPECT_THAT(*events_res,
-                AnyOf(
-                    // started on read-write
-                    ElementsAre(Pair("statement/com/Reset Connection", 4),
-                                Pair("statement/sql/select", 9),
-                                Pair("statement/sql/set_option", 5)),
-                    // started on read-only
-                    ElementsAre(Pair("statement/com/Reset Connection", 5),
-                                Pair("statement/sql/select", 11),
-                                Pair("statement/sql/set_option", 6))));
+  {
+    auto stmt_hist_res = statement_history_from_read_only(cli);
+    ASSERT_NO_ERROR(stmt_hist_res);
+
+    EXPECT_THAT(*stmt_hist_res,
+                ::testing::ElementsAreArray(
+                    std::span(ro_expected_stmts)
+                        .last(std::min(ro_expected_stmts.size(), size_t{10}))));
+
+    ro_expected_stmts.emplace_back(stmt_type_sql_select, stmt_select_history);
   }
+
+  rw_expected_stmts.emplace_back(stmt_type_com_reset_connection, "<NULL>");
+  rw_expected_stmts.emplace_back(stmt_type_sql_set_option,
+                                 stmt_restore_session_vars);
 
   // primary
   ASSERT_NO_ERROR(cli.query("INSERT INTO testing.t1 VALUES ()"));
 
-  // check if server waits for GTID. It will issue a SELECT NOT WAIT_FOR...
-  //
-  // executed on the secondary:
-  //
-  // - reset-connection (from pool)
-  // - SET trackers
-  // - SELECT @@super_read_only
-  // - SELECT GTID...
-  // - SELECT * FROM performance_schema... [not seen by this query]
+  rw_expected_stmts.emplace_back(stmt_type_sql_insert,
+                                 "INSERT INTO `testing` . `t1` VALUES ( )");
   {
-    auto events_res = changed_event_counters(cli);
-    ASSERT_NO_ERROR(events_res);
+    auto stmt_hist_res = statement_history_from_read_write(cli);
+    ASSERT_NO_ERROR(stmt_hist_res);
 
-    EXPECT_THAT(*events_res,
-                AnyOf(
-                    // started on read-write
-                    ElementsAre(Pair("statement/com/Reset Connection", 5),
-                                Pair("statement/sql/select", 12),
-                                Pair("statement/sql/set_option", 6)),
+    EXPECT_THAT(*stmt_hist_res, ::testing::ElementsAreArray(rw_expected_stmts));
 
-                    // started on read-only
-                    ElementsAre(Pair("statement/com/Reset Connection", 6),
-                                Pair("statement/sql/select", 14),
-                                Pair("statement/sql/set_option", 7))));
+    rw_expected_stmts.emplace_back(stmt_type_sql_select, stmt_select_history);
   }
 }
 
@@ -1669,18 +2011,16 @@ TEST_P(SplittingConnectionTest,
     EXPECT_THAT(*events_res,
                 AnyOf(
                     // started on read-write
-                    ElementsAre(Pair("statement/com/Reset Connection", 1),
-                                Pair("statement/sql/select", 3),
-                                Pair("statement/sql/set_option", 2)),
+                    ElementsAre(Pair("statement/sql/select", 1),
+                                Pair("statement/sql/set_option", 1)),
                     // started on read-write and table didn't exist yet.
                     ElementsAre(Pair("statement/com/Reset Connection", 1),
                                 Pair("statement/sql/select", 3),
                                 Pair("statement/sql/set_option", 2),
                                 Pair("statement/sql/show_warnings", 1)),
                     // started on read-only
-                    ElementsAre(Pair("statement/com/Reset Connection", 2),
-                                Pair("statement/sql/select", 5),
-                                Pair("statement/sql/set_option", 3)),
+                    ElementsAre(Pair("statement/sql/select", 2),
+                                Pair("statement/sql/set_option", 1)),
                     // start on read-only and table didn't exist yet.
                     ElementsAre(Pair("statement/com/Reset Connection", 2),
                                 Pair("statement/sql/select", 5),
@@ -1700,7 +2040,6 @@ TEST_P(SplittingConnectionTest,
   //
   // - reset-connection
   // - SET trackers
-  // - SELECT @@super_read_only
   // - SELECT GTID...
   // - SELECT * FROM testing...
   {
@@ -1713,7 +2052,6 @@ TEST_P(SplittingConnectionTest,
   //
   // - reset-connection (from pool)
   // - SET trackers
-  // - SELECT @@super_read_only
   // - SELECT GTID...
   // - SELECT * FROM performance_schema... [not seen by this query]
   {
@@ -1723,18 +2061,18 @@ TEST_P(SplittingConnectionTest,
     EXPECT_THAT(*events_res,
                 AnyOf(
                     // started on read-write
-                    ElementsAre(Pair("statement/com/Reset Connection", 5),
-                                Pair("statement/sql/select", 10),
-                                Pair("statement/sql/set_option", 6)),
+                    ElementsAre(Pair("statement/com/Reset Connection", 1),
+                                Pair("statement/sql/select", 6),
+                                Pair("statement/sql/set_option", 2)),
                     // started on read-write and table didn't exist yet.
                     ElementsAre(Pair("statement/com/Reset Connection", 5),
                                 Pair("statement/sql/select", 10),
                                 Pair("statement/sql/set_option", 6),
                                 Pair("statement/sql/show_warnings", 1)),
                     // start on read-only
-                    ElementsAre(Pair("statement/com/Reset Connection", 6),
-                                Pair("statement/sql/select", 12),
-                                Pair("statement/sql/set_option", 7)),
+                    ElementsAre(Pair("statement/com/Reset Connection", 1),
+                                Pair("statement/sql/select", 7),
+                                Pair("statement/sql/set_option", 2)),
                     // start on read-only and table didn't exist yet
                     ElementsAre(Pair("statement/com/Reset Connection", 6),
                                 Pair("statement/sql/select", 12),
@@ -1772,7 +2110,6 @@ TEST_P(SplittingConnectionTest,
   // executed on the secondary:
   //
   // - SET trackers
-  // - SELECT @@super_read_only
   // - SELECT * FROM performance_schema... [not seen by this query]
   {
     auto events_res = changed_event_counters(cli);
@@ -1781,11 +2118,10 @@ TEST_P(SplittingConnectionTest,
     EXPECT_THAT(*events_res,
                 AnyOf(
                     // started on read-write
-                    ElementsAre(Pair("statement/sql/select", 1),
-                                Pair("statement/sql/set_option", 1)),
+                    ElementsAre(Pair("statement/sql/set_option", 1)),
                     // started on read-only
                     ElementsAre(Pair("statement/com/Reset Connection", 1),
-                                Pair("statement/sql/select", 3),
+                                Pair("statement/sql/select", 1),
                                 Pair("statement/sql/set_option", 2))));
   }
 
@@ -1795,7 +2131,6 @@ TEST_P(SplittingConnectionTest,
   // executed on the secondary:
   //
   // - SET trackers
-  // - SELECT @@super_read_only
   // - SELECT * FROM performance_schema... [not seen by this query]
   {
     auto events_res = changed_event_counters(cli);
@@ -1804,13 +2139,13 @@ TEST_P(SplittingConnectionTest,
     EXPECT_THAT(*events_res,
                 AnyOf(
                     // started on read-write
-                    ElementsAre(Pair("statement/com/Reset Connection", 3),
-                                Pair("statement/sql/select", 4),
-                                Pair("statement/sql/set_option", 4)),
+                    ElementsAre(Pair("statement/com/Reset Connection", 1),
+                                Pair("statement/sql/select", 2),
+                                Pair("statement/sql/set_option", 2)),
                     // started on read-only
-                    ElementsAre(Pair("statement/com/Reset Connection", 4),
-                                Pair("statement/sql/select", 6),
-                                Pair("statement/sql/set_option", 5))));
+                    ElementsAre(Pair("statement/com/Reset Connection", 2),
+                                Pair("statement/sql/select", 3),
+                                Pair("statement/sql/set_option", 3))));
   }
 }
 
@@ -1879,32 +2214,36 @@ TEST_P(SplittingConnectionTest, change_user_resets_session_wait_for_my_writes) {
     EXPECT_THAT(*events_res,
                 AnyOf(
                     // started on read-write
-                    ElementsAre(Pair("statement/com/Reset Connection", 1),
-                                Pair("statement/sql/select", 3),
-                                Pair("statement/sql/set_option", 2)),
+                    ElementsAre(Pair("statement/sql/select", 1),
+                                Pair("statement/sql/set_option", 1)),
                     // started on read-only
-                    ElementsAre(Pair("statement/com/Reset Connection", 2),
-                                Pair("statement/sql/select", 5),
-                                Pair("statement/sql/set_option", 3))));
+                    ElementsAre(Pair("statement/sql/select", 2),
+                                Pair("statement/sql/set_option", 1))));
   }
 
   auto change_user_account =
       SharedServer::caching_sha2_empty_password_account();
 
   // change-user sets the wait_for_my_writes to '1'
+  //
+  // executed on the secondary:
+  //
+  // - change-user
+  // - SET trackers
   ASSERT_NO_ERROR(cli.change_user(change_user_account.username,
                                   change_user_account.password, ""));
 
   // primary
+  //
+  // - SELECT sql_mode ...
+  // - INSERT
   ASSERT_NO_ERROR(cli.query("INSERT INTO testing.t1 VALUES ()"));
 
   // secondary, waits for executed gtid.
   //
-  // executed on the secondary:
-  //
-  // - reset-connection
-  // - SET trackers
-  // - SELECT @@super_read_only
+  // - (change-user)
+  // - (SET trackers)
+  // - SET sql_mode
   // - SELECT GTID...
   // - SELECT * FROM testing...
   {
@@ -1912,13 +2251,6 @@ TEST_P(SplittingConnectionTest, change_user_resets_session_wait_for_my_writes) {
     ASSERT_NO_ERROR(stmt_res);
   }
 
-  // executed on the secondary:
-  //
-  // - reset-connection (from pool)
-  // - SET trackers
-  // - SELECT @@super_read_only
-  // - SELECT GTID...
-  // - SELECT * FROM performance_schema... [not seen by this query]
   {
     auto events_res = changed_event_counters(cli);
     ASSERT_NO_ERROR(events_res);
@@ -1927,16 +2259,12 @@ TEST_P(SplittingConnectionTest, change_user_resets_session_wait_for_my_writes) {
                 AnyOf(
                     // started on read-write
                     ElementsAre(Pair("statement/com/Change user", 1),
-                                Pair("statement/com/Reset Connection", 3),
-                                Pair("statement/sql/select", 9),
-                                Pair("statement/sql/set_option", 5)),
+                                Pair("statement/sql/select", 5),
+                                Pair("statement/sql/set_option", 3)),
                     // started on read-only
                     ElementsAre(Pair("statement/com/Change user", 1),
-                                Pair("statement/com/Reset Connection", 4),
-                                Pair("statement/sql/select", 11),
-                                Pair("statement/sql/set_option", 6))
-
-                        ));
+                                Pair("statement/sql/select", 6),
+                                Pair("statement/sql/set_option", 3))));
   }
 }
 
@@ -1950,8 +2278,7 @@ TEST_P(SplittingConnectionTest, change_user_targets_the_current_destination) {
   MysqlClient cli;
 
   auto account = SharedServer::caching_sha2_empty_password_account();
-  auto change_user_account =
-      SharedServer::caching_sha2_empty_password_account();
+  auto change_user_account = SharedServer::caching_sha2_password_account();
 
   cli.username(account.username);
   cli.password(account.password);
@@ -1965,13 +2292,24 @@ TEST_P(SplittingConnectionTest, change_user_targets_the_current_destination) {
 
   SCOPED_TRACE("// change-user to primary");
 
-  ASSERT_NO_ERROR(cli.change_user(change_user_account.username,
-                                  change_user_account.password, ""));
+  auto change_user_res = cli.change_user(change_user_account.username,
+                                         change_user_account.password, "");
+
+  if (GetParam().client_ssl_mode == kDisabled) {
+    ASSERT_ERROR(change_user_res);
+    // Authentication plugin 'caching_sha2_password' reported error:
+    // Authentication requires secure connection.
+    EXPECT_EQ(change_user_res.error().value(), 2061);
+
+    return;
+  }
+  ASSERT_NO_ERROR(change_user_res);
 
   // executed on the secondary:
   //
+  // - connect
   // - SET trackers
-  // - SELECT @@super_read_only
+  // - SELECT sql_mode
   // - SELECT * FROM performance_schema... [not seen by this query]
   {
     auto events_res = changed_event_counters(cli);
@@ -1983,9 +2321,8 @@ TEST_P(SplittingConnectionTest, change_user_targets_the_current_destination) {
                     ElementsAre(Pair("statement/sql/select", 1),
                                 Pair("statement/sql/set_option", 1)),
                     // started on read-only
-                    ElementsAre(Pair("statement/com/Reset Connection", 1),
-                                Pair("statement/sql/select", 3),
-                                Pair("statement/sql/set_option", 2))));
+                    ElementsAre(Pair("statement/sql/select", 2),
+                                Pair("statement/sql/set_option", 1))));
   }
 
   SCOPED_TRACE("// change-user to secondary");
@@ -1994,9 +2331,14 @@ TEST_P(SplittingConnectionTest, change_user_targets_the_current_destination) {
 
   // executed on the secondary:
   //
+  // - (connect)
+  // - (SET trackers)
+  // - (SELECT sql_mode)
+  // - SELECT * FROM performance_schema
+  // - change-user
   // - SET trackers
-  // - SELECT @@super_read_only
-  // - SELECT * FROM performance_schema... [not seen by this query]
+  // - SELECT sql_mode
+  // - (SELECT * FROM performance_schema...) [not seen by this query]
   {
     auto events_res = changed_event_counters(cli);
     ASSERT_NO_ERROR(events_res);
@@ -2005,14 +2347,36 @@ TEST_P(SplittingConnectionTest, change_user_targets_the_current_destination) {
                 AnyOf(
                     // started on read-write
                     ElementsAre(Pair("statement/com/Change user", 1),
-                                Pair("statement/com/Reset Connection", 1),
                                 Pair("statement/sql/select", 3),
-                                Pair("statement/sql/set_option", 3)),
+                                Pair("statement/sql/set_option", 2)),
                     // started on read-only
                     ElementsAre(Pair("statement/com/Change user", 1),
-                                Pair("statement/com/Reset Connection", 2),
-                                Pair("statement/sql/select", 5),
-                                Pair("statement/sql/set_option", 4))));
+                                Pair("statement/sql/select", 4),
+                                Pair("statement/sql/set_option", 2))));
+  }
+
+  {
+    ASSERT_NO_ERROR(cli.query("ROUTER SET access_mode='read_write'"));
+
+    {
+      auto user_res = query_one_result(cli, "SELECT CURRENT_USER()");
+      ASSERT_NO_ERROR(user_res);
+      EXPECT_THAT(
+          *user_res,
+          ElementsAre(ElementsAre(change_user_account.username + "@%")));
+    }
+
+    ASSERT_NO_ERROR(cli.query("ROUTER SET access_mode='read_only'"));
+
+    {
+      auto user_res = query_one_result(cli, "SELECT CURRENT_USER()");
+      ASSERT_NO_ERROR(user_res);
+      EXPECT_THAT(
+          *user_res,
+          ElementsAre(ElementsAre(change_user_account.username + "@%")));
+    }
+
+    ASSERT_NO_ERROR(cli.query("ROUTER SET access_mode='auto'"));
   }
 }
 
@@ -2043,7 +2407,6 @@ TEST_P(SplittingConnectionTest, ping_succeeds) {
   // executed on the secondary:
   //
   // - SET trackers
-  // - SELECT @@super_read_only
   // - SELECT * FROM performance_schema... [not seen by this query]
   {
     auto events_res = changed_event_counters(cli);
@@ -2052,12 +2415,11 @@ TEST_P(SplittingConnectionTest, ping_succeeds) {
     EXPECT_THAT(*events_res,
                 AnyOf(
                     // started on read-write
-                    ElementsAre(Pair("statement/sql/select", 2),
+                    ElementsAre(Pair("statement/sql/select", 1),
                                 Pair("statement/sql/set_option", 1)),
                     // started on read-only
-                    ElementsAre(Pair("statement/com/Reset Connection", 1),
-                                Pair("statement/sql/select", 4),
-                                Pair("statement/sql/set_option", 2))));
+                    ElementsAre(Pair("statement/sql/select", 2),
+                                Pair("statement/sql/set_option", 1))));
   }
 
   SCOPED_TRACE("// ping secondary");
@@ -2066,7 +2428,6 @@ TEST_P(SplittingConnectionTest, ping_succeeds) {
   // executed on the secondary:
   //
   // - SET trackers
-  // - SELECT @@super_read_only
   // - SELECT * FROM performance_schema... [not seen by this query]
   {
     auto events_res = changed_event_counters(cli);
@@ -2076,86 +2437,12 @@ TEST_P(SplittingConnectionTest, ping_succeeds) {
                 AnyOf(
                     // started on read-write
                     ElementsAre(Pair("statement/com/Ping", 1),
-                                Pair("statement/com/Reset Connection", 2),
-                                Pair("statement/sql/select", 7),
-                                Pair("statement/sql/set_option", 3)),
-                    // started on read-only
-                    ElementsAre(Pair("statement/com/Ping", 1),
-                                Pair("statement/com/Reset Connection", 3),
-                                Pair("statement/sql/select", 9),
-                                Pair("statement/sql/set_option", 4))));
-  }
-}
-
-TEST_P(SplittingConnectionTest, list_fields_succeeds) {
-  RecordProperty("Worklog", "12794");
-  RecordProperty("RequirementId", "FR9.2");
-  RecordProperty("Requirement",
-                 "If `access_mode` is 'auto' and the client sends a "
-                 "a list-fields command, Router MUST target the current host");
-
-  MysqlClient cli;
-
-  auto account = SharedServer::caching_sha2_empty_password_account();
-
-  cli.username(account.username);
-  cli.password(account.password);
-  cli.use_schema("testing");
-
-  // may start on the primary or secondary.
-  ASSERT_NO_ERROR(
-      cli.connect(shared_router()->host(), shared_router()->port(GetParam())));
-
-  // a noop statement which switches to the primary.
-  ASSERT_NO_ERROR(cli.query("TRUNCATE TABLE testing.t1"));
-
-  SCOPED_TRACE("// list-fields from primary");
-  ASSERT_NO_ERROR(cli.list_fields("t1"));
-
-  // executed on the secondary:
-  //
-  // - SET trackers
-  // - SELECT @@super_read_only
-  // - SELECT * FROM performance_schema... [not seen by this query]
-  {
-    auto events_res = changed_event_counters(cli);
-    ASSERT_NO_ERROR(events_res);
-
-    EXPECT_THAT(*events_res,
-                AnyOf(
-                    // started on read-write
-                    ElementsAre(Pair("statement/sql/select", 2),
+                                Pair("statement/sql/select", 4),
                                 Pair("statement/sql/set_option", 1)),
                     // started on read-only
-                    ElementsAre(Pair("statement/com/Reset Connection", 1),
-                                Pair("statement/sql/select", 4),
-                                Pair("statement/sql/set_option", 2))));
-  }
-
-  SCOPED_TRACE("// list-fields from secondary");
-  ASSERT_NO_ERROR(cli.list_fields("t1"));
-
-  // executed on the secondary:
-  //
-  // - SET trackers
-  // - SELECT @@super_read_only
-  // - SELECT * FROM performance_schema... [not seen by this query]
-  {
-    auto events_res = changed_event_counters(cli);
-    ASSERT_NO_ERROR(events_res);
-
-    EXPECT_THAT(*events_res,
-                AnyOf(
-                    // started on read-write
-                    ElementsAre(Pair("statement/com/Field List", 1),
-                                Pair("statement/com/Reset Connection", 2),
-                                Pair("statement/sql/select", 7),
-                                Pair("statement/sql/set_option", 3)),
-                    // started on read-only
-                    ElementsAre(Pair("statement/com/Field List", 1),
-                                Pair("statement/com/Reset Connection", 3),
-                                Pair("statement/sql/select", 9),
-                                Pair("statement/sql/set_option", 4))));
+                    ElementsAre(Pair("statement/com/Ping", 1),
+                                Pair("statement/sql/select", 5),
+                                Pair("statement/sql/set_option", 1))));
   }
 }
 
@@ -2173,62 +2460,376 @@ TEST_P(SplittingConnectionTest, set_option_succeeds) {
   cli.username(account.username);
   cli.password(account.password);
 
-  // may start on the primary or secondary.
+  // may start on the primary or secondary depending on router's round-robin
   ASSERT_NO_ERROR(
       cli.connect(shared_router()->host(), shared_router()->port(GetParam())));
+
+  std::vector<std::tuple<std::string, std::string>> initial_expected_stmts{
+      {stmt_type_sql_set_option, stmt_set_session_tracker},
+      {stmt_type_sql_select, stmt_select_session_vars},
+  };
+
+  std::vector<std::tuple<std::string, std::string>> switched_expected_stmts{
+      {stmt_type_sql_set_option, stmt_restore_session_vars},
+  };
+
+  std::vector<std::tuple<std::string, std::string>> rw_expected_stmts;
+  std::vector<std::tuple<std::string, std::string>> ro_expected_stmts;
+  bool started_on_rw{false};
+
+  {
+    auto stmt_hist_res = statement_history_from_read_write(cli);
+    ASSERT_NO_ERROR(stmt_hist_res);
+
+    // detect if router started on a RW or RO node.
+    started_on_rw = stmt_hist_res->size() == 2;
+
+    if (started_on_rw) {
+      rw_expected_stmts = initial_expected_stmts;
+      ro_expected_stmts = switched_expected_stmts;
+    } else {
+      ro_expected_stmts = initial_expected_stmts;
+      rw_expected_stmts = switched_expected_stmts;
+    }
+
+    EXPECT_THAT(*stmt_hist_res, ::testing::ElementsAreArray(rw_expected_stmts));
+    rw_expected_stmts.emplace_back(stmt_type_sql_select, stmt_select_history);
+  }
 
   // a noop statement which switches to the primary.
   ASSERT_NO_ERROR(cli.query("TRUNCATE TABLE testing.t1"));
 
+  rw_expected_stmts.emplace_back(stmt_type_sql_truncate,
+                                 "TRUNCATE TABLE `testing` . `t1`");
+
   SCOPED_TRACE("// set-option from primary");
   ASSERT_NO_ERROR(cli.set_server_option(MYSQL_OPTION_MULTI_STATEMENTS_ON));
 
-  // executed on the secondary:
-  //
-  // - SET trackers
-  // - SELECT @@super_read_only
-  // - SELECT * FROM performance_schema... [not seen by this query]
-  {
-    auto events_res = changed_event_counters(cli);
-    ASSERT_NO_ERROR(events_res);
+  rw_expected_stmts.emplace_back(stmt_type_com_set_option, "<NULL>");
 
-    EXPECT_THAT(*events_res,
-                AnyOf(
-                    // started on read-write
-                    ElementsAre(Pair("statement/sql/select", 2),
-                                Pair("statement/sql/set_option", 1)),
-                    // started on read-only, set-option replayed
-                    ElementsAre(Pair("statement/com/Reset Connection", 1),
-                                Pair("statement/com/Set option", 1),
-                                Pair("statement/sql/select", 4),
-                                Pair("statement/sql/set_option", 2))));
+  {
+    auto stmt_hist_res = statement_history_from_read_write(cli);
+    ASSERT_NO_ERROR(stmt_hist_res);
+
+    EXPECT_THAT(*stmt_hist_res, ::testing::ElementsAreArray(rw_expected_stmts));
+    rw_expected_stmts.emplace_back(stmt_type_sql_select, stmt_select_history);
+  }
+
+  SCOPED_TRACE("// switch to secondary");
+
+  if (!started_on_rw) {
+    // if the test started with a RO node, the set-option will be applied to the
+    // secondary if we switch back to the secondary again.
+    //
+    // If the test started with a RW node, the set-option will be set as part of
+    // the initial handshake and will not be tracked.
+    ro_expected_stmts.emplace_back(stmt_type_com_set_option, "<NULL>");
+  }
+
+  // secondary
+  //
+  // Router should:
+  // - wait for GTID_EXECUTED.
+  // - set multi-statement option.
+  ro_expected_stmts.emplace_back(stmt_type_sql_select, stmt_select_wait_gtid);
+
+  {
+    auto stmt_res = query_one_result(cli, "SELECT * FROM testing.t1");
+    ASSERT_NO_ERROR(stmt_res);
+
+    ro_expected_stmts.emplace_back(stmt_type_sql_select,
+                                   "SELECT * FROM `testing` . `t1`");
+  }
+
+  SCOPED_TRACE("// checking statement history of RO");
+
+  // needed?
+  ro_expected_stmts.emplace_back(stmt_type_sql_select, stmt_select_wait_gtid);
+
+  {
+    auto stmt_hist_res = statement_history_from_read_only(cli);
+    ASSERT_NO_ERROR(stmt_hist_res);
+
+    EXPECT_THAT(*stmt_hist_res, ::testing::ElementsAreArray(ro_expected_stmts));
+    ro_expected_stmts.emplace_back(stmt_type_sql_select, stmt_select_history);
   }
 
   SCOPED_TRACE("// set-option from secondary");
   ASSERT_NO_ERROR(cli.set_server_option(MYSQL_OPTION_MULTI_STATEMENTS_ON));
 
-  // executed on the secondary:
-  //
-  // - SET trackers
-  // - SELECT @@super_read_only
-  // - SELECT * FROM performance_schema... [not seen by this query]
-  {
-    auto events_res = changed_event_counters(cli);
-    ASSERT_NO_ERROR(events_res);
+  // needed?
+  ro_expected_stmts.emplace_back(stmt_type_sql_select, stmt_select_wait_gtid);
 
-    EXPECT_THAT(*events_res,
-                AnyOf(
-                    // started on read-write
-                    ElementsAre(Pair("statement/com/Reset Connection", 2),
-                                Pair("statement/com/Set option", 1),
-                                Pair("statement/sql/select", 7),
-                                Pair("statement/sql/set_option", 3)),
-                    // started on read-only, set-option replayed
-                    ElementsAre(Pair("statement/com/Reset Connection", 3),
-                                Pair("statement/com/Set option", 2),
-                                Pair("statement/sql/select", 9),
-                                Pair("statement/sql/set_option", 4))));
+  ro_expected_stmts.emplace_back(stmt_type_com_set_option, "<NULL>");
+
+  // needed?
+  ro_expected_stmts.emplace_back(stmt_type_sql_select, stmt_select_wait_gtid);
+
+  {
+    auto stmt_hist_res = statement_history_from_read_only(cli);
+    ASSERT_NO_ERROR(stmt_hist_res);
+
+    EXPECT_THAT(*stmt_hist_res, ::testing::ElementsAreArray(ro_expected_stmts));
+    ro_expected_stmts.emplace_back(stmt_type_sql_select, stmt_select_history);
   }
+}
+
+TEST_P(SplittingConnectionTest, init_schema_propagates) {
+  MysqlClient cli;
+
+  auto account = SharedServer::caching_sha2_empty_password_account();
+
+  cli.username(account.username);
+  cli.password(account.password);
+
+  ASSERT_NO_ERROR(
+      cli.connect(shared_router()->host(), shared_router()->port(GetParam())));
+
+  // connection goes out of the pool and back to the pool again.
+  ASSERT_NO_ERROR(shared_router()->wait_for_stashed_server_connections(1, 1s));
+
+  SCOPED_TRACE("// force SELECT from PRIMARY");
+  ASSERT_NO_ERROR(query_one_result(cli, "ROUTER SET access_mode='read_write'"));
+
+  // SELECT from PRIMARY and SECONDARY to ensure a connection to each is
+  // established.
+
+  SCOPED_TRACE("// check schema-change is propagated.");
+  {
+    auto query_res = query_one_result(cli, "SELECT SCHEMA()");
+    ASSERT_NO_ERROR(query_res);
+    EXPECT_THAT(*query_res, ElementsAre(ElementsAre("<NULL>")));
+  }
+
+  SCOPED_TRACE("// force SELECT from SECONDARY");
+  ASSERT_NO_ERROR(query_one_result(cli, "ROUTER SET access_mode='read_only'"));
+  {
+    auto query_res = query_one_result(cli, "SELECT SCHEMA()");
+    ASSERT_NO_ERROR(query_res);
+    EXPECT_THAT(*query_res, ElementsAre(ElementsAre("<NULL>")));
+  }
+
+  // switch schema and check it is applied to both
+
+  SCOPED_TRACE("// switch schema with COM_INIT_DB");
+  ASSERT_NO_ERROR(cli.use_schema("testing"));
+
+  SCOPED_TRACE("// check schema change is noticed.");
+  {
+    auto query_res = query_one_result(cli, "SELECT SCHEMA()");
+    ASSERT_NO_ERROR(query_res);
+    EXPECT_THAT(*query_res, ElementsAre(ElementsAre("testing")));
+  }
+
+  SCOPED_TRACE("// force SELECT from PRIMARY");
+  ASSERT_NO_ERROR(query_one_result(cli, "ROUTER SET access_mode='read_write'"));
+
+  SCOPED_TRACE("// check schema-change is propagated.");
+  {
+    auto query_res = query_one_result(cli, "SELECT SCHEMA()");
+    ASSERT_NO_ERROR(query_res);
+    EXPECT_THAT(*query_res, ElementsAre(ElementsAre("testing")));
+  }
+}
+
+TEST_P(SplittingConnectionTest, use_schema_propagates) {
+  MysqlClient cli;
+
+  auto account = SharedServer::caching_sha2_empty_password_account();
+
+  cli.username(account.username);
+  cli.password(account.password);
+
+  ASSERT_NO_ERROR(
+      cli.connect(shared_router()->host(), shared_router()->port(GetParam())));
+
+  // connection goes out of the pool and back to the pool again.
+  ASSERT_NO_ERROR(shared_router()->wait_for_stashed_server_connections(1, 1s));
+
+  SCOPED_TRACE("// force SELECT from PRIMARY");
+  ASSERT_NO_ERROR(query_one_result(cli, "ROUTER SET access_mode='read_write'"));
+
+  // SELECT from PRIMARY and SECONDARY to ensure a connection to each is
+  // established.
+
+  SCOPED_TRACE("// check schema-change is propagated.");
+  {
+    auto query_res = query_one_result(cli, "SELECT SCHEMA()");
+    ASSERT_NO_ERROR(query_res);
+    EXPECT_THAT(*query_res, ElementsAre(ElementsAre("<NULL>")));
+  }
+
+  SCOPED_TRACE("// force SELECT from SECONDARY");
+  ASSERT_NO_ERROR(query_one_result(cli, "ROUTER SET access_mode='read_only'"));
+  {
+    auto query_res = query_one_result(cli, "SELECT SCHEMA()");
+    ASSERT_NO_ERROR(query_res);
+    EXPECT_THAT(*query_res, ElementsAre(ElementsAre("<NULL>")));
+  }
+
+  // switch schema and check it is applied to both
+
+  SCOPED_TRACE("// switch schema with USE");
+  ASSERT_NO_ERROR(cli.query("USE testing"));
+
+  SCOPED_TRACE("// check schema change is noticed.");
+  {
+    auto query_res = query_one_result(cli, "SELECT SCHEMA()");
+    ASSERT_NO_ERROR(query_res);
+    EXPECT_THAT(*query_res, ElementsAre(ElementsAre("testing")));
+  }
+
+  SCOPED_TRACE("// force SELECT from PRIMARY");
+  ASSERT_NO_ERROR(query_one_result(cli, "ROUTER SET access_mode='read_write'"));
+
+  SCOPED_TRACE("// check schema-change is propagated.");
+  {
+    auto query_res = query_one_result(cli, "SELECT SCHEMA()");
+    ASSERT_NO_ERROR(query_res);
+    EXPECT_THAT(*query_res, ElementsAre(ElementsAre("testing")));
+  }
+}
+
+TEST_P(SplittingConnectionTest, set_sys_vars_propagates) {
+  MysqlClient cli;
+
+  auto account = SharedServer::caching_sha2_empty_password_account();
+
+  cli.username(account.username);
+  cli.password(account.password);
+
+  ASSERT_NO_ERROR(
+      cli.connect(shared_router()->host(), shared_router()->port(GetParam())));
+
+  // connection goes out of the pool and back to the pool again.
+  ASSERT_NO_ERROR(shared_router()->wait_for_stashed_server_connections(1, 1s));
+
+  SCOPED_TRACE("// force SELECT from PRIMARY");
+  ASSERT_NO_ERROR(query_one_result(cli, "ROUTER SET access_mode='read_write'"));
+
+  // SELECT from PRIMARY and SECONDARY to ensure a connection to each is
+  // established.
+
+  SCOPED_TRACE("// check schema-change is propagated.");
+  {
+    auto query_res = query_one_result(cli, "SELECT @@sql_mode");
+    ASSERT_NO_ERROR(query_res);
+    EXPECT_THAT(
+        *query_res,
+        ElementsAre(ElementsAre(
+            "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_"
+            "DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION")));
+  }
+
+  SCOPED_TRACE("// force SELECT from SECONDARY");
+  ASSERT_NO_ERROR(query_one_result(cli, "ROUTER SET access_mode='read_only'"));
+  {
+    auto query_res = query_one_result(cli, "SELECT @@sql_mode");
+    ASSERT_NO_ERROR(query_res);
+    EXPECT_THAT(
+        *query_res,
+        ElementsAre(ElementsAre(
+            "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_"
+            "DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION")));
+  }
+
+  // change sys-var and check it is applied to both
+
+  SCOPED_TRACE("// set sys-var");
+  ASSERT_NO_ERROR(cli.query("SET sql_mode=''"));
+
+  SCOPED_TRACE("// check change of sys-vars is noticed.");
+  {
+    auto query_res = query_one_result(cli, "SELECT @@sql_mode");
+    ASSERT_NO_ERROR(query_res);
+    EXPECT_THAT(*query_res, ElementsAre(ElementsAre("")));
+  }
+
+  SCOPED_TRACE("// force SELECT from PRIMARY");
+  ASSERT_NO_ERROR(query_one_result(cli, "ROUTER SET access_mode='read_write'"));
+
+  SCOPED_TRACE("// check change of sys-vars is propagated.");
+  {
+    auto query_res = query_one_result(cli, "SELECT @@sql_mode");
+    ASSERT_NO_ERROR(query_res);
+    EXPECT_THAT(*query_res, ElementsAre(ElementsAre("")));
+  }
+}
+
+TEST_P(SplittingConnectionTest, switch_primary_without_trx) {
+  RecordProperty("Bug", "36591958");
+  RecordProperty("Description",
+                 "Check that switching the PRIMARY while a connection is "
+                 "already open, drops the client connection.");
+  auto admin_cli_res = shared_servers()[0]->admin_cli();
+  ASSERT_NO_ERROR(admin_cli_res);
+
+  auto admin_cli = std::move(*admin_cli_res);
+
+  MysqlClient cli;
+
+  auto account = SharedServer::caching_sha2_empty_password_account();
+
+  cli.username(account.username);
+  cli.password(account.password);
+
+  ASSERT_NO_ERROR(
+      cli.connect(shared_router()->host(), shared_router()->port(GetParam())));
+
+  // connection goes out of the pool and back to the pool again.
+  ASSERT_NO_ERROR(shared_router()->wait_for_stashed_server_connections(1, 1s));
+
+  // SELECT from PRIMARY and SECONDARY to ensure a connection to each is
+  // established.
+  SCOPED_TRACE("// force stmt from PRIMARY");
+  ASSERT_NO_ERROR(query_one_result(cli, "ROUTER SET access_mode='read_write'"));
+
+  SCOPED_TRACE("// check the write-connection works");
+  auto primary_server_uuid_res = query_one_result(cli, "SELECT @@server_uuid");
+  ASSERT_NO_ERROR(primary_server_uuid_res);
+
+  SCOPED_TRACE("// force stmt from SECONDARY");
+  ASSERT_NO_ERROR(query_one_result(cli, "ROUTER SET access_mode='read_only'"));
+
+  SCOPED_TRACE("// check the write-connection works");
+  auto secondary_server_uuid_res =
+      query_one_result(cli, "SELECT @@server_uuid");
+  ASSERT_NO_ERROR(secondary_server_uuid_res);
+
+  auto primary_server_uuid = (*primary_server_uuid_res)[0][0];
+  auto secondary_server_uuid = (*secondary_server_uuid_res)[0][0];
+
+  ASSERT_NE(primary_server_uuid, secondary_server_uuid);
+
+  SCOPED_TRACE("// set new primary");
+  ASSERT_NO_ERROR(admin_cli.query("SELECT group_replication_set_as_primary('" +
+                                  secondary_server_uuid + "', 10)"));
+
+  ASSERT_NO_ERROR(query_one_result(cli, "ROUTER SET access_mode='read_write'"));
+
+  SCOPED_TRACE("// check the write-connection fails with --super-read-only");
+
+  auto end = std::chrono::steady_clock::now() + 1s;
+  do {
+    auto truncate_res = query_one_result(cli, "TRUNCATE TABLE testing.t1");
+    ASSERT_ERROR(truncate_res);
+
+    if (truncate_res.error().value() == 2013) {
+      EXPECT_EQ(truncate_res.error().message(),
+                "Lost connection to MySQL server during query");
+
+      // good, leave the loop.
+      break;
+    }
+
+    EXPECT_EQ(truncate_res.error().value(), 1290)
+        << truncate_res.error().message();
+
+    ASSERT_LT(std::chrono::steady_clock::now(), end);
+
+    // wait for the metadata-cache TTL to notice the member change.
+    std::this_thread::sleep_for(100ms);
+  } while (true);
 }
 
 TEST_P(SplittingConnectionTest, clone_fails) {
@@ -2284,7 +2885,7 @@ TEST_P(SplittingConnectionTest, binlog_fails) {
   SCOPED_TRACE("// binlog_dump");
   {
     MYSQL_RPL rpl;
-    rpl.file_name = NULL;
+    rpl.file_name = nullptr;
     rpl.start_position = 4;
     rpl.server_id = 0;
     rpl.flags = 1 << 0 /* NON_BLOCK */;
@@ -2327,7 +2928,421 @@ TEST_P(SplittingConnectionTest, select_overlong) {
   }
 }
 
+TEST_P(SplittingConnectionTest, empty_statements) {
+  RecordProperty("Worklog", "12794");
+  RecordProperty(
+      "Description",
+      "Check if empty statements are properly tokenized and forwarded.");
+
+  MysqlClient cli;
+
+  auto account = SharedServer::caching_sha2_empty_password_account();
+
+  cli.username(account.username);
+  cli.password(account.password);
+
+  ASSERT_NO_ERROR(
+      cli.connect(shared_router()->host(), shared_router()->port(GetParam())));
+
+  for (std::string stmt : {"", "  ", ";"}) {
+    SCOPED_TRACE("// stmt: " + stmt);
+
+    auto query_res = query_one_result(cli, stmt);
+    ASSERT_ERROR(query_res);
+    EXPECT_EQ(query_res.error().value(), 1065) << query_res.error();
+  }
+
+  for (std::string stmt : {"-- ", "/* */"}) {
+    SCOPED_TRACE("// stmt: " + stmt);
+
+    auto query_res = query_one_result(cli, stmt);
+    ASSERT_NO_ERROR(query_res);
+  }
+}
+
 INSTANTIATE_TEST_SUITE_P(Spec, SplittingConnectionTest,
+                         ::testing::ValuesIn(share_connection_params),
+                         [](auto &info) {
+                           return "ssl_modes_" + info.param.testname;
+                         });
+
+class SplittingConnectionNoPoolTest
+    : public SplittingConnectionTestBaseP<3, 0>,
+      public ::testing::WithParamInterface<SplittingConnectionParam> {
+ public:
+  void TearDown() override {
+    if (HasFailure()) {
+      shared_router()->process_manager().dump_logs();
+
+      for (auto &srv : shared_servers()) {
+        srv->process_manager().dump_logs();
+      }
+    }
+  }
+};
+
+TEST_P(SplittingConnectionNoPoolTest, classic_protocol_tls_resumption) {
+  std::map<std::string, std::string> last_hits;
+
+  auto account = SharedServer::caching_sha2_empty_password_account();
+
+  for (int round = 0; round < 10; ++round) {
+    SCOPED_TRACE("// connecting to server - round " + std::to_string(round));
+
+    {
+      MysqlClient cli;
+
+      cli.username(account.username);
+      cli.password(account.password);
+
+      SCOPED_TRACE("// connect");
+      ASSERT_NO_ERROR(cli.connect(shared_router()->host(),
+                                  shared_router()->port(GetParam())));
+
+      for (const auto *initial_query : {"ROUTER SET access_mode='read_write'",
+                                        "ROUTER SET access_mode='read_only'"}) {
+        ASSERT_NO_ERROR(cli.query(initial_query));
+
+        SCOPED_TRACE("// checking TLS resumptions with the server.");
+        auto hits_res = query_one_result(
+            cli,
+            "SELECT variable_value "
+            "  FROM performance_schema.session_status "
+            " WHERE variable_name LIKE 'Ssl_session_cache_hits'"
+            " UNION "
+            " SELECT variable_value "
+            "  FROM performance_schema.global_variables "
+            " WHERE variable_name LIKE 'port'");
+        ASSERT_NO_ERROR(hits_res);
+        ASSERT_THAT(*hits_res, testing::SizeIs(testing::Eq(2)));
+        std::string hits = (*hits_res)[0][0];
+        std::string port = (*hits_res)[1][0];
+
+        ASSERT_THAT(hits, Not(IsEmpty()));
+        ASSERT_THAT(port, Not(IsEmpty()));
+
+        if (!last_hits.contains(port)) {
+          // second round and later.
+          //
+          // with TLS on the server-side there should be TLS resumption.
+          if (GetParam().server_ssl_mode == kPreferred ||
+              GetParam().server_ssl_mode == kRequired ||
+              (GetParam().server_ssl_mode == kAsClient &&
+               (GetParam().client_ssl_mode == kPreferred ||
+                GetParam().client_ssl_mode == kRequired))) {
+            // the hits should increase.
+            //
+            // As the metadata-cache also connects to the backends and
+            // resumes TLS connections we don't know the exact increase
+            EXPECT_NE(last_hits[port], hits);
+          }
+        }
+
+        last_hits[port] = hits;
+      }
+    }
+  }
+}
+
+TEST_P(SplittingConnectionNoPoolTest, classic_protocol_quit_sender) {
+  std::map<std::string, std::string> last_hits;
+
+  auto account = SharedServer::caching_sha2_empty_password_account();
+
+  for (int round = 0; round < 10; ++round) {
+    SCOPED_TRACE("// connecting to server - round " + std::to_string(round));
+
+    {
+      MysqlClient cli;
+
+      cli.username(account.username);
+      cli.password(account.password);
+
+      SCOPED_TRACE("// connect");
+      ASSERT_NO_ERROR(cli.connect(shared_router()->host(),
+                                  shared_router()->port(GetParam())));
+
+      ASSERT_NO_ERROR(cli.query("DO 1"));  // on read-only.
+
+      std::string ro_port;
+      std::string rw_port;
+
+      {
+        SCOPED_TRACE("// checking TLS resumptions on the read-only server.");
+        auto hits_res = query_one_result(
+            cli,
+            "SELECT variable_value "
+            "  FROM performance_schema.session_status "
+            " WHERE variable_name LIKE 'Ssl_session_cache_hits'"
+            " UNION "
+            " SELECT variable_value "
+            "  FROM performance_schema.global_variables "
+            " WHERE variable_name LIKE 'port'");
+        ASSERT_NO_ERROR(hits_res);
+        ASSERT_THAT(*hits_res, testing::SizeIs(testing::Eq(2)));
+        std::string hits = (*hits_res)[0][0];
+        std::string port = (*hits_res)[1][0];
+
+        ASSERT_THAT(hits, Not(IsEmpty()));
+        ASSERT_THAT(port, Not(IsEmpty()));
+
+        if (!last_hits.contains(port)) {
+          // second round and later.
+          //
+          // with TLS on the server-side there should be TLS resumption.
+          if (GetParam().server_ssl_mode == kPreferred ||
+              GetParam().server_ssl_mode == kRequired ||
+              (GetParam().server_ssl_mode == kAsClient &&
+               (GetParam().client_ssl_mode == kPreferred ||
+                GetParam().client_ssl_mode == kRequired))) {
+            // the hits should increase.
+            //
+            // As the metadata-cache also connects to the backends and
+            // resumes TLS connections we don't know the exact increase
+            EXPECT_NE(last_hits[port], hits);
+          }
+        }
+
+        last_hits[port] = hits;
+
+        ro_port = port;
+      }
+
+      auto prep_res = cli.prepare("DO ?");  // on the read-write node.
+      ASSERT_NO_ERROR(prep_res);
+
+      {
+        SCOPED_TRACE("// checking TLS resumptions with the server.");
+        auto hits_res = query_one_result(
+            cli,
+            "SELECT variable_value "
+            "  FROM performance_schema.session_status "
+            " WHERE variable_name LIKE 'Ssl_session_cache_hits'"
+            " UNION "
+            " SELECT variable_value "
+            "  FROM performance_schema.global_variables "
+            " WHERE variable_name LIKE 'port'");
+        ASSERT_NO_ERROR(hits_res);
+        ASSERT_THAT(*hits_res, testing::SizeIs(testing::Eq(2)));
+        std::string hits = (*hits_res)[0][0];
+        std::string port = (*hits_res)[1][0];
+
+        ASSERT_THAT(hits, Not(IsEmpty()));
+        ASSERT_THAT(port, Not(IsEmpty()));
+
+        if (!last_hits.contains(port)) {
+          // second round and later.
+          //
+          // with TLS on the server-side there should be TLS resumption.
+          if (GetParam().server_ssl_mode == kPreferred ||
+              GetParam().server_ssl_mode == kRequired ||
+              (GetParam().server_ssl_mode == kAsClient &&
+               (GetParam().client_ssl_mode == kPreferred ||
+                GetParam().client_ssl_mode == kRequired))) {
+            // the hits should increase.
+            //
+            // As the metadata-cache also connects to the backends and
+            // resumes TLS connections we don't know the exact increase
+            EXPECT_NE(last_hits[port], hits);
+          }
+        }
+
+        last_hits[port] = hits;
+
+        rw_port = port;
+      }
+
+      EXPECT_NE(rw_port, ro_port);
+    }
+  }
+}
+
+TEST_P(SplittingConnectionNoPoolTest,
+       classic_protocol_split_after_connect_openid_connect) {
+#ifdef SKIP_AUTHENTICATION_CLIENT_PLUGINS_TESTS
+  GTEST_SKIP() << "built with WITH_AUTHENTICATION_CLIENT_PLUGINS=OFF";
+#endif
+
+  if (!shared_servers()[0]->has_openid_connect()) GTEST_SKIP();
+
+  RecordProperty("Worklog", "16466");
+  RecordProperty("Requirement", "FR6");
+  RecordProperty("Description",
+                 "check that connection via openid_connect can be shared if "
+                 "the connection is encrypted, and fails otherwise.");
+
+  SCOPED_TRACE("// create the JWT token for authentication.");
+  TempDirectory jwtdir;
+  auto id_token_res = create_openid_connect_id_token_file(
+      "openid_user1",                  // subject
+      "https://myissuer.com",          // ${identity_provider}.name
+      120,                             // expiry in seconds
+      CMAKE_SOURCE_DIR                 //
+      "/router/tests/component/data/"  //
+      "openid_key.pem",                // private-key of the identity-provider
+      jwtdir.name()                    // out-dir
+  );
+  ASSERT_NO_ERROR(id_token_res);
+
+  auto id_token = *id_token_res;
+
+  SCOPED_TRACE("// setup mysql connection");
+
+  MysqlClient cli;
+
+  auto account = SharedServer::openid_connect_account();
+
+  SCOPED_TRACE(
+      "// set the JWT-token in the authentication_openid_connect_client "
+      "plugin.");
+
+  cli.set_option(MysqlClient::PluginDir(plugin_output_directory().c_str()));
+
+  auto plugin_res = cli.find_plugin("authentication_openid_connect_client",
+                                    MYSQL_CLIENT_AUTHENTICATION_PLUGIN);
+  ASSERT_NO_ERROR(plugin_res);
+
+  plugin_res->set_option(
+      MysqlClient::Plugin::StringOption("id-token-file", id_token.c_str()));
+
+  SCOPED_TRACE("// connecting to server");
+
+  cli.username(account.username);
+  cli.password(account.password);
+
+  auto connect_res =
+      cli.connect(shared_router()->host(), shared_router()->port(GetParam()));
+
+  if (GetParam().client_ssl_mode == kDisabled ||
+      GetParam().server_ssl_mode == kDisabled) {
+    // should fail as the connection is not secure.
+    ASSERT_ERROR(connect_res);
+    if (GetParam().server_ssl_mode == kDisabled ||
+        GetParam().server_ssl_mode == kAsClient) {
+      EXPECT_EQ(connect_res.error().value(), 1045);
+    } else {
+      EXPECT_EQ(connect_res.error().value(), 2000);
+    }
+
+    return;
+  }
+
+  ASSERT_NO_ERROR(connect_res);
+
+  ASSERT_NO_ERROR(shared_router()->wait_for_stashed_server_connections(1, 10s));
+
+  SCOPED_TRACE("// detect the port of the PRIMARY");
+
+  std::string primary_port;
+
+  {
+    auto query_res = query_one_result(
+        cli, "SELECT * FROM performance_schema.replication_group_members");
+    ASSERT_NO_ERROR(query_res);
+
+    // 3 nodes
+    // - a PRIMARY and 2 SECONDARY
+    // - all ONLINE
+    EXPECT_THAT(
+        *query_res,
+        UnorderedElementsAre(
+            ElementsAre("group_replication_applier", testing::_, "127.0.0.1",
+                        testing::_, "ONLINE", "PRIMARY", testing::_, "MySQL"),
+            ElementsAre("group_replication_applier", testing::_, "127.0.0.1",
+                        testing::_, "ONLINE", "SECONDARY", testing::_, "MySQL"),
+            ElementsAre("group_replication_applier", testing::_, "127.0.0.1",
+                        testing::_, "ONLINE", "SECONDARY", testing::_,
+                        "MySQL")));
+
+    // find the port of the current PRIMARY.
+    for (auto const &row : *query_res) {
+      if (row[5] == "PRIMARY") primary_port = row[3];
+    }
+  }
+  ASSERT_THAT(primary_port, ::testing::Not(::testing::IsEmpty()));
+
+  // enable tracing to detect if the query went to the primary or secondary.
+  ASSERT_NO_ERROR(cli.query("ROUTER SET trace = 1"));
+
+  SCOPED_TRACE("// clean up from earlier runs");
+  ASSERT_NO_ERROR(cli.query("TRUNCATE TABLE testing.t1"));
+
+  {
+    auto query_res = query_one_result(cli, "SHOW WARNINGS");
+    ASSERT_NO_ERROR(query_res);
+    ASSERT_THAT(*query_res, ElementsAre(::testing::SizeIs(3)));
+
+    auto json_trace = query_res->operator[](0)[2];
+
+    rapidjson::Document doc;
+    doc.Parse(json_trace.data(), json_trace.size());
+
+    for (const auto &[pntr, val] : {
+             std::pair{"/name", rapidjson::Value("mysql/query")},
+             std::pair{"/attributes/mysql.sharing_blocked",
+                       rapidjson::Value(false)},
+             std::pair{"/events/0/name",
+                       rapidjson::Value("mysql/query_classify")},
+             std::pair{"/events/0/attributes/mysql.query.classification",
+                       rapidjson::Value("accept_session_state_from_"
+                                        "session_tracker")},
+             std::pair{"/events/1/name",
+                       rapidjson::Value("mysql/connect_and_forward")},
+             std::pair{"/events/1/attributes/mysql.remote.is_connected",
+                       rapidjson::Value(false)},
+         }) {
+      ASSERT_TRUE(json_pointer_eq(doc, rapidjson::Pointer(pntr), val))
+          << json_trace;
+    }
+  }
+
+  SCOPED_TRACE("// INSERT on PRIMARY");
+  ASSERT_NO_ERROR(cli.query("INSERT INTO testing.t1 VALUES ()"));
+  {
+    auto query_res = query_one_result(cli, "SHOW WARNINGS");
+    ASSERT_NO_ERROR(query_res);
+    ASSERT_THAT(*query_res, ElementsAre(::testing::SizeIs(3)));
+
+    auto json_trace = query_res->operator[](0)[2];
+
+    rapidjson::Document doc;
+    doc.Parse(json_trace.data(), json_trace.size());
+
+    for (const auto &[pntr, val] : {
+             std::pair{"/name", rapidjson::Value("mysql/query")},
+             std::pair{"/attributes/mysql.sharing_blocked",
+                       rapidjson::Value(false)},
+             std::pair{"/events/0/name",
+                       rapidjson::Value("mysql/query_classify")},
+             std::pair{"/events/0/attributes/mysql.query.classification",
+                       rapidjson::Value("accept_session_state_from_"
+                                        "session_tracker")},
+             std::pair{"/events/1/name",
+                       rapidjson::Value("mysql/connect_and_forward")},
+             std::pair{"/events/1/attributes/mysql.remote.is_connected",
+                       rapidjson::Value(false)},
+             std::pair{"/events/1/events/0/name",
+                       rapidjson::Value("mysql/prepare_server_connection")},
+             std::pair{"/events/1/events/0/events/0/name",
+                       rapidjson::Value("mysql/from_stash")},
+             std::pair{"/events/1/events/0/events/0/attributes/"
+                       "mysql.remote.is_connected",
+                       rapidjson::Value(true)},
+             std::pair{"/events/1/events/0/events/0/attributes/"
+                       "mysql.remote.endpoint",
+                       rapidjson::Value("127.0.0.1:" + primary_port,
+                                        doc.GetAllocator())},
+             std::pair{"/events/1/events/0/events/0/attributes/"
+                       "db.name",
+                       rapidjson::Value("")},
+         }) {
+      ASSERT_TRUE(json_pointer_eq(doc, rapidjson::Pointer(pntr), val))
+          << json_trace;
+    }
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(Spec, SplittingConnectionNoPoolTest,
                          ::testing::ValuesIn(share_connection_params),
                          [](auto &info) {
                            return "ssl_modes_" + info.param.testname;

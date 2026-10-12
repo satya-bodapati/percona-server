@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -35,6 +36,10 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ddl0impl-buffer.h"
 #include "ddl0impl-file-reader.h"
 #include "row0pread.h"
+
+/** Vector index build state, defined in the vec layer. Opaque here so the
+DDL builder needs none of the HNSW headers. */
+struct Vec_build;
 
 namespace ddl {
 
@@ -67,6 +72,10 @@ struct Builder {
     /** FTS sort and build, this is done in one "step" */
     FTS_SORT_AND_BUILD,
 
+    /** Vector: walk the graph built during ADD and write the aux table.
+    Also one "step", and for the same reason - there is nothing to sort. */
+    VEC_BUILD,
+
     /** Finish the loading of the index. */
     FINISH,
 
@@ -90,8 +99,9 @@ struct Builder {
   dberr_t get_error() const noexcept { return m_ctx.get_error(); }
 
   /** Set the error code.
-  @param[in] err                Error code to set. */
-  void set_error(dberr_t err) noexcept { m_ctx.set_error(err, m_id); }
+  @param[in] err                Error code to set.
+  @return true iff this thread successfully set the error code. */
+  bool set_error(dberr_t err) noexcept { return m_ctx.set_error(err, m_id); }
 
   /** @return the instance ID. */
   [[nodiscard]] size_t id() const noexcept { return m_id; }
@@ -113,6 +123,11 @@ struct Builder {
   /** @return true if the index is an FTS index. */
   [[nodiscard]] bool is_fts_index() const noexcept {
     return m_index->type & DICT_FTS;
+  }
+
+  /** @return true if the index is a vector index. */
+  [[nodiscard]] bool is_vector_index() const noexcept {
+    return m_index->is_vector();
   }
 
   /** @return true if the index is a unique index. */
@@ -161,6 +176,10 @@ struct Builder {
   /** FTS: Sort and insert the rows read.
   @return DB_SUCCESS or error code. */
   [[nodiscard]] dberr_t fts_sort_and_build() noexcept;
+
+  /** Vector: walk the graph the scan built and write the aux table.
+  @return DB_SUCCESS or error code. */
+  [[nodiscard]] dberr_t vec_build() noexcept;
 
   /** Non-FTS: Sort the rows read.
   @return DB_SUCCESS or error code. */
@@ -355,12 +374,17 @@ struct Builder {
                                            dfield_t *&src_field,
                                            size_t &mv_rows_added) noexcept;
 
-  /** Copy the FTS columns.
-  @param[in,out] ctx            Copy context.
-  @param[in,out] field          Field to write to.
+  /** Enqueue parsing of the field of the row
+  @param[in]     row            The row which contains the field to parse
+  @param[in]     field_no       Which field to parse
   @return DB_SUCCESS or error code. */
-  [[nodiscard]] dberr_t copy_fts_column(Copy_ctx &ctx,
-                                        dfield_t *field) noexcept;
+  [[nodiscard]] dberr_t enqueue_parsing(const dtuple_t &row,
+                                        size_t field_no) noexcept;
+
+  /** Enqueue parsing of the row. Asserts we are building FTS index only.
+  @param[in] row   The row which contains fields to parse.
+  @return DB_SUCCESS or error code. */
+  [[nodiscard]] dberr_t enqueue_parsing(const dtuple_t &row) noexcept;
 
   /** Copy the columns to the temporary file buffer.
   @param[in,out] ctx            Copy context.
@@ -400,10 +424,18 @@ struct Builder {
 
   /** Check for duplicates in the first block
   @param[in] dupcheck           Files to check for duplicates.
-  @param[in,out] dup            For collecting duplicate key information.
   @return DB_SUCCESS or error code. */
-  [[nodiscard]] dberr_t check_duplicates(Thread_ctxs &dupcheck,
-                                         Dup *dup) noexcept;
+  [[nodiscard]] dberr_t check_duplicates(Thread_ctxs &dupcheck) noexcept;
+
+  /** Cleanup DDL after error in online build
+  Note: To be called if DDL must cleanup due to error in online build. Pages
+  which are buffer-fixed (in Page_load::release) until the next iteration, must
+  be unfixed (with Page_load::latch) before returning the error.
+  @note: Assumes that either m_btr_load->release is called before or
+  m_n_recs is 0 (no records are inserted yet).
+  @param[in]  err    Error hit in online build
+  @return the cursor error status. */
+  [[nodiscard]] dberr_t handle_error(dberr_t err) noexcept;
 
  private:
   /** Buffer ID. */
@@ -451,6 +483,11 @@ struct Builder {
 
   /** Stage per builder. */
   Alter_stage *m_local_stage{};
+
+  /** Vector index build state: the in-memory graph the scan threads
+  insert into, written out to the aux table in VEC_BUILD. Null unless
+  is_vector_index(). */
+  Vec_build *m_vec{};
 
   row_prebuilt_t *m_prebuilt;
 };
@@ -507,10 +544,10 @@ struct Merge_cursor : public Load_cursor {
   /** Add the cursor to use for merge load.
   @param[in] file               File file to read.
   @param[in] buffer_size        IO buffer size to use for reading.
-  @param[in] offset             Page to read from.
+  @param[in] range              Range to read from
   @return DB_SUCCESS or error code. */
   [[nodiscard]] dberr_t add_file(const ddl::file_t &file, size_t buffer_size,
-                                 os_offset_t offset) noexcept;
+                                 const Range &range) noexcept;
 
   /** Open the cursor.
   @return DB_SUCCESS or error code. */

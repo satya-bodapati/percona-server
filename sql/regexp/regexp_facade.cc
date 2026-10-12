@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,15 +28,16 @@
 #include <tuple>
 
 #include "my_pointer_arithmetic.h"
+#include "mysql/strings/m_ctype.h"  // CHARSET_INFO.
 #include "sql/item_func.h"
 #include "sql/mysqld.h"  // make_unique_destroy_only
 #include "sql/regexp/regexp_engine.h"
 #include "sql_string.h"
 #include "template_utils.h"
 
-struct CHARSET_INFO;
-
 namespace regexp {
+
+CHARSET_INFO *regexp_lib_charset = nullptr;
 
 /**
   When dealing with the binary character set, we tell ICU that we're using
@@ -130,16 +132,17 @@ bool Regexp_facade::SetPattern(Item *pattern_expr, uint32_t flags) {
     m_engine = nullptr;
     return true;
   }
-  if (m_engine == nullptr)
-    // Called for the first time.
-    return SetupEngine(pattern_expr, flags);
-
   /*
-    We don't need to recompile the regular expression if the pattern is
-    a constant in the query and the flags are the same.
+    Compile the regular expression if
+    - this is the first call, or
+    - the pattern varies for each row, or
+    - flags have changed
   */
-  if (pattern_expr->const_item() && flags == m_engine->flags()) return false;
-  return SetupEngine(pattern_expr, flags);
+  if (m_engine == nullptr || !pattern_expr->const_for_execution() ||
+      flags != m_engine->flags()) {
+    return SetupEngine(pattern_expr, flags);
+  }
+  return false;
 }
 
 bool Regexp_facade::Reset(Item *subject_expr, int start) {

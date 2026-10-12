@@ -1,15 +1,16 @@
-/* Copyright (c) 2003, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -228,28 +229,6 @@ class Bitmap<64> {
       if (map & (1ULL << i)) return i;
     return MY_BIT_NONE;
   }
-};
-
-/* An iterator to quickly walk over bits in unlonglong bitmap. */
-class Table_map_iterator {
-  ulonglong bmp;
-  uint no;
-
- public:
-  Table_map_iterator(ulonglong t) : bmp(t), no(0) {}
-  int next_bit() {
-    static const char last_bit[16] = {32, 0, 1, 0, 2, 0, 1, 0,
-                                      3,  0, 1, 0, 2, 0, 1, 0};
-    uint bit;
-    while ((bit = last_bit[bmp & 0xF]) == 32) {
-      no += 4;
-      bmp = bmp >> 4;
-      if (!bmp) return BITMAP_END;
-    }
-    bmp &= ~(1LL << bit);
-    return no + bit;
-  }
-  enum { BITMAP_END = 64 };
 };
 
 #if MAX_INDEXES <= 64

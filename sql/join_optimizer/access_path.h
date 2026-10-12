@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,32 +26,37 @@
 
 #include <assert.h>
 #include <stdint.h>
-
-#include <string>
+#include <cmath>
+#include <cstddef>
+#include <span>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
-#include "sql/iterators/row_iterator.h"
+#include "my_alloc.h"
+#include "my_base.h"
+#include "my_table_map.h"
+#include "sql/item.h"
+// IWYU suggests removing row_iterator.h, but then the inlined short form of
+// CreateIteratorFromAccessPath() fails to compile. So use a pragma to keep it.
+#include "sql/iterators/row_iterator.h"  // IWYU pragma: keep
 #include "sql/join_optimizer/interesting_orders_defs.h"
 #include "sql/join_optimizer/materialize_path_parameters.h"
 #include "sql/join_optimizer/node_map.h"
 #include "sql/join_optimizer/overflow_bitset.h"
-#include "sql/join_optimizer/relational_expression.h"
 #include "sql/join_type.h"
 #include "sql/mem_root_array.h"
-#include "sql/sql_array.h"
+#include "sql/olap.h"
 #include "sql/sql_class.h"
 #include "sql/table.h"
 
-template <class T>
-class Bounds_checked_array;
-class Common_table_expr;
+class Cost_model_server;
 class Filesort;
 class HashJoinCondition;
-class Item;
 class Item_func_match;
 class JOIN;
 class KEY;
+class Query_expression;
 class QEP_TAB;
 class QUICK_RANGE;
 class SJ_TMP_TABLE;
@@ -62,10 +68,8 @@ struct GroupIndexSkipScanParameters;
 struct IndexSkipScanParameters;
 struct Index_lookup;
 struct KEY_PART;
-struct ORDER;
 struct POSITION;
 struct RelationalExpression;
-struct TABLE;
 
 /**
   A specification that two specific relational expressions
@@ -90,23 +94,35 @@ struct JoinPredicate {
   // or {a, c} → b.
   //
   // Used in the processing of interesting orders.
-  FunctionalDependencySet functional_dependencies;
+  FunctionalDependencySet functional_dependencies{};
 
   // A less compact form of functional_dependencies, used during building
   // (FunctionalDependencySet bitmaps are only available after all functional
   // indexes have been collected and Build() has been called).
-  Mem_root_array<int> functional_dependencies_idx;
+  Mem_root_array<int> functional_dependencies_idx{};
 
-  // If this is a suitable semijoin: Contains the grouping given by the
-  // join key. If the rows are in this grouping, then the join optimizer will
-  // consider deduplicating on it and inverting the join. -1 otherwise.
+  // A semijoin on the following format:
+  //
+  // SELECT ... FROM t1 WHERE EXISTS
+  // (SELECT ... FROM t2 WHERE t1.f1=t2.f2 AND t1.f3=t2.f4 ... t1.fn=t2.fm)
+  //
+  // may be transformed into an equivalent inner join:
+  //
+  // SELECT ... FROM (SELECT DISTINCT f2, f4...fm FROM t2) d JOIN t1
+  // ON t1.f1=d.f2 AND t1.f3=d.f4 ... t1.fn=d.fm
+  //
+  // If this is a suitable semijoin: This field will identify the the
+  // grouping given by (f2, f4..fm). (@see
+  // LogicalOrderings::RemapOrderingIndex() for a description of how this
+  // value can be mapped to an actual ordering). The join
+  // optimizer will then consider deduplicating on it and applying the
+  // above transform. If no such grouping was found, this field will be -1.
   int ordering_idx_needed_for_semijoin_rewrite = -1;
 
   // Same as ordering_idx_needed_for_semijoin_rewrite, but given to the
   // RemoveDuplicatesIterator for doing the actual grouping. Allocated
   // on the MEM_ROOT. Can be empty, in which case a LIMIT 1 would do.
-  Item **semijoin_group = nullptr;
-  int semijoin_group_size = 0;
+  std::span<Item *> semijoin_group{};
 };
 
 /**
@@ -142,6 +158,17 @@ struct Predicate {
   // sargable predicate.
   bool was_join_condition = false;
 
+  // Whether this predicate references tables that could be NULL-complemented
+  // later by an outer join. This could for example be true for degenerate outer
+  // join conditions that are pushed down as a table filter on one of the inner
+  // tables, or for join conditions in inner joins that are on the inner side of
+  // an outer join.
+  //
+  // We keep track of this here in order to prevent collection of functional
+  // dependencies from such predicates if the functional dependencies are not
+  // valid after the outer join.
+  bool possibly_null_complemented_later = false;
+
   // If this is a join condition that came from a multiple equality,
   // and we have decided to create a mesh from that multiple equality,
   // returns the index of it into the “multiple_equalities” array
@@ -166,7 +193,25 @@ struct AppendPathParameters {
 };
 
 /// To indicate that a row estimate is not yet made.
-constexpr double kUnknownRowCount = -1.0;
+inline constexpr double kUnknownRowCount = -1.0;
+
+/// To indicate that a cost estimate is not yet made. We use a large negative
+/// value to avoid getting a positive result if we by mistake add this to
+/// a real (positive) cost.
+inline constexpr double kUnknownCost = -1e12;
+
+/// Calculate the cost of reading the first row from an access path, given
+/// estimates for init cost, total cost and the number of rows returned.
+inline double FirstRowCost(double init_cost, double total_cost,
+                           double output_rows) {
+  assert(init_cost >= 0.0);
+  assert(total_cost >= init_cost);
+  assert(output_rows >= 0.0);
+  if (output_rows <= 1.0) {
+    return total_cost;
+  }
+  return init_cost + (total_cost - init_cost) / output_rows;
+}
 
 /**
   Access paths are a query planning structure that correspond 1:1 to iterators,
@@ -191,31 +236,20 @@ constexpr double kUnknownRowCount = -1.0;
   planning structure.
  */
 struct AccessPath {
-  // Most of the members are declared with initializers, but bit fields cannot
-  // be declared with initializers until C++20, so we need to define a
-  // constructor to initialize those fields.
-  // TODO(khatlen): When we move to C++20, add initializers to the bit fields
-  // too, and use the default constructor generated by the compiler.
-  AccessPath()
-      : count_examined_rows(false)
-#ifndef NDEBUG
-        ,
-        forced_by_dbug(false)
-#endif
-  {
-  }
-
   enum Type : uint8_t {
     // Basic access paths (those with no children, at least nominally).
     // NOTE: When adding more paths to this section, also update GetBasicTable()
     // to handle them.
     TABLE_SCAN,
+    SAMPLE_SCAN,
     INDEX_SCAN,
+    INDEX_DISTANCE_SCAN,
     REF,
     REF_OR_NULL,
     EQ_REF,
     PUSHED_JOIN_REF,
     FULL_TEXT_SEARCH,
+    VECTOR_SEARCH,
     CONST_TABLE,
     MRR,
     FOLLOW_TAIL,
@@ -295,12 +329,15 @@ struct AccessPath {
   /// and thus should be counted towards examined_rows. It can sometimes
   /// seem a bit arbitrary which iterators count towards examined_rows
   /// and which ones do not, so the only canonical reference is the tests.
-  bool count_examined_rows : 1;
+  bool count_examined_rows : 1 {false};
+
+  /// Whether this access path contains a GROUP_INDEX_SKIP_SCAN
+  bool has_group_skip_scan : 1 {false};
 
 #ifndef NDEBUG
   /// Whether this access path is forced preferred over all others by means
   /// of a SET DEBUG force_subplan_0x... statement.
-  bool forced_by_dbug : 1;
+  bool forced_by_dbug : 1 {false};
 #endif
 
   /// For UPDATE and DELETE statements: The node index of a table which can be
@@ -358,29 +395,42 @@ struct AccessPath {
   /// information in EXPLAIN ANALYZE queries.
   RowIterator *iterator = nullptr;
 
-  /// Expected cost to read all of this access path once; -1.0 for unknown.
-  double cost{-1.0};
+  double cost() const { return m_cost; }
 
-  /// Expected cost to initialize this access path; ie., cost to read
-  /// k out of N rows would be init_cost + (k/N) * (cost - init_cost).
-  /// Note that EXPLAIN prints out cost of reading the _first_ row
-  /// because it is easier for the user and also easier to measure in
-  /// EXPLAIN ANALYZE, but it is easier to do calculations with a pure
-  /// initialization cost, so that is what we use in this member.
-  /// -1.0 for unknown.
-  double init_cost{-1.0};
+  double init_cost() const { return m_init_cost; }
 
-  /// Of init_cost, how much of the initialization needs only to be done
-  /// once per query block. (This is a cost, not a proportion.)
-  /// Ie., if the access path can reuse some its initialization work
-  /// if Init() is called multiple times, this member will be nonzero.
-  /// A typical example is a materialized table with rematerialize=false;
-  /// the second time Init() is called, it's a no-op. Most paths will have
-  /// init_once_cost = 0.0, ie., repeated scans will cost the same.
-  /// We do not intend to use this field to model cache effects.
-  ///
-  /// This is currently not printed in EXPLAIN, only optimizer trace.
-  double init_once_cost{0.0};
+  /// The cost of reading the first row.
+  double first_row_cost() const {
+    return FirstRowCost(m_init_cost, m_cost, m_num_output_rows);
+  }
+
+  double init_once_cost() const { return m_init_once_cost; }
+
+  double cost_before_filter() const { return m_cost_before_filter; }
+
+  void set_cost(double val) {
+    assert(std::isfinite(val));
+    assert(val >= 0.0 || val == kUnknownCost);
+    m_cost = val;
+  }
+
+  void set_init_cost(double val) {
+    assert(std::isfinite(val));
+    assert(val >= 0.0 || val == kUnknownCost);
+    m_init_cost = val;
+  }
+
+  void set_init_once_cost(double val) {
+    assert(std::isfinite(val));
+    assert(val >= 0.0);
+    m_init_once_cost = val;
+  }
+
+  void set_cost_before_filter(double val) {
+    assert(std::isfinite(val));
+    assert(val >= 0.0 || val == kUnknownCost);
+    m_cost_before_filter = val;
+  }
 
   /// Return the cost of scanning the given path for the second time
   /// (or later) in the given query block. This is really the interesting
@@ -388,12 +438,13 @@ struct AccessPath {
   /// have zero init_once_cost, storing that instead allows us to skip
   /// a lot of repeated path->init_once_cost = path->init_cost calls
   /// in the code.
-  double rescan_cost() const { return cost - init_once_cost; }
+  double rescan_cost() const { return cost() - init_once_cost(); }
 
-  /// If no filter, identical to num_output_rows, cost, respectively.
-  /// init_cost is always the same (filters have zero initialization cost).
-  double num_output_rows_before_filter{kUnknownRowCount},
-      cost_before_filter{-1.0};
+  /// Return true if costs and row counts are consistent.
+  bool HasConsistentCostsAndRows(const JoinHypergraph &graph) const;
+
+  /// If no filter, identical to num_output_rows.
+  double num_output_rows_before_filter{kUnknownRowCount};
 
   /// Bitmap of WHERE predicates that we are including on this access path,
   /// referring to the “predicates” array internal to the join optimizer.
@@ -415,6 +466,11 @@ struct AccessPath {
   ///
   /// See also nested_loop_join().equijoin_predicates, which is for filters
   /// being applied _before_ nested-loop joins, but is otherwise the same idea.
+  ///
+  /// Note that the higher bits of this bitset, those starting at the position
+  /// given by JoinHypergraph::num_filter_predicates, do not represent filter
+  /// predicates, but rather applied sargable join predicates. @see
+  /// #applied_sargable_join_predicates() for more details.
   OverflowBitset filter_predicates{0};
 
   /// Bitmap of sargable join predicates that have already been applied
@@ -428,7 +484,7 @@ struct AccessPath {
   /// never overlap with filter_predicates, and so we can reuse the same
   /// memory using an alias (a union would not be allowed, since OverflowBitset
   /// is a class with non-trivial default constructor), even though the meaning
-  /// is entirely separate. If N = num_where_predicates in the hypergraph, then
+  /// is entirely separate. If N = num_filter_predicates in the hypergraph, then
   /// bits 0..(N-1) belong to filter_predicates, and the rest to
   /// applied_sargable_join_predicates.
   OverflowBitset &applied_sargable_join_predicates() {
@@ -443,6 +499,11 @@ struct AccessPath {
   /// other tables, or because because we could not push them down into
   /// the nullable side of outer joins). Used during planning only
   /// (see filter_predicates).
+  ///
+  /// Note that the higher bits of this bitset, those starting at the position
+  /// given by JoinHypergraph::num_filter_predicates, do not represent delayed
+  /// predicates, but rather subsumed sargable join predicates. @see
+  /// #subsumed_sargable_join_predicates() for more details.
   OverflowBitset delayed_predicates{0};
 
   /// Similar to applied_sargable_join_predicates, bitmap of sargable
@@ -490,6 +551,10 @@ struct AccessPath {
   /// destroyed.
   void *secondary_engine_data{nullptr};
 
+  /// Signature used to uniquely identify the access path.
+  /// 0 meaning non-initialized.
+  size_t signature{0};
+
   // Accessors for the union below.
   auto &table_scan() {
     assert(type == TABLE_SCAN);
@@ -499,6 +564,14 @@ struct AccessPath {
     assert(type == TABLE_SCAN);
     return u.table_scan;
   }
+  auto &sample_scan() {
+    assert(type == SAMPLE_SCAN);
+    return u.sample_scan;
+  }
+  const auto &sample_scan() const {
+    assert(type == SAMPLE_SCAN);
+    return u.sample_scan;
+  }
   auto &index_scan() {
     assert(type == INDEX_SCAN);
     return u.index_scan;
@@ -506,6 +579,14 @@ struct AccessPath {
   const auto &index_scan() const {
     assert(type == INDEX_SCAN);
     return u.index_scan;
+  }
+  auto &index_distance_scan() {
+    assert(type == INDEX_DISTANCE_SCAN);
+    return u.index_distance_scan;
+  }
+  const auto &index_distance_scan() const {
+    assert(type == INDEX_DISTANCE_SCAN);
+    return u.index_distance_scan;
   }
   auto &ref() {
     assert(type == REF);
@@ -546,6 +627,14 @@ struct AccessPath {
   const auto &full_text_search() const {
     assert(type == FULL_TEXT_SEARCH);
     return u.full_text_search;
+  }
+  auto &vector_search() {
+    assert(type == VECTOR_SEARCH);
+    return u.vector_search;
+  }
+  const auto &vector_search() const {
+    assert(type == VECTOR_SEARCH);
+    return u.vector_search;
   }
   auto &const_table() {
     assert(type == CONST_TABLE);
@@ -846,11 +935,43 @@ struct AccessPath {
 
   double num_output_rows() const { return m_num_output_rows; }
 
-  void set_num_output_rows(double val) { m_num_output_rows = val; }
+  void set_num_output_rows(double val) {
+    assert(std::isfinite(val));
+    assert(val == kUnknownRowCount || val >= 0.0);
+    m_num_output_rows = val;
+  }
 
  private:
-  /// Expected number of output rows, -1.0 for unknown.
+  /// Expected number of output rows.
   double m_num_output_rows{kUnknownRowCount};
+
+  /// Expected cost to read all of this access path once.
+  double m_cost{kUnknownCost};
+
+  /// Expected cost to initialize this access path; ie., cost to read
+  /// k out of N rows would be init_cost + (k/N) * (cost - init_cost).
+  /// Note that EXPLAIN prints out cost of reading the _first_ row
+  /// because it is easier for the user and also easier to measure in
+  /// EXPLAIN ANALYZE, but it is easier to do calculations with a pure
+  /// initialization cost, so that is what we use in this member.
+  /// kUnknownCost for unknown.
+  double m_init_cost{kUnknownCost};
+
+  /// Of init_cost, how much of the initialization needs only to be done
+  /// once per query block. (This is a cost, not a proportion.)
+  /// Ie., if the access path can reuse some its initialization work
+  /// if Init() is called multiple times, this member will be nonzero.
+  /// A typical example is a materialized table with rematerialize=false;
+  /// the second time Init() is called, it's a no-op. Most paths will have
+  /// init_once_cost = 0.0, ie., repeated scans will cost the same.
+  /// We do not intend to use this field to model cache effects.
+  ///
+  /// This is currently not printed in EXPLAIN, only optimizer trace.
+  double m_init_once_cost{0.0};
+
+  /// If no filter, identical to cost.  init_cost is always the same
+  /// (filters have zero initialization cost).
+  double m_cost_before_filter{kUnknownCost};
 
   // We'd prefer if this could be an std::variant, but we don't have C++17 yet.
   // It is private to force all access to be through the type-checking
@@ -864,10 +985,21 @@ struct AccessPath {
     } table_scan;
     struct {
       TABLE *table;
+      double sampling_percentage;
+      enum tablesample_type sampling_type;
+    } sample_scan;
+    struct {
+      TABLE *table;
       int idx;
       bool use_order;
       bool reverse;
     } index_scan;
+    struct {
+      TABLE *table;
+      int idx;
+      QUICK_RANGE *range;
+      bool reverse;
+    } index_distance_scan;
     struct {
       TABLE *table;
       Index_lookup *ref;
@@ -896,6 +1028,12 @@ struct AccessPath {
       bool use_limit;
       Item_func_match *ft_func;
     } full_text_search;
+    struct {
+      TABLE *table;
+      Index_lookup *ref;
+      Item *item;
+      ha_rows limit;
+    } vector_search;
     struct {
       TABLE *table;
       Index_lookup *ref;
@@ -1023,7 +1161,7 @@ struct AccessPath {
     } unqualified_count;
 
     struct {
-      // No members (implicit from the JOIN).
+      Mem_root_array<Item_values_column *> *output_refs;
     } table_value_constructor;
     struct {
       // No members.
@@ -1120,10 +1258,11 @@ struct AccessPath {
     } sort;
     struct {
       AccessPath *child;
-      bool rollup;
+      olap_type olap;
     } aggregate;
     struct {
       AccessPath *subquery_path;
+      JOIN *join;
       Temp_table_param *temp_table_param;
       TABLE *table;
       AccessPath *table_path;
@@ -1149,8 +1288,8 @@ struct AccessPath {
     } stream;
     struct {
       // NOTE: The only legal access paths within table_path are
-      // TABLE_SCAN, REF, REF_OR_NULL, EQ_REF, ALTERNATIVE and
-      // CONST_TABLE (the latter is somewhat nonsensical).
+      // TABLE_SCAN, REF, REF_OR_NULL, EQ_REF, ALTERNATIVE,
+      // CONST_TABLE (somewhat nonsensical), INDEX_SCAN and DYNAMIC_INDEX_SCAN
       AccessPath *table_path;
 
       // Large, and has nontrivial destructors, so split out
@@ -1158,6 +1297,9 @@ struct AccessPath {
       MaterializePathParameters *param;
       /** The total cost of executing the queries that we materialize.*/
       double subquery_cost;
+      /// The number of materialized rows (as opposed to the number of rows
+      /// fetched by table_path). Needed for 'explain'.
+      double subquery_rows;
     } materialize;
     struct {
       AccessPath *table_path;
@@ -1181,9 +1323,25 @@ struct AccessPath {
       table_map tables_to_get_rowid_for;
     } weedout;
     struct {
+      using ItemSpan = std::span<Item *>;
       AccessPath *child;
-      Item **group_items;
-      int group_items_size;
+
+      /// @cond IGNORE
+      // These functions somehow triggers a doxygen warning. (Presumably
+      // a doxygen bug.)
+      ItemSpan &group_items() {
+        return reinterpret_cast<ItemSpan &>(m_group_items);
+      }
+
+      const ItemSpan &group_items() const {
+        return reinterpret_cast<const ItemSpan &>(m_group_items);
+      }
+      /// @endcond
+
+     private:
+      // gcc 11 does not support a span as a union member. Replace this
+      // with "std::span<Item *> group_items" when we move to newer gcc version.
+      alignas(alignof(ItemSpan)) std::byte m_group_items[sizeof(ItemSpan)];
     } remove_duplicates;
     struct {
       AccessPath *child;
@@ -1219,20 +1377,25 @@ static_assert(std::is_trivially_destructible<AccessPath>::value,
               "on the MEM_ROOT and not wrapped in unique_ptr_destroy_only"
               "(because multiple candidates during planning could point to "
               "the same access paths, and refcounting would be expensive)");
-static_assert(sizeof(AccessPath) <= 144,
+static_assert(sizeof(AccessPath) <= 152,
               "We are creating a lot of access paths in the join "
               "optimizer, so be sure not to bloat it without noticing. "
-              "(96 bytes for the base, 48 bytes for the variant.)");
+              "(104 bytes for the base, 52 bytes for the variant.)");
 
 inline void CopyBasicProperties(const AccessPath &from, AccessPath *to) {
   to->set_num_output_rows(from.num_output_rows());
-  to->cost = from.cost;
-  to->init_cost = from.init_cost;
-  to->init_once_cost = from.init_once_cost;
+  to->set_cost(from.cost());
+  to->set_init_cost(from.init_cost());
+  to->set_init_once_cost(from.init_once_cost());
   to->parameter_tables = from.parameter_tables;
   to->safe_for_rowid = from.safe_for_rowid;
   to->ordering_state = from.ordering_state;
+  to->has_group_skip_scan = from.has_group_skip_scan;
+  to->signature = from.signature;
 }
+
+/// Return the name of an AccessPath::Type enumerator.
+std::string_view AccessPathTypeName(AccessPath::Type type);
 
 // Trivial factory functions for all of the types of access paths above.
 
@@ -1242,6 +1405,17 @@ inline AccessPath *NewTableScanAccessPath(THD *thd, TABLE *table,
   path->type = AccessPath::TABLE_SCAN;
   path->count_examined_rows = count_examined_rows;
   path->table_scan().table = table;
+  return path;
+}
+
+inline AccessPath *NewSampleScanAccessPath(THD *thd, TABLE *table,
+                                           double sampling_percentage,
+                                           bool count_examined_rows) {
+  AccessPath *path = new (thd->mem_root) AccessPath;
+  path->type = AccessPath::SAMPLE_SCAN;
+  path->count_examined_rows = count_examined_rows;
+  path->sample_scan().table = table;
+  path->sample_scan().sampling_percentage = sampling_percentage;
   return path;
 }
 
@@ -1323,6 +1497,20 @@ inline AccessPath *NewFullTextSearchAccessPath(THD *thd, TABLE *table,
   return path;
 }
 
+inline AccessPath *NewVectorSearchAccessPath(THD *thd, TABLE *table,
+                                             Index_lookup *ref, Item *item,
+                                             ha_rows limit,
+                                             bool count_examined_rows) {
+  AccessPath *path = new (thd->mem_root) AccessPath;
+  path->type = AccessPath::VECTOR_SEARCH;
+  path->count_examined_rows = count_examined_rows;
+  path->vector_search().table = table;
+  path->vector_search().ref = ref;
+  path->vector_search().item = item;
+  path->vector_search().limit = limit;
+  return path;
+}
+
 inline AccessPath *NewConstTableAccessPath(THD *thd, TABLE *table,
                                            Index_lookup *ref,
                                            bool count_examined_rows) {
@@ -1330,9 +1518,9 @@ inline AccessPath *NewConstTableAccessPath(THD *thd, TABLE *table,
   path->type = AccessPath::CONST_TABLE;
   path->count_examined_rows = count_examined_rows;
   path->set_num_output_rows(1.0);
-  path->cost = 0.0;
-  path->init_cost = 0.0;
-  path->init_once_cost = 0.0;
+  path->set_cost(0.0);
+  path->set_init_cost(0.0);
+  path->set_init_once_cost(0.0);
   path->const_table().table = table;
   path->const_table().ref = ref;
   return path;
@@ -1388,14 +1576,8 @@ inline AccessPath *NewUnqualifiedCountAccessPath(THD *thd) {
   return path;
 }
 
-inline AccessPath *NewTableValueConstructorAccessPath(THD *thd) {
-  AccessPath *path = new (thd->mem_root) AccessPath;
-  path->type = AccessPath::TABLE_VALUE_CONSTRUCTOR;
-  // The iterator keeps track of which row it is at in examined_rows,
-  // so we always need to give it the pointer.
-  path->count_examined_rows = true;
-  return path;
-}
+AccessPath *NewTableValueConstructorAccessPath(const THD *thd,
+                                               const JOIN *join);
 
 inline AccessPath *NewNestedLoopSemiJoinWithDuplicateRemovalAccessPath(
     THD *thd, AccessPath *outer, AccessPath *inner, const TABLE *table,
@@ -1407,6 +1589,8 @@ inline AccessPath *NewNestedLoopSemiJoinWithDuplicateRemovalAccessPath(
   path->nested_loop_semijoin_with_duplicate_removal().table = table;
   path->nested_loop_semijoin_with_duplicate_removal().key = key;
   path->nested_loop_semijoin_with_duplicate_removal().key_len = key_len;
+  path->has_group_skip_scan =
+      outer->has_group_skip_scan || inner->has_group_skip_scan;
   return path;
 }
 
@@ -1417,6 +1601,7 @@ inline AccessPath *NewFilterAccessPath(THD *thd, AccessPath *child,
   path->filter().child = child;
   path->filter().condition = condition;
   path->filter().materialize_subqueries = false;
+  path->has_group_skip_scan = child->has_group_skip_scan;
   return path;
 }
 
@@ -1426,20 +1611,23 @@ AccessPath *NewSortAccessPath(THD *thd, AccessPath *child, Filesort *filesort,
                               ORDER *order, bool count_examined_rows);
 
 inline AccessPath *NewAggregateAccessPath(THD *thd, AccessPath *child,
-                                          bool rollup) {
+                                          olap_type olap) {
   AccessPath *path = new (thd->mem_root) AccessPath;
   path->type = AccessPath::AGGREGATE;
   path->aggregate().child = child;
-  path->aggregate().rollup = rollup;
+  path->aggregate().olap = olap;
+  path->has_group_skip_scan = child->has_group_skip_scan;
   return path;
 }
 
 inline AccessPath *NewTemptableAggregateAccessPath(
-    THD *thd, AccessPath *subquery_path, Temp_table_param *temp_table_param,
-    TABLE *table, AccessPath *table_path, int ref_slice) {
+    THD *thd, AccessPath *subquery_path, JOIN *join,
+    Temp_table_param *temp_table_param, TABLE *table, AccessPath *table_path,
+    int ref_slice) {
   AccessPath *path = new (thd->mem_root) AccessPath;
   path->type = AccessPath::TEMPTABLE_AGGREGATE;
   path->temptable_aggregate().subquery_path = subquery_path;
+  path->temptable_aggregate().join = join;
   path->temptable_aggregate().temp_table_param = temp_table_param;
   path->temptable_aggregate().table = table;
   path->temptable_aggregate().table_path = table_path;
@@ -1462,7 +1650,7 @@ inline AccessPath *NewLimitOffsetAccessPath(THD *thd, AccessPath *child,
   path->limit_offset().count_all_rows = count_all_rows;
   path->limit_offset().reject_multiple_rows = reject_multiple_rows;
   path->limit_offset().send_records_override = send_records_override;
-  path->ordering_state = child->ordering_state;
+  CopyBasicProperties(*child, path);
   EstimateLimitOffsetCost(path);
   return path;
 }
@@ -1473,9 +1661,9 @@ inline AccessPath *NewFakeSingleRowAccessPath(THD *thd,
   path->type = AccessPath::FAKE_SINGLE_ROW;
   path->count_examined_rows = count_examined_rows;
   path->set_num_output_rows(1.0);
-  path->cost = 0.0;
-  path->init_cost = 0.0;
-  path->init_once_cost = 0.0;
+  path->set_cost(0.0);
+  path->set_init_cost(0.0);
+  path->set_init_once_cost(0.0);
   return path;
 }
 
@@ -1486,11 +1674,11 @@ inline AccessPath *NewZeroRowsAccessPath(THD *thd, AccessPath *child,
   path->zero_rows().child = child;
   path->zero_rows().cause = cause;
   path->set_num_output_rows(0.0);
-  path->cost = 0.0;
-  path->init_cost = 0.0;
-  path->init_once_cost = 0.0;
+  path->set_cost(0.0);
+  path->set_init_cost(0.0);
+  path->set_init_once_cost(0.0);
   path->num_output_rows_before_filter = 0.0;
-  path->cost_before_filter = 0.0;
+  path->set_cost_before_filter(0.0);
   return path;
 }
 
@@ -1504,26 +1692,14 @@ inline AccessPath *NewZeroRowsAggregatedAccessPath(THD *thd,
   path->type = AccessPath::ZERO_ROWS_AGGREGATED;
   path->zero_rows_aggregated().cause = cause;
   path->set_num_output_rows(1.0);
-  path->cost = 0.0;
-  path->init_cost = 0.0;
+  path->set_cost(0.0);
+  path->set_init_cost(0.0);
   return path;
 }
 
-inline AccessPath *NewStreamingAccessPath(THD *thd, AccessPath *child,
-                                          JOIN *join,
-                                          Temp_table_param *temp_table_param,
-                                          TABLE *table, int ref_slice) {
-  AccessPath *path = new (thd->mem_root) AccessPath;
-  path->type = AccessPath::STREAM;
-  path->stream().child = child;
-  path->stream().join = join;
-  path->stream().temp_table_param = temp_table_param;
-  path->stream().table = table;
-  path->stream().ref_slice = ref_slice;
-  // Will be set later if we get a weedout access path as parent.
-  path->stream().provide_rowid = false;
-  return path;
-}
+AccessPath *NewStreamingAccessPath(THD *thd, AccessPath *child, JOIN *join,
+                                   Temp_table_param *temp_table_param,
+                                   TABLE *table, int ref_slice);
 
 inline Mem_root_array<MaterializePathParameters::Operand>
 SingleMaterializeQueryBlock(THD *thd, AccessPath *path, int select_number,
@@ -1546,7 +1722,9 @@ inline AccessPath *NewMaterializeAccessPath(
     Mem_root_array<const AccessPath *> *invalidators, TABLE *table,
     AccessPath *table_path, Common_table_expr *cte, Query_expression *unit,
     int ref_slice, bool rematerialize, ha_rows limit_rows,
-    bool reject_multiple_rows) {
+    bool reject_multiple_rows,
+    MaterializePathParameters::DedupType dedup_reason =
+        MaterializePathParameters::NO_DEDUP) {
   MaterializePathParameters *param =
       new (thd->mem_root) MaterializePathParameters;
   param->m_operands = std::move(operands);
@@ -1569,6 +1747,7 @@ inline AccessPath *NewMaterializeAccessPath(
                            // see its constructor
                            HA_POS_ERROR);
   param->reject_multiple_rows = reject_multiple_rows;
+  param->deduplication_reason = dedup_reason;
 
 #ifndef NDEBUG
   for (MaterializePathParameters::Operand &operand : param->m_operands) {
@@ -1580,7 +1759,8 @@ inline AccessPath *NewMaterializeAccessPath(
   path->type = AccessPath::MATERIALIZE;
   path->materialize().table_path = table_path;
   path->materialize().param = param;
-  path->materialize().subquery_cost = -1.0;
+  path->materialize().subquery_cost = kUnknownCost;
+  path->materialize().subquery_rows = kUnknownRowCount;
   if (rematerialize) {
     path->safe_for_rowid = AccessPath::SAFE_IF_SCANNED_ONCE;
   } else {
@@ -1600,6 +1780,30 @@ inline AccessPath *NewMaterializeInformationSchemaTableAccessPath(
   return path;
 }
 
+/// Add path costs c1 and c2, but handle kUnknownCost correctly.
+inline double AddCost(double c1, double c2) {
+  // If one is undefined, use the other, as we have nothing else.
+  if (c1 == kUnknownCost) {
+    return c2;
+  } else if (c2 == kUnknownCost) {
+    return c1;
+  } else {
+    return c1 + c2;
+  }
+}
+
+/// Add row counts c1 and c2, but handle kUnknownRowCount correctly.
+inline double AddRowCount(double c1, double c2) {
+  // If one is undefined, use the other, as we have nothing else.
+  if (c1 == kUnknownRowCount) {
+    return c2;
+  } else if (c2 == kUnknownRowCount) {
+    return c1;
+  } else {
+    return c1 + c2;
+  }
+}
+
 // The Mem_root_array must be allocated on a MEM_ROOT that lives at least for as
 // long as the access path.
 inline AccessPath *NewAppendAccessPath(
@@ -1607,15 +1811,14 @@ inline AccessPath *NewAppendAccessPath(
   AccessPath *path = new (thd->mem_root) AccessPath;
   path->type = AccessPath::APPEND;
   path->append().children = children;
-  path->cost = 0.0;
-  path->init_cost = 0.0;
-  path->init_once_cost = 0.0;
-  double num_output_rows = 0.0;
+  double num_output_rows = kUnknownRowCount;
   for (const AppendPathParameters &child : *children) {
-    path->cost += child.path->cost;
-    path->init_cost += child.path->init_cost;
-    path->init_once_cost += child.path->init_once_cost;
-    num_output_rows += child.path->num_output_rows();
+    path->set_cost(AddCost(path->cost(), child.path->cost()));
+    path->set_init_cost(AddCost(path->init_cost(), child.path->init_cost()));
+    path->set_init_once_cost(path->init_once_cost() +
+                             child.path->init_once_cost());
+    num_output_rows =
+        AddRowCount(num_output_rows, child.path->num_output_rows());
   }
   path->set_num_output_rows(num_output_rows);
   return path;
@@ -1633,6 +1836,7 @@ inline AccessPath *NewWindowAccessPath(THD *thd, AccessPath *child,
   path->window().temp_table_param = temp_table_param;
   path->window().ref_slice = ref_slice;
   path->window().needs_buffering = needs_buffering;
+  path->set_num_output_rows(child->num_output_rows());
   return path;
 }
 
@@ -1647,14 +1851,13 @@ inline AccessPath *NewWeedoutAccessPath(THD *thd, AccessPath *child,
   return path;
 }
 
-inline AccessPath *NewRemoveDuplicatesAccessPath(THD *thd, AccessPath *child,
-                                                 Item **group_items,
-                                                 int group_items_size) {
+inline AccessPath *NewRemoveDuplicatesAccessPath(
+    THD *thd, AccessPath *child, std::span<Item *> group_items) {
   AccessPath *path = new (thd->mem_root) AccessPath;
   path->type = AccessPath::REMOVE_DUPLICATES;
   path->remove_duplicates().child = child;
-  path->remove_duplicates().group_items = group_items;
-  path->remove_duplicates().group_items_size = group_items_size;
+  path->remove_duplicates().group_items() = group_items;
+  path->has_group_skip_scan = child->has_group_skip_scan;
   return path;
 }
 
@@ -1667,6 +1870,7 @@ inline AccessPath *NewRemoveDuplicatesOnIndexAccessPath(
   path->remove_duplicates_on_index().table = table;
   path->remove_duplicates_on_index().key = key;
   path->remove_duplicates_on_index().loosescan_key_len = loosescan_key_len;
+  path->has_group_skip_scan = child->has_group_skip_scan;
   return path;
 }
 
@@ -1695,12 +1899,29 @@ AccessPath *NewDeleteRowsAccessPath(THD *thd, AccessPath *child,
                                     table_map immediate_tables);
 
 AccessPath *NewUpdateRowsAccessPath(THD *thd, AccessPath *child,
-                                    table_map delete_tables,
+                                    table_map update_tables,
                                     table_map immediate_tables);
 
 /**
   Modifies "path" and the paths below it so that they provide row IDs for
   all tables.
+
+  This also figures out how the row IDs should be retrieved for each table in
+  the input to the path. If the handler of the table is positioned on the
+  correct row while reading the input, handler::position() can be called to get
+  the row ID from the handler. However, if the input iterator returns rows
+  without keeping the position of the underlying handlers in sync, calling
+  handler::position() will not be able to provide the row IDs. Specifically,
+  hash join and BKA join do not keep the underlying handlers positioned on the
+  right row. Therefore, this function will instruct every hash join or BKA join
+  below "path" to maintain row IDs in the join buffer, and updating handler::ref
+  in every input table for each row they return. Then "path" does not need to
+  call handler::position() to get it (nor should it, since calling it would
+  overwrite the correct row ID with a stale one).
+
+  The tables on which "path" should call handler::position() are stored in a
+  `tables_to_get_rowid_for` bitset in "path". For all the other tables, it can
+  assume that handler::ref already contains the correct row ID.
  */
 void FindTablesToGetRowidFor(AccessPath *path);
 
@@ -1727,6 +1948,28 @@ void SetCostOnTableAccessPath(const Cost_model_server &cost_model,
   sorting, aggregate and subquery materialization are not returned.
 */
 TABLE *GetBasicTable(const AccessPath *path);
+
+/**
+  Applies the secondary storage engine nrows modification function, if any.
+
+  @param params input params for the callback function.
+   Refer to typedef for the actual input parameters explainations.
+
+  @return true if secondary engine has proposed modification to ap's nrows.
+*/
+bool ApplySecondaryEngineNrowsHook(
+    const SecondaryEngineNrowsParameters &params);
+
+/**
+  Returns whether SecondaryNrows is applicable given the parameters.
+
+  @param path access path to be verified.
+  @param graph current query block hypergraph.
+
+  @return true if nrows hook is applicable.
+*/
+bool IsSecondaryEngineNrowsHookApplicable(AccessPath *path,
+                                          const JoinHypergraph *graph);
 
 /**
   Returns a map of all tables read when `path` or any of its children are
@@ -1763,9 +2006,8 @@ Mem_root_array<TABLE *> CollectTables(THD *thd, AccessPath *root_path);
 
   “join” is the join that “path” is part of.
  */
-void ExpandFilterAccessPaths(THD *thd, AccessPath *path, const JOIN *join,
-                             const Mem_root_array<Predicate> &predicates,
-                             unsigned num_where_predicates);
+void ExpandFilterAccessPaths(THD *thd, const JoinHypergraph &graph,
+                             AccessPath *path, const JOIN *join);
 
 /**
   Extracts the Item expression from the given “filter_predicates” corresponding
@@ -1773,13 +2015,33 @@ void ExpandFilterAccessPaths(THD *thd, AccessPath *path, const JOIN *join,
  */
 Item *ConditionFromFilterPredicates(const Mem_root_array<Predicate> &predicates,
                                     OverflowBitset mask,
-                                    int num_where_predicates);
+                                    int num_filter_predicates);
 
 /// Like ExpandFilterAccessPaths(), but expands only the single access path
 /// at “path”.
-void ExpandSingleFilterAccessPath(THD *thd, AccessPath *path, const JOIN *join,
-                                  const Mem_root_array<Predicate> &predicates,
-                                  unsigned num_where_predicates);
+void ExpandSingleFilterAccessPath(THD *thd, const JoinHypergraph &graph,
+                                  AccessPath *path, const JOIN *join);
+
+/**
+  Clear all the bits representing filter predicates in a bitset, and keep only
+  the bits representing applied sargable join conditions.
+
+  See AccessPath::filter_predicates and
+  AccessPath::applied_sargable_join_predicates() for details about how filter
+  predicates and applied sargable join predicates are stored in different
+  partitions of the same bitset.
+
+  @param predicates A bitset representing both filter predicates and applied
+  sargable join predicates.
+  @param num_filter_predicates The number of filter predicates.
+  @param mem_root The root on which to allocate memory, if needed.
+
+  @return A copy of "predicates" with only the bits for applied sargable join
+  predicates set.
+ */
+MutableOverflowBitset ClearFilterPredicates(OverflowBitset predicates,
+                                            int num_filter_predicates,
+                                            MEM_ROOT *mem_root);
 
 /// Returns the tables that are part of a hash join.
 table_map GetHashJoinTables(AccessPath *path);
@@ -1803,5 +2065,19 @@ const Mem_root_array<Item *> *GetExtraHashJoinConditions(
     MEM_ROOT *mem_root, bool using_hypergraph_optimizer,
     const std::vector<HashJoinCondition> &equijoin_conditions,
     const Mem_root_array<Item *> &other_conditions);
+
+/**
+  Update status variables which count how many scans of various types are used
+  in a query plan.
+
+  The following status variables are updated: Select_scan, Select_full_join,
+  Select_range, Select_full_range_join, Select_range_check. They are also stored
+  as performance schema statement events with the same names.
+
+  In addition, the performance schema statement events NO_INDEX_USED and
+  NO_GOOD_INDEX_USED are updated, if appropriate.
+ */
+void CollectStatusVariables(THD *thd, const JOIN *top_join,
+                            const AccessPath &top_path);
 
 #endif  // SQL_JOIN_OPTIMIZER_ACCESS_PATH_H

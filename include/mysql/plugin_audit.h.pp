@@ -9,6 +9,8 @@ struct MYSQL_LEX_CSTRING {
 };
 #include "plugin.h"
 #include "status_var.h"
+#include "mysql/components/services/bits/status_variables_bits.h"
+#include "mysql/components/services/bits/thd.h"
 enum enum_mysql_show_type {
   SHOW_UNDEF,
   SHOW_BOOL,
@@ -56,6 +58,7 @@ struct MYSQL_XID {
   char data[128];
 };
 #include <mysql/components/services/bits/system_variables_bits.h>
+#include "mysql/components/services/bits/thd.h"
 struct st_mysql_value {
   int (*value_type)(struct st_mysql_value *);
   const char *(*val_str)(struct st_mysql_value *, char *buffer, int *length);
@@ -68,6 +71,9 @@ typedef int (*mysql_var_check_func)(void * thd, SYS_VAR *var, void *save,
                                     struct st_mysql_value *value);
 typedef void (*mysql_var_update_func)(void * thd, SYS_VAR *var,
                                       void *var_ptr, const void *save);
+struct SYS_VAR {
+  int flags; const char *name; const char *comment; mysql_var_check_func check; mysql_var_update_func update;
+};
 struct st_mysql_plugin {
   int type;
   void *info;
@@ -141,7 +147,6 @@ void *thd_get_ha_data(const void * thd, const struct handlerton *hton);
 void thd_set_ha_data(void * thd, const struct handlerton *hton,
                      const void *ha_data);
 void remove_ssl_err_thread_state();
-unsigned int thd_get_num_vcpus();
 int thd_command(const void * thd);
 long long thd_start_time(const void * thd);
 void thd_kill(unsigned long id);
@@ -165,12 +170,12 @@ enum enum_server_command {
   COM_FIELD_LIST,
   COM_CREATE_DB,
   COM_DROP_DB,
-  COM_REFRESH,
-  COM_DEPRECATED_1,
+  COM_UNUSED_2,
+  COM_UNUSED_1,
   COM_STATISTICS,
-  COM_PROCESS_INFO,
+  COM_UNUSED_4,
   COM_CONNECT,
-  COM_PROCESS_KILL,
+  COM_UNUSED_5,
   COM_DEBUG,
   COM_PING,
   COM_TIME,
@@ -217,8 +222,8 @@ enum enum_sql_command {
   SQLCOM_SHOW_ENGINE_STATUS,
   SQLCOM_SHOW_ENGINE_MUTEX,
   SQLCOM_SHOW_PROCESSLIST,
-  SQLCOM_SHOW_MASTER_STAT,
-  SQLCOM_SHOW_SLAVE_STAT,
+  SQLCOM_SHOW_BINLOG_STATUS,
+  SQLCOM_SHOW_REPLICA_STATUS,
   SQLCOM_SHOW_GRANTS,
   SQLCOM_SHOW_CREATE,
   SQLCOM_SHOW_CHARSETS,
@@ -253,12 +258,12 @@ enum enum_sql_command {
   SQLCOM_COMMIT,
   SQLCOM_SAVEPOINT,
   SQLCOM_RELEASE_SAVEPOINT,
-  SQLCOM_SLAVE_START,
-  SQLCOM_SLAVE_STOP,
+  SQLCOM_REPLICA_START,
+  SQLCOM_REPLICA_STOP,
   SQLCOM_START_GROUP_REPLICATION,
   SQLCOM_STOP_GROUP_REPLICATION,
   SQLCOM_BEGIN,
-  SQLCOM_CHANGE_MASTER,
+  SQLCOM_CHANGE_REPLICATION_SOURCE,
   SQLCOM_CHANGE_REPLICATION_FILTER,
   SQLCOM_RENAME_TABLE,
   SQLCOM_RESET,
@@ -269,7 +274,7 @@ enum enum_sql_command {
   SQLCOM_HA_OPEN,
   SQLCOM_HA_CLOSE,
   SQLCOM_HA_READ,
-  SQLCOM_SHOW_SLAVE_HOSTS,
+  SQLCOM_SHOW_REPLICAS,
   SQLCOM_DELETE_MULTI,
   SQLCOM_UPDATE_MULTI,
   SQLCOM_SHOW_BINLOG_EVENTS,
@@ -356,6 +361,14 @@ enum enum_sql_command {
   SQLCOM_CREATE_SRS,
   SQLCOM_DROP_SRS,
   SQLCOM_SHOW_PARSE_TREE,
+  SQLCOM_CREATE_LIBRARY,
+  SQLCOM_DROP_LIBRARY,
+  SQLCOM_SHOW_CREATE_LIBRARY,
+  SQLCOM_ALTER_LIBRARY,
+  SQLCOM_SHOW_STATUS_LIBRARY,
+  SQLCOM_CREATE_MASKING_POLICY,
+  SQLCOM_DROP_MASKING_POLICY,
+  SQLCOM_SHOW_CREATE_MASKING_POLICY,
   SQLCOM_SHOW_USER_STATS,
   SQLCOM_SHOW_TABLE_STATS,
   SQLCOM_SHOW_INDEX_STATS,

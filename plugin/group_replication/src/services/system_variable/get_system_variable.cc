@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -124,6 +125,28 @@ int Get_system_variable::get_global_super_read_only(bool &value) {
   return error;
 }
 
+int Get_system_variable::get_most_uptodate(bool &value) {
+  int error = 1;
+
+  if (nullptr == mysql_thread_handler) {
+    return 1;
+  }
+
+  Get_system_variable_parameters *parameter =
+      new Get_system_variable_parameters(
+          Get_system_variable_parameters::VAR_MOST_UPTODATE);
+  Mysql_thread_task *task = new Mysql_thread_task(this, parameter);
+  error = mysql_thread_handler->trigger(task);
+  error |= parameter->get_error();
+
+  if (!error) {
+    value = string_to_bool(parameter->m_result);
+  }
+
+  delete task;
+  return error;
+}
+
 bool Get_system_variable::string_to_bool(const std::string &value) {
   if (value == "ON") {
     return true;
@@ -138,22 +161,28 @@ void Get_system_variable::run(Mysql_thread_body_parameters *parameters) {
   switch (param->get_service()) {
     case Get_system_variable_parameters::VAR_GTID_EXECUTED:
       param->set_error(internal_get_system_variable(
-          std::string("gtid_executed"), param->m_result,
-          GTID_VALUES_FETCH_BUFFER_SIZE));
+          std::string("mysql_server"), std::string("gtid_executed"),
+          param->m_result, GTID_VALUES_FETCH_BUFFER_SIZE));
       break;
     case Get_system_variable_parameters::VAR_GTID_PURGED:
       param->set_error(internal_get_system_variable(
-          std::string("gtid_purged"), param->m_result,
-          GTID_VALUES_FETCH_BUFFER_SIZE));
+          std::string("mysql_server"), std::string("gtid_purged"),
+          param->m_result, GTID_VALUES_FETCH_BUFFER_SIZE));
       break;
     case Get_system_variable_parameters::VAR_READ_ONLY:
       param->set_error(internal_get_system_variable(
-          std::string("read_only"), param->m_result,
-          BOOL_VALUES_FETCH_BUFFER_SIZE));
+          std::string("mysql_server"), std::string("read_only"),
+          param->m_result, BOOL_VALUES_FETCH_BUFFER_SIZE));
       break;
     case Get_system_variable_parameters::VAR_SUPER_READ_ONLY:
       param->set_error(internal_get_system_variable(
-          std::string("super_read_only"), param->m_result,
+          std::string("mysql_server"), std::string("super_read_only"),
+          param->m_result, BOOL_VALUES_FETCH_BUFFER_SIZE));
+      break;
+    case Get_system_variable_parameters::VAR_MOST_UPTODATE:
+      param->set_error(internal_get_system_variable(
+          std::string("group_replication_elect_prefers_most_updated"),
+          std::string("enabled"), param->m_result,
           BOOL_VALUES_FETCH_BUFFER_SIZE));
       break;
     default:
@@ -161,7 +190,8 @@ void Get_system_variable::run(Mysql_thread_body_parameters *parameters) {
   }
 }
 
-int Get_system_variable::internal_get_system_variable(std::string variable,
+int Get_system_variable::internal_get_system_variable(std::string system,
+                                                      std::string variable,
                                                       std::string &value,
                                                       size_t value_max_length) {
   char *var_value = nullptr;
@@ -169,7 +199,7 @@ int Get_system_variable::internal_get_system_variable(std::string variable,
   int error = false;
 
   if (nullptr == server_services_references_module
-                     ->component_sys_variable_register_service) {
+                     ->component_sys_variable_reader_service) {
     error = 1; /* purecov: inspected */
     goto end;  /* purecov: inspected */
   }
@@ -179,9 +209,9 @@ int Get_system_variable::internal_get_system_variable(std::string variable,
     goto end;  /* purecov: inspected */
   }
 
-  if (server_services_references_module->component_sys_variable_register_service
-          ->get_variable("mysql_server", variable.c_str(),
-                         reinterpret_cast<void **>(&var_value), &var_len)) {
+  if (server_services_references_module->component_sys_variable_reader_service
+          ->get(nullptr, "GLOBAL", system.c_str(), variable.c_str(),
+                reinterpret_cast<void **>(&var_value), &var_len)) {
     error = 1; /* purecov: inspected */
     goto end;  /* purecov: inspected */
   }

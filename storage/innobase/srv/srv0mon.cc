@@ -1,18 +1,19 @@
 /*****************************************************************************
 
-Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 Copyright (c) 2012, Facebook Inc.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -403,7 +404,7 @@ static monitor_info_t innodb_counter_info[] = {
      "Avg time (ms) spent for adaptive flushing recently per slot.",
      MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_FLUSH_ADAPTIVE_AVG_TIME_SLOT},
 
-    {"buffer_LRU_batch_flush_avg_time_slot", "buffer",  // TODO: always zero
+    {"buffer_LRU_batch_flush_avg_time_slot", "buffer",
      "Avg time (ms) spent for LRU batch flushing recently per slot.",
      MONITOR_NONE, MONITOR_DEFAULT_START,
      MONITOR_LRU_BATCH_FLUSH_AVG_TIME_SLOT},
@@ -413,7 +414,7 @@ static monitor_info_t innodb_counter_info[] = {
      MONITOR_NONE, MONITOR_DEFAULT_START,
      MONITOR_FLUSH_ADAPTIVE_AVG_TIME_THREAD},
 
-    {"buffer_LRU_batch_flush_avg_time_thread", "buffer",  // TODO: always zero
+    {"buffer_LRU_batch_flush_avg_time_thread", "buffer",
      "Avg time (ms) spent for LRU batch flushing recently per thread.",
      MONITOR_NONE, MONITOR_DEFAULT_START,
      MONITOR_LRU_BATCH_FLUSH_AVG_TIME_THREAD},
@@ -422,7 +423,7 @@ static monitor_info_t innodb_counter_info[] = {
      "Estimated time (ms) spent for adaptive flushing recently.", MONITOR_NONE,
      MONITOR_DEFAULT_START, MONITOR_FLUSH_ADAPTIVE_AVG_TIME_EST},
 
-    {"buffer_LRU_batch_flush_avg_time_est", "buffer",  // TODO: always zero
+    {"buffer_LRU_batch_flush_avg_time_est", "buffer",
      "Estimated time (ms) spent for LRU batch flushing recently.", MONITOR_NONE,
      MONITOR_DEFAULT_START, MONITOR_LRU_BATCH_FLUSH_AVG_TIME_EST},
 
@@ -434,7 +435,7 @@ static monitor_info_t innodb_counter_info[] = {
      "Number of adaptive flushes passed during the recent Avg period.",
      MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_FLUSH_ADAPTIVE_AVG_PASS},
 
-    {"buffer_LRU_batch_flush_avg_pass", "buffer",  // TODO: always zero
+    {"buffer_LRU_batch_flush_avg_pass", "buffer",
      "Number of LRU batch flushes passed during the recent Avg period.",
      MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LRU_BATCH_FLUSH_AVG_PASS},
 
@@ -599,6 +600,16 @@ static monitor_info_t innodb_counter_info[] = {
      "Page scanned per single LRU unzip search", MONITOR_SET_MEMBER,
      MONITOR_LRU_UNZIP_SEARCH_SCANNED,
      MONITOR_LRU_UNZIP_SEARCH_SCANNED_PER_CALL},
+
+    {"buffer_LRU_single_page_flush_count", "buffer",
+     "Times a user thread issued its own single-page flush while"
+     " searching for a free block",
+     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LRU_SINGLE_PAGE_FLUSH_COUNT},
+
+    {"buffer_LRU_flush_await_count", "buffer",
+     "Times a user thread waited for an in-progress LRU flush instead of"
+     " issuing single-page flush",
+     MONITOR_NONE, MONITOR_DEFAULT_START, MONITOR_LRU_FLUSH_AWAIT_COUNT},
 
     /* ========== Counters for Buffer Page I/O ========== */
     {"module_buffer_page", "buffer_page_io", "Buffer Page I/O Module",
@@ -1044,9 +1055,10 @@ static monitor_info_t innodb_counter_info[] = {
      MONITOR_LOG_ON_RECENT_WRITTEN_WAIT_LOOPS},
 
     {"log_on_recent_closed_wait_loops", "log",
-     "Loops of waits in user threads on space in log.recent_closed",
-     /* Non-zero values of the counter => writes to log buffer are delayed.
-     Then innodb_log_recent_closed_slots should be increased. */
+     "Loops of waits in user threads on space in "
+     "innodb_buf_flush_list_added_size",
+     /* Non-zero values of the counter => appends to flush lists are delayed.
+     Then innodb_buf_flush_list_added_size should be increased. */
      MONITOR_NONE, MONITOR_DEFAULT_START,
      MONITOR_LOG_ON_RECENT_CLOSED_WAIT_LOOPS},
 
@@ -1457,7 +1469,7 @@ monitor_value_t innodb_counter_value[NUM_MONITOR];
 
 /* monitor_set_tbl is used to record and determine whether a monitor
 has been turned on/off. */
-ulint monitor_set_tbl[(NUM_MONITOR + NUM_BITS_ULINT - 1) / NUM_BITS_ULINT];
+std::bitset<NUM_MONITOR> monitor_set_tbl;
 
 /** Get a monitor's "monitor_info" by its monitor id (index into the
  innodb_counter_info array.
@@ -1763,7 +1775,7 @@ void srv_mon_process_existing_counter(
       break;
 
     /* innodb_data_read, the amount of data read since the server was started
-     * (in bytes) */
+    (in bytes) */
     case MONITOR_OVLD_BYTE_READ:
       value = srv_stats.data_read;
       break;
@@ -2002,7 +2014,7 @@ void srv_mon_process_existing_counter(
     } break;
 
     case MONITOR_OVLD_LSN_BUF_DIRTY_PAGES_ADDED:
-      value = (mon_type_t)log_buffer_dirty_pages_added_up_to_lsn(*log_sys);
+      value = (mon_type_t)buf_flush_list_added->smallest_not_added_lsn();
       break;
 
     case MONITOR_OVLD_BUF_OLDEST_LSN_APPROX:

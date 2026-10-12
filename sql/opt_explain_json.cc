@@ -1,15 +1,16 @@
-/* Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -399,8 +400,8 @@ class context : public Explain_context {
 /**
   Node class to wrap a subquery node tree
 
-  Implements CTX_WHERE, CTX_HAVING, CTX_ORDER_BY_SQ, CTX_GROUP_BY_SQ and
-  CTX_OPTIMIZED_AWAY_SUBQUERY context nodes.
+  Implements CTX_WHERE, CTX_HAVING,  CTX_QUALIFY, CTX_ORDER_BY_SQ,
+  CTX_GROUP_BY_SQ and CTX_OPTIMIZED_AWAY_SUBQUERY context nodes.
   This class hosts underlying join_ctx or uion_ctx.
 
   Is used for a subquery, a derived table.
@@ -1669,6 +1670,7 @@ bool Explain_format_JSON::begin_context(enum_parsing_context ctx_arg,
              current_context->type == CTX_OPTIMIZED_AWAY_SUBQUERY ||
              current_context->type == CTX_WHERE ||
              current_context->type == CTX_HAVING ||
+             current_context->type == CTX_QUALIFY ||
              current_context->type == CTX_ORDER_BY_SQ ||
              current_context->type == CTX_GROUP_BY_SQ ||
              current_context->type == CTX_QUERY_SPEC);
@@ -1916,6 +1918,7 @@ bool Explain_format_JSON::begin_context(enum_parsing_context ctx_arg,
              current_context->type == CTX_OPTIMIZED_AWAY_SUBQUERY ||
              current_context->type == CTX_WHERE ||
              current_context->type == CTX_HAVING ||
+             current_context->type == CTX_QUALIFY ||
              current_context->type == CTX_ORDER_BY_SQ ||
              current_context->type == CTX_GROUP_BY_SQ ||
              current_context->type == CTX_QUERY_SPEC);
@@ -2111,4 +2114,11 @@ std::string Explain_format_JSON::ExplainJsonToString(Json_object *json) {
     return "";
   }
   return {explain.ptr(), explain.length()};
+}
+
+bool Explain_format_JSON::is_iterator_based(THD *explain_thd,
+                                            const THD *query_thd) const {
+  return query_thd->optimizer_switch_flag(
+             OPTIMIZER_SWITCH_HYPERGRAPH_OPTIMIZER) ||
+         explain_thd->variables.explain_json_format_version == 2;
 }

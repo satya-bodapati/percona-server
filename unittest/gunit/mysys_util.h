@@ -1,17 +1,18 @@
 #ifndef UNITTEST_GUNIT_MYSYS_UTIL_H_
 #define UNITTEST_GUNIT_MYSYS_UTIL_H_
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,47 +29,29 @@
 */
 
 #include "my_inttypes.h"
+#include "my_temporal.h"
 #include "mysql_time.h"
 
 /// Adds sensible constructors to MYSQL_TIME.
-struct MysqlTime : public MYSQL_TIME {
-  MysqlTime() : MysqlTime(0, 0, 0) {}
+struct MysqlTime : public Datetime_val {
+  MysqlTime() : Datetime_val() {}
 
-  MysqlTime(uint year_arg, uint month_arg, uint day_arg)
-      : MysqlTime(year_arg, month_arg, day_arg, 0, 0, 0, 0) {}
+  MysqlTime(uint32_t year_arg, uint32_t month_arg, uint32_t day_arg)
+      : Datetime_val(year_arg, month_arg, day_arg) {}
 
-  MysqlTime(uint year_arg, uint month_arg, uint day_arg, uint hour_arg,
-            uint minute_arg, uint second_arg, ulong microsecond_arg)
-      : MysqlTime(year_arg, month_arg, day_arg, hour_arg, minute_arg,
-                  second_arg, microsecond_arg, false, MYSQL_TIMESTAMP_DATE) {}
+  MysqlTime(uint32_t year_arg, uint32_t month_arg, uint32_t day_arg,
+            uint32_t hour_arg, uint32_t minute_arg, uint32_t second_arg,
+            uint32_t microsecond_arg)
+      : Datetime_val(year_arg, month_arg, day_arg, hour_arg, minute_arg,
+                     second_arg, microsecond_arg) {}
 
-  MysqlTime(uint year_arg, uint month_arg, uint day_arg, uint hour_arg,
-            uint minute_arg, uint second_arg, ulong microsecond_arg,
-            int time_zone_displacement_arg)
-      : MYSQL_TIME{year_arg,
-                   month_arg,
-                   day_arg,
-                   hour_arg,
-                   minute_arg,
-                   second_arg,
-                   microsecond_arg,
-                   false,
-                   MYSQL_TIMESTAMP_DATETIME_TZ,
-                   time_zone_displacement_arg} {}
-
-  MysqlTime(uint year_arg, uint month_arg, uint day_arg, uint hour_arg,
-            uint minute_arg, uint second_arg, ulong microsecond_arg,
-            bool isNegative, enum_mysql_timestamp_type type)
-      : MYSQL_TIME{year_arg,
-                   month_arg,
-                   day_arg,
-                   hour_arg,
-                   minute_arg,
-                   second_arg,
-                   microsecond_arg /* second_arg_part */,
-                   isNegative /* neg */,
-                   type /* time_type */,
-                   0 /* time_zone_displacement_arg */} {}
+  MysqlTime(uint32_t year_arg, uint32_t month_arg, uint32_t day_arg,
+            uint32_t hour_arg, uint32_t minute_arg, uint32_t second_arg,
+            uint32_t microsecond_arg, int32_t time_zone_displacement_arg)
+      : Datetime_val{year_arg,        month_arg,
+                     day_arg,         hour_arg,
+                     minute_arg,      second_arg,
+                     microsecond_arg, time_zone_displacement_arg} {}
 };
 
 #endif  // UNITTEST_GUNIT_MYSYS_UTIL_H_

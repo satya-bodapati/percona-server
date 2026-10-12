@@ -65,6 +65,7 @@ DROP TABLE t1;
 
 #ER_ROW_IS_REFERENCED_2
 #ER_NO_REFERENCED_ROW_2
+SET restrict_fk_on_non_standard_key=OFF;
 CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE = InnoDB;
 CREATE TABLE t2 (b INT, FOREIGN KEY(b) REFERENCES t1(a)) ENGINE = InnoDB;
 CREATE TABLE t3 (c INT PRIMARY KEY, FOREIGN KEY(c) REFERENCES t2(b)) ENGINE = InnoDB;
@@ -87,6 +88,7 @@ UPDATE IGNORE t2 SET b=b+5;
 SELECT * FROM t2;
 
 DROP TABLE t3,t2,t1;
+SET restrict_fk_on_non_standard_key=ON;
 
 #ER_BAD_NULL_ERROR
 CREATE TABLE t1 (a INT) ENGINE = InnoDB;
@@ -211,6 +213,7 @@ UPDATE IGNORE t1,t2 SET t2.b=NULL;
 DROP TABLE t1, t2;
 #ER_ROW_IS_REFERENCED_2
 #ER_NO_REFERENCED_ROW_2
+SET restrict_fk_on_non_standard_key=OFF;
 CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE = InnoDB;
 CREATE TABLE t2 (b INT, FOREIGN KEY(b) REFERENCES t1(a)) ENGINE = InnoDB;
 CREATE TABLE t3 (c INT PRIMARY KEY, FOREIGN KEY(c) REFERENCES t2(b)) ENGINE = InnoDB;
@@ -233,6 +236,7 @@ UPDATE IGNORE t2 SET b=b+5;
 SELECT * FROM t2;
 
 DROP TABLE t3,t2,t1;
+SET restrict_fk_on_non_standard_key=ON;
 
 #ER_ROW_DOES_NOT_MATCH_GIVEN_PARTITION_SET
 CREATE TABLE t1 (a int) ENGINE = InnoDB PARTITION BY HASH (a) PARTITIONS 2;
@@ -262,13 +266,15 @@ UPDATE t1 SET a=4 WHERE a=5;
 UPDATE IGNORE t1 SET a=4 WHERE a=5;
 DROP TABLE t1;
 
-#ER_SUBQUERY_NO_1_ROW
+#ER_SUBQUERY_NO_1_ROW (no longer ignored)
 CREATE TABLE t11 (a INT NOT NULL, b INT, PRIMARY KEY (a)) ENGINE = InnoDB;
 CREATE TABLE t2 (a INT NOT NULL, b INT, PRIMARY KEY (a)) ENGINE = InnoDB;
 INSERT INTO t11 VALUES (0, 10),(1, 11),(2, 12);
 INSERT INTO t2 VALUES (1, 21),(2, 12),(3, 23);
 --error ER_SUBQUERY_NO_1_ROW
 DELETE FROM t11 WHERE t11.b = (SELECT b FROM t2 WHERE t11.a < t2.a);
+# ER_SUBQUERY_NO_1_ROW is no longer in the ignored set
+--error ER_SUBQUERY_NO_1_ROW
 DELETE IGNORE FROM t11 WHERE t11.b = (SELECT b FROM t2 WHERE t11.a < t2.a);
 DROP TABLE t11, t2;
 
@@ -502,8 +508,8 @@ INSERT INTO t2 VALUES (1,3), (2,4);
 # Different number of warnings with hypergraph.
 --disable_warnings
 UPDATE IGNORE t1,t2 SET t2.b=NULL;
---enable_warnings
 UPDATE IGNORE t2,t1 SET t2.b=NULL;
+--enable_warnings
 DROP TABLE t1,t2;
 
 --echo
@@ -515,6 +521,7 @@ DROP TABLE t1,t2;
 --echo # This case checks foreign key relationships.
 #ER_DUP_ENTRY
 #ER_NO_REFERENCED_ROW_2
+SET restrict_fk_on_non_standard_key=OFF;
 CREATE TABLE t1 (a INT PRIMARY KEY) ENGINE = InnoDB;
 CREATE TABLE t2 (b INT, FOREIGN KEY(b) REFERENCES t1(a)) ENGINE = InnoDB;
 CREATE TABLE t3 (c INT PRIMARY KEY, FOREIGN KEY(c) REFERENCES t2(b)) ENGINE = InnoDB;
@@ -537,6 +544,7 @@ UPDATE IGNORE t2 SET b=b+5;
 SELECT * FROM t2;
 
 DROP TABLE t3,t2,t1;
+SET restrict_fk_on_non_standard_key=ON;
 
 --echo # This case checks that the number of warnings returned
 --echo # after multiupdate is correct.
@@ -675,3 +683,14 @@ SET SESSION sql_safe_updates=ON;
 DELETE IGNORE FROM t1 WHERE a=1;
 DROP TABLE t1;
 SET sql_safe_updates= @org_safe_updates;
+
+--echo #
+--echo # Bug#35373406 Subquery to derived optimizer assertion error
+--echo #
+CREATE TABLE t1(c0 INT);
+INSERT INTO t1 VALUES (1), (2);
+SET @@SESSION.OPTIMIZER_SWITCH = 'subquery_to_derived=on';
+--error ER_SUBQUERY_NO_1_ROW
+INSERT IGNORE INTO t1 (SELECT (SELECT t1.c0 FROM t1) FROM t1);
+SET @@SESSION.OPTIMIZER_SWITCH = 'subquery_to_derived=default';
+DROP TABLE t1;

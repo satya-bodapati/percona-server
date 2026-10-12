@@ -1,15 +1,16 @@
-// Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+// Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License, version 2.0,
 // as published by the Free Software Foundation.
 //
-// This program is also distributed with certain software (including
+// This program is designed to work with certain software (including
 // but not limited to OpenSSL) that is licensed under separate terms,
 // as designated in a particular file or component or in included license
 // documentation.  The authors of MySQL hereby grant you an additional
 // permission to link the program and your derivative works with the
-// separately licensed software that they have included with MySQL.
+// separately licensed software that they have either included with
+// the program or referenced in the documentation.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -58,7 +59,8 @@ static std::unique_ptr<Geometry> typed_geometry_collection_apply_difference(
     if (mpy_result->type() == Geometry_type::kPolygon)
       result->push_back(*mpy_result);
     else
-      for (auto py : *down_cast<MPy *>(mpy_result.get())) result->push_back(py);
+      for (const auto &py : *down_cast<MPy *>(mpy_result.get()))
+        result->push_back(py);
   }
 
   if (!mls->is_empty()) {
@@ -69,7 +71,8 @@ static std::unique_ptr<Geometry> typed_geometry_collection_apply_difference(
     if (mls_result->type() == Geometry_type::kLinestring)
       result->push_back(*mls_result);
     else
-      for (auto ls : *down_cast<MLs *>(mls_result.get())) result->push_back(ls);
+      for (const auto &ls : *down_cast<MLs *>(mls_result.get()))
+        result->push_back(ls);
   }
 
   if (!mpt->is_empty()) {
@@ -80,7 +83,8 @@ static std::unique_ptr<Geometry> typed_geometry_collection_apply_difference(
     if (mpt_result->type() == Geometry_type::kPoint)
       result->push_back(*mpt_result);
     else
-      for (auto pt : *down_cast<MPt *>(mpt_result.get())) result->push_back(pt);
+      for (const auto &pt : *down_cast<MPt *>(mpt_result.get()))
+        result->push_back(pt);
   }
 
   return std::make_unique<GC>(*result);
@@ -189,10 +193,10 @@ std::unique_ptr<Cartesian_multipoint> Difference::eval(
 
 std::unique_ptr<Geometry> Difference::eval(
     const Cartesian_point *g1, const Cartesian_geometrycollection *g2) const {
-  Cartesian_multipoint *result_g = new Cartesian_multipoint();
+  auto *result_g = new Cartesian_multipoint();
   std::unique_ptr<Geometry> result(result_g);
   result_g->push_back(*g1);
-  for (auto g : *g2) {
+  for (auto *g : *g2) {
     result = (*this)(result.get(), g);
   }
   return result;
@@ -255,10 +259,10 @@ std::unique_ptr<Cartesian_multilinestring> Difference::eval(
 std::unique_ptr<Geometry> Difference::eval(
     const Cartesian_linestring *g1,
     const Cartesian_geometrycollection *g2) const {
-  Cartesian_multilinestring *result_g = new Cartesian_multilinestring();
+  auto *result_g = new Cartesian_multilinestring();
   std::unique_ptr<Geometry> result(result_g);
   result_g->push_back(*g1);
-  for (auto g : *g2) {
+  for (auto *g : *g2) {
     result = (*this)(result.get(), g);
   }
   return result;
@@ -323,10 +327,10 @@ std::unique_ptr<Cartesian_multipolygon> Difference::eval(
 
 std::unique_ptr<Geometry> Difference::eval(
     const Cartesian_polygon *g1, const Cartesian_geometrycollection *g2) const {
-  Cartesian_multipolygon *result_g = new Cartesian_multipolygon();
+  auto *result_g = new Cartesian_multipolygon();
   std::unique_ptr<Geometry> result(result_g);
   result_g->push_back(*g1);
-  for (auto g : *g2) {
+  for (auto *g : *g2) {
     result = (*this)(result.get(), g);
   }
   return result;
@@ -397,7 +401,7 @@ std::unique_ptr<Geometry> Difference::eval(
     const Cartesian_multipoint *g1,
     const Cartesian_geometrycollection *g2) const {
   std::unique_ptr<Geometry> result(g1->clone());
-  for (auto g : *g2) {
+  for (auto *g : *g2) {
     result = (*this)(result.get(), g);
   }
   return result;
@@ -464,7 +468,7 @@ std::unique_ptr<Geometry> Difference::eval(
     const Cartesian_multilinestring *g1,
     const Cartesian_geometrycollection *g2) const {
   std::unique_ptr<Geometry> result(g1->clone());
-  for (auto g : *g2) {
+  for (auto *g : *g2) {
     result = (*this)(result.get(), g);
   }
   return result;
@@ -531,7 +535,7 @@ std::unique_ptr<Geometry> Difference::eval(
     const Cartesian_multipolygon *g1,
     const Cartesian_geometrycollection *g2) const {
   std::unique_ptr<Geometry> result(g1->clone());
-  for (auto g : *g2) {
+  for (auto *g : *g2) {
     result = (*this)(result.get(), g);
   }
   return result;
@@ -588,10 +592,10 @@ std::unique_ptr<Geographic_multipoint> Difference::eval(
 
 std::unique_ptr<Geometry> Difference::eval(
     const Geographic_point *g1, const Geographic_geometrycollection *g2) const {
-  Geographic_multipoint *result_g = new Geographic_multipoint();
+  auto *result_g = new Geographic_multipoint();
   std::unique_ptr<Geometry> result(result_g);
   result_g->push_back(*g1);
-  for (auto g : *g2) {
+  for (auto *g : *g2) {
     result = (*this)(result.get(), g);
   }
   return result;
@@ -656,10 +660,10 @@ std::unique_ptr<Geographic_multilinestring> Difference::eval(
 std::unique_ptr<Geometry> Difference::eval(
     const Geographic_linestring *g1,
     const Geographic_geometrycollection *g2) const {
-  Geographic_multilinestring *result_g = new Geographic_multilinestring();
+  auto *result_g = new Geographic_multilinestring();
   std::unique_ptr<Geometry> result(result_g);
   result_g->push_back(*g1);
-  for (auto g : *g2) {
+  for (auto *g : *g2) {
     result = (*this)(result.get(), g);
   }
   return result;
@@ -725,10 +729,10 @@ std::unique_ptr<Geographic_multipolygon> Difference::eval(
 std::unique_ptr<Geometry> Difference::eval(
     const Geographic_polygon *g1,
     const Geographic_geometrycollection *g2) const {
-  Geographic_multipolygon *result_g = new Geographic_multipolygon();
+  auto *result_g = new Geographic_multipolygon();
   std::unique_ptr<Geometry> result(result_g);
   result_g->push_back(*g1);
-  for (auto g : *g2) {
+  for (auto *g : *g2) {
     result = (*this)(result.get(), g);
   }
   return result;
@@ -800,7 +804,7 @@ std::unique_ptr<Geometry> Difference::eval(
     const Geographic_multipoint *g1,
     const Geographic_geometrycollection *g2) const {
   std::unique_ptr<Geometry> result(g1->clone());
-  for (auto g : *g2) {
+  for (auto *g : *g2) {
     result = (*this)(result.get(), g);
   }
   return result;
@@ -869,7 +873,7 @@ std::unique_ptr<Geometry> Difference::eval(
     const Geographic_multilinestring *g1,
     const Geographic_geometrycollection *g2) const {
   std::unique_ptr<Geometry> result(g1->clone());
-  for (auto g : *g2) {
+  for (auto *g : *g2) {
     result = (*this)(result.get(), g);
   }
   return result;
@@ -939,7 +943,7 @@ std::unique_ptr<Geometry> Difference::eval(
     const Geographic_multipolygon *g1,
     const Geographic_geometrycollection *g2) const {
   std::unique_ptr<Geometry> result(g1->clone());
-  for (auto g : *g2) {
+  for (auto *g : *g2) {
     result = (*this)(result.get(), g);
   }
   return result;

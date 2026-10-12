@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -236,6 +237,48 @@ struct Tester {
   @param[in]   tokens   the given command line
   @return RET_PASS on success, or the error code. */
   [[nodiscard]] Ret_t find_tablespace_file_name(
+      std::vector<std::string> &tokens) noexcept;
+
+  /** Insert one row into a vector-index aux table via the parser-free
+  vec0dml layer ( test surface).
+  Usage: vec_aux_insert_row db/table id level f1,f2,.. nb_spec
+  nb_spec is per-level neighbor labels: "1:2|3" = level0 {1,2},
+  level1 {3}; "-" = none. row_ref is written as the 8-byte image of id.
+  @param[in]   tokens   the given command line
+  @return RET_PASS on success, or the error code. */
+  [[nodiscard]] Ret_t vec_aux_insert_row(
+      std::vector<std::string> &tokens) noexcept;
+
+  /** Update the neighbors BLOB of one aux row via vec0dml.
+  Usage: vec_aux_update_row db/table id nb_spec
+  @param[in]   tokens   the given command line
+  @return RET_PASS on success, or the error code. */
+  [[nodiscard]] Ret_t vec_aux_update_row(
+      std::vector<std::string> &tokens) noexcept;
+
+  /** Dump all visible rows of a table's vector aux table, sorted by id.
+  Usage: vec_aux_dump db/table
+  @param[in]   tokens   the given command line
+  @return RET_PASS on success, or the error code. */
+  [[nodiscard]] Ret_t vec_aux_dump(std::vector<std::string> &tokens) noexcept;
+
+  /** Order-independent consistency check on a vector aux table. Reports
+  only invariants that hold whatever order concurrent inserts ran in, so
+  it stays usable once concurrent graph mutation is allowed.
+  Usage: vec_aux_verify db/table */
+  [[nodiscard]] Ret_t vec_aux_verify(std::vector<std::string> &tokens) noexcept;
+
+  /** Assign the next vector label for a table and print it.
+  Usage: vec_next_id db/table
+  @param[in]  tokens  the command
+  @return the status */
+  [[nodiscard]] Ret_t vec_next_id(std::vector<std::string> &tokens) noexcept;
+
+  /** Print a vector index runtime's parameters.
+  Usage: vec_runtime_info db/table
+  @param[in]  tokens  the command
+  @return the status */
+  [[nodiscard]] Ret_t vec_runtime_info(
       std::vector<std::string> &tokens) noexcept;
 
   /** A macro to declare a dispatch function or a command function.  They all

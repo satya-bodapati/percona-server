@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,8 +26,8 @@
 #endif
 #include "xcom/xcom_msg_queue.h"
 
-#include <assert.h>
-#include <stdlib.h>
+#include <cassert>
+#include <cstdlib>
 
 #include "xcom/pax_msg.h"
 #include "xcom/server_struct.h"
@@ -75,13 +76,14 @@ msg_link *msg_link_new(pax_msg *p, node_no to) {
   if (link_empty(&msg_link_list)) {
     ret = (msg_link *)xcom_calloc((size_t)1, sizeof(msg_link));
     msg_link_init(ret, p, to);
-    /* IFDBG(D_NONE, FN; STRLIT(" allocate "); PTREXP(ret);
+    /* XCOM_IFDBG(D_NONE, FN; STRLIT(" allocate "); PTREXP(ret);
     dbg_linkage(&ret->l)); */
   } else {
-    /* IFDBG(D_NONE, FN; STRLIT("get from free list ");
+    /* XCOM_IFDBG(D_NONE, FN; STRLIT("get from free list ");
      * dbg_linkage(&msg_link_list));*/
     ret = (msg_link *)link_extract_first(&msg_link_list);
-    /* IFDBG(D_NONE, FN; STRLIT("msg_link_new from free list "); PTREXP(ret););
+    /* XCOM_IFDBG(D_NONE, FN; STRLIT("msg_link_new from free list ");
+     * PTREXP(ret););
      */
     assert(!ret->p);
     msg_link_init(ret, p, to);
@@ -92,11 +94,11 @@ msg_link *msg_link_new(pax_msg *p, node_no to) {
 /* Put msg_link in free list */
 void msg_link_delete(msg_link **link_p) {
   msg_link *link = *link_p;
-  /* IFDBG(D_NONE, FN; PTREXP(link);); */
+  /* XCOM_IFDBG(D_NONE, FN; PTREXP(link);); */
   link_into(link_out(&link->l), &msg_link_list);
   replace_pax_msg(&link->p, nullptr);
   *link_p = nullptr;
-  /* IFDBG(D_NONE, FN; STRLIT("insert in free list ");
+  /* XCOM_IFDBG(D_NONE, FN; STRLIT("insert in free list ");
    * dbg_linkage(&msg_link_list));
    */
 }
@@ -104,7 +106,7 @@ void msg_link_delete(msg_link **link_p) {
 /* Deallocate msg_link */
 static void msg_link_free(msg_link **link_p) {
   msg_link *link = *link_p;
-  /* IFDBG(D_NONE, FN; STRLIT("msg_link_free link %p",(void*)link);); */
+  /* XCOM_IFDBG(D_NONE, FN; STRLIT("msg_link_free link %p",(void*)link);); */
   link_out(&link->l);
   replace_pax_msg(&link->p, nullptr);
   free(link);
@@ -132,7 +134,7 @@ void shrink_msg_list(linkage *l, int n) {
 #endif
 
 void empty_msg_channel(channel *c) {
-  IFDBG(D_NONE, FN;);
+  XCOM_IFDBG(D_NONE, FN;);
   task_wakeup(&c->queue);   /* Wake up all tasks in queue */
   empty_msg_list(&c->data); /* Empty the queue */
 }
@@ -140,7 +142,7 @@ void empty_msg_channel(channel *c) {
 #if 0
 /* purecov: begin deadcode */
 void shrink_msg_channel(channel *c, int n) {
-  IFDBG(D_NONE, FN;);
+  XCOM_IFDBG(D_NONE, FN;);
   task_wakeup(&c->queue);       /* Wake up all tasks in queue */
   shrink_msg_list(&c->data, n); /* Empty the queue */
 }
@@ -149,7 +151,7 @@ void shrink_msg_channel(channel *c, int n) {
 
 /* Empty the free list */
 void empty_link_free_list() {
-  IFDBG(D_NONE, FN; STRLIT("empty_link_free_list"););
+  XCOM_IFDBG(D_NONE, FN; STRLIT("empty_link_free_list"););
   while (!link_empty(&msg_link_list)) {
     msg_link *link = (msg_link *)link_extract_first(&msg_link_list);
     msg_link_free(&link);

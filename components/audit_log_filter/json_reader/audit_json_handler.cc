@@ -14,6 +14,8 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA */
 
 #include "components/audit_log_filter/json_reader/audit_json_handler.h"
+#include <cassert>
+#include <cstring>  // std::strcpy
 #include "components/audit_log_filter/audit_log_reader.h"
 
 namespace audit_log_filter::json_reader {
@@ -62,7 +64,10 @@ void AuditJsonHandler::iterative_parse_init() noexcept {
 }
 
 void AuditJsonHandler::iterative_parse_close(bool with_null_tag) noexcept {
-  if (m_used_buff_size > 2 && !with_null_tag) {
+  // Remove the trailing ",\n" from the last event, if present,
+  // to ensure valid JSON array closing.
+  if (m_used_buff_size >= 2 && (m_current_buff - 2)[0] == ',' &&
+      (m_current_buff - 1)[0] == '\n' && !with_null_tag) {
     m_current_buff -= 2;
     m_used_buff_size -= 2;
   }
@@ -72,60 +77,86 @@ void AuditJsonHandler::iterative_parse_close(bool with_null_tag) noexcept {
   write_out_buff(closing_tag.c_str(), closing_tag.length());
 }
 
-bool AuditJsonHandler::Null() { return true; }
+// --- Value Handlers ---
+
+bool AuditJsonHandler::Null() {
+  before_value();
+  m_event_str << "null";
+  return true;
+}
 
 bool AuditJsonHandler::Bool(bool value) {
-  m_event_str << (value ? "true" : "false") << ", ";
+  before_value();
+  m_event_str << (value ? "true" : "false");
   return true;
 }
 
 bool AuditJsonHandler::Int(int value) {
-  update_bookmark(value);
-  m_event_str << value << ", ";
+  update_bookmark(static_cast<uint64_t>(value));
+  before_value();
+  m_event_str << value;
   return true;
 }
 
 bool AuditJsonHandler::Uint(unsigned value) {
-  update_bookmark(value);
-  m_event_str << value << ", ";
+  update_bookmark(static_cast<uint64_t>(value));
+  before_value();
+  m_event_str << value;
   return true;
 }
 
 bool AuditJsonHandler::Int64(int64_t value) {
-  update_bookmark(value);
-  m_event_str << value << ", ";
+  update_bookmark(static_cast<uint64_t>(value));
+  before_value();
+  m_event_str << value;
   return true;
 }
 
 bool AuditJsonHandler::Uint64(uint64_t value) {
   update_bookmark(value);
-  m_event_str << value << ", ";
+  before_value();
+  m_event_str << value;
   return true;
 }
 
 bool AuditJsonHandler::Double(double value) {
-  m_event_str << value << ", ";
+  before_value();
+  m_event_str << value;
   return true;
 }
 
-bool AuditJsonHandler::String(const char *value,
-                              rapidjson::SizeType length [[maybe_unused]],
+bool AuditJsonHandler::String(const char *value, rapidjson::SizeType length,
                               bool copy [[maybe_unused]]) {
-  update_bookmark(value);
-  m_event_str << "\"" << value << "\", ";
+  std::string s_value(value, length);
+  update_bookmark(s_value);
+  before_value();
+  m_event_str << "\"" << s_value << "\"";
   return true;
 }
+
+// --- Structure Handlers ---
 
 bool AuditJsonHandler::StartObject() {
+  before_value();
   ++m_obj_level;
   m_event_str << "{";
+  m_context_stack.push_back({ContainerType::Object, true});
   return true;
 }
 
-bool AuditJsonHandler::Key(const char *str,
-                           rapidjson::SizeType length [[maybe_unused]],
+bool AuditJsonHandler::Key(const char *str, rapidjson::SizeType length,
                            bool copy [[maybe_unused]]) {
-  m_current_key_name = str;
+  m_current_key_name.assign(str, length);
+  assert(!m_context_stack.empty());
+  assert(m_context_stack.back().type == ContainerType::Object);
+
+  auto &context = m_context_stack.back();
+  if (context.is_first_element) {
+    context.is_first_element = false;
+  } else {
+    m_event_str << ", ";
+  }
+
   m_event_str << "\"" << str << "\": ";
   return true;
 }
@@ -136,20 +167,21 @@ bool AuditJsonHandler::EndObject(rapidjson::SizeType memberCount
     --m_obj_level;
   }
 
-  if (m_obj_level > 0) {
-    // remove comma after last event
-    m_event_str.seekp(-2, std::ios_base::end);
-  }
-
   m_event_str << "}";
+  assert(!m_context_stack.empty());
+  assert(m_context_stack.back().type == ContainerType::Object);
+  m_context_stack.pop_back();
 
+  // Handle the completed top-level event object.
   if (m_obj_level == 0) {
     if (!check_reading_start_reached()) {
       clear_current_event();
       return true;
     }
 
+    // Add the inter-event separator (comma and newline).
     m_event_str << ",\n";
+
     const auto event_length = m_event_str.str().length();
     const auto max_array_length =
         m_reader_context->batch_reader_args->max_array_length;
@@ -171,6 +203,14 @@ bool AuditJsonHandler::EndObject(rapidjson::SizeType memberCount
 }
 
 bool AuditJsonHandler::StartArray() {
+  const bool is_top_level_array = (m_arr_level == 0 && m_obj_level == 0);
+
+  if (!is_top_level_array) {
+    before_value();
+    m_event_str << "[";
+    m_context_stack.push_back({ContainerType::Array, true});
+  }
+
   ++m_arr_level;
   return true;
 }
@@ -178,20 +218,57 @@ bool AuditJsonHandler::StartArray() {
 bool AuditJsonHandler::EndArray(rapidjson::SizeType elementCount
                                 [[maybe_unused]]) {
   if (m_arr_level > 0) {
+    if (!(m_arr_level == 1 && m_obj_level == 0)) {
+      m_event_str << "]";
+      assert(!m_context_stack.empty());
+      assert(m_context_stack.back().type == ContainerType::Array);
+      m_context_stack.pop_back();
+    }
+
     --m_arr_level;
   }
   return true;
 }
 
-void AuditJsonHandler::clear_current_event() { m_event_str.str(std::string()); }
+void AuditJsonHandler::before_value() {
+  if (m_context_stack.empty()) {
+    return;
+  }
+
+  auto &context = m_context_stack.back();
+  if (context.type != ContainerType::Array) {
+    return;
+  }
+
+  if (context.is_first_element) {
+    context.is_first_element = false;
+  } else {
+    m_event_str << ", ";
+  }
+}
+
+void AuditJsonHandler::clear_current_event() {
+  m_event_str.str(std::string());
+  m_event_str.clear();
+  m_current_key_name.clear();
+  m_current_event_bookmark = {};
+}
 
 bool AuditJsonHandler::check_reading_start_reached() {
   if (!m_reading_start_reached) {
-    m_reading_start_reached = m_reader_context->next_event_bookmark.timestamp ==
-                                  m_current_event_bookmark.timestamp &&
-                              (m_reader_context->next_event_bookmark.id == 0 ||
-                               m_reader_context->next_event_bookmark.id ==
-                                   m_current_event_bookmark.id);
+    switch (m_reader_context->batch_reader_args->command) {
+      case AuditLogReaderArgs::Command::ReadFromBookmark:
+        m_reading_start_reached =
+            m_reader_context->next_event_bookmark == m_current_event_bookmark;
+        break;
+      case AuditLogReaderArgs::Command::ReadFromTimestamp:
+        m_reading_start_reached =
+            m_reader_context->next_event_bookmark.timestamp <=
+            m_current_event_bookmark.timestamp;
+        break;
+      default:
+        assert(false);
+    }
   }
 
   return m_reading_start_reached;

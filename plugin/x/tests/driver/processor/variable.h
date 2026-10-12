@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -65,7 +66,7 @@ class Variable_string_readonly : public Variable_string {
   explicit Variable_string_readonly(const Value_type &value)
       : Variable_string(std::to_string(value)) {}
 
-  bool set_value(const std::string &value) override { return false; }
+  bool set_value(const std::string & /*value*/) override { return false; }
 };
 
 class Variable_dynamic_string : public Variable_interface {
@@ -95,7 +96,7 @@ class Variable_dynamic_array_of_strings : public Variable_interface {
       const Array_of_string_ref &value_ref)
       : m_value(value_ref) {}
 
-  bool set_value(const std::string &value) override { return false; }
+  bool set_value(const std::string & /*value*/) override { return false; }
 
   std::string get_value() const override {
     switch (m_value.get().size()) {

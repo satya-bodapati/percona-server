@@ -1,15 +1,16 @@
-/* Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -203,7 +204,9 @@ int Transaction_monitor_thread::start() {
   while (m_transaction_monitor_thd_state.is_alive_not_running()) {
     DBUG_PRINT("sleep",
                ("Waiting for the transaction monitor thread to start"));
-    mysql_cond_wait(&m_run_cond, &m_run_lock);
+    struct timespec abstime;
+    set_timespec(&abstime, 1);
+    mysql_cond_timedwait(&m_run_cond, &m_run_lock, &abstime);
   }
 
 end:
@@ -243,6 +246,7 @@ end:
   mysql_mutex_lock(&m_run_lock);
   m_transaction_monitor_thd_state.set_running();
   mysql_cond_broadcast(&m_run_cond);
+  mysql_mutex_unlock(&m_run_lock);
 
   m_mysql_new_transaction_control->stop();
 
@@ -254,7 +258,12 @@ end:
 #endif /* HAVE_PSI_THREAD_INTERFACE */
 
   // main_loop
-  while (!m_abort && !thd->is_killed()) {
+  while (!thd->is_killed()) {
+    mysql_mutex_lock(&m_run_lock);
+    if (m_abort) {
+      mysql_mutex_unlock(&m_run_lock);
+      break;
+    }
     time_now = SteadyClock::now();
     /**
       If time has elapsed disconnect the client connections running the
@@ -280,7 +289,9 @@ end:
             execution of this thread.
     */
     if (clients_disconnected) {
-      mysql_cond_wait(&m_run_cond, &m_run_lock);
+      struct timespec abstime;
+      set_timespec(&abstime, 1);
+      mysql_cond_timedwait(&m_run_cond, &m_run_lock, &abstime);
     } else {
       long int time_pending = std::chrono::duration_cast<std::chrono::seconds>(
                                   transaction_timeout_time - time_now)
@@ -291,6 +302,7 @@ end:
         mysql_cond_timedwait(&m_run_cond, &m_run_lock, &abstime);
       }
     }
+    mysql_mutex_unlock(&m_run_lock);
     /**
       1. Refresh time_now.
       2. Disconnect the clients only once.
@@ -331,6 +343,7 @@ end:
   global_thd_manager_remove_thd(thd);
   delete thd;
   my_thread_end();
+  mysql_mutex_lock(&m_run_lock);
   m_transaction_monitor_thd_state.set_terminated();
   mysql_cond_broadcast(&m_run_cond);  // Unblock terminate
   mysql_mutex_unlock(&m_run_lock);

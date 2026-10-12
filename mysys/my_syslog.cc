@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -31,21 +32,18 @@
   @file mysys/my_syslog.cc
 */
 
-#include <stddef.h>
+#include <cassert>
 
-#include "my_compiler.h"
 #include "my_dbug.h"
 #include "my_sys.h"
 #include "mysql/my_loglevel.h"
-#include "mysql/strings/m_ctype.h"
+#include "mysql/strings/m_ctype.h"  // IWYU pragma: keep
 #if defined(_WIN32)
 #include <stdio.h>
 
 #include "mysql/service_mysql_alloc.h"
 #include "mysys/mysys_priv.h"
 #endif
-
-extern CHARSET_INFO my_charset_utf16le_bin;
 
 #ifndef _WIN32
 #include <syslog.h>
@@ -127,9 +125,9 @@ int my_syslog(const CHARSET_INFO *cs [[maybe_unused]], enum loglevel level,
   }
 
   if (hEventLog) {
-    nbytes =
-        my_convert((char *)buff, sizeof(buff) - sizeof(buff[0]),
-                   &my_charset_utf16le_bin, msg, msg_len, cs, &dummy_errors);
+    nbytes = my_convert((char *)buff, sizeof(buff) - sizeof(buff[0]),
+                        get_charset_by_name("utf16le_bin", MYF(0)), msg,
+                        msg_len, cs, &dummy_errors);
 
     // terminate it with NULL
     buff[nbytes / sizeof(wchar_t)] = L'\0';
@@ -186,6 +184,9 @@ err:
 
 #ifdef _WIN32
 
+const char registry_prefix[] =
+    "SYSTEM\\CurrentControlSet\\services\\eventlog\\Application\\";
+
 /**
    Create a key in the Windows registry.
    We'll setup a "MySQL" key in the EventLog branch (RegCreateKey),
@@ -204,9 +205,6 @@ err:
      0 Success
     -1 Error
 */
-
-const char registry_prefix[] =
-    "SYSTEM\\CurrentControlSet\\services\\eventlog\\Application\\";
 
 static int windows_eventlog_create_registry_entry(const char *key) {
   HKEY hRegKey = nullptr;
@@ -284,7 +282,7 @@ static int windows_eventlog_create_registry_entry(const char *key) {
 */
 int my_openlog(const char *name, int option, int facility) {
 #ifndef _WIN32
-  int opts = (option & MY_SYSLOG_PIDS) ? LOG_PID : 0;
+  int const opts = (option & MY_SYSLOG_PIDS) ? LOG_PID : 0;
 
   DBUG_TRACE;
   openlog(name, opts | LOG_NDELAY, facility);
@@ -324,7 +322,7 @@ int my_openlog(const char *name, int option, int facility) {
      0 Success
     -1 Error
 */
-int my_closelog(void) {
+int my_closelog() {
   DBUG_TRACE;
 #ifndef _WIN32
   closelog();

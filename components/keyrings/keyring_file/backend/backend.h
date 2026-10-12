@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,11 +30,11 @@
 #include <components/keyrings/common/memstore/iterator.h>
 #include <components/keyrings/common/operations/operations.h>
 
-namespace keyring_file {
-namespace backend {
+namespace keyring_file::backend {
+
 class Keyring_file_backend final {
  public:
-  explicit Keyring_file_backend(const std::string keyring_file_name,
+  explicit Keyring_file_backend(const std::string &keyring_file_name,
                                 bool read_only);
 
   ~Keyring_file_backend() = default;
@@ -127,7 +128,7 @@ class Keyring_file_backend final {
   bool write_to_file();
 
   /** Create data file if missing */
-  void create_file_if_missing(std::string file_name);
+  void create_file_if_missing(const std::string &file_name);
 
  private:
   /** Keyring file */
@@ -142,7 +143,7 @@ class Keyring_file_backend final {
   /** Validity */
   bool valid_;
 };
-}  // namespace backend
-}  // namespace keyring_file
+
+}  // namespace keyring_file::backend
 
 #endif  // !KEYRING_FILE_BACKEND_INCLUDED

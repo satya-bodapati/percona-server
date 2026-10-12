@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,6 +27,8 @@
 #include "my_config.h"
 #include "mysql/binlog/event/control_events.h"
 #include "mysql/binlog/event/statement_events.h"
+#include "mysql/gtids/legacy_glue.h"
+
 namespace cs::reader::binary {
 
 Tracker::Tracker() {
@@ -58,7 +61,8 @@ bool Tracker::track_and_update(std::shared_ptr<State> state,
 #endif
 
   switch (ev_type) {
-    case mysql::binlog::event::GTID_LOG_EVENT: {
+    case mysql::binlog::event::GTID_LOG_EVENT:
+    case mysql::binlog::event::GTID_TAGGED_LOG_EVENT: {
       BAPI_ASSERT(!was_inside_transaction);
       BAPI_ASSERT(m_current_gtid_event_buffer.empty());
       // save the gtid buffer, so we can instantiate the event later and
@@ -112,8 +116,10 @@ bool Tracker::track_and_update(std::shared_ptr<State> state,
     mysql::binlog::event::Gtid_event gev{m_current_gtid_event_buffer.c_str(),
                                          m_fde.get()};
     if (!gev.header()->get_is_valid()) return true;
-    mysql::gtid::Gtid gtid(gev.get_uuid(), gev.get_gno());
-    state->add_gtid(gtid);
+    mysql::gtid::Gtid old_gtid(gev.get_tsid(), gev.get_gno());
+    mysql::gtids::Gtid new_gtid;
+    mysql::gtids::old_to_new(old_gtid, new_gtid);
+    state->add_gtid(new_gtid);
     m_current_gtid_event_buffer.clear();
   }
 

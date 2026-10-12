@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -34,17 +35,13 @@ using std::unique_ptr;
 
 namespace keyring {
 
-extern PSI_memory_key key_memory_KEYRING;
-
 Keys_container::Keys_container(ILogger *logger)
     : keys_hash(new Keys_container::Key_hash(system_charset_info,
                                              key_memory_KEYRING)),
       logger(logger),
       keyring_io(nullptr) {}
 
-Keys_container::~Keys_container() {
-  if (keyring_io != nullptr) delete keyring_io;
-}
+Keys_container::~Keys_container() { delete keyring_io; }
 
 bool Keys_container::init(IKeyring_io *keyring_io,
                           std::string keyring_storage_url) {
@@ -77,13 +74,10 @@ void Keys_container::store_keys_metadata(IKey *key) {
 bool Keys_container::store_key_in_hash(IKey *key) {
   // TODO: This can be written more succinctly with C++17's try_emplace.
   const string signature = *key->get_key_signature();
-  if (keys_hash->count(signature) != 0)
-    return true;
-  else {
-    keys_hash->emplace(signature, unique_ptr<IKey>(key));
-    store_keys_metadata(key);
-    return false;
-  }
+  if (keys_hash->contains(signature)) return true;
+  keys_hash->emplace(signature, unique_ptr<IKey>(key));
+  store_keys_metadata(key);
+  return false;
 }
 
 bool Keys_container::store_key(IKey *key) {
@@ -103,7 +97,7 @@ void Keys_container::allocate_and_set_data_for_key(
     IKey *key, std::string *source_key_type, uchar *source_key_data,
     size_t source_key_data_size) {
   key->set_key_type(source_key_type);
-  uchar *key_data = keyring_malloc<uchar *>(source_key_data_size);
+  auto *key_data = keyring_malloc<uchar *>(source_key_data_size);
   memcpy(key_data, source_key_data, source_key_data_size);
   key->set_key_data(key_data, source_key_data_size);
 }
@@ -126,7 +120,7 @@ IKey *Keys_container::fetch_key(IKey *key) {
 
 bool Keys_container::remove_keys_metadata(IKey *key) {
   const Key_metadata src(key->get_key_id(), key->get_user_id());
-  auto it =
+  const auto it =
       std::find_if(keys_metadata.begin(), keys_metadata.end(),
                    [src](Key_metadata const &dest) {
                      return (*src.id == *dest.id && *src.user == *dest.user);
@@ -139,9 +133,9 @@ bool Keys_container::remove_keys_metadata(IKey *key) {
 }
 
 bool Keys_container::remove_key_from_hash(IKey *key) {
-  auto it = keys_hash->find(*key->get_key_signature());
+  const auto it = keys_hash->find(*key->get_key_signature());
   if (it == keys_hash->end()) return true;
-  it->second.release();  // Prevent erase from removing key from memory
+  (void)it->second.release();  // Prevent erase from removing key from memory
   keys_hash->erase(it);
   remove_keys_metadata(key);
   return false;
@@ -165,15 +159,13 @@ bool Keys_container::remove_key(IKey *key) {
 }
 
 bool Keys_container::load_keys_from_keyring_storage() {
-  bool was_error = false;
   ISerialized_object *serialized_keys = nullptr;
-  was_error = keyring_io->get_serialized_object(&serialized_keys);
-  while (was_error == false && serialized_keys != nullptr) {
+  bool was_error = keyring_io->get_serialized_object(&serialized_keys);
+  while (!was_error && serialized_keys != nullptr) {
     IKey *key_loaded = nullptr;
     while (serialized_keys->has_next_key()) {
       if (serialized_keys->get_next_key(&key_loaded) || key_loaded == nullptr ||
-          key_loaded->is_key_valid() == false ||
-          store_key_in_hash(key_loaded)) {
+          !key_loaded->is_key_valid() || store_key_in_hash(key_loaded)) {
         was_error = true;
         delete key_loaded;
         break;
@@ -182,7 +174,7 @@ bool Keys_container::load_keys_from_keyring_storage() {
     }
     delete serialized_keys;
     serialized_keys = nullptr;
-    if (was_error == false && keyring_io->has_next_serialized_object())
+    if (!was_error && keyring_io->has_next_serialized_object())
       was_error = keyring_io->get_serialized_object(&serialized_keys);
   }
   if (was_error)

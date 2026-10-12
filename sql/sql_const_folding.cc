@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -236,7 +237,7 @@ static bool analyze_int_field_constant(THD *thd, Item_field *f,
     case INT_RESULT:
       break;
     case STRING_RESULT: {
-      if ((*const_val)->type() == Item::VARBIN_ITEM) {
+      if ((*const_val)->type() == Item::HEX_BIN_ITEM) {
         /*
           0x digits have STRING_RESULT but are ints in int
           context.
@@ -300,7 +301,12 @@ static bool analyze_int_field_constant(THD *thd, Item_field *f,
         the integer constant logic.
       */
       my_decimal d_buff;
-      if (d == nullptr) d = (*const_val)->val_decimal(&d_buff);
+      if (d == nullptr) {
+        d = (*const_val)->val_decimal(&d_buff);
+      }
+      if (d == nullptr) {
+        return true;
+      }
       if (ft == Item_func::LT_FUNC || ft == Item_func::LE_FUNC) {
         /*
           Round up (or down if field is the right operand) the decimal to next
@@ -436,7 +442,7 @@ static bool analyze_int_field_constant(THD *thd, Item_field *f,
 /**
   Minion of analyze_field_constant for decimal type fields
 
-  Analyze a constant's placement within (or without) the type range of the
+  Analyze a constant's placement inside (or outside) the type range of the
   field f. Also normalize the given constant to the type of the field if
   applicable.
 
@@ -448,7 +454,7 @@ static bool analyze_int_field_constant(THD *thd, Item_field *f,
   @param      ft        the function type of the comparison
   @param[out] place     the placement of the const_val relative to
                         the range of f
-  @param[out] negative  true if the constant is has a (minus) sign
+  @param[out] negative  true if the constant has a (minus) sign
   @returns   true on error
 */
 static bool analyze_decimal_field_constant(THD *thd, const Item_field *f,
@@ -470,7 +476,7 @@ static bool analyze_decimal_field_constant(THD *thd, const Item_field *f,
     0xnnn numbers, which also have STRING result type, but should be treated
     the same as ints.
   */
-  if (ir == STRING_RESULT && (*const_val)->type() != Item::VARBIN_ITEM) {
+  if (ir == STRING_RESULT && (*const_val)->type() != Item::HEX_BIN_ITEM) {
     was_string_or_real = true;
     ir = DECIMAL_RESULT;
   }
@@ -480,8 +486,9 @@ static bool analyze_decimal_field_constant(THD *thd, const Item_field *f,
     case INT_RESULT: {
       my_decimal tmp;
       const auto *const d = (*const_val)->val_decimal(&tmp);
-      if (thd->is_error()) return true;
-      assert(d != nullptr);
+      if (d == nullptr) {
+        return thd->is_error();
+      }
       assert(decimal_actual_fraction(d) == 0);
       const int actual_intg = decimal_intg(d);
 
@@ -541,10 +548,11 @@ static bool analyze_decimal_field_constant(THD *thd, const Item_field *f,
 
       // Dictionary info about decimal field:
       // Compute actual (minimal) decimal type of the constant
-      my_decimal buff, *d;
-      d = (*const_val)->val_decimal(&buff);
-      if ((*const_val)->null_value) return false;
-      assert(d != nullptr);
+      my_decimal buff;
+      my_decimal *d = (*const_val)->val_decimal(&buff);
+      if (d == nullptr) {
+        return thd->is_error();
+      }
       const int actual_frac = decimal_actual_fraction(d);
       const int actual_intg = decimal_intg(d);
       const bool overflow = actual_intg > f_intg;
@@ -559,9 +567,9 @@ static bool analyze_decimal_field_constant(THD *thd, const Item_field *f,
         if (ft == Item_func::GT_FUNC || ft == Item_func::GE_FUNC ||
             ft == Item_func::LT_FUNC || ft == Item_func::LE_FUNC) {
           // adjust precision to same as field
+          *negative = cpy.sign();
           if (decimal_round(&cpy, &cpy, f_frac, cpy.sign() ? CEILING : FLOOR))
             return true;
-          *negative = cpy.sign();
           const auto new_dec = new (thd->mem_root) Item_decimal(&cpy);
           if (new_dec == nullptr) return true;
           thd->change_item_tree(const_val, new_dec);
@@ -785,7 +793,12 @@ static bool analyze_timestamp_field_constant(THD *thd, const Item_field *f,
           my_time_set(0, 0, 0, 0, 0, 0, 0, false, MYSQL_TIMESTAMP_DATETIME);
       MYSQL_TIME_STATUS status;
       if (rtype == STRING_RESULT) {
-        String buf, *res = (*const_val)->val_str(&buf);
+        String buf;
+        String *res = (*const_val)->val_str(&buf);
+        if (res == nullptr) {
+          assert((*const_val)->null_value);
+          return false;
+        }
         /*
           Some wrong values are still compared as DATETIME, e.g. '2018-02-31
           06:14:07' (illegal day in February), while worse values lead to
@@ -921,10 +934,13 @@ static bool analyze_timestamp_field_constant(THD *thd, const Item_field *f,
             ltime.second_part = 0;
             *place = RP_INSIDE_TRUNCATED;
           }
-          i = new (thd->mem_root) Item_date_literal(&ltime);
+          Date_val date = Date_val(ltime);
+          i = new (thd->mem_root) Item_date_literal(date);
         } else if (!check_time_zone_convertibility(ltime)) {
+          Datetime_val dt;
+          *implicit_cast<MYSQL_TIME *>(&dt) = ltime;
           i = new (thd->mem_root) Item_datetime_literal(
-              &ltime, actual_decimals(&ltime), thd->time_zone());
+              &dt, actual_decimals(&ltime), thd->time_zone());
         }
         if (i == nullptr) return true;
         thd->change_item_tree(const_val, i);
@@ -956,16 +972,15 @@ static bool analyze_time_field_constant(THD *thd, Item **const_val) {
   }
 
   /*
-    An OK TIME constant, represented as Item_time_with_ref.
+    An OK TIME constant, represented as Item_time_literal.
     Note that excessive decimals have already been rounded, so there is no
     opportunity for folding. This is in contrast to DATETIME/TIMESTAMP
     btw, which retains any excessive decimals digits when comparing.
     Cf. Bug#28320529
   */
-  MYSQL_TIME ltime;
-  TIME_from_longlong_time_packed(&ltime, (*const_val)->val_time_temporal());
-  auto i =
-      new (thd->mem_root) Item_time_literal(&ltime, actual_decimals(&ltime));
+  Time_val time;
+  if ((*const_val)->val_time(&time)) return true;
+  Item *i = new (thd->mem_root) Item_time_literal(time, time.actual_decimals());
   if (i == nullptr) return true;
   thd->change_item_tree(const_val, i);
   return false;
@@ -1075,8 +1090,8 @@ static bool fold_or_simplify(THD *thd, Item *ref_or_field,
                              bool manifest_result, Item **retcond,
                              Item::cond_result *cond_value) {
   Item *i = nullptr;
-  const int is_top_level =
-      ft == Item_func::MULT_EQUAL_FUNC ||
+  const bool is_top_level =
+      ft == Item_func::MULTI_EQ_FUNC ||
       down_cast<Item_bool_func2 *>(*retcond)->ignore_unknown();
   if (always_true) {
     if (ref_or_field->is_nullable()) {
@@ -1297,7 +1312,7 @@ bool fold_condition(THD *thd, Item *cond, Item **retcond,
     case Item_func::GE_FUNC:
     case Item_func::GT_FUNC:
     case Item_func::EQUAL_FUNC:
-    case Item_func::MULT_EQUAL_FUNC:
+    case Item_func::MULTI_EQ_FUNC:
       break;
     default:
       /* Not a comparison function, so fold its args instead */
@@ -1306,7 +1321,7 @@ bool fold_condition(THD *thd, Item *cond, Item **retcond,
 
   Item **args = nullptr;
 
-  if (func_type != Item_func::MULT_EQUAL_FUNC) {
+  if (func_type != Item_func::MULTI_EQ_FUNC) {
     args = func->arguments();
   } else {
     /*
@@ -1314,7 +1329,7 @@ bool fold_condition(THD *thd, Item *cond, Item **retcond,
       normal comparison functions and multi-equal: we use a scratch two args
       array and update the multi-equal's normal constant later.
     */
-    const auto equal = down_cast<Item_equal *>(func);
+    auto *const equal = down_cast<Item_multi_eq *>(func);
     // Use first field:  any one will do: they have the same type
     equal->m_const_folding[0] = equal->get_first();
     equal->m_const_folding[1] = equal->const_arg();
@@ -1337,9 +1352,9 @@ bool fold_condition(THD *thd, Item *cond, Item **retcond,
         [1] See `create_tmp_field_from_item' case INT_RESULT.
       */
       seen_field = true;
-    } else if (args[i]->const_for_execution() && type != Item::SUBSELECT_ITEM) {
+    } else if (args[i]->const_for_execution() && type != Item::SUBQUERY_ITEM) {
       /*
-        Re test on Item::SUBSELECT_ITEM above: we exclude optimize time
+        Re test on Item::SUBQUERY_ITEM above: we exclude optimize time
         evaluation of constant subqueries for now; since it could still be
         expensive to evaluate and we have no cost model to decide whether
         folding it would save total time spent. It may turn out not to be
@@ -1419,7 +1434,7 @@ bool fold_condition(THD *thd, Item *cond, Item **retcond,
     case Item_func::EQ_FUNC:
     case Item_func::EQUAL_FUNC:
     case Item_func::NE_FUNC:
-    case Item_func::MULT_EQUAL_FUNC:
+    case Item_func::MULTI_EQ_FUNC:
       switch (place) {
         case RP_OUTSIDE_HIGH:
         case RP_OUTSIDE_LOW:
@@ -1437,9 +1452,9 @@ bool fold_condition(THD *thd, Item *cond, Item **retcond,
         case RP_ON_MIN:
           break;
       }
-      if (func_type == Item_func::MULT_EQUAL_FUNC && (*retcond != nullptr)) {
+      if (func_type == Item_func::MULTI_EQ_FUNC && (*retcond != nullptr)) {
         // The constant may have been modified, update the multi-equal
-        const auto equal = down_cast<Item_equal *>(func);
+        auto *const equal = down_cast<Item_multi_eq *>(func);
         assert(equal->m_const_folding[1] != nullptr);  // the constant
         equal->set_const_arg(equal->m_const_folding[1]);
       }

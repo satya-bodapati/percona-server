@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -30,7 +31,6 @@ Group_action_message::Group_action_message()
       group_action_type(ACTION_MESSAGE_END),
       group_action_phase(ACTION_PHASE_END),
       return_value(0),
-      primary_election_uuid(""),
       gcs_protocol(Gcs_protocol_version::UNKNOWN),
       m_action_initiator(ACTION_INITIATOR_UNKNOWN) {}
 
@@ -39,7 +39,6 @@ Group_action_message::Group_action_message(enum_action_message_type type)
       group_action_type(type),
       group_action_phase(ACTION_PHASE_END),
       return_value(0),
-      primary_election_uuid(""),
       gcs_protocol(Gcs_protocol_version::UNKNOWN),
       m_action_initiator(ACTION_INITIATOR_UNKNOWN) {}
 
@@ -59,7 +58,6 @@ Group_action_message::Group_action_message(Gcs_protocol_version gcs_protocol)
       group_action_type(ACTION_SET_COMMUNICATION_PROTOCOL_MESSAGE),
       group_action_phase(ACTION_PHASE_END),
       return_value(0),
-      primary_election_uuid(""),
       gcs_protocol(gcs_protocol),
       m_action_initiator(ACTION_INITIATOR_UNKNOWN) {}
 
@@ -133,15 +131,15 @@ void Group_action_message::encode_payload(
     std::vector<unsigned char> *buffer) const {
   DBUG_TRACE;
 
-  uint16 group_action_message_type_aux = (uint16)group_action_type;
+  auto group_action_message_type_aux = (uint16)group_action_type;
   encode_payload_item_int2(buffer, PIT_ACTION_TYPE,
                            group_action_message_type_aux);
 
-  uint16 group_action_message_phase_aux = (uint16)group_action_phase;
+  auto group_action_message_phase_aux = (uint16)group_action_phase;
   encode_payload_item_int2(buffer, PIT_ACTION_PHASE,
                            group_action_message_phase_aux);
 
-  uint32 return_value_aux = (uint32)return_value;
+  auto return_value_aux = (uint32)return_value;
   encode_payload_item_int4(buffer, PIT_ACTION_RETURN_VALUE, return_value_aux);
   /*
     Optional payload items.
@@ -151,7 +149,7 @@ void Group_action_message::encode_payload(
                                primary_election_uuid.c_str(),
                                primary_election_uuid.length());
     if (m_transaction_monitor_timeout >= 0) {
-      uint32 transaction_monitor_timeout_aux =
+      auto transaction_monitor_timeout_aux =
           (uint32)m_transaction_monitor_timeout;
       encode_payload_item_int4(buffer, PIT_ACTION_TRANSACTION_MONITOR_TIMEOUT,
                                transaction_monitor_timeout_aux);

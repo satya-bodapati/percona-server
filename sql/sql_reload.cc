@@ -1,15 +1,16 @@
-/* Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -52,6 +53,7 @@
 #include "sql/sql_class.h"    // THD
 #include "sql/sql_connect.h"  // reset_mqh
 #include "sql/sql_const.h"
+#include "sql/sql_error.h"    // push_deprecated_warn_no_replacement
 #include "sql/sql_profile.h"
 #include "sql/sql_servers.h"  // servers_reload
 #include "sql/system_variables.h"
@@ -73,11 +75,6 @@
 bool is_reload_request_denied(THD *thd, unsigned long op_type) {
   DBUG_TRACE;
   Security_context *sctx = thd->security_context();
-
-  if ((op_type & REFRESH_HOSTS)) {
-    push_deprecated_warn(thd, "FLUSH HOSTS",
-                         "TRUNCATE TABLE performance_schema.host_cache");
-  }
   /*
     First check RELOAD and stop if it's granted.
     No need to pass DB since it's a global priv
@@ -85,6 +82,12 @@ bool is_reload_request_denied(THD *thd, unsigned long op_type) {
   if (sctx->check_access(RELOAD_ACL, thd->db().str ? thd->db().str : "", true))
     return false;
 
+  if ((op_type & REFRESH_GRANT) &&
+      !sctx->has_global_grant(STRING_WITH_LEN("FLUSH_PRIVILEGES")).first) {
+    my_error(ER_SPECIFIC_ACCESS_DENIED_ERROR, MYF(0),
+             "RELOAD or FLUSH_PRIVILEGES");
+    return true;
+  }
   if ((op_type & REFRESH_OPTIMIZER_COSTS) &&
       !sctx->has_global_grant(STRING_WITH_LEN("FLUSH_OPTIMIZER_COSTS")).first) {
     my_error(ER_SPECIFIC_ACCESS_DENIED_ERROR, MYF(0),
@@ -108,9 +111,9 @@ bool is_reload_request_denied(THD *thd, unsigned long op_type) {
     return true;
   }
 
-  op_type &=
-      ~(REFRESH_OPTIMIZER_COSTS | REFRESH_STATUS | REFRESH_USER_RESOURCES |
-        REFRESH_TABLES | REFRESH_FOR_EXPORT | REFRESH_READ_LOCK);
+  op_type &= ~(REFRESH_GRANT | REFRESH_OPTIMIZER_COSTS | REFRESH_STATUS |
+               REFRESH_USER_RESOURCES | REFRESH_TABLES | REFRESH_FOR_EXPORT |
+               REFRESH_READ_LOCK);
 
   /* if it was just the above we're good */
   if (!op_type) return false;
@@ -151,6 +154,8 @@ bool handle_reload_request(THD *thd, unsigned long options, Table_ref *tables,
 
   if (options & REFRESH_GRANT) {
     THD *tmp_thd = nullptr;
+    if (thd != nullptr)
+      push_deprecated_warn_no_replacement(thd, "FLUSH PRIVILEGES");
     /*
       If handle_reload_request() is called from SIGHUP handler we have to
       allocate temporary THD for execution of acl_reload()/grant_reload().
@@ -161,7 +166,7 @@ bool handle_reload_request(THD *thd, unsigned long options, Table_ref *tables,
     }
 
     if (thd) {
-      bool reload_acl_failed = reload_acl_caches(thd, false);
+      bool reload_acl_failed = reload_acl_caches(thd, false, false, nullptr);
       bool reload_servers_failed = servers_reload(thd);
       notify_flush_event(thd);
       if (reload_acl_failed || reload_servers_failed) {
@@ -342,10 +347,7 @@ bool handle_reload_request(THD *thd, unsigned long options, Table_ref *tables,
       }
     }
   }
-  if (options & REFRESH_HOSTS) hostname_cache_refresh();
   if (thd && (options & REFRESH_STATUS)) refresh_status();
-  if (options & REFRESH_THREADS)
-    Per_thread_connection_handler::kill_blocked_pthreads();
   if (options & REFRESH_SOURCE) {
     assert(thd);
     tmp_write_to_binlog = 0;

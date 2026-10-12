@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -67,6 +68,7 @@ class Commit_order_queue {
     FINISHED_APPLYING,  // Transaction execution finished
     REQUESTED_GRANT,    // Request for turn to commit has been placed
     WAITED,             // Waited for the turn to commit
+    WAITED_OVERTAKE,    // Waited to commit, allowed to commit out of order
     FINISHED            // Committed and finished processing the transaction
   };
 
@@ -139,6 +141,11 @@ class Commit_order_queue {
     memory::Aligned_atomic<Commit_order_queue::sequence_type>
         m_commit_sequence_nr{NO_SEQUENCE_NR};
 
+    /** The sequence number for the commit request of the worker scheduled
+        after this one. */
+    memory::Aligned_atomic<Commit_order_queue::sequence_type>
+        m_next_commit_sequence_nr{NO_SEQUENCE_NR};
+
     /**
       Sets the commit request sequence number for this node as unassigned. If
       the sequence number is currently frozen, invoking this method will make
@@ -154,7 +161,8 @@ class Commit_order_queue {
          the unblocking operation.
 
       @return the sequence number for the commit request sequence number
-              this node's worker is been cleared of
+              of the worker scheduled after this one, or NO_SEQUENCE_NR
+              if there is no next worker.
      */
     Commit_order_queue::sequence_type reset_commit_sequence_nr();
   };
@@ -260,8 +268,9 @@ class Commit_order_queue {
     unfrozen.
 
     @return A tuple holding the identifier of the worker that is first
-            in-line to commit and the associated commit order sequence
-            number.
+            in-line to commit and the sequence number for the commit
+            request of the worker scheduled after this one (or NO_SEQUENCE_NR
+            if there is no next worker).
    */
   std::tuple<value_type, sequence_type> pop();
   /**
@@ -334,6 +343,17 @@ class Commit_order_queue {
    */
   static sequence_type get_next_sequence_nr(sequence_type current_seq_nr);
 
+  /**
+    Removes from the queue and returns the first identifier of the worker
+    that is equal to `index`.
+
+    @return A tuple holding the identifier of the worker equal to `index`
+            and the sequence number for the commit request of the worker
+            scheduled after this one (or NO_SEQUENCE_NR if there is no
+            next worker).
+   */
+  std::tuple<value_type, sequence_type> remove(value_type index);
+
  private:
   /** The commit sequence number counter */
   memory::Aligned_atomic<sequence_type> m_commit_sequence_generator{
@@ -344,6 +364,20 @@ class Commit_order_queue {
   queue_type m_commit_queue;
   /** The lock to acquire exlusivity over changes on the queue. */
   lock::Shared_spin_lock m_push_pop_lock;
+  /**
+    Removes from the commit queue the first identifier that is equal to `index`.
+
+    @param to_remove The value to remove from the queue.
+
+    @return A tuple, where:
+            - The first component is the removed value, or NO_WORKER if the
+              value was not found.
+            - The second component is the value preceding the removed one,
+              or NO_WORKER if the value was not found, or was found in the
+              first slot.
+   */
+  std::tuple<value_type, value_type> remove_from_commit_queue(
+      value_type to_remove);
 };
 }  // namespace apply
 }  // namespace cs

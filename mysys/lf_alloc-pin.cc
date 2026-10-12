@@ -1,16 +1,17 @@
 /* QQ: TODO multi-pinbox */
-/* Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -26,10 +27,9 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
-#include <assert.h>
-#include <stddef.h>
 #include <sys/types.h>
 #include <atomic>
+#include <cassert>
 
 static_assert(sizeof(std::atomic<void *>) == sizeof(void *),
               "We happily cast to and from std::atomic<void *>, so they need "
@@ -139,7 +139,7 @@ static void lf_pinbox_real_free(LF_PINS *pins);
 void lf_pinbox_init(LF_PINBOX *pinbox, uint free_ptr_offset,
                     lf_pinbox_free_func *free_func, void *free_func_arg) {
   assert(free_ptr_offset % sizeof(void *) == 0);
-  static_assert(sizeof(LF_PINS) == 64, "");
+  static_assert(sizeof(LF_PINS) == 64);
   lf_dynarray_init(&pinbox->pinarray, sizeof(LF_PINS));
   pinbox->pinstack_top_ver = 0;
   pinbox->pins_in_array = 0;
@@ -288,8 +288,8 @@ struct st_match_and_save_arg {
   pointers not pinned by any thread.
 */
 static int match_and_save(void *v_el, void *v_arg) {
-  LF_PINS *el = static_cast<LF_PINS *>(v_el);
-  st_match_and_save_arg *arg = static_cast<st_match_and_save_arg *>(v_arg);
+  auto *el = static_cast<LF_PINS *>(v_el);
+  auto *arg = static_cast<st_match_and_save_arg *>(v_arg);
   int i;
   LF_PINS *el_end = el + LF_DYNARRAY_LEVEL_LENGTH;
   for (; el < el_end; el++) {
@@ -345,8 +345,7 @@ static void lf_pinbox_real_free(LF_PINS *pins) {
 }
 
 static inline std::atomic<uchar *> &next_node(LF_PINBOX *P, uchar *X) {
-  std::atomic<uchar *> *free_ptr =
-      (std::atomic<uchar *> *)(X + P->free_ptr_offset);
+  auto *free_ptr = (std::atomic<uchar *> *)(X + P->free_ptr_offset);
   return *free_ptr;
 }
 
@@ -365,9 +364,9 @@ LF_REQUIRE_PINS(1)
     first->el->el->....->el->last. Use first==last to free only one element.
 */
 static void alloc_free(void *v_first, void *v_last, void *v_allocator) {
-  uchar *first = static_cast<uchar *>(v_first);
-  uchar *last = static_cast<uchar *>(v_last);
-  LF_ALLOCATOR *allocator = static_cast<LF_ALLOCATOR *>(v_allocator);
+  auto *first = static_cast<uchar *>(v_first);
+  auto *last = static_cast<uchar *>(v_last);
+  auto *allocator = static_cast<LF_ALLOCATOR *>(v_allocator);
   uchar *node = allocator->top;
   do {
     anext_node(last) = node;
@@ -435,7 +434,7 @@ void lf_alloc_destroy(LF_ALLOCATOR *allocator) {
     pin[0] is used, it's removed on return.
 */
 void *lf_alloc_new(LF_PINS *pins) {
-  LF_ALLOCATOR *allocator = (LF_ALLOCATOR *)(pins->pinbox->free_func_arg);
+  auto *allocator = (LF_ALLOCATOR *)(pins->pinbox->free_func_arg);
   uchar *node;
   for (;;) {
     do {

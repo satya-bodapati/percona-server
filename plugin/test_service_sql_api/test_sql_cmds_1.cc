@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,8 +26,8 @@
 #include <fcntl.h>
 #include <mysql/plugin.h>
 #include <mysql/service_srv_session_info.h>
-#include <stdlib.h>
 #include <sys/types.h>
+#include <cstdlib>
 
 #include <mysql/components/my_service.h>
 #include <mysql/components/services/log_builtins.h>
@@ -40,6 +41,7 @@
 #include "sql_string.h" /* STRING_PSI_MEMORY_KEY */
 #include "template_utils.h"
 #include "thr_cond.h"
+#include "thr_mutex.h"
 
 static constexpr int STRING_BUFFER = 1024 * 4;
 
@@ -63,6 +65,10 @@ static void WRITE_STR(const char *format) {
   my_write(outfile, (uchar *)buffer, strlen(buffer), MYF(0));
 }
 
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wmissing-format-attribute"
+#endif
 template <typename T>
 void WRITE_VAL(const char *format, T value) {
   char buffer[STRING_BUFFER];
@@ -76,6 +82,9 @@ void WRITE_VAL(const char *format, T1 value1, T2 value2) {
   snprintf(buffer, sizeof(buffer), format, value1, value2);
   my_write(outfile, (uchar *)buffer, strlen(buffer), MYF(0));
 }
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 static const char *user_localhost = "localhost";
 static const char *user_local = "127.0.0.1";
@@ -279,7 +288,7 @@ static void sql_handle_ok(void *ctx, uint server_status,
                           ulonglong last_insert_id, const char *const message) {
   DBUG_TRACE;
 
-  Callback_data *cbd = (Callback_data *)ctx;
+  auto *cbd = (Callback_data *)ctx;
 
   cbd->server_status = server_status;
   cbd->warn_count = statement_warn_count;
@@ -292,7 +301,7 @@ static void sql_handle_error(void *ctx, uint sql_errno,
                              const char *const err_msg,
                              const char *const sqlstate) {
   DBUG_TRACE;
-  Callback_data *cbd = (Callback_data *)ctx;
+  auto *cbd = (Callback_data *)ctx;
   WRITE_VAL("ERROR %i %s\n", sql_errno, err_msg);
   cbd->error_called = true;
   cbd->err = sql_errno;
@@ -302,7 +311,7 @@ static void sql_handle_error(void *ctx, uint sql_errno,
 
 static void sql_shutdown(void *ctx, int shutdown_server) {
   DBUG_TRACE;
-  Callback_data *cbd = (Callback_data *)ctx;
+  auto *cbd = (Callback_data *)ctx;
 
   cbd->shutdown = shutdown_server;
   cbd->shutdown_called = true;
@@ -478,49 +487,6 @@ static int test_com_init_db(void *p) {
   return 0;
 }
 
-/*
-static int test_com_list_fields(void *p)
-{
-  DBUG_TRACE;
-
-  MYSQL_SESSION st_session;
-
-  ENSURE_API_NOT_NULL(st_session = srv_session_open(NULL, p));
-
-  COM_DATA cmd;
-
-  cmd.com_init_db.db_name = "mysql";
-  cmd.com_init_db.length = strlen("mysql");
-  ENSURE_API_OK(command_service_run_command(st_session, COM_INIT_DB, &cmd,
-&my_charset_utf8mb3_general_ci, &sql_cbs, CS_TEXT_REPRESENTATION, p));
-
-  WRITE_VAL("switched default db to: %s\n",
-srv_session_info_get_current_db(st_session));
-
-
-  WRITE_STR("field_list\n");
-  cmd.com_field_list.table_name = (unsigned char*)"user";
-  cmd.com_field_list.table_name_length = strlen((const
-char*)cmd.com_field_list.table_name); cmd.com_field_list.query = (unsigned
-char*)"%"; cmd.com_field_list.query_length = strlen((const
-char*)cmd.com_field_list.query);
-  ENSURE_API_OK(command_service_run_command(st_session, COM_FIELD_LIST, &cmd,
-&my_charset_utf8mb3_general_ci, &sql_cbs, CS_TEXT_REPRESENTATION, p));
-
-  WRITE_STR("-----------------------------------------------------------------\n");
-  for (uint row_count=0;row_count < sql_num_rows;row_count++){
-    for (uint col_count=0;col_count < sql_num_cols;col_count+=2){
-      WRITE_VAL("%s\t\%s\n",sql_str_value[col_count][row_count],
-                  sql_str_value[col_count+1][row_count]);
-    }
-  }
-
-  ENSURE_API_OK(srv_session_close(st_session));
-
-  return 0;
-}
-*/
-
 struct Test_data {
   void *p;
   MYSQL_SESSION session;
@@ -660,40 +626,6 @@ static int test_query_kill(void *p) {
   return 0;
 }
 
-static int test_com_process_kill(void *p) {
-  DBUG_TRACE;
-
-  MYSQL_SESSION st_session;
-  Callback_data cbd;
-
-  WRITE_STR("COM_KILL\n");
-
-  ENSURE_API_NOT_NULL(st_session = srv_session_open(nullptr, p));
-
-  switch_user(st_session, user_privileged);
-  MYSQL_SESSION st_session_victim;
-  ENSURE_API_NOT_NULL(st_session_victim =
-                          srv_session_open(session_error_cb, p));
-
-  WRITE_VAL("session is dead? %i\n",
-            thd_killed(srv_session_info_get_thd(st_session_victim)));
-
-  COM_DATA cmd;
-
-  cmd.com_kill.id = srv_session_info_get_session_id(st_session_victim);
-  ENSURE_API_OK(command_service_run_command(
-      st_session, COM_PROCESS_KILL, &cmd, &my_charset_utf8mb3_general_ci,
-      &sql_cbs, CS_TEXT_REPRESENTATION, &cbd));
-
-  WRITE_VAL("session is dead now? %i\n",
-            thd_killed(srv_session_info_get_thd(st_session_victim)));
-
-  ENSURE_API_OK(srv_session_close(st_session));
-  ENSURE_API_OK(srv_session_close(st_session_victim));
-
-  return 0;
-}
-
 static int test_priv(void *p) {
   DBUG_TRACE;
 
@@ -757,10 +689,6 @@ static void test_sql(void *p [[maybe_unused]]) {
   test_com_query(p);
   WRITE_SEP();
   test_com_init_db(p);
-  WRITE_SEP();
-  //  test_com_list_fields(p);
-  //  WRITE_SEP();
-  test_com_process_kill(p);
   WRITE_SEP();
   test_query_kill(p);
   WRITE_SEP();

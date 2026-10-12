@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,6 +29,7 @@
 #include "harness_export.h"
 #include "mysql/harness/logging/logging.h"
 
+#include <atomic>
 #include <set>
 #include <string>
 
@@ -57,6 +59,9 @@ class HARNESS_EXPORT Logger {
   void detach_handler(std::string name, bool handler_must_exist = true);
   void handle(const Record &record);
 
+  void lazy_handle(LogLevel record_level,
+                   std::function<Record()> record_creator) const;
+
   /**
    * check if the log-level will be handled.
    *
@@ -85,6 +90,56 @@ class HARNESS_EXPORT Logger {
   std::set<std::string> handlers_;
   const Registry *registry_;  // owner backreference (we don't own Registry,
                               // Registry owns us)
+};
+
+class HARNESS_EXPORT DomainLogger {
+ public:
+  DomainLogger() = default;
+
+  DomainLogger(std::string domain) : domain_(std::move(domain)) {}
+
+  void debug(std::invocable auto producer) const {
+    log(LogLevel::kDebug, std::move(producer));
+  }
+  void debug(const std::string &msg) const { log(LogLevel::kDebug, msg); }
+
+  void info(std::invocable auto producer) const {
+    log(LogLevel::kInfo, std::move(producer));
+  }
+  void info(const std::string &msg) const { log(LogLevel::kInfo, msg); }
+
+  void warning(std::invocable auto producer) const {
+    log(LogLevel::kWarning, std::move(producer));
+  }
+  void warning(const std::string &msg) const { log(LogLevel::kWarning, msg); }
+
+  void system(std::invocable auto producer) const {
+    log(LogLevel::kSystem, std::move(producer));
+  }
+  void system(const std::string &msg) const { log(LogLevel::kSystem, msg); }
+
+  void note(std::invocable auto producer) const {
+    log(LogLevel::kNote, std::move(producer));
+  }
+  void note(const std::string &msg) const { log(LogLevel::kNote, msg); }
+
+  void error(std::invocable auto producer) const {
+    log(LogLevel::kError, std::move(producer));
+  }
+  void error(const std::string &msg) const { log(LogLevel::kError, msg); }
+
+  void log(LogLevel log_level, std::function<std::string()> producer) const;
+
+  void log(LogLevel log_level, std::string msg) const;
+
+ private:
+  bool init_logger() const;
+
+  mutable std::mutex logger_mtx_;
+  mutable std::optional<mysql_harness::logging::Logger> logger_;
+  mutable std::atomic<bool> logger_ready_{false};
+
+  std::string domain_{MYSQL_ROUTER_LOG_DOMAIN};
 };
 
 }  // namespace logging

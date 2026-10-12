@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -79,7 +80,7 @@ inline void SetJoinConditions(const mem_root_deque<Table_ref *> &join_list);
 inline void DestroyFakeTables(
     const std::unordered_map<string, Fake_TABLE *> &fake_tables) {
   for (const auto &[name, table] : fake_tables) {
-    destroy(table);
+    ::destroy_at(table);
   }
 }
 
@@ -102,9 +103,18 @@ struct Table {
 
 }  // namespace optimizer_test
 
-// Base class for the optimizer unit tests (both old and new optimizer).
+/*
+  Base class for the optimizer unit tests (both old and new optimizer).
+
+  Queries in text format: e.g. "SELECT x, y FROM t1 JOIN t2 ON t1.x = t2.w" are
+  parsed and resolved to mock objects by calling ParseAndResolve() on the query
+  string. The tables that appear in the query are created as Fake_TABLE objects
+  and placed in m_fake_tables. These tables can then be manipulated before
+  calling the optimizer, for example by setting the number of rows in the table.
+*/
 class OptimizerTestBase : public ::testing::Test {
  public:
+  OptimizerTestBase() {}
   void SetUp() override {
     m_initializer.SetUp();
     m_thd = m_initializer.thd();
@@ -133,10 +143,15 @@ class OptimizerTestBase : public ::testing::Test {
   std::unordered_map<std::string, Fake_TABLE *> m_fake_tables;
 };
 
-// Template for parameterized optimizer tests.
-template <class T>
-class OptimizerTestWithParam : public OptimizerTestBase,
-                               public ::testing::WithParamInterface<T> {};
+// Same as OptimizerTestBase, but with the hypergraph optimizer switch enabled.
+class HypergraphOptimizerTestBase : public OptimizerTestBase {
+ public:
+  void SetUp() override {
+    OptimizerTestBase::SetUp();
+    // We set thd->lex->using_hypergraph_optimizer during mock parsing.
+    m_thd->variables.optimizer_switch |= OPTIMIZER_SWITCH_HYPERGRAPH_OPTIMIZER;
+  }
+};
 
 inline Query_block *ParseAndResolve(
     const char *query, bool nullable, const Server_initializer &initializer,
@@ -181,7 +196,7 @@ inline void ResolveQueryBlock(
     tl->table = fake_table;
     tl->set_tableno(num_tables++);
     tl->set_updatable();
-    tl->grant.privilege = ~0UL;
+    tl->grant.privilege = ~(Access_bitmask)0;
   }
 
   // Find all Item_field objects, and resolve them to fields in the fake tables.
@@ -190,7 +205,7 @@ inline void ResolveQueryBlock(
   // Also in any conditions and subqueries within the WHERE condition.
   if (query_block->where_cond() != nullptr) {
     WalkItem(query_block->where_cond(), enum_walk::POSTFIX, [&](Item *item) {
-      if (item->type() == Item::SUBSELECT_ITEM &&
+      if (item->type() == Item::SUBQUERY_ITEM &&
           down_cast<Item_subselect *>(item)->subquery_type() ==
               Item_subselect::IN_SUBQUERY) {
         Item_in_subselect *item_subselect =
@@ -299,7 +314,7 @@ inline void ResolveFieldToFakeTable(
     if (item->type() == Item::FIELD_ITEM) {
       Item_field *item_field = down_cast<Item_field *>(item);
       Fake_TABLE *table = fake_tables.at(item_field->table_name);
-      item_field->table_ref = table->pos_in_table_list;
+      item_field->m_table_ref = table->pos_in_table_list;
       Field *field = nullptr;
       if (strcmp(item_field->field_name, "x") == 0) {
         field = table->field[0];
@@ -356,10 +371,16 @@ inline handlerton *OptimizerTestBase::EnableSecondaryEngine(
     hton->secondary_engine_flags =
         MakeSecondaryEngineFlags(SecondaryEngineFlag::SUPPORTS_HASH_JOIN);
   }
-  hton->secondary_engine_modify_access_path_cost = nullptr;
-  hton->secondary_engine_check_optimizer_request = nullptr;
+  hton->secondary_engine_modify_view_ap_cost = nullptr;
+  hton->secondary_engine_nrows = nullptr;
+  hton->secondary_engine_check_optimizer_request =
+      [](THD *, const JoinHypergraph &, const AccessPath *, int, int, bool,
+         std::string *) {
+        SecondaryEngineGraphSimplificationRequestParameters output = {
+            SecondaryEngineGraphSimplificationRequest::kContinue, 100, true};
+        return output;
+      };
   for (const auto &[name, table] : m_fake_tables) {
-    (void)name;
     table->file->ht = hton;
     static_cast<Fake_TABLE_SHARE *>(table->s)->set_secondary_engine(true);
     ON_CALL(table->mock_handler, table_type())
@@ -367,7 +388,8 @@ inline handlerton *OptimizerTestBase::EnableSecondaryEngine(
   }
 
   m_thd->lex->m_sql_cmd->use_secondary_storage_engine(hton);
-
+  m_thd->set_secondary_engine_optimization(
+      Secondary_engine_optimization::SECONDARY);
   return hton;
 }
 

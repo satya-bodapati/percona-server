@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,20 +26,21 @@
 #ifndef MYSQLROUTER_DESTINATION_STATUS_TYPES_INCLUDED
 #define MYSQLROUTER_DESTINATION_STATUS_TYPES_INCLUDED
 
-#include <memory>
+#include <functional>
 #include <vector>
 
-#include "tcp_address.h"
+#include "mysql/harness/destination.h"
+#include "mysqlrouter/datatypes.h"
 
 struct QuarantineRoutingCallbacks {
-  std::function<std::vector<mysql_harness::TCPAddress>(const std::string &)>
+  std::function<std::vector<mysql_harness::Destination>(const std::string &)>
       on_get_destinations;
   std::function<void(const std::string &)> on_start_acceptors;
   std::function<void(const std::string &)> on_stop_acceptors;
 
   void reset() {
     on_get_destinations =
-        [](const std::string &) -> std::vector<mysql_harness::TCPAddress> {
+        [](const std::string &) -> std::vector<mysql_harness::Destination> {
       return {};
     };
 
@@ -48,11 +50,13 @@ struct QuarantineRoutingCallbacks {
 };
 
 struct AvailableDestination {
-  AvailableDestination(mysql_harness::TCPAddress a, std::string i)
-      : address{std::move(a)}, id{std::move(i)} {}
+  AvailableDestination(mysql_harness::Destination dst, std::string i,
+                       mysqlrouter::ServerMode m)
+      : destination{std::move(dst)}, id{std::move(i)}, mode(m) {}
 
-  mysql_harness::TCPAddress address;
+  mysql_harness::Destination destination;
   std::string id;
+  mysqlrouter::ServerMode mode;
 };
 
 using AllowedNodes = std::vector<AvailableDestination>;

@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -135,13 +136,23 @@ void Server::delayed_start_tasks() {
 }
 
 void Server::reload_ssl_context() {
-  m_ssl_context = xpl::Ssl_context_builder().get_result_context();
+#if defined(__cpp_lib_atomic_shared_ptr)
+  m_ssl_context.store(xpl::Ssl_context_builder().get_result_context());
+#else
+  std::atomic_store(&m_ssl_context,
+                    xpl::Ssl_context_builder().get_result_context());
+#endif
 }
 
 void Server::start_tasks() {
   // We can't fetch the servers ssl config at plugin-load
   // this method allows to setup it at better time.
-  m_ssl_context = xpl::Ssl_context_builder().get_result_context();
+#if defined(__cpp_lib_atomic_shared_ptr)
+  m_ssl_context.store(xpl::Ssl_context_builder().get_result_context());
+#else
+  std::atomic_store(&m_ssl_context,
+                    xpl::Ssl_context_builder().get_result_context());
+#endif
 
   if (m_state.exchange(State::State_initializing, State_running)) {
     for (auto task : m_tasks) {
@@ -435,7 +446,12 @@ bool Server::reset() {
 
   m_state.wait_for(allowed_values);
 
-  m_ssl_context->reset();
+#if defined(__cpp_lib_atomic_shared_ptr)
+  auto context = m_ssl_context.load();
+#else
+  auto context = std::atomic_load(&m_ssl_context);
+#endif
+  context->reset();
   m_id_generator.reset(new Document_id_generator());
   m_factory.reset(new xpl::Server_factory());
 

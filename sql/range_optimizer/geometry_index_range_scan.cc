@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,7 +23,7 @@
 
 #include "sql/range_optimizer/geometry_index_range_scan.h"
 
-#include <stddef.h>
+#include <cstddef>
 
 #include "my_base.h"
 #include "my_dbug.h"
@@ -31,13 +32,13 @@
 
 /* Get next for geometrical indexes */
 
-int GeometryIndexRangeScanIterator::Read() {
+int GeometryIndexRangeScanIterator::DoRead() {
   DBUG_TRACE;
 
   for (;;) {
     if (last_range) {
       // Already read through key
-      int result = file->ha_index_next_same(
+      int const result = file->ha_index_next_same(
           table()->record[0], last_range->min_key, last_range->min_length);
       if (result == 0) {
         if (m_examined_rows != nullptr) {
@@ -56,7 +57,7 @@ int GeometryIndexRangeScanIterator::Read() {
     }
     last_range = *(cur_range++);
 
-    int result = file->ha_index_read_map(
+    int const result = file->ha_index_read_map(
         table()->record[0], last_range->min_key, last_range->min_keypart_map,
         last_range->rkey_func_flag);
     if (result == 0) {
@@ -65,7 +66,7 @@ int GeometryIndexRangeScanIterator::Read() {
       }
       return 0;
     }
-    if (int error_code = HandleError(result); error_code != -1) {
+    if (int const error_code = HandleError(result); error_code != -1) {
       return error_code;
     }
     last_range = nullptr;  // Not found, to next range

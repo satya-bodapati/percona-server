@@ -1,18 +1,19 @@
 #ifndef ITEM_FUNC_INCLUDED
 #define ITEM_FUNC_INCLUDED
 
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -68,16 +69,16 @@ class Protocol;
 class Query_block;
 class THD;
 class sp_rcontext;
+class sp_instr;
 struct MY_BITMAP;
 struct Parse_context;
+struct TYPELIB;
 
 template <class T>
 class List;
 
 /* Function items used by mysql */
 
-extern bool reject_geometry_args(uint arg_count, Item **args,
-                                 Item_result_field *me);
 void unsupported_json_comparison(size_t arg_count, Item **args,
                                  const char *msg);
 
@@ -132,6 +133,30 @@ class Item_func : public Item_result_field {
   inline Item **arguments() const {
     return (argument_count() > 0) ? args : nullptr;
   }
+  /*
+    This function is used to provide a unique textual name for the specific
+    subclass of Item_func. E.g, it returns "+" for the arithmetic addition
+    operator, "abs" for the absolute value function, "avg" for the average
+    aggregate function, etc. The function value is currently used to distinguish
+    Item_func subclasses from each other in Item_func::eq(),
+    since Item_func::functype() is not implemented for every subclass.
+    In addition, the function value is used when printing a textual
+    representation of a function reference, which is used within the dictionary
+    implementation and when printing SQL text for explain purposes.
+    Note that for calls to stored functions and UDF functions, func_name()
+    returns the name of the function. This may overlap with the name of an
+    internal function, thus the functype() must be used together with
+    func_name() to get a unique function reference.
+    For runtime type identification, it is adviced to use Item_func::functype()
+    and Item_sum::sum_func() instead.
+    The value is returned in ASCII character set, except for user-defined
+    functions, whose names are returned in the system character set.
+  */
+  virtual const char *func_name() const = 0;
+
+  bool reject_vector_args();
+  uint num_vector_args();
+  bool reject_geometry_args();
 
  protected:
   /*
@@ -170,7 +195,13 @@ class Item_func : public Item_result_field {
   /// Value used in calculation of result of not_null_tables()
   table_map not_null_tables_cache{0};
 
+  uint64_t hash(bool commutative_args);
+
+  uint64_t hash_args(bool commutative) const;
+
  public:
+  bool is_null_on_null() const { return null_on_null; }
+
   /*
     When updating Functype with new spatial functions,
     is_spatial_operator() should also be updated.
@@ -200,11 +231,12 @@ class Item_func : public Item_result_field {
     XOR_FUNC,
     BETWEEN,
     IN_FUNC,
-    MULT_EQUAL_FUNC,
+    MULTI_EQ_FUNC,
     INTERVAL_FUNC,
     ISNOTNULLTEST_FUNC,
     SP_EQUALS_FUNC,
     SP_DISJOINT_FUNC,
+    SP_DISTANCE_FUNC,
     SP_INTERSECTS_FUNC,
     SP_TOUCHES_FUNC,
     SP_CROSSES_FUNC,
@@ -264,6 +296,7 @@ class Item_func : public Item_result_field {
     ACOS_FUNC,
     MOD_FUNC,
     IF_FUNC,
+    BOOL_IF_FUNC,
     NULLIF_FUNC,
     CASE_FUNC,
     YEAR_FUNC,
@@ -310,7 +343,28 @@ class Item_func : public Item_result_field {
     PERIODDIFF_FUNC,
     SEC_TO_TIME_FUNC,
     GET_FORMAT_FUNC,
-    ANY_VALUE_FUNC
+    ANY_VALUE_FUNC,
+    JSON_LENGTH_FUNC,
+    JSON_DEPTH_FUNC,
+    JSON_EXTRACT_FUNC,
+    JSON_OBJECT_FUNC,
+    JSON_DUALITY_OBJECT_FUNC,
+    JSON_ARRAY_FUNC,
+    JSON_VALID_FUNC,
+    JSON_TYPE_FUNC,
+    JSON_PRETTY_FUNC,
+    JSON_QUOTE_FUNC,
+    JSON_CONTAINS_PATH_FUNC,
+    JSON_STORAGE_SIZE_FUNC,
+    JSON_STORAGE_FREE_FUNC,
+    JSON_VALUE_FUNC,
+    JSON_SEARCH_FUNC,
+    JSON_SCHEMA_VALIDATION_REPORT_FUNC,
+    JSON_SCHEMA_VALID_FUNC,
+    ETAG_FUNC,
+    CURRENT_USER_IN_FUNC,
+    CURRENT_ROLE_IN_FUNC,
+    VECTOR_DISTANCE_FUNC
   };
   enum optimize_type {
     OPTIMIZE_NONE,
@@ -483,7 +537,12 @@ class Item_func : public Item_result_field {
   table_map not_null_tables() const override { return not_null_tables_cache; }
   void update_used_tables() override;
   void set_used_tables(table_map map) { used_tables_cache = map; }
-  bool eq(const Item *item, bool binary_cmp) const override;
+  bool eq(const Item *item) const override;
+  /**
+    Provide a more specific equality check for a function.
+    Combine with Item::eq() to implement a complete equality check.
+  */
+  virtual bool eq_specific(const Item *) const { return true; }
   virtual optimize_type select_optimize(const THD *) { return OPTIMIZE_NONE; }
   virtual bool have_rev_func() const { return false; }
   virtual Item *key_item() const { return args[0]; }
@@ -497,20 +556,25 @@ class Item_func : public Item_result_field {
     @return true on OOM, false otherwise
   */
   bool set_arguments(mem_root_deque<Item *> *list, bool context_free);
-  void split_sum_func(THD *thd, Ref_item_array ref_item_array,
+  bool split_sum_func(THD *thd, Ref_item_array ref_item_array,
                       mem_root_deque<Item *> *fields) override;
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
+
+  uint64_t hash() override;
   void print_op(const THD *thd, String *str, enum_query_type query_type) const;
   void print_args(const THD *thd, String *str, uint from,
                   enum_query_type query_type) const;
   virtual void fix_num_length_and_dec();
   virtual bool is_deprecated() const { return false; }
-  bool get_arg0_date(MYSQL_TIME *ltime, my_time_flags_t fuzzy_date) {
-    return (null_value = args[0]->get_date(ltime, fuzzy_date));
+  bool val_arg0_date(Date_val *date, my_time_flags_t flags) {
+    return (null_value = args[0]->val_date(date, flags));
   }
-  inline bool get_arg0_time(MYSQL_TIME *ltime) {
-    return (null_value = args[0]->get_time(ltime));
+  bool val_arg0_datetime(Datetime_val *dt, my_time_flags_t flags) {
+    return (null_value = args[0]->val_datetime(dt, flags));
+  }
+  bool val_arg0_time(Time_val *time) {
+    return (null_value = args[0]->val_time(time));
   }
   bool is_null() override { return update_null_value() || null_value; }
   void signal_divide_by_null();
@@ -519,22 +583,18 @@ class Item_func : public Item_result_field {
   Field *tmp_table_field(TABLE *t_arg) override;
   Item *get_tmp_table_item(THD *thd) override;
 
+  void raise_temporal_overflow(const char *type_name);
+
   my_decimal *val_decimal(my_decimal *) override;
 
-  bool agg_arg_charsets(DTCollation &c, Item **items, uint nitems, uint flags,
-                        int item_sep) {
-    return agg_item_charsets(c, func_name(), items, nitems, flags, item_sep,
-                             false);
-  }
   /*
     Aggregate arguments for string result, e.g: CONCAT(a,b)
     - convert to @@character_set_connection if all arguments are numbers
     - allow DERIVATION_NONE
   */
   bool agg_arg_charsets_for_string_result(DTCollation &c, Item **items,
-                                          uint nitems, int item_sep = 1) {
-    return agg_item_charsets_for_string_result(c, func_name(), items, nitems,
-                                               item_sep);
+                                          uint nitems) {
+    return agg_item_charsets_for_string_result(c, func_name(), items, nitems);
   }
   /*
     Aggregate arguments for comparison, e.g: a=b, a LIKE b, a RLIKE b
@@ -542,10 +602,11 @@ class Item_func : public Item_result_field {
     - don't allow DERIVATION_NONE
   */
   bool agg_arg_charsets_for_comparison(DTCollation &c, Item **items,
-                                       uint nitems, int item_sep = 1) {
-    return agg_item_charsets_for_comparison(c, func_name(), items, nitems,
-                                            item_sep);
+                                       uint nitems) {
+    return agg_item_charsets_for_comparison(c, func_name(), items, nitems);
   }
+
+  Item *replace_func_call(uchar *) override;
 
   bool walk(Item_processor processor, enum_walk walk, uchar *arg) override;
   Item *transform(Item_transformer transformer, uchar *arg) override;
@@ -553,6 +614,35 @@ class Item_func : public Item_result_field {
                 Item_transformer transformer, uchar *arg_t) override;
   void traverse_cond(Cond_traverser traverser, void *arg,
                      traverse_order order) override;
+
+  bool replace_equal_field_checker(uchar **arg) override {
+    Replace_equal *replace = pointer_cast<Replace_equal *>(*arg);
+    replace->stack.push_front(this);
+    return true;
+  }
+
+  Item *replace_equal_field(uchar *arg) override {
+    pointer_cast<Replace_equal *>(arg)->stack.pop();
+    return this;
+  }
+
+  /**
+    Check whether a function allows replacement of a field with another item:
+    In particular, a replacement that changes the metadata of some Item
+    from non-nullable to nullable is not allowed.
+    Notice that e.g. changing the nullability of an operand of a comparison
+    operator in a WHERE clause that ignores UNKNOWN values is allowed,
+    according to this criterion.
+
+    @param original the field that could be replaced
+    @param subst    the item that could be the replacement
+
+    @returns true if replacement is allowed, false otherwise
+  */
+  virtual bool allow_replacement(Item_field *const original,
+                                 Item *const subst) {
+    return original->is_nullable() || !subst->is_nullable();
+  }
 
   /**
      Throw an error if the input double number is not finite, i.e. is either
@@ -769,6 +859,11 @@ class Item_real_func : public Item_func {
     set_data_type_double();
   }
 
+  Item_real_func(const POS &pos, Item *a, Item *b, Item *c)
+      : Item_func(pos, a, b, c) {
+    set_data_type_double();
+  }
+
   explicit Item_real_func(mem_root_deque<Item *> *list) : Item_func(list) {
     set_data_type_double();
   }
@@ -783,11 +878,12 @@ class Item_real_func : public Item_func {
     assert(fixed);
     return llrint_with_overflow_check(val_real());
   }
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_real(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_real(date, flags);
   }
-  bool get_time(MYSQL_TIME *ltime) override {
-    return get_time_from_real(ltime);
+  bool val_time(Time_val *time) override { return get_time_from_real(time); }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_real(dt, flags);
   }
   enum Item_result result_type() const override { return REAL_RESULT; }
 };
@@ -836,51 +932,59 @@ class Item_func_numhybrid : public Item_func {
   longlong val_int() override;
   my_decimal *val_decimal(my_decimal *) override;
   String *val_str(String *str) override;
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override;
-  bool get_time(MYSQL_TIME *ltime) override;
+  bool val_date(Date_val *date, my_time_flags_t flags) override;
+  bool val_time(Time_val *time) override;
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override;
   /**
-     @brief Performs the operation that this functions implements when the
-     result type is INT.
+    Evaluates item when resulting data type is integer type
 
-     @return The result of the operation.
+    @returns The result of the operation (0 when error or result is NULL)
   */
   virtual longlong int_op() = 0;
-
   /**
-     @brief Performs the operation that this functions implements when the
-     result type is REAL.
+    Evaluates item when resulting data type is floating point type
 
-     @return The result of the operation.
+    @returns The result of the operation (0.0 when error or result is NULL)
   */
   virtual double real_op() = 0;
-
   /**
-     @brief Performs the operation that this functions implements when the
-     result type is DECIMAL.
+    Evaluates item when resulting data type is DECIMAL
 
-     @param decimal_value A pointer where the DECIMAL value will be allocated.
-     @return
-       - 0 If the result is NULL
-       - The same pointer it was given, with the area initialized to the
-         result of the operation.
+    @param[out] decimal_value Buffer into which decimal value is stored
+    @returns    nullptr if error or result is NULL, otherwise pointer to result
   */
   virtual my_decimal *decimal_op(my_decimal *decimal_value) = 0;
-
   /**
-     @brief Performs the operation that this functions implements when the
-     result type is a string type.
+    Evaluates item when resulting data type is a string type
 
-     @return The result of the operation.
+    @param[out] string string evaluation buffer
+    @returns    nullptr if error or result is NULL, otherwise pointer to result
   */
-  virtual String *str_op(String *) = 0;
+  virtual String *str_op(String *string) = 0;
   /**
-     @brief Performs the operation that this functions implements when the
-     result type is MYSQL_TYPE_DATE or MYSQL_TYPE_DATETIME.
+    Evaluates item when resulting data type is DATE
 
-     @return The result of the operation.
+    @param[out] date  resulting date value when return value is false
+    @param      flags flags for handling invalid date values
+    @returns    true if error or result is NULL, false if non-NULL result
   */
-  virtual bool date_op(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) = 0;
-  virtual bool time_op(MYSQL_TIME *ltime) = 0;
+  virtual bool date_op(Date_val *date, my_time_flags_t flags) = 0;
+  /**
+    Evaluates item when resulting data type is TIME
+
+    @param[out] time  resulting time value when return value is false
+    @returns    true if error or result is NULL, false if non-NULL result
+  */
+  virtual bool time_op(Time_val *time) = 0;
+  /**
+    Evaluates item when resulting data type is DATETIME or TIMESTAMP
+
+    @param[out] dt    resulting datetime value when return value is false
+    @param      flags flags for handling invalid date values
+    @returns    true if error or result is NULL, false if non-NULL result
+  */
+  virtual bool datetime_op(Datetime_val *dt, my_time_flags_t flags) = 0;
+
   bool is_null() override { return update_null_value() || null_value; }
 };
 
@@ -897,15 +1001,19 @@ class Item_func_num1 : public Item_func_numhybrid {
   void fix_num_length_and_dec() override;
   void set_numeric_type() override;
   String *str_op(String *) override {
-    assert(0);
+    assert(false);
     return nullptr;
   }
-  bool date_op(MYSQL_TIME *, my_time_flags_t) override {
-    assert(0);
+  bool date_op(Date_val *, my_time_flags_t) override {
+    assert(false);
     return false;
   }
-  bool time_op(MYSQL_TIME *) override {
-    assert(0);
+  bool time_op(Time_val *) override {
+    assert(false);
+    return false;
+  }
+  bool datetime_op(Datetime_val *, my_time_flags_t) override {
+    assert(false);
     return false;
   }
 };
@@ -926,15 +1034,19 @@ class Item_num_op : public Item_func_numhybrid {
 
   void set_numeric_type() override;
   String *str_op(String *) override {
-    assert(0);
+    assert(false);
     return nullptr;
   }
-  bool date_op(MYSQL_TIME *, my_time_flags_t) override {
-    assert(0);
+  bool date_op(Date_val *, my_time_flags_t) override {
+    assert(false);
     return false;
   }
-  bool time_op(MYSQL_TIME *) override {
-    assert(0);
+  bool time_op(Time_val *) override {
+    assert(false);
+    return false;
+  }
+  bool datetime_op(Datetime_val *, my_time_flags_t) override {
+    assert(false);
     return false;
   }
 };
@@ -987,10 +1099,13 @@ class Item_int_func : public Item_func {
   }
   double val_real() override;
   String *val_str(String *str) override;
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_int(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_int(date, flags);
   }
-  bool get_time(MYSQL_TIME *ltime) override { return get_time_from_int(ltime); }
+  bool val_time(Time_val *time) override { return get_time_from_int(time); }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_int(dt, flags);
+  }
   enum Item_result result_type() const override { return INT_RESULT; }
   /*
     Concerning PS-param types,
@@ -1061,15 +1176,17 @@ class Item_typecast_decimal final : public Item_func {
   String *val_str(String *str) override;
   double val_real() override;
   longlong val_int() override;
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_decimal(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_decimal(date, flags);
   }
-  bool get_time(MYSQL_TIME *ltime) override {
-    return get_time_from_decimal(ltime);
+  bool val_time(Time_val *time) override { return get_time_from_decimal(time); }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_decimal(dt, flags);
   }
   my_decimal *val_decimal(my_decimal *) override;
   enum Item_result result_type() const override { return DECIMAL_RESULT; }
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     if (args[0]->propagate_type(thd, MYSQL_TYPE_NEWDECIMAL, false, true))
       return true;
     return false;
@@ -1078,6 +1195,7 @@ class Item_typecast_decimal final : public Item_func {
   enum Functype functype() const override { return TYPECAST_FUNC; }
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
+  uint64_t hash() override;
 };
 
 /**
@@ -1102,11 +1220,13 @@ class Item_typecast_real final : public Item_func {
   String *val_str(String *str) override;
   double val_real() override;
   longlong val_int() override { return val_int_from_real(); }
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override;
-  bool get_time(MYSQL_TIME *ltime) override;
+  bool val_date(Date_val *date, my_time_flags_t flags) override;
+  bool val_time(Time_val *time) override;
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override;
   my_decimal *val_decimal(my_decimal *decimal_value) override;
   enum Item_result result_type() const override { return REAL_RESULT; }
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     return args[0]->propagate_type(thd, MYSQL_TYPE_DOUBLE, false, true);
   }
   const char *func_name() const override { return "cast_as_real"; }
@@ -1136,7 +1256,7 @@ class Item_func_plus final : public Item_func_additive_op {
 
   // SUPPRESS_UBSAN: signed integer overflow
   longlong int_op() override SUPPRESS_UBSAN;
-
+  uint64_t hash() override { return Item_func::hash(true); }
   double real_op() override;
   my_decimal *decimal_op(my_decimal *) override;
   enum Functype functype() const override { return PLUS_FUNC; }
@@ -1167,6 +1287,7 @@ class Item_func_mul final : public Item_num_op {
   const char *func_name() const override { return "*"; }
   longlong int_op() override;
   double real_op() override;
+  uint64_t hash() override { return Item_func::hash(true); }
   my_decimal *decimal_op(my_decimal *) override;
   void result_precision() override;
   bool check_partition_func_processor(uchar *) override { return false; }
@@ -1444,6 +1565,7 @@ class Item_func_rand final : public Item_real_func {
   rand_struct *m_rand{nullptr};
   bool first_eval{true};  // true if val_real() is called 1st time
  public:
+  Item_func_rand() : Item_real_func() {}
   Item_func_rand(const POS &pos, Item *a) : Item_real_func(pos, a) {}
   explicit Item_func_rand(const POS &pos) : Item_real_func(pos) {}
 
@@ -1454,7 +1576,7 @@ class Item_func_rand final : public Item_real_func {
     This function is non-deterministic and hence depends on the
     'RAND' pseudo-table.
 
-    @retval RAND_TABLE_BIT
+    @returns RAND_TABLE_BIT
   */
   table_map get_initial_pseudo_tables() const override {
     return RAND_TABLE_BIT;
@@ -1529,8 +1651,9 @@ class Item_func_min_max : public Item_func_numhybrid {
   double real_op() override;
   my_decimal *decimal_op(my_decimal *) override;
   String *str_op(String *) override;
-  bool date_op(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override;
-  bool time_op(MYSQL_TIME *ltime) override;
+  bool date_op(Date_val *date, my_time_flags_t flags) override;
+  bool time_op(Time_val *time) override;
+  bool datetime_op(Datetime_val *dt, my_time_flags_t flags) override;
   enum_field_types default_data_type() const override {
     return MYSQL_TYPE_VARCHAR;
   }
@@ -1538,17 +1661,17 @@ class Item_func_min_max : public Item_func_numhybrid {
   bool resolve_type_inner(THD *thd) override;
   void set_numeric_type() override {}
   enum Item_result result_type() const override { return hybrid_type; }
+  TYPELIB *get_typelib() const override;
 
   /**
     Make CAST(LEAST_OR_GREATEST(datetime_expr, varchar_expr))
     return a number in format YYMMDDhhmmss.
   */
   enum Item_result cast_to_int_type() const override {
-    return compare_as_dates() ? INT_RESULT : result_type();
+    return m_eval_type == MYSQL_TYPE_DATETIME || m_eval_type == MYSQL_TYPE_DATE
+               ? INT_RESULT
+               : result_type();
   }
-
-  /// Returns true if arguments to this function should be compared as dates.
-  bool compare_as_dates() const;
 
   /// Returns true if at least one of the arguments was of temporal type.
   bool has_temporal_arg() const { return temporal_item; }
@@ -1557,7 +1680,14 @@ class Item_func_min_max : public Item_func_numhybrid {
   /// True if LEAST function, false if GREATEST.
   const bool m_is_least_func;
   String m_string_buf;
-  /*
+  /**
+    Evaluation type, ie. the data type that the comparison function uses.
+    This is the same as the data_type(), except in the case where the result
+    type is a string type and at least one of the arguments is a DATE
+    or DATETIME temporal value, in which it is a derived temporal type.
+  */
+  enum_field_types m_eval_type;
+  /**
     Used for determining whether one of the arguments is of temporal type and
     for converting arguments to a common output format if arguments are
     compared as dates and result type is character string. For example,
@@ -1574,22 +1704,31 @@ class Item_func_min_max : public Item_func_numhybrid {
   /**
     Compare arguments as datetime values.
 
-    @param value Pointer to which the datetime value of the winning argument
-    is written.
+    @param      flags  Flags used when evaluating date
+    @param[out] value  Smallest/largest datetime value from comparison
 
     @return true if error, false otherwise.
   */
-  bool cmp_datetimes(longlong *value);
+  bool cmp_datetimes(longlong *value, my_time_flags_t flags);
 
   /**
     Compare arguments as time values.
 
-    @param value Pointer to which the time value of the winning argument is
-    written.
+    @param[out] value  Smallest/largest time value from comparison
 
     @return true if error, false otherwise.
   */
-  bool cmp_times(longlong *value);
+  bool cmp_times(Time_val *value);
+
+  /**
+    Compare arguments as date values.
+
+    @param      flags  Flags used when evaluating date
+    @param[out] value  Smallest/largest date value from comparison
+
+    @return true if error, false otherwise.
+  */
+  bool cmp_dates(Date_val *value, my_time_flags_t flags);
 };
 
 class Item_func_min final : public Item_func_min_max {
@@ -1597,6 +1736,7 @@ class Item_func_min final : public Item_func_min_max {
   Item_func_min(const POS &pos, PT_item_list *opt_list)
       : Item_func_min_max(pos, opt_list, true) {}
   const char *func_name() const override { return "least"; }
+  uint64_t hash() override { return Item_func::hash(true); }
   enum Functype functype() const override { return LEAST_FUNC; }
 };
 
@@ -1644,15 +1784,16 @@ class Item_rollup_group_item final : public Item_func {
     // with all the other copying done here.)
     hidden = inner_item->hidden;
     set_nullable(true);
-    set_rollup_expr();
+    set_group_by_modifier();
   }
   double val_real() override;
   longlong val_int() override;
   String *val_str(String *str) override;
   my_decimal *val_decimal(my_decimal *dec) override;
   bool val_json(Json_wrapper *result) override;
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override;
-  bool get_time(MYSQL_TIME *ltime) override;
+  bool val_date(Date_val *date, my_time_flags_t flags) override;
+  bool val_time(Time_val *time) override;
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override;
   const char *func_name() const override { return "rollup_group_item"; }
   table_map used_tables() const override {
     /*
@@ -1665,7 +1806,7 @@ class Item_rollup_group_item final : public Item_func {
   }
   void update_used_tables() override {
     Item_func::update_used_tables();
-    set_rollup_expr();
+    set_group_by_modifier();
   }
   Item_result result_type() const override { return args[0]->result_type(); }
   bool resolve_type(THD *) override {
@@ -1684,7 +1825,9 @@ class Item_rollup_group_item final : public Item_func {
   enum Functype functype() const override { return ROLLUP_GROUP_ITEM_FUNC; }
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
-  bool eq(const Item *item, bool binary_cmp) const override;
+  uint64_t hash() override;
+  bool eq_specific(const Item *item) const override;
+  TYPELIB *get_typelib() const override;
 
   // Used by AggregateIterator.
   void set_current_rollup_level(int level) { m_current_rollup_level = level; }
@@ -1706,6 +1849,29 @@ class Item_func_length : public Item_int_func {
   const char *func_name() const override { return "length"; }
   bool resolve_type(THD *thd) override {
     if (param_type_is_default(thd, 0, 1)) return true;
+    max_length = 10;
+    return false;
+  }
+};
+
+class Item_func_vector_dim : public Item_int_func {
+  String value;
+
+ public:
+  Item_func_vector_dim(const POS &pos, Item *a) : Item_int_func(pos, a) {}
+  longlong val_int() override;
+  const char *func_name() const override { return "vector_dim"; }
+  bool resolve_type(THD *thd) override {
+    if (param_type_is_default(thd, 0, 1, MYSQL_TYPE_VECTOR)) {
+      return true;
+    }
+    bool valid_type = (args[0]->data_type() == MYSQL_TYPE_VECTOR) ||
+                      (args[0]->result_type() == STRING_RESULT &&
+                       args[0]->collation.collation == &my_charset_bin);
+    if (!valid_type) {
+      my_error(ER_WRONG_ARGUMENTS, MYF(0), func_name());
+      return true;
+    }
     max_length = 10;
     return false;
   }
@@ -1874,17 +2040,23 @@ class Item_func_bit : public Item_func {
              enum_query_type query_type) const override {
     print_op(thd, str, query_type);
   }
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
     if (hybrid_type == INT_RESULT)
-      return get_date_from_int(ltime, fuzzydate);
+      return get_date_from_int(date, flags);
     else
-      return get_date_from_string(ltime, fuzzydate);
+      return get_date_from_string(date, flags);
   }
-  bool get_time(MYSQL_TIME *ltime) override {
+  bool val_time(Time_val *time) override {
     if (hybrid_type == INT_RESULT)
-      return get_time_from_int(ltime);
+      return get_time_from_int(time);
     else
-      return get_time_from_string(ltime);
+      return get_time_from_string(time);
+  }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    if (hybrid_type == INT_RESULT)
+      return get_datetime_from_int(dt, flags);
+    else
+      return get_datetime_from_string(dt, flags);
   }
 
  private:
@@ -1928,6 +2100,7 @@ class Item_func_bit_or final : public Item_func_bit_two_param {
   Item_func_bit_or(const POS &pos, Item *a, Item *b)
       : Item_func_bit_two_param(pos, a, b) {}
   const char *func_name() const override { return "|"; }
+  uint64_t hash() override { return Item_func::hash(true); }
 
  private:
   longlong int_op() override { return eval_int_op(std::bit_or<ulonglong>()); }
@@ -1941,6 +2114,7 @@ class Item_func_bit_and final : public Item_func_bit_two_param {
   Item_func_bit_and(const POS &pos, Item *a, Item *b)
       : Item_func_bit_two_param(pos, a, b) {}
   const char *func_name() const override { return "&"; }
+  uint64_t hash() override { return Item_func::hash(true); }
 
  private:
   longlong int_op() override { return eval_int_op(std::bit_and<ulonglong>()); }
@@ -1954,6 +2128,7 @@ class Item_func_bit_xor final : public Item_func_bit_two_param {
   Item_func_bit_xor(const POS &pos, Item *a, Item *b)
       : Item_func_bit_two_param(pos, a, b) {}
   const char *func_name() const override { return "^"; }
+  uint64_t hash() override { return Item_func::hash(true); }
 
  private:
   longlong int_op() override { return eval_int_op(std::bit_xor<ulonglong>()); }
@@ -2000,8 +2175,8 @@ class Item_func_shift_left final : public Item_func_shift {
   const char *func_name() const override { return "<<"; }
 
  private:
-  longlong int_op() override { return eval_int_op<true>(); }
-  String *str_op(String *str) override { return eval_str_op<true>(str); }
+  longlong int_op() override;
+  String *str_op(String *str) override;
 };
 
 class Item_func_shift_right final : public Item_func_shift {
@@ -2011,8 +2186,8 @@ class Item_func_shift_right final : public Item_func_shift {
   const char *func_name() const override { return ">>"; }
 
  private:
-  longlong int_op() override { return eval_int_op<false>(); }
-  String *str_op(String *str) override { return eval_str_op<false>(str); }
+  longlong int_op() override;
+  String *str_op(String *str) override;
 };
 
 class Item_func_bit_neg final : public Item_func_bit {
@@ -2028,6 +2203,7 @@ class Item_func_bit_neg final : public Item_func_bit {
              enum_query_type query_type) const override {
     Item_func::print(thd, str, query_type);
   }
+  uint64_t hash() override { return Item_func::hash(); }
 
  private:
   longlong int_op() override;
@@ -2112,7 +2288,7 @@ class Item_func_sleep final : public Item_int_func {
     This function is non-deterministic and hence depends on the
     'RAND' pseudo-table.
 
-    @retval RAND_TABLE_BIT
+    @returns RAND_TABLE_BIT
   */
   table_map get_initial_pseudo_tables() const override {
     return RAND_TABLE_BIT;
@@ -2155,7 +2331,6 @@ class Item_udf_func : public Item_func {
   Item_result result_type() const override { return udf.result_type(); }
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
-
   bool check_function_as_value_generator(uchar *checker_args) override {
     Check_function_as_value_generator_parameters *func_arg =
         pointer_cast<Check_function_as_value_generator_parameters *>(
@@ -2195,11 +2370,12 @@ class Item_func_udf_float final : public Item_udf_func {
   }
   double val_real() override;
   String *val_str(String *str) override;
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_real(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_real(date, flags);
   }
-  bool get_time(MYSQL_TIME *ltime) override {
-    return get_time_from_real(ltime);
+  bool val_time(Time_val *time) override { return get_time_from_real(time); }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_real(dt, flags);
   }
   bool resolve_type(THD *) override {
     set_data_type_double();
@@ -2217,10 +2393,13 @@ class Item_func_udf_int final : public Item_udf_func {
     return static_cast<double>(Item_func_udf_int::val_int());
   }
   String *val_str(String *str) override;
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_int(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_int(date, flags);
   }
-  bool get_time(MYSQL_TIME *ltime) override { return get_time_from_int(ltime); }
+  bool val_time(Time_val *time) override { return get_time_from_int(time); }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_int(dt, flags);
+  }
   enum Item_result result_type() const override { return INT_RESULT; }
   bool resolve_type(THD *) override {
     set_data_type_longlong();
@@ -2237,11 +2416,12 @@ class Item_func_udf_decimal : public Item_udf_func {
   double val_real() override;
   my_decimal *val_decimal(my_decimal *) override;
   String *val_str(String *str) override;
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_decimal(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_decimal(date, flags);
   }
-  bool get_time(MYSQL_TIME *ltime) override {
-    return get_time_from_decimal(ltime);
+  bool val_time(Time_val *time) override { return get_time_from_decimal(time); }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_decimal(dt, flags);
   }
   enum Item_result result_type() const override { return DECIMAL_RESULT; }
   bool resolve_type(THD *thd) override;
@@ -2277,11 +2457,12 @@ class Item_func_udf_str : public Item_udf_func {
                    dec_buf);
     return dec_buf;
   }
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_string(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_string(date, flags);
   }
-  bool get_time(MYSQL_TIME *ltime) override {
-    return get_time_from_string(ltime);
+  bool val_time(Time_val *time) override { return get_time_from_string(time); }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_string(dt, flags);
   }
   enum Item_result result_type() const override { return STRING_RESULT; }
   bool resolve_type(THD *thd) override;
@@ -2302,6 +2483,9 @@ class Item_func_get_lock final : public Item_int_func {
   bool do_itemize(Parse_context *pc, Item **res) override;
   longlong val_int() override;
   const char *func_name() const override { return "get_lock"; }
+  table_map get_initial_pseudo_tables() const override {
+    return INNER_TABLE_BIT;
+  }
   bool resolve_type(THD *thd) override {
     if (param_type_is_default(thd, 0, 1)) return true;
     if (param_type_is_default(thd, 1, 2, MYSQL_TYPE_LONGLONG)) return true;
@@ -2330,6 +2514,9 @@ class Item_func_release_lock final : public Item_int_func {
 
   longlong val_int() override;
   const char *func_name() const override { return "release_lock"; }
+  table_map get_initial_pseudo_tables() const override {
+    return INNER_TABLE_BIT;
+  }
   bool resolve_type(THD *thd) override {
     if (param_type_is_default(thd, 0, 1)) return true;
     max_length = 1;
@@ -2355,6 +2542,9 @@ class Item_func_release_all_locks final : public Item_int_func {
 
   longlong val_int() override;
   const char *func_name() const override { return "release_all_locks"; }
+  table_map get_initial_pseudo_tables() const override {
+    return INNER_TABLE_BIT;
+  }
   bool resolve_type(THD *) override {
     unsigned_flag = true;
     return false;
@@ -2386,6 +2576,9 @@ class Item_source_pos_wait : public Item_int_func {
   bool do_itemize(Parse_context *pc, Item **res) override;
   longlong val_int() override;
   const char *func_name() const override { return "source_pos_wait"; }
+  table_map get_initial_pseudo_tables() const override {
+    return INNER_TABLE_BIT;
+  }
   bool resolve_type(THD *thd) override {
     if (param_type_is_default(thd, 0, 1)) return true;
     if (param_type_is_default(thd, 1, 3, MYSQL_TYPE_LONGLONG)) return true;
@@ -2954,11 +3147,14 @@ class Item_var_func : public Item_func {
   Item_var_func(Item *a) : Item_func(a) {}
   Item_var_func(const POS &pos, Item *a) : Item_func(pos, a) {}
 
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_non_temporal(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_non_temporal(date, flags);
   }
-  bool get_time(MYSQL_TIME *ltime) override {
-    return get_time_from_non_temporal(ltime);
+  bool val_time(Time_val *time) override {
+    return get_time_from_non_temporal(time);
+  }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_non_temporal(dt, flags);
   }
   bool check_function_as_value_generator(uchar *checker_args) override {
     Check_function_as_value_generator_parameters *func_arg =
@@ -3163,6 +3359,7 @@ class user_var_entry {
   /* Routines to access the value and its type */
   const char *ptr() const { return m_ptr; }
   size_t length() const { return m_length; }
+  /// The data type of this variable.
   Item_result type() const { return m_type; }
   /* Item-alike routines to access the value */
   double val_real(bool *null_value) const;
@@ -3222,6 +3419,7 @@ class Item_func_set_user_var : public Item_var_func {
   bool resolve_type(THD *) override;
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
+  uint64_t hash() override;
   void print_assignment(const THD *thd, String *str,
                         enum_query_type query_type) const;
   const char *func_name() const override { return "set_user_var"; }
@@ -3268,6 +3466,7 @@ class Item_func_get_user_var : public Item_var_func,
   void update_used_tables() override {}  // Keep existing used tables
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
+  uint64_t hash() override;
   enum Item_result result_type() const override;
   /*
     We must always return variables as strings to guard against selects of type
@@ -3275,7 +3474,7 @@ class Item_func_get_user_var : public Item_var_func,
   */
   const char *func_name() const override { return "get_user_var"; }
   bool is_non_const_over_literals(uchar *) override { return true; }
-  bool eq(const Item *item, bool binary_cmp) const override;
+  bool eq_specific(const Item *item) const override;
 
  private:
   bool set_value(THD *thd, sp_rcontext *ctx, Item **it) override;
@@ -3310,19 +3509,23 @@ class Item_user_var_as_out_param : public Item {
   longlong val_int() override;
   String *val_str(String *str) override;
   my_decimal *val_decimal(my_decimal *decimal_buffer) override;
-  bool get_date(MYSQL_TIME *, my_time_flags_t) override {
-    assert(0);
+  bool val_date(Date_val *, my_time_flags_t) override {
+    assert(false);
     return true;
   }
-  bool get_time(MYSQL_TIME *) override {
-    assert(0);
+  bool val_time(Time_val *) override {
+    assert(false);
     return true;
   }
-
+  bool val_datetime(Datetime_val *, my_time_flags_t) override {
+    assert(false);
+    return true;
+  }
   /* fix_fields() binds variable name with its entry structure */
   bool fix_fields(THD *thd, Item **ref) override;
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
+  uint64_t hash() override;
   void set_null_value(const CHARSET_INFO *cs);
   void set_value(const char *str, size_t length, const CHARSET_INFO *cs);
 };
@@ -3391,6 +3594,7 @@ class Item_func_get_system_var final : public Item_var_func {
   bool resolve_type(THD *) override;
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
+  uint64_t hash() override;
   bool is_non_const_over_literals(uchar *) override { return true; }
   enum Item_result result_type() const override {
     assert(fixed);
@@ -3404,7 +3608,7 @@ class Item_func_get_system_var final : public Item_var_func {
   }
   /* TODO: fix to support views */
   const char *func_name() const override { return "get_system_var"; }
-  bool eq(const Item *item, bool binary_cmp) const override;
+  bool eq_specific(const Item *item) const override;
   bool is_valid_for_pushdown(uchar *arg [[maybe_unused]]) override {
     // Expressions which have system variables cannot be pushed as of
     // now because Item_func_get_system_var::print does not print the
@@ -3484,7 +3688,8 @@ class Item_func_match final : public Item_real_func {
   enum Functype functype() const override { return FT_FUNC; }
   const char *func_name() const override { return "match"; }
   bool fix_fields(THD *thd, Item **ref) override;
-  bool eq(const Item *, bool binary_cmp) const override;
+  void update_used_tables() override;
+  bool eq_specific(const Item *item) const override;
   /* The following should be safe, even if we compare doubles */
   longlong val_int() override {
     assert(fixed);
@@ -3493,7 +3698,7 @@ class Item_func_match final : public Item_real_func {
   double val_real() override;
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
-
+  uint64_t hash() override;
   bool fix_index(const THD *thd);
   bool init_search(THD *thd);
   bool check_function_as_value_generator(uchar *checker_args) override {
@@ -3718,6 +3923,9 @@ class Item_func_is_free_lock final : public Item_int_func {
   bool do_itemize(Parse_context *pc, Item **res) override;
   longlong val_int() override;
   const char *func_name() const override { return "is_free_lock"; }
+  table_map get_initial_pseudo_tables() const override {
+    return INNER_TABLE_BIT;
+  }
   bool resolve_type(THD *thd) override {
     if (param_type_is_default(thd, 0, 1)) return true;
     max_length = 1;
@@ -3745,6 +3953,9 @@ class Item_func_is_used_lock final : public Item_int_func {
   bool do_itemize(Parse_context *pc, Item **res) override;
   longlong val_int() override;
   const char *func_name() const override { return "is_used_lock"; }
+  table_map get_initial_pseudo_tables() const override {
+    return INNER_TABLE_BIT;
+  }
   bool resolve_type(THD *thd) override {
     if (param_type_is_default(thd, 0, 1)) return true;
     unsigned_flag = true;
@@ -3797,7 +4008,9 @@ class Item_func_sp final : public Item_func {
   typedef Item_func super;
 
  private:
-  Name_resolution_context *context{nullptr};
+  /// Holds the security definer context(if defined with SQL SECURITY DEFINER)
+  /// and the error the handler.
+  Name_resolution_context *m_name_resolution_ctx{nullptr};
   /// The name of the stored function
   sp_name *m_name{nullptr};
   /// Pointer to actual function instance (null when not resolved or executing)
@@ -3838,18 +4051,22 @@ class Item_func_sp final : public Item_func {
 
   longlong val_int() override;
   double val_real() override;
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override;
-  bool get_time(MYSQL_TIME *ltime) override;
+  bool val_date(Date_val *date, my_time_flags_t flags) override;
+  bool val_time(Time_val *time) override;
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override;
   my_decimal *val_decimal(my_decimal *dec_buf) override;
   String *val_str(String *str) override;
   bool val_json(Json_wrapper *result) override;
 
   bool change_context_processor(uchar *arg) override {
-    context = reinterpret_cast<Item_ident::Change_context *>(arg)->m_context;
+    m_name_resolution_ctx =
+        pointer_cast<Item_ident::Change_context *>(arg)->m_context;
     return false;
   }
 
   bool sp_check_access(THD *thd);
+  sp_head *get_sp() { return m_sp; }
+  const sp_name *get_name() { return m_name; }
   enum Functype functype() const override { return FUNC_SP; }
 
   bool fix_fields(THD *thd, Item **ref) override;

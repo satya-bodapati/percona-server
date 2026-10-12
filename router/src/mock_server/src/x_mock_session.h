@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,10 +27,12 @@
 #define MYSQLD_MOCK_X_MOCK_SESSION_INCLUDED
 
 #include <memory>
-#include <mutex>
-#include <set>
 
+#include "mysql/harness/destination_endpoint.h"
+#include "mysql/harness/destination_socket.h"
+#include "mysql/harness/logging/logger.h"
 #include "mysql/harness/net_ts/impl/socket_constants.h"
+#include "mysql/harness/tls_server_context.h"
 #include "mysql_server_mock.h"
 #include "router/src/mock_server/src/mock_session.h"
 #include "router/src/mock_server/src/statement_reader.h"
@@ -84,13 +87,16 @@ class MySQLServerMockSessionX : public MySQLServerMockSession {
   using clock_type = std::chrono::steady_clock;
 
   MySQLServerMockSessionX(
-      MySQLXProtocol protocol,
+      mysql_harness::DestinationSocket sock,
+      mysql_harness::DestinationEndpoint ep, TlsServerContext &tls_ctx,
       std::unique_ptr<StatementReaderBase> statement_processor,
       const bool debug_mode, bool with_tls);
 
   void run() override;
 
   void cancel() override { protocol_.cancel(); }
+
+  void terminate() override { protocol_.terminate(); }
 
   /**
    * encode all async notices.
@@ -131,6 +137,8 @@ class MySQLServerMockSessionX : public MySQLServerMockSession {
   clock_type::time_point start_time_{};
 
   net::steady_timer notice_timer_{protocol_.io_context()};
+
+  mysql_harness::logging::DomainLogger logger_;
 };
 
 }  // namespace server_mock

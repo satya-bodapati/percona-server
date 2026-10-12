@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,10 +25,10 @@
 
 #include "plugin/x/client/authentication/password_hasher.h"
 
-#include <assert.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 #include <sys/types.h>
+#include <cassert>
 
 #include <cstdint>
 #include <cstring>
@@ -38,8 +39,7 @@
 #define PVERSION41_CHAR '*'
 #define SCRAMBLE_LENGTH 20
 
-namespace xcl {
-namespace password_hasher {
+namespace xcl::password_hasher {
 namespace {
 
 const char *_dig_vec_upper = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -97,7 +97,7 @@ std::string get_password_from_salt(const std::string &hash_stage2) {
   if (hash_stage2.length() != MYSQL41_HASH_SIZE) return "";
 
   result[0] = PVERSION41_CHAR;
-  octet2hex(&result[1], &hash_stage2[0], MYSQL41_HASH_SIZE);
+  octet2hex(&result[1], hash_stage2.data(), MYSQL41_HASH_SIZE);
 
   // Skip the additional \0 sign added by octet2hex
   return {std::begin(result), std::end(result) - 1};
@@ -105,7 +105,7 @@ std::string get_password_from_salt(const std::string &hash_stage2) {
 
 std::string generate_user_salt() {
   std::string result(SCRAMBLE_LENGTH, '\0');
-  char *buffer = &result[0];
+  char *buffer = result.data();
   char *end = buffer + result.length() - 1;
 
   RAND_bytes(reinterpret_cast<unsigned char *>(buffer), SCRAMBLE_LENGTH);
@@ -158,14 +158,14 @@ std::string scramble(const std::string &message, const std::string &password) {
                                  reinterpret_cast<uint8_t *>(hash_stage2));
 
   /* create crypt string as sha1(message, hash_stage2) */
-  compute_mysql41_hash_multi(
-      reinterpret_cast<uint8_t *>(&result[0]), message.c_str(), message.size(),
-      reinterpret_cast<const char *>(hash_stage2), MYSQL41_HASH_SIZE);
-  my_crypt(&result[0], reinterpret_cast<const uint8_t *>(&result[0]),
+  compute_mysql41_hash_multi(reinterpret_cast<uint8_t *>(result.data()),
+                             message.c_str(), message.size(),
+                             reinterpret_cast<const char *>(hash_stage2),
+                             MYSQL41_HASH_SIZE);
+  my_crypt(result.data(), reinterpret_cast<const uint8_t *>(result.data()),
            hash_stage1, SCRAMBLE_LENGTH);
 
   return result;
 }
 
-}  // namespace password_hasher
-}  // namespace xcl
+}  // namespace xcl::password_hasher

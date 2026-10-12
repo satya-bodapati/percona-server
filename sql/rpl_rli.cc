@@ -1,15 +1,16 @@
-/* Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -63,6 +64,7 @@
 #include "sql/rpl_info_handler.h"
 #include "sql/rpl_mi.h"   // Master_info
 #include "sql/rpl_msr.h"  // channel_map
+#include "sql/rpl_relay_log_sanitizer.h"
 #include "sql/rpl_replica.h"
 #include "sql/rpl_reporting.h"
 #include "sql/rpl_rli_pdb.h"  // Slave_worker
@@ -138,7 +140,6 @@ Relay_log_info::Relay_log_info(bool is_slave_recovery,
       transaction_parser(mysql::binlog::event::Transaction_boundary_parser::
                              TRX_BOUNDARY_PARSER_APPLIER),
       group_relay_log_pos(0),
-      event_relay_log_number(0),
       event_relay_log_pos(0),
       group_source_log_seen_start_pos(false),
       group_source_log_start_pos(0),
@@ -156,8 +157,6 @@ Relay_log_info::Relay_log_info(bool is_slave_recovery,
       m_is_applier_source_position_info_invalid(false),
       is_group_master_log_pos_invalid(false),
       log_space_total(0),
-      ignore_log_space_limit(false),
-      sql_force_rotate_relay(false),
       last_master_timestamp(0),
       slave_skip_counter(0),
       abort_pos_wait(0),
@@ -171,10 +170,8 @@ Relay_log_info::Relay_log_info(bool is_slave_recovery,
       deferred_events(nullptr),
       workers(PSI_NOT_INSTRUMENTED),
       workers_array_initialized(false),
-      curr_group_assigned_parts(PSI_NOT_INSTRUMENTED),
       curr_group_da(PSI_NOT_INSTRUMENTED),
       curr_group_seen_begin(false),
-      mts_end_group_sets_max_dbs(false),
       replica_parallel_workers(0),
       exit_counter(0),
       max_updated_index(0),
@@ -186,8 +183,6 @@ Relay_log_info::Relay_log_info(bool is_slave_recovery,
       mts_recovery_index(0),
       mts_recovery_group_seen_begin(false),
       mts_group_status(MTS_NOT_IN_GROUP),
-      stats_exec_time(0),
-      stats_read_time(0),
       current_mts_submode(nullptr),
       reported_unsafe_warning(false),
       rli_description_event(nullptr),
@@ -223,7 +218,6 @@ Relay_log_info::Relay_log_info(bool is_slave_recovery,
   ign_master_log_name_end[0] = 0;
   set_timespec_nsec(&last_clock, 0);
   cached_charset_invalidate();
-  inited_hash_workers = false;
   commit_timestamps_status = COMMIT_TS_UNKNOWN;
 
   if (!rli_fake) {
@@ -243,19 +237,19 @@ Relay_log_info::Relay_log_info(bool is_slave_recovery,
     relay_log.init_pthread_objects();
     force_flush_postponed_due_to_split_trans = false;
 
-    Checkable_rwlock *sid_lock = new Checkable_rwlock(
+    Checkable_rwlock *tsid_lock = new Checkable_rwlock(
 #if defined(HAVE_PSI_INTERFACE)
-        key_rwlock_receiver_sid_lock
+        key_rwlock_receiver_tsid_lock
 #endif
     );
-    Sid_map *sid_map = new Sid_map(sid_lock);
-    gtid_set = new Gtid_set(sid_map, sid_lock);
+    Tsid_map *tsid_map = new Tsid_map(tsid_lock);
+    gtid_set = new Gtid_set(tsid_map, tsid_lock);
 
     /*
       Group replication applier channel shall not use checksum on its relay
       log files.
     */
-    if (channel_map.is_group_replication_channel_name(param_channel, true)) {
+    if (channel_map.is_group_replication_applier_channel_name(param_channel)) {
       relay_log.relay_log_checksum_alg =
           mysql::binlog::event::BINLOG_CHECKSUM_ALG_OFF;
     }
@@ -274,15 +268,11 @@ void Relay_log_info::init_workers(ulong n_workers) {
     Parallel slave parameters initialization is done regardless
     whether the feature is or going to be active or not.
   */
-  mts_groups_assigned = 0;
-  mts_events_assigned = 0;
-  pending_jobs = 0;
-  wq_size_waits_cnt = 0;
-  mts_wq_excess_cnt = mts_wq_no_underrun_cnt = mts_wq_overfill_cnt = 0;
-  mts_total_wait_overlap = 0;
-  mts_total_wait_worker_avail = 0;
-  mts_last_online_stat = 0;
   mta_coordinator_has_waited_stat = 0;
+  mts_groups_assigned = 0;
+  pending_jobs = 0;
+  mts_wq_excess_cnt = 0;
+  worker_queue_mem_exceeded_count = 0;
 
   workers.reserve(n_workers);
   workers_array_initialized = true;  // set after init
@@ -322,16 +312,16 @@ Relay_log_info::~Relay_log_info() {
     mysql_cond_destroy(&logical_clock_cond);
     relay_log.cleanup();
 
-    Sid_map *sid_map = gtid_set->get_sid_map();
-    Checkable_rwlock *sid_lock = sid_map->get_sid_lock();
+    Tsid_map *tsid_map = gtid_set->get_tsid_map();
+    Checkable_rwlock *tsid_lock = tsid_map->get_tsid_lock();
 
-    sid_lock->wrlock();
+    tsid_lock->wrlock();
     gtid_set->clear();
-    sid_map->clear();
+    tsid_map->clear();
     delete gtid_set;
-    delete sid_map;
-    sid_lock->unlock();
-    delete sid_lock;
+    delete tsid_map;
+    tsid_lock->unlock();
+    delete tsid_lock;
   }
 
   if (set_rli_description_event(nullptr)) {
@@ -370,11 +360,11 @@ void Relay_log_info::reset_notified_relay_log_change() {
    the current bitmap and starts using the clean bitmap indexed from zero
    of being reset rli_checkpoint_seqno.
 
-    New seconds_behind_master timestamp is installed.
+    New seconds_behind_source timestamp is installed.
 
    @param shift            number of bits to shift by Worker due to the
                            current checkpoint change.
-   @param new_ts           new seconds_behind_master timestamp value
+   @param new_ts           new seconds_behind_source timestamp value
                            unless zero. Zero could be due to FD event
                            or fake rotate event.
    @param update_timestamp if true, this function will update the
@@ -417,7 +407,7 @@ void Relay_log_info::reset_notified_checkpoint(ulong shift, time_t new_ts,
     Then the new checkpoint sequence is updated by subtracting the number
     of consecutive jobs that were successfully processed.
   */
-  assert(current_mts_submode->get_type() != MTS_PARALLEL_TYPE_DB_NAME ||
+  assert(current_mts_submode->get_type() == MTS_PARALLEL_TYPE_LOGICAL_CLOCK ||
          !(shift == 0 && rli_checkpoint_seqno != 0));
   rli_checkpoint_seqno = rli_checkpoint_seqno - shift;
   DBUG_PRINT("mta", ("reset_notified_checkpoint shift --> %lu, "
@@ -516,7 +506,7 @@ bool Relay_log_info::cannot_safely_rollback() const {
   return ret;
 }
 
-static inline int add_relay_log(Relay_log_info *rli, LOG_INFO *linfo) {
+static inline int add_relay_log(Relay_log_info *rli, Log_info *linfo) {
   MY_STAT s;
   DBUG_TRACE;
   mysql_mutex_assert_owner(&rli->log_space_lock);
@@ -534,7 +524,7 @@ static inline int add_relay_log(Relay_log_info *rli, LOG_INFO *linfo) {
 }
 
 int Relay_log_info::count_relay_log_space() {
-  LOG_INFO flinfo;
+  Log_info flinfo;
   DBUG_TRACE;
   MUTEX_LOCK(lock, &log_space_lock);
   log_space_total = 0;
@@ -555,7 +545,7 @@ int Relay_log_info::count_relay_log_space() {
 }
 
 bool Relay_log_info::reset_group_relay_log_pos(const char **errmsg) {
-  LOG_INFO linfo;
+  Log_info linfo;
 
   mysql_mutex_assert_owner(&data_lock);
 
@@ -572,7 +562,7 @@ bool Relay_log_info::is_group_relay_log_name_invalid(const char **errmsg) {
   DBUG_TRACE;
   const char *errmsg_fmt = nullptr;
   static char errmsg_buff[MYSQL_ERRMSG_SIZE + FN_REFLEN];
-  LOG_INFO linfo;
+  Log_info linfo;
 
   *errmsg = nullptr;
   if (relay_log.find_log_pos(&linfo, group_relay_log_name, true)) {
@@ -661,10 +651,10 @@ int Relay_log_info::wait_for_pos(THD *thd, String *log_name, longlong log_pos,
      this, these commands modify abort_pos_wait ; We just monitor abort_pos_wait
      and see if it has changed. Why do we have this mechanism instead of simply
      monitoring slave_running in the loop (we do this too), as CHANGE
-     MASTER/RESET SLAVE require that the SQL thread be stopped? This is because
-     if someones does: STOP REPLICA;CHANGE REPLICATION SOURCE/RESET REPLICA;
-     START REPLICA; the change may happen very quickly and we may not notice
-     that slave_running briefly switches between 1/0/1.
+     MASTER/RESET REPLICA require that the SQL thread be stopped? This is
+     because if someones does: STOP REPLICA;CHANGE REPLICATION SOURCE/RESET
+     REPLICA; START REPLICA; the change may happen very quickly and we may not
+     notice that slave_running briefly switches between 1/0/1.
   */
   init_abort_pos_wait = abort_pos_wait;
 
@@ -713,7 +703,7 @@ int Relay_log_info::wait_for_pos(THD *thd, String *log_name, longlong log_pos,
 
     /*
       group_master_log_name can be "", if we are just after a fresh
-      replication start or after a CHANGE MASTER TO MASTER_HOST/PORT
+      replication start or after a CHANGE REPLICATION SOURCE TO SOURCE_HOST/PORT
       (before we have executed one Rotate event from the master) or
       (rare) if the user is doing a weird slave setup (see next
       paragraph).  If group_master_log_name is "", we assume we don't
@@ -724,8 +714,8 @@ int Relay_log_info::wait_for_pos(THD *thd, String *log_name, longlong log_pos,
       configuration which does nothing), then group_master_log_pos
       will grow and group_master_log_name will stay "".
       Also in case the group master log position is invalid (e.g. after
-      CHANGE MASTER TO RELAY_LOG_POS ), we will wait till the first event
-      is read and the log position is valid again.
+      CHANGE REPLICATION SOURCE TO RELAY_LOG_POS ), we will wait till the first
+      event is read and the log position is valid again.
     */
     if (*group_master_log_name && !is_group_master_log_pos_invalid &&
         !is_applier_source_position_info_invalid()) {
@@ -818,10 +808,10 @@ int Relay_log_info::wait_for_gtid_set(THD *thd, const char *gtid,
 
   DBUG_PRINT("info", ("Waiting for %s timeout %lf", gtid, timeout));
 
-  Gtid_set wait_gtid_set(global_sid_map);
-  global_sid_lock->rdlock();
+  Gtid_set wait_gtid_set(global_tsid_map);
+  global_tsid_lock->rdlock();
   enum_return_status ret = wait_gtid_set.add_gtid_text(gtid);
-  global_sid_lock->unlock();
+  global_tsid_lock->unlock();
 
   if (ret != RETURN_STATUS_OK) {
     DBUG_PRINT("exit", ("improper gtid argument"));
@@ -865,13 +855,12 @@ int Relay_log_info::wait_for_gtid_set(THD *thd, const Gtid_set *wait_gtid_set,
                     &stage_waiting_for_the_replica_thread_to_advance_position,
                     &old_stage);
   /*
-     This function will abort when it notices that some CHANGE MASTER or
-     RESET BINARY LOGS AND GTIDS has changed the master info.
-     To catch this, these commands modify abort_pos_wait ; We just monitor
-     abort_pos_wait and see if it has changed.
-     Why do we have this mechanism instead of simply monitoring slave_running
-     in the loop (we do this too), as CHANGE REPLICATION SOURCE/RESET REPLICA
-     require that the SQL thread be stopped?
+     This function will abort when it notices that some CHANGE REPLICATION
+     SOURCE or RESET BINARY LOGS AND GTIDS has changed the master info. To catch
+     this, these commands modify abort_pos_wait ; We just monitor abort_pos_wait
+     and see if it has changed. Why do we have this mechanism instead of simply
+     monitoring slave_running in the loop (we do this too), as CHANGE
+     REPLICATION SOURCE/RESET REPLICA require that the SQL thread be stopped?
      This is because if someones does:
      STOP REPLICA;CHANGE REPLICATION SOURCE/RESET REPLICA; START REPLICA;
      the change may happen very quickly and we may not notice that
@@ -887,10 +876,10 @@ int Relay_log_info::wait_for_gtid_set(THD *thd, const Gtid_set *wait_gtid_set,
 
     // wait for master update, with optional timeout.
 
-    assert(wait_gtid_set->get_sid_map() == nullptr ||
-           wait_gtid_set->get_sid_map() == global_sid_map);
+    assert(wait_gtid_set->get_tsid_map() == nullptr ||
+           wait_gtid_set->get_tsid_map() == global_tsid_map);
 
-    global_sid_lock->wrlock();
+    global_tsid_lock->wrlock();
     const Gtid_set *executed_gtids = gtid_state->get_executed_gtids();
     const Owned_gtids *owned_gtids = gtid_state->get_owned_gtids();
 
@@ -913,10 +902,10 @@ int Relay_log_info::wait_for_gtid_set(THD *thd, const Gtid_set *wait_gtid_set,
     */
     if (wait_gtid_set->is_subset(executed_gtids) &&
         !owned_gtids->is_intersection_nonempty(wait_gtid_set)) {
-      global_sid_lock->unlock();
+      global_tsid_lock->unlock();
       break;
     }
-    global_sid_lock->unlock();
+    global_tsid_lock->unlock();
 
     DBUG_PRINT("info", ("Waiting for source update"));
 
@@ -1001,11 +990,11 @@ int Relay_log_info::inc_group_relay_log_pos(ulonglong log_pos,
     when the slave and master are 5.0 but with different event length (for
     example the slave is more recent than the master and features the event
     UID). It would give false SOURCE_POS_WAIT, false Exec_master_log_pos in
-    SHOW SLAVE STATUS, and so the user would do some CHANGE MASTER using this
-    value which would lead to badly broken replication.
-    Even the relay_log_pos will be corrupted in this case, because the len is
-    the relay log is not "val".
-    With the end_log_pos solution, we avoid computations involving lengths.
+    SHOW REPLICA STATUS, and so the user would do some CHANGE REPLICATION SOURCE
+    using this value which would lead to badly broken replication. Even the
+    relay_log_pos will be corrupted in this case, because the len is the relay
+    log is not "val". With the end_log_pos solution, we avoid computations
+    involving lengths.
   */
   DBUG_PRINT("info", ("log_pos: %lu  group_source_log_pos: %lu", (long)log_pos,
                       (long)group_master_log_pos));
@@ -1013,8 +1002,8 @@ int Relay_log_info::inc_group_relay_log_pos(ulonglong log_pos,
   if (log_pos > 0)  // 3.23 binlogs don't have log_posx
     group_master_log_pos = log_pos;
   /*
-    If the master log position was invalidiated by say, "CHANGE MASTER TO
-    RELAY_LOG_POS=N", it is now valid,
+    If the master log position was invalidiated by say, "CHANGE REPLICATION
+    SOURCE TO RELAY_LOG_POS=N", it is now valid,
    */
   if (is_group_master_log_pos_invalid) is_group_master_log_pos_invalid = false;
 
@@ -1110,11 +1099,11 @@ int Relay_log_info::purge_relay_logs(THD *thd, const char **errmsg,
     init_info checks for the existence of the relay log, this fails and
     init_info leaves inited to 0.
     In that pathological case, master_log_pos* will be properly reinited at
-    the next START SLAVE (as RESET SLAVE or CHANGE MASTER, the callers of
-    purge_relay_logs, will delete bogus *.info files or replace them with
-    correct files), however if the user does SHOW SLAVE STATUS before START
-    SLAVE, he will see old, confusing master_log_*. In other words, we reinit
-    master_log_* for SHOW SLAVE STATUS to display fine in any case.
+    the next START REPLICA (as RESET REPLICA or CHANGE REPLICATION SOURCE, the
+    callers of purge_relay_logs, will delete bogus *.info files or replace them
+    with correct files), however if the user does SHOW REPLICA STATUS before
+    START REPLICA, he will see old, confusing master_log_*. In other words, we
+    reinit master_log_* for SHOW REPLICA STATUS to display fine in any case.
   */
   group_master_log_name[0] = 0;
   group_master_log_pos = 0;
@@ -1133,8 +1122,8 @@ int Relay_log_info::purge_relay_logs(THD *thd, const char **errmsg,
           mi->reset means that the channel was reset but still exists. Channel
           shall have the index and the first relay log file.
 
-          Those files shall be remove in a following RESET SLAVE ALL (even when
-          channel was not inited again).
+          Those files shall be remove in a following RESET REPLICA ALL (even
+          when channel was not inited again).
         */
         (mi->reset && delete_only)) {
       assert(relay_log.is_relay_log);
@@ -1164,7 +1153,7 @@ int Relay_log_info::purge_relay_logs(THD *thd, const char **errmsg,
       if (relay_log.open_binlog(
               ln, nullptr,
               (max_relay_log_size ? max_relay_log_size : max_binlog_size), true,
-              true /*need_lock_index=true*/, true /*need_sid_lock=true*/,
+              true /*need_lock_index=true*/, true /*need_tsid_lock=true*/,
               mi->get_mi_description_event())) {
         mysql_mutex_unlock(log_lock);
         mysql_mutex_unlock(&mi->data_lock);
@@ -1192,9 +1181,9 @@ int Relay_log_info::purge_relay_logs(THD *thd, const char **errmsg,
   /**
     Clear the retrieved gtid set for this channel.
   */
-  get_sid_lock()->wrlock();
-  (const_cast<Gtid_set *>(get_gtid_set()))->clear_set_and_sid_map();
-  get_sid_lock()->unlock();
+  get_tsid_lock()->wrlock();
+  (const_cast<Gtid_set *>(get_gtid_set()))->clear_set_and_tsid_map();
+  get_tsid_lock()->unlock();
 
   if (relay_log.reset_logs(thd, delete_only)) {
     *errmsg = "Failed during log reset";
@@ -1540,13 +1529,23 @@ err:
   return res;
 }
 
-int Relay_log_info::rli_init_info(bool skip_received_gtid_set_recovery) {
+int Relay_log_info::rli_init_info(
+    bool skip_received_gtid_set_and_relaylog_recovery) {
   int error = 0;
   enum_return_check check_return = ERROR_CHECKING_REPOSITORY;
   const char *msg = nullptr;
   DBUG_TRACE;
 
   mysql_mutex_assert_owner(&data_lock);
+
+  // Prepare for relay log sanitization
+  rpl::Relay_log_sanitizer relay_log_sanitizer;
+  bool execute_relay_log_sanitization =
+      !is_relay_log_recovery && !relay_log_sanitized &&
+      !skip_received_gtid_set_and_relaylog_recovery;
+
+  DBUG_EXECUTE_IF("dbug_disable_relay_log_truncation",
+                  { execute_relay_log_sanitization = false; };);
 
   /*
     If Relay_log_info is issued again after a failed init_info(), for
@@ -1651,7 +1650,7 @@ int Relay_log_info::rli_init_info(bool skip_received_gtid_set_recovery) {
     ln = add_channel_to_relay_log_name(relay_bin_channel, FN_REFLEN,
                                        ln_without_channel_name);
 
-    /* We send the warning only at startup, not after every RESET SLAVE */
+    /* We send the warning only at startup, not after every RESET REPLICA */
     if (!opt_relay_logname_supplied && !opt_relaylog_index_name_supplied &&
         !name_warning_sent) {
       /*
@@ -1686,15 +1685,24 @@ int Relay_log_info::rli_init_info(bool skip_received_gtid_set_recovery) {
       return 1;
     }
 
+    if (execute_relay_log_sanitization) {
+      relay_log_sanitizer.analyze_logs(relay_log,
+                                       opt_replica_sql_verify_checksum);
+      // sanitize relay_log if applicable, ignore errors, they will be reported
+      // later on
+      relay_log_sanitizer.sanitize_log(relay_log);
+    }
+
     if (!gtid_retrieved_initialized) {
       /* Store the GTID of a transaction spanned in multiple relay log files */
       Gtid_monitoring_info *partial_trx = mi->get_gtid_monitoring_info();
       partial_trx->clear();
 #ifndef NDEBUG
-      get_sid_lock()->wrlock();
+      get_tsid_lock()->wrlock();
       gtid_set->dbug_print("set of GTIDs in relay log before initialization");
-      get_sid_lock()->unlock();
+      get_tsid_lock()->unlock();
 #endif
+
       /*
         In the init_gtid_set below we pass the mi->transaction_parser.
         This will be useful to ensure that we only add a GTID to
@@ -1708,7 +1716,7 @@ int Relay_log_info::rli_init_info(bool skip_received_gtid_set_recovery) {
         init_recovery.
       */
       if (!is_relay_log_recovery && !gtid_retrieved_initialized &&
-          !skip_received_gtid_set_recovery &&
+          !skip_received_gtid_set_and_relaylog_recovery &&
           relay_log.init_gtid_sets(
               gtid_set, nullptr, opt_replica_sql_verify_checksum,
               true /*true=need lock*/, &mi->transaction_parser, partial_trx)) {
@@ -1717,9 +1725,9 @@ int Relay_log_info::rli_init_info(bool skip_received_gtid_set_recovery) {
       }
       gtid_retrieved_initialized = true;
 #ifndef NDEBUG
-      get_sid_lock()->wrlock();
+      get_tsid_lock()->wrlock();
       gtid_set->dbug_print("set of GTIDs in relay log after initialization");
-      get_sid_lock()->unlock();
+      get_tsid_lock()->unlock();
 #endif
     }
     /*
@@ -1728,24 +1736,22 @@ int Relay_log_info::rli_init_info(bool skip_received_gtid_set_recovery) {
       correctly compute the set of previous gtids.
     */
     relay_log.set_previous_gtid_set_relaylog(gtid_set);
+
     /*
       note, that if open() fails, we'll still have index file open
       but a destructor will take care of that
     */
-
     mysql_mutex_t *log_lock = relay_log.get_log_lock();
     mysql_mutex_lock(log_lock);
-
     if (relay_log.open_binlog(
             ln, nullptr,
             (max_relay_log_size ? max_relay_log_size : max_binlog_size), true,
-            true /*need_lock_index=true*/, true /*need_sid_lock=true*/,
+            true /*need_lock_index=true*/, true /*need_tsid_lock=true*/,
             mi->get_mi_description_event())) {
       mysql_mutex_unlock(log_lock);
       LogErr(ERROR_LEVEL, ER_RPL_CANT_OPEN_LOG_IN_AM_INIT_INFO);
       return 1;
     }
-
     mysql_mutex_unlock(log_lock);
   }
 
@@ -1869,6 +1875,12 @@ int Relay_log_info::rli_init_info(bool skip_received_gtid_set_recovery) {
     goto err;
   }
 
+  // applier metadata was read from disk, update receiver positions
+  if (execute_relay_log_sanitization) {
+    relay_log_sanitizer.update_source_position(mi);
+    relay_log_sanitized = true;
+  }
+
   /*
     In case of MTS the recovery is deferred until the end of
     load_mi_and_rli_from_repositories.
@@ -1921,7 +1933,7 @@ void Relay_log_info::set_master_info(Master_info *info) { mi = info; }
   Stores the file and position where the execute-slave thread are in the
   relay log:
 
-    - As this is only called by the slave thread or on STOP SLAVE, with the
+    - As this is only called by the slave thread or on STOP REPLICA, with the
       log_lock grabbed and the slave thread stopped, we don't need to have
       a lock here.
     - If there is an active transaction, then we don't update the position
@@ -2022,7 +2034,7 @@ enum_return_check Relay_log_info::check_if_info_was_cleared(
     int lines = strtoul(number_of_lines, &first_non_digit, 10);
 
     if (number_of_lines[0] != '\0' && *first_non_digit == '\0' &&
-        lines >= LINES_IN_RELAY_LOG_INFO_WITH_REQUIRE_ROW_FORMAT) {
+        lines >= APPLIER_METADATA_LINES_WITH_REQUIRE_ROW_FORMAT) {
       char log_name[FN_REFLEN] = {0};
 
       if (this->handler->get_info(log_name, sizeof(log_name), "") ==
@@ -2039,7 +2051,7 @@ bool Relay_log_info::clear_info() {
   this->handler->init_info();
 
   if (this->handler->prepare_info_for_write() ||
-      this->handler->set_info((int)MAXIMUM_LINES_IN_RELAY_LOG_INFO_FILE) ||
+      this->handler->set_info((int)MAXIMUM_APPLIER_METADATA_LINES) ||
       this->handler->set_info(nullptr) || this->handler->set_info(nullptr) ||
       this->handler->set_info(nullptr) || this->handler->set_info(nullptr) ||
       this->handler->set_info(nullptr) || this->handler->set_info(nullptr) ||
@@ -2137,7 +2149,7 @@ bool Relay_log_info::read_info(Rpl_info_handler *from) {
     from. We can't simply count the lines in the file, since
     versions before 5.1.x could generate files with more lines than
     needed. If first line doesn't contain a number, or if it
-    contains a number less than LINES_IN_RELAY_LOG_INFO_WITH_DELAY,
+    contains a number less than APPLIER_METADATA_LINES_WITH_DELAY,
     then the file is treated like a file from pre-5.1.x version.
     There is no ambiguity when reading an old master.info: before
     5.1.x, the first line contained the binlog's name, which is
@@ -2160,7 +2172,7 @@ bool Relay_log_info::read_info(Rpl_info_handler *from) {
   lines = strtoul(group_relay_log_name, &first_non_digit, 10);
 
   if (group_relay_log_name[0] != '\0' && *first_non_digit == '\0' &&
-      lines >= LINES_IN_RELAY_LOG_INFO_WITH_DELAY) {
+      lines >= APPLIER_METADATA_LINES_WITH_DELAY) {
     /* Seems to be new format => read group relay log name */
     status =
         from->get_info(group_relay_log_name, sizeof(group_relay_log_name), "");
@@ -2183,22 +2195,22 @@ bool Relay_log_info::read_info(Rpl_info_handler *from) {
   status = from->get_info(&temp_group_master_log_pos, 0UL);
   if (status == Rpl_info_handler::enum_field_get_status::FAILURE) return true;
 
-  if (lines >= LINES_IN_RELAY_LOG_INFO_WITH_DELAY) {
+  if (lines >= APPLIER_METADATA_LINES_WITH_DELAY) {
     status = from->get_info(&temp_sql_delay, 0);
     if (status == Rpl_info_handler::enum_field_get_status::FAILURE) return true;
   }
 
-  if (lines >= LINES_IN_RELAY_LOG_INFO_WITH_WORKERS) {
+  if (lines >= APPLIER_METADATA_LINES_WITH_WORKERS) {
     status = from->get_info(&recovery_parallel_workers, 0UL);
     if (status == Rpl_info_handler::enum_field_get_status::FAILURE) return true;
   }
 
-  if (lines >= LINES_IN_RELAY_LOG_INFO_WITH_ID) {
+  if (lines >= APPLIER_METADATA_LINES_WITH_ID) {
     status = from->get_info(&temp_internal_id, 1);
     if (status == Rpl_info_handler::enum_field_get_status::FAILURE) return true;
   }
 
-  if (lines >= LINES_IN_RELAY_LOG_INFO_WITH_CHANNEL) {
+  if (lines >= APPLIER_METADATA_LINES_WITH_CHANNEL) {
     /* the default value is empty string"" */
     if (!!from->get_info(channel, sizeof(channel), "")) return true;
   }
@@ -2209,7 +2221,7 @@ bool Relay_log_info::read_info(Rpl_info_handler *from) {
    */
   char temp_privilege_checks_username[PRIV_CHECKS_USERNAME_LENGTH + 4] = {0};
   char *username = nullptr;
-  if (lines >= LINES_IN_RELAY_LOG_INFO_WITH_PRIV_CHECKS_USERNAME) {
+  if (lines >= APPLIER_METADATA_LINES_WITH_PRIV_CHECKS_USERNAME) {
     status = from->get_info(temp_privilege_checks_username,
                             PRIV_CHECKS_USERNAME_LENGTH + 1, nullptr);
     if (status == Rpl_info_handler::enum_field_get_status::FAILURE) return true;
@@ -2223,7 +2235,7 @@ bool Relay_log_info::read_info(Rpl_info_handler *from) {
    */
   char temp_privilege_checks_hostname[PRIV_CHECKS_HOSTNAME_LENGTH + 4] = {0};
   char *hostname = nullptr;
-  if (lines >= LINES_IN_RELAY_LOG_INFO_WITH_PRIV_CHECKS_HOSTNAME) {
+  if (lines >= APPLIER_METADATA_LINES_WITH_PRIV_CHECKS_HOSTNAME) {
     status = from->get_info(temp_privilege_checks_hostname,
                             PRIV_CHECKS_HOSTNAME_LENGTH + 1, nullptr);
     if (status == Rpl_info_handler::enum_field_get_status::FAILURE) return true;
@@ -2231,7 +2243,7 @@ bool Relay_log_info::read_info(Rpl_info_handler *from) {
       hostname = temp_privilege_checks_hostname;
   }
 
-  if (lines >= LINES_IN_RELAY_LOG_INFO_WITH_REQUIRE_ROW_FORMAT) {
+  if (lines >= APPLIER_METADATA_LINES_WITH_REQUIRE_ROW_FORMAT) {
     if (!!from->get_info(&temp_require_row_format, 0)) return true;
   } else {
     if (channel_map.is_group_replication_channel_name(channel))
@@ -2239,7 +2251,7 @@ bool Relay_log_info::read_info(Rpl_info_handler *from) {
   }
   m_require_row_format = temp_require_row_format;
 
-  if (lines >= LINES_IN_RELAY_LOG_INFO_WITH_REQUIRE_TABLE_PRIMARY_KEY_CHECK) {
+  if (lines >= APPLIER_METADATA_LINES_WITH_REQUIRE_TABLE_PRIMARY_KEY_CHECK) {
     if (!!from->get_info(&temp_require_table_primary_key_check, 1)) return true;
   }
   if (temp_require_table_primary_key_check < Relay_log_info::PK_CHECK_STREAM ||
@@ -2258,7 +2270,7 @@ bool Relay_log_info::read_info(Rpl_info_handler *from) {
           temp_require_table_primary_key_check);
 
   if (lines >=
-      LINES_IN_RELAY_LOG_INFO_WITH_ASSIGN_GTIDS_TO_ANONYMOUS_TRANSACTIONS_TYPE) {
+      APPLIER_METADATA_LINES_WITH_ASSIGN_GTIDS_TO_ANONYMOUS_TRANSACTIONS_TYPE) {
     const ulong off = static_cast<ulong>(
         Assign_gtids_to_anonymous_transactions_info::enum_type::AGAT_OFF);
     const ulong manual = static_cast<ulong>(
@@ -2279,7 +2291,7 @@ bool Relay_log_info::read_info(Rpl_info_handler *from) {
   }
 
   if (lines >=
-      LINES_IN_RELAY_LOG_INFO_WITH_ASSIGN_GTIDS_TO_ANONYMOUS_TRANSACTIONS_VALUE) {
+      APPLIER_METADATA_LINES_WITH_ASSIGN_GTIDS_TO_ANONYMOUS_TRANSACTIONS_VALUE) {
     char temp_assign_gtids_to_anonymous_transactions_value
         [mysql::gtid::Uuid::TEXT_LENGTH + 1] = {0};
     status = from->get_info(temp_assign_gtids_to_anonymous_transactions_value,
@@ -2308,7 +2320,7 @@ bool Relay_log_info::read_info(Rpl_info_handler *from) {
   } else {
     // If the file contains the TYPE, then the VALUE is mandatory.
     if (lines >=
-        LINES_IN_RELAY_LOG_INFO_WITH_ASSIGN_GTIDS_TO_ANONYMOUS_TRANSACTIONS_TYPE)
+        APPLIER_METADATA_LINES_WITH_ASSIGN_GTIDS_TO_ANONYMOUS_TRANSACTIONS_TYPE)
       return true;
   }
 
@@ -2346,7 +2358,7 @@ bool Relay_log_info::read_info(Rpl_info_handler *from) {
 bool Relay_log_info::set_info_search_keys(Rpl_info_handler *to) {
   DBUG_TRACE;
 
-  if (to->set_info(LINES_IN_RELAY_LOG_INFO_WITH_CHANNEL, channel)) return true;
+  if (to->set_info(APPLIER_METADATA_LINES_WITH_CHANNEL, channel)) return true;
 
   return false;
 }
@@ -2360,7 +2372,7 @@ bool Relay_log_info::write_info(Rpl_info_handler *to) {
   */
   // assert(!belongs_to_client());
   if (to->prepare_info_for_write() ||
-      to->set_info((int)MAXIMUM_LINES_IN_RELAY_LOG_INFO_FILE) ||
+      to->set_info((int)MAXIMUM_APPLIER_METADATA_LINES) ||
       to->set_info(group_relay_log_name) ||
       to->set_info((ulong)group_relay_log_pos) ||
       to->set_info(group_master_log_name) ||
@@ -2445,8 +2457,8 @@ int Relay_log_info::set_rli_description_event(
     if (info_thd) {
       /* @see rpl_rli_pdb.h:Slave_worker::set_rli_description_event for a
          detailed explanation on the following code block's logic. */
-      if (info_thd->variables.gtid_next.type == AUTOMATIC_GTID ||
-          info_thd->variables.gtid_next.type == UNDEFINED_GTID) {
+      if (info_thd->variables.gtid_next.is_automatic() ||
+          info_thd->variables.gtid_next.is_undefined()) {
         bool in_active_multi_stmt =
             info_thd->in_active_multi_stmt_transaction();
 
@@ -2697,27 +2709,6 @@ ulong Relay_log_info::adapt_to_master_version_updown(ulong master_version,
   return master_version;
 }
 
-void Relay_log_info::relay_log_number_to_name(uint number,
-                                              char name[FN_REFLEN + 1]) {
-  char *str = nullptr;
-  char relay_bin_channel[FN_REFLEN + 1];
-  const char *relay_log_basename_channel = add_channel_to_relay_log_name(
-      relay_bin_channel, FN_REFLEN + 1, relay_log_basename);
-
-  /* str points to closing null of relay log basename channel */
-  str = strmake(name, relay_log_basename_channel, FN_REFLEN + 1);
-  *str++ = '.';
-  sprintf(str, "%06u", number);
-}
-
-uint Relay_log_info::relay_log_name_to_number(const char *name) {
-  return static_cast<uint>(atoi(fn_ext(name) + 1));
-}
-
-bool is_mts_db_partitioned(Relay_log_info *rli) {
-  return (rli->current_mts_submode->get_type() == MTS_PARALLEL_TYPE_DB_NAME);
-}
-
 const char *Relay_log_info::get_for_channel_str(bool upper_case) const {
   if (rli_fake || mi == nullptr)
     return "";
@@ -2728,9 +2719,9 @@ const char *Relay_log_info::get_for_channel_str(bool upper_case) const {
 enum_return_status Relay_log_info::add_gtid_set(const Gtid_set *gtid_set) {
   DBUG_TRACE;
 
-  get_sid_lock()->wrlock();
+  get_tsid_lock()->wrlock();
   enum_return_status return_status = this->gtid_set->add_gtid_set(gtid_set);
-  get_sid_lock()->unlock();
+  get_tsid_lock()->unlock();
 
   return return_status;
 }
@@ -2754,7 +2745,7 @@ my_off_t Relay_log_info::get_until_log_pos() {
 }
 
 int Relay_log_info::init_until_option(THD *thd,
-                                      const LEX_MASTER_INFO *master_param) {
+                                      const LEX_SOURCE_INFO *master_param) {
   DBUG_TRACE;
   int ret = 0;
   Until_option *option = nullptr;
@@ -2783,12 +2774,12 @@ int Relay_log_info::init_until_option(THD *thd,
     } else if (master_param->gtid) {
       Until_gtids *until_g = nullptr;
 
-      if (LEX_MASTER_INFO::UNTIL_SQL_BEFORE_GTIDS ==
+      if (LEX_SOURCE_INFO::UNTIL_SQL_BEFORE_GTIDS ==
           master_param->gtid_until_condition) {
         option = until_g = new Until_before_gtids(this);
         until_condition = UNTIL_SQL_BEFORE_GTIDS;
       } else {
-        assert(LEX_MASTER_INFO::UNTIL_SQL_AFTER_GTIDS ==
+        assert(LEX_SOURCE_INFO::UNTIL_SQL_AFTER_GTIDS ==
                master_param->gtid_until_condition);
 
         option = until_g = new Until_after_gtids(this);
@@ -2954,7 +2945,7 @@ void Relay_log_info::post_commit(bool on_rollback) {
 void Relay_log_info::set_group_source_log_start_end_pos(const Log_event *ev) {
   DBUG_TRACE;
   if (!group_source_log_seen_start_pos &&
-      (ev->starts_group() || is_gtid_event(ev))) {
+      (ev->starts_group() || is_any_gtid_event(ev))) {
     group_source_log_seen_start_pos = true;
     group_source_log_start_pos =
         ev->common_header->log_pos - ev->common_header->data_written;
@@ -3368,6 +3359,12 @@ bool Relay_log_info::is_applier_source_position_info_invalid() const {
   return m_is_applier_source_position_info_invalid;
 }
 
+cs::apply::instruments::Applier_metrics_interface &
+Relay_log_info::get_applier_metrics() {
+  if (mi->is_metric_collection_enabled()) return m_coordinator_metrics;
+  return m_disabled_metric_aggregator;
+}
+
 std::string Assign_gtids_to_anonymous_transactions_info::get_value() const {
   return m_value;
 }
@@ -3387,16 +3384,14 @@ bool Assign_gtids_to_anonymous_transactions_info::set_info(
       break;
     case Assign_gtids_to_anonymous_transactions_info::enum_type::AGAT_UUID: {
       assert(value_arg != nullptr);
-      rpl_sid rename_sid{};
-      if (rename_sid.parse(value_arg, strlen(value_arg))) {
+      mysql::gtid::Tsid rename_tsid;
+      if (rename_tsid.from_cstring(value_arg) == 0) {
         return true;
       }
-      global_sid_lock->rdlock();
-      m_sidno = global_sid_map->add_sid(rename_sid);
-      global_sid_lock->unlock();
-      char normalized_uuid[mysql::gtid::Uuid::TEXT_LENGTH + 1];
-      rename_sid.to_string(normalized_uuid);
-      m_value.assign(normalized_uuid);
+      global_tsid_lock->rdlock();
+      m_sidno = global_tsid_map->add_tsid(rename_tsid);
+      global_tsid_lock->unlock();
+      m_value = rename_tsid.to_string();
       break;
     }
     case Assign_gtids_to_anonymous_transactions_info::enum_type::AGAT_OFF:
@@ -3510,7 +3505,7 @@ bool Applier_security_context_guard::skip_priv_checks() const {
 }
 
 bool Applier_security_context_guard::has_access(
-    std::initializer_list<ulong> extra_privileges) const {
+    std::initializer_list<Access_bitmask> extra_privileges) const {
   if (this->m_privilege_checks_none) return true;
   if (this->m_current == nullptr) return false;
 
@@ -3534,12 +3529,12 @@ bool Applier_security_context_guard::has_access(
 }
 
 bool Applier_security_context_guard::has_access(
-    std::vector<std::tuple<ulong, TABLE const *, Rows_log_event *>>
+    std::vector<std::tuple<Access_bitmask, TABLE const *, Rows_log_event *>>
         &extra_privileges) const {
   if (this->m_privilege_checks_none) return true;
   if (this->m_current == nullptr) return false;
 
-  ulong priv{0};
+  Access_bitmask priv{0};
   TABLE const *table{nullptr};
 
   if (this->m_thd->variables.binlog_row_image == BINLOG_ROW_IMAGE_FULL) {

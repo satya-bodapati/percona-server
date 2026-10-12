@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -227,8 +228,7 @@ static SEL_TREE *get_func_mm_tree_from_in_predicate(
         We create the Item on thd->mem_root which points to
         per-statement mem_root.
       */
-      Item_basic_constant *value_item =
-          op->m_const_array->create_item(thd->mem_root);
+      Item *value_item = op->m_const_array->create_item(thd->mem_root);
       if (value_item == nullptr) return nullptr;
 
       /* Get a SEL_TREE for "(-inf|NULL) < X < c_0" interval.  */
@@ -247,7 +247,7 @@ static SEL_TREE *get_func_mm_tree_from_in_predicate(
         /* We get here in cases like "t.unsigned NOT IN (-1,-2,-3) */
         return nullptr;
       SEL_TREE *tree2 = nullptr;
-      Item_basic_constant *previous_range_value =
+      Item *previous_range_value =
           op->m_const_array->create_item(thd->mem_root);
       for (; i < op->m_const_array->m_used_size; i++) {
         // Check if the value stored in the field for the previous range
@@ -771,15 +771,15 @@ static SEL_TREE *get_full_func_mm_tree(THD *thd, RANGE_OPT_PARAM *param,
     Item_field *item_field = static_cast<Item_field *>(predicand);
     Field *field = item_field->field;
 
-    if (!((ref_tables | item_field->table_ref->map()) & param_comp))
+    if (!((ref_tables | item_field->m_table_ref->map()) & param_comp))
       ftree = get_func_mm_tree(thd, param, prev_tables, read_tables,
                                remove_jump_scans, predicand, op, value, inv);
-    Item_equal *item_equal = item_field->item_equal;
+    Item_multi_eq *item_equal = item_field->multi_equality();
     if (item_equal != nullptr) {
       for (Item_field &item : item_equal->get_fields()) {
         Field *f = item.field;
         if (!field->eq(f) &&
-            !((ref_tables | item.table_ref->map()) & param_comp)) {
+            !((ref_tables | item.m_table_ref->map()) & param_comp)) {
           tree = get_func_mm_tree(thd, param, prev_tables, read_tables,
                                   remove_jump_scans, &item, op, value, inv);
           ftree = !ftree ? tree : tree_and(param, ftree, tree);
@@ -967,15 +967,15 @@ SEL_TREE *get_mm_tree(THD *thd, RANGE_OPT_PARAM *param, table_map prev_tables,
       break;
     }  // end case Item_func::IN_FUNC
 
-    case Item_func::MULT_EQUAL_FUNC: {
-      Item_equal *item_equal = down_cast<Item_equal *>(cond);
+    case Item_func::MULTI_EQ_FUNC: {
+      Item_multi_eq *item_equal = down_cast<Item_multi_eq *>(cond);
       Item *value = item_equal->const_arg();
       if (value == nullptr) return nullptr;
       table_map ref_tables = value->used_tables();
       for (Item_field &field_item : item_equal->get_fields()) {
         Field *field = field_item.field;
         table_map param_comp = ~(prev_tables | read_tables | current_table);
-        if (!((ref_tables | field_item.table_ref->map()) & param_comp)) {
+        if (!((ref_tables | field_item.m_table_ref->map()) & param_comp)) {
           SEL_TREE *tree =
               get_mm_parts(thd, param, prev_tables, read_tables, item_equal,
                            field, Item_func::EQ_FUNC, value);
@@ -985,7 +985,7 @@ SEL_TREE *get_mm_tree(THD *thd, RANGE_OPT_PARAM *param, table_map prev_tables,
 
       dbug_print_tree("tree_returned", ftree, param);
       return ftree;
-    }  // end case Item_func::MULT_EQUAL_FUNC
+    }  // end case Item_func::MULTI_EQ_FUNC
 
     default: {
       Item *const arg_left = cond_func->arguments()[0];
@@ -1050,6 +1050,7 @@ static bool is_spatial_operator(Item_func::Functype op_type) {
   switch (op_type) {
     case Item_func::SP_EQUALS_FUNC:
     case Item_func::SP_DISJOINT_FUNC:
+    case Item_func::SP_DISTANCE_FUNC:
     case Item_func::SP_INTERSECTS_FUNC:
     case Item_func::SP_TOUCHES_FUNC:
     case Item_func::SP_CROSSES_FUNC:
@@ -1126,6 +1127,14 @@ static SEL_TREE *get_mm_parts(THD *thd, RANGE_OPT_PARAM *param,
       tree->set_key(key_part->key,
                     sel_add(tree->release_key(key_part->key), sel_root));
       tree->keys_map.set_bit(key_part->key);
+      // A range constructed for a multi-valued index is never exact.
+      // So it needs the filter to be placed on top of the range access.
+      if (param->using_real_indexes) {
+        int index = param->real_keynr[key_part->key];
+        if (param->table->key_info[index].flags & HA_MULTI_VALUED_KEY) {
+          tree->inexact = true;
+        }
+      }
     }
   }
 

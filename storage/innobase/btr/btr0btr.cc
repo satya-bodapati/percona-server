@@ -1,18 +1,19 @@
 /*****************************************************************************
 
-Copyright (c) 1994, 2023, Oracle and/or its affiliates.
+Copyright (c) 1994, 2026, Oracle and/or its affiliates.
 Copyright (c) 2012, Facebook Inc.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -648,8 +649,8 @@ static inline void btr_node_ptr_set_child_page_no(
   ut_ad(!rec_offs_comp(offsets) || rec_get_node_ptr_flag(rec));
 
   /* The child address is in the last field */
-  field = const_cast<byte *>(rec_get_nth_field(
-      nullptr, rec, offsets, rec_offs_n_fields(offsets) - 1, &len));
+  field = rec_get_nth_field(nullptr, rec, offsets,
+                            rec_offs_n_fields(offsets) - 1, &len);
 
   ut_ad(len == REC_NODE_PTR_SIZE);
 
@@ -1341,7 +1342,7 @@ bool btr_page_reorganize_low(bool recovery, ulint z_level, page_cur_t *cursor,
         << data_size2 << ", page old max ins size " << max_ins_size1
         << " new max ins size " << max_ins_size2;
 
-    ib::error(ER_IB_MSG_31) << BUG_REPORT_MSG;
+    ib::error(ER_IB_MSG_SUBMIT_DETAILED_BUG_REPORT);
     ut_d(ut_error);
   } else {
     success = true;
@@ -1445,9 +1446,9 @@ bool btr_page_reorganize(page_cur_t *cursor, dict_index_t *index, mtr_t *mtr) {
 
 /** Parses a redo log record of reorganizing a page.
  @return end of log record or NULL */
-byte *btr_parse_page_reorganize(
-    byte *ptr,           /*!< in: buffer */
-    byte *end_ptr,       /*!< in: buffer end */
+const byte *btr_parse_page_reorganize(
+    const byte *ptr,     /*!< in: buffer */
+    const byte *end_ptr, /*!< in: buffer end */
     dict_index_t *index, /*!< in: record descriptor */
     bool compressed,     /*!< in: true if compressed page */
     buf_block_t *block,  /*!< in: page to be reorganized, or NULL */
@@ -2799,12 +2800,12 @@ static inline void btr_set_min_rec_mark_log(rec_t *rec, mlog_id_t type,
 /** Parses the redo log record for setting an index record as the predefined
  minimum record.
  @return end of log record or NULL */
-byte *btr_parse_set_min_rec_mark(
-    byte *ptr,     /*!< in: buffer */
-    byte *end_ptr, /*!< in: buffer end */
-    ulint comp,    /*!< in: nonzero=compact page format */
-    page_t *page,  /*!< in: page or NULL */
-    mtr_t *mtr)    /*!< in: mtr or NULL */
+const byte *btr_parse_set_min_rec_mark(
+    const byte *ptr,     /*!< in: buffer */
+    const byte *end_ptr, /*!< in: buffer end */
+    ulint comp,          /*!< in: nonzero=compact page format */
+    page_t *page,        /*!< in: page or NULL */
+    mtr_t *mtr)          /*!< in: mtr or NULL */
 {
   rec_t *rec;
 
@@ -3352,6 +3353,25 @@ retry:
 #endif /* UNIV_BTR_DEBUG */
       goto err_exit;
     }
+
+    /* When persistent cursor is used to scan over index in backwards
+    direction it stops on infimum record of its current page and releases
+    all latches it has, before switching from the cursor's current page to
+    the previous one. At this point merge from the previous page to cursor's
+    current one might happen. During this merge records from the previous
+    page will be moved over cursor position/infimum record which is used
+    used to continue iteration in optimistic case, making moved records
+    invisible to the scan.
+    We force such cursor to use pessimistic approach of restoring its
+    position/continuing iteration, which is not affected by this problem
+    (as it relies on looking up user record which was visited by cursor
+    right before the infimum) by incrementing modification clock for page
+    being merged into.
+    The forward iteration seems to be unaffected by this problem as it
+    doesn't release latch on the current page before it acquires latch on
+    the next one when cursor switches pages. So merge from the next page
+    to the current one stays blocked. */
+    buf_block_modify_clock_inc(merge_block);
 
     btr_search_drop_page_hash_index(block);
 
@@ -3964,12 +3984,7 @@ bool btr_index_rec_validate(const rec_t *rec,          /*!< in: index record */
 
   n = dict_index_get_n_fields(index);
 
-  if (!page_is_comp(page) &&
-      (rec_get_n_fields_old(rec, index) != n
-       /* a record for older SYS_INDEXES table
-       (missing merge_threshold column) is acceptable. */
-       && !(index->id == DICT_INDEXES_ID &&
-            rec_get_n_fields_old(rec, index) == n - 1))) {
+  if (!page_is_comp(page) && rec_get_n_fields_old(rec, index) != n) {
     btr_index_rec_validate_report(page, rec, index);
 
     ib::error(ER_IB_MSG_37) << "Has " << rec_get_n_fields_old(rec, index)
@@ -4640,7 +4655,8 @@ bool btr_validate_index(
 
   /* Full Text index are implemented by auxiliary tables,
   not the B-tree */
-  if (dict_index_is_online_ddl(index) || (index->type & DICT_FTS)) {
+  if (dict_index_is_online_ddl(index) ||
+      (index->type & (DICT_FTS | DICT_VECTOR))) {
     return (true);
   }
 
@@ -4931,7 +4947,7 @@ void BFT::children_to_visit(buf_block_t *block) {
   if (block->is_leaf()) {
     return;
   }
-  Scoped_heap scoped_heap{};
+  Scoped_heap scoped_heap{2048, UT_LOCATION_HERE};
   mem_heap_t *heap = scoped_heap.get();
   ulint *offsets = nullptr;
   page_cur_t cur;

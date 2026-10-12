@@ -18,7 +18,11 @@ if (mysqld.global.gr_nodes === undefined) {
 }
 
 if (mysqld.global.cluster_name == undefined) {
-  mysqld.global.cluster_name = "mycluster";
+  mysqld.global.cluster_name = "my-cluster";
+}
+
+if (mysqld.global.router_expected_local_cluster == undefined) {
+  mysqld.global.router_expected_local_cluster = ".*";
 }
 
 if (mysqld.global.metadata_schema_version === undefined) {
@@ -27,6 +31,13 @@ if (mysqld.global.metadata_schema_version === undefined) {
 
 if (mysqld.global.gr_id === undefined) {
   mysqld.global.gr_id = "cluster-specific-id";
+}
+
+if (mysqld.global.server_version === undefined) {
+  // Let's keep the default server version as some known compatible version.
+  // If there is a need to some specific compatibility checks, this should be
+  // overwritten from the test.
+  mysqld.global.server_version = "8.3.0";
 }
 
 var members = gr_memberships.gr_members(
@@ -44,6 +55,26 @@ const recovering_gr_nodes = members
                                 })
                                 .length;
 
+if (mysqld.global.upd_attr_config_json === undefined) {
+  mysqld.global.upd_attr_config_json = "";
+}
+
+if (mysqld.global.upd_attr_config_defaults_and_schema_json === undefined) {
+  mysqld.global.upd_attr_config_defaults_and_schema_json = "";
+}
+
+if (mysqld.global.config_defaults_stored_is_null === undefined) {
+  mysqld.global.config_defaults_stored_is_null = 0;
+}
+
+if (mysqld.global.last_insert_id === undefined) {
+  mysqld.global.last_insert_id = 1;
+}
+
+if (mysqld.global.account_user_pattern === undefined) {
+  mysqld.global.account_user_pattern = "mysql_router1_[0-9a-z]{7}";
+}
+
 var options = {
   metadata_schema_version: mysqld.global.metadata_schema_version,
   cluster_type: "gr",
@@ -55,6 +86,12 @@ var options = {
   gr_members_all: members.length,
   gr_members_online: online_gr_nodes,
   gr_members_recovering: recovering_gr_nodes,
+  router_version: mysqld.global.router_version,
+  config_defaults_stored_is_null: mysqld.global.config_defaults_stored_is_null,
+  last_insert_id: mysqld.global.last_insert_id,
+  account_user_pattern:
+      "mysql_router" + mysqld.global.last_insert_id + "_[0-9a-z]{7}",
+  router_expected_local_cluster: mysqld.global.router_expected_local_cluster,
 };
 
 var common_responses = common_stmts.prepare_statement_responses(
@@ -72,11 +109,13 @@ var common_responses = common_stmts.prepare_statement_responses(
       "router_select_cluster_instances_v2_gr",
       "router_start_transaction",
       "router_commit",
+      "get_routing_guidelines_version",
+      "get_guidelines_router_info",
+      "get_routing_guidelines",
 
       // account verification
       "router_select_metadata_v2_gr_account_verification",
-      "router_select_group_replication_primary_member",
-      "router_select_group_membership_with_primary_mode",
+      "router_select_group_membership",
     ],
     options);
 
@@ -90,21 +129,31 @@ var common_responses_regex = common_stmts.prepare_statement_responses_regex(
     [
       "router_insert_into_routers",
       "router_create_user_if_not_exists",
+      "router_check_auth_plugin",
       "router_grant_on_metadata_db",
       "router_grant_on_pfs_db",
       "router_grant_on_routers",
       "router_grant_on_v2_routers",
-      "router_update_routers_in_metadata",
+      "router_grant_on_router_stats",
       "router_update_router_options_in_metadata",
+      "router_select_config_defaults_stored_gr_cluster",
+      "router_update_local_cluster_in_metadata",
     ],
     options);
+
+var router_update_attributes =
+    common_stmts.get("router_update_routers_in_metadata", options);
+
+var router_store_config_defaults_gr_cluster =
+    common_stmts.get("router_store_config_defaults_gr_cluster", options);
 
 ({
   handshake: {
     auth: {
       username: "root",
       password: "fake-pass",
-    }
+    },
+    greeting: {server_version: mysqld.global.server_version}
   },
   stmts: function(stmt) {
     var res;
@@ -121,8 +170,17 @@ var common_responses_regex = common_stmts.prepare_statement_responses_regex(
         (res = common_stmts.handle_regex_stmt(stmt, common_responses_regex)) !==
         undefined) {
       return res;
+    } else if (res = stmt.match(router_update_attributes.stmt_regex)) {
+      mysqld.global.upd_attr_config_json = res[1];
+      return router_update_attributes;
+    } else if (
+        res = stmt.match(router_store_config_defaults_gr_cluster.stmt_regex)) {
+      mysqld.global.upd_attr_config_defaults_and_schema_json = res[1];
+      return router_store_config_defaults_gr_cluster;
     } else {
-      return common_stmts.unknown_statement_response(stmt);
+      return common_stmts.unknown_statement_response(
+          "'" + mysqld.global.router_version + "' " + stmt);
+      // return common_stmts.unknown_statement_response(stmt);
     }
   }
 })

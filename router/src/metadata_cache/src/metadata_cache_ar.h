@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -46,16 +47,18 @@ class METADATA_CACHE_EXPORT ARMetadataCache : public MetadataCache {
    */
   ARMetadataCache(
       const unsigned router_id,
-      const std::vector<mysql_harness::TCPAddress> &metadata_servers,
+      const std::vector<mysql_harness::TcpDestination> &metadata_servers,
       std::shared_ptr<MetaData> cluster_metadata,
       const metadata_cache::MetadataCacheTTLConfig &ttl_config,
       const mysqlrouter::SSLOptions &ssl_options,
       const mysqlrouter::TargetCluster &target_cluster,
       const metadata_cache::RouterAttributes &router_attributes,
       size_t thread_stack_size = mysql_harness::kDefaultStackSizeInKiloBytes)
-      : MetadataCache(router_id, "", metadata_servers, cluster_metadata,
-                      ttl_config, ssl_options, target_cluster,
-                      router_attributes, thread_stack_size, false) {}
+      : MetadataCache(router_id, "", metadata_servers,
+                      std::move(cluster_metadata), ttl_config, ssl_options,
+                      target_cluster, router_attributes, thread_stack_size,
+                      /* use_cluster_notifications= */ false,
+                      /* close_connection_after_refresh= */ true) {}
 
   bool refresh(bool needs_writable_node) override;
 

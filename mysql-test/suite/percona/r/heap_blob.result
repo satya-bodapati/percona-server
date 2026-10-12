@@ -1,3 +1,4 @@
+include/rpl/set_gtid_mode_off.inc
 SET default_storage_engine=MEMORY;
 SET sql_mode = 'NO_ENGINE_SUBSTITUTION';
 CREATE TABLE t1 (a blob, b text, c blob(250), d text(70000), e text(70000000));
@@ -431,6 +432,8 @@ create table t1 (id integer auto_increment unique,imagem LONGBLOB not null defau
 Warnings:
 Warning	1101	BLOB, TEXT, GEOMETRY or JSON column 'imagem' can't have a default value
 insert into t1 (id) values (1);
+Warnings:
+Warning	1364	Field 'imagem' doesn't have a default value
 select
 charset(load_file('../../std_data/words.dat')),
 collation(load_file('../../std_data/words.dat')),
@@ -789,6 +792,8 @@ t1	CREATE TABLE `t1` (
   `a` text
 ) ENGINE=MEMORY DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 insert into t1 values (default);
+Warnings:
+Warning	1364	Field 'a' doesn't have a default value
 select * from t1;
 a
 NULL
@@ -1014,3 +1019,4 @@ length(data)
 65535
 drop table t1;
 SET GLOBAL max_heap_table_size = @old_max_heap_table_size;
+include/rpl/set_gtid_mode_on.inc

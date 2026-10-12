@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -55,7 +56,7 @@ const handler::Table_flags HA_INNOPART_DISABLED_TABLE_FLAGS =
     (HA_CAN_FULLTEXT | HA_CAN_FULLTEXT_EXT | HA_CAN_GEOMETRY |
      HA_DUPLICATE_POS | HA_READ_BEFORE_WRITE_REMOVAL);
 
-typedef Bitset Sql_stat_start_parts;
+typedef Bitset<> Sql_stat_start_parts;
 
 /** InnoDB partition specific Handler_share. */
 class Ha_innopart_share : public Partition_share {
@@ -387,12 +388,6 @@ class ha_innopart : public ha_innobase,
 
   int discard_or_import_tablespace(bool discard, dd::Table *table_def) override;
 
-  /** This function reads zip dict-related info from the base class.
-  @param    thd          Thread handler
-  @param    part_name    Must be always NULL.
-  */
-  virtual void upgrade_update_field_with_zip_dict_info(
-      THD *thd, const char *part_name) override;
 
   /** Compare key and rowid.
   Helper function for sorting records in the priority queue.
@@ -1134,11 +1129,6 @@ class ha_innopart : public ha_innobase,
 
   int records(ha_rows *num_rows) override;
 
-  int records_from_index(ha_rows *num_rows, uint) override {
-    /* Force use of cluster index until we implement sec index parallel scan. */
-    return ha_innopart::records(num_rows);
-  }
-
   int index_next(uchar *record) override {
     return (Partition_helper::ph_index_next(record));
   }
@@ -1182,6 +1172,13 @@ class ha_innopart : public ha_innobase,
   Returns statistics information of the table to the MySQL interpreter,
   in various fields of the handle object.
   @param[in]    flag            Flags for what to update and return.
+                                HA_STATUS_NO_LOCK is supported only for:
+                                ha_statistics::delete_length
+                                it is not supported for others like:
+                                ha_statistics::records
+                                But it will not lock for the duration of stats
+                                calculation. Only during copy to make sure
+                                stats are consistent.
   @param[in]    is_analyze      True if called from "::analyze()".
   @return       HA_ERR_* error code or 0. */
   int info_low(uint flag, bool is_analyze) override;
@@ -1189,5 +1186,11 @@ class ha_innopart : public ha_innobase,
   bool can_reuse_mysql_template() const override {
     return m_reuse_mysql_template;
   }
+  void info_low_table_stats(const dict_table_t *ib_table,
+                            ulint &stat_clustered_index_size,
+                            ulint &stat_sum_of_other_index_sizes,
+                            uint64_t &stat_n_rows) const;
+  void info_low_rec_per_key(const dict_table_t *ib_table, uint64_t max_rows,
+                            uint biggest_partition);
 };
 #endif /* ha_innopart_h */

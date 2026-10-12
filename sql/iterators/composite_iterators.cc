@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,62 +24,102 @@
 #include "sql/iterators/composite_iterators.h"
 
 #include <limits.h>
+#include <stdio.h>
 #include <string.h>
+#include <algorithm>
 #include <atomic>
-#include <list>
-#include <string>
+#include <bit>
+#include <cmath>
+#include <functional>
+#include <limits>
+#include <new>
+#include <span>
+#include <stdexcept>
+#include <string_view>
 #include <vector>
 
+#include <ankerl/unordered_dense.h>
+
+#include "extra/xxhash/my_xxhash.h"
 #include "field_types.h"
 #include "mem_root_deque.h"
-#include "my_bit.h"
+#include "my_config.h"
 #include "my_dbug.h"
 #include "my_inttypes.h"
 #include "my_sys.h"
-#include "my_xxhash.h"
+#include "mysql_com.h"
 #include "mysqld_error.h"
 #include "prealloced_array.h"
 #include "scope_guard.h"
 #include "sql/debug_sync.h"
+#include "sql/derror.h"
 #include "sql/error_handler.h"
 #include "sql/field.h"
 #include "sql/handler.h"
 #include "sql/immutable_string.h"
 #include "sql/item.h"
+#include "sql/item_cmpfunc.h"
 #include "sql/item_func.h"
 #include "sql/item_sum.h"
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/hash_join_buffer.h"
+#include "sql/iterators/hash_join_chunk.h"
 #include "sql/iterators/hash_join_iterator.h"
 #include "sql/iterators/timing_iterator.h"
 #include "sql/join_optimizer/access_path.h"
 #include "sql/join_optimizer/materialize_path_parameters.h"
 #include "sql/key.h"
-#include "sql/mysqld.h"
 #include "sql/opt_trace.h"
 #include "sql/opt_trace_context.h"
+#include "sql/pack_rows.h"
 #include "sql/pfs_batch_mode.h"
+#include "sql/psi_memory_key.h"
 #include "sql/sql_base.h"
 #include "sql/sql_class.h"
+#include "sql/sql_const.h"
 #include "sql/sql_executor.h"
 #include "sql/sql_lex.h"
 #include "sql/sql_list.h"
+#include "sql/sql_opt_exec_shared.h"
 #include "sql/sql_optimizer.h"
 #include "sql/sql_show.h"
 #include "sql/sql_tmp_table.h"
+#include "sql/system_variables.h"
 #include "sql/table.h"
 #include "sql/table_function.h"  // Table_function
 #include "sql/temp_table_param.h"
 #include "sql/window.h"
 #include "template_utils.h"
 
-#include "extra/robin-hood-hashing/robin_hood.h"
 using pack_rows::TableCollection;
-using std::string;
-using std::swap;
-using std::vector;
+using std::any_of;
 
-int FilterIterator::Read() {
+bool FilterIterator::DoInit() {
+  // If any conjunct (AND-term) of the condition is constant for execution
+  // and evaluates to false or NULL, the entire WHERE is unsatisfiable.
+  // Skip source initialization entirely and return no rows.
+  // This handles both simple constant conditions (e.g. an uncorrelated
+  // subquery) and mixed conjunctions like
+  //   WHERE 0 = (SELECT COUNT(*) FROM t) AND x IS NULL
+  // where only one AND-term is constant-false.
+  m_no_rows = false;
+  WalkConjunction(m_condition, [&](Item *item) {
+    if (item->const_for_execution()) {
+      if (!item->val_int()) {
+        m_no_rows = true;
+        return true;  // Stop walking: found a false/NULL conjunct.
+      }
+    }
+    return false;
+  });
+  if (thd()->is_error()) return true;
+  if (m_no_rows) return false;
+  return m_source->Init();
+}
+
+int FilterIterator::DoRead() {
+  if (m_no_rows) return -1;
+
   for (;;) {
     int err = m_source->Read();
     if (err != 0) return err;
@@ -103,7 +144,7 @@ int FilterIterator::Read() {
   }
 }
 
-bool LimitOffsetIterator::Init() {
+bool LimitOffsetIterator::DoInit() {
   if (m_source->Init()) {
     return true;
   }
@@ -117,7 +158,7 @@ bool LimitOffsetIterator::Init() {
   return false;
 }
 
-int LimitOffsetIterator::Read() {
+int LimitOffsetIterator::DoRead() {
   if (m_seen_rows >= m_limit) {
     // We either have hit our LIMIT, or we need to skip OFFSET rows.
     // Check which one.
@@ -181,33 +222,37 @@ int LimitOffsetIterator::Read() {
 
 AggregateIterator::AggregateIterator(
     THD *thd, unique_ptr_destroy_only<RowIterator> source, JOIN *join,
-    TableCollection tables, bool rollup)
+    TableCollection tables, std::span<AccessPath *> single_row_index_lookups,
+    bool rollup)
     : RowIterator(thd),
       m_source(std::move(source)),
       m_join(join),
       m_rollup(rollup),
-      m_tables(std::move(tables)) {
-  const size_t upper_data_length = ComputeRowSizeUpperBound(m_tables);
-  m_first_row_this_group.reserve(upper_data_length);
-  m_first_row_next_group.reserve(upper_data_length);
+      m_tables(std::move(tables)),
+      m_single_row_index_lookups(single_row_index_lookups) {
+  if (!tables.has_blob_column()) {
+    // If blob, we reserve lazily in StoreFromTableBuffers since we can't know
+    // upper bound here.
+    const size_t upper_data_length =
+        ComputeRowSizeUpperBoundSansBlobs(m_tables);
+    m_first_row_this_group.reserve(upper_data_length);
+    m_first_row_next_group.reserve(upper_data_length);
+  }
 }
 
-bool AggregateIterator::Init() {
+bool AggregateIterator::DoInit() {
   assert(!m_join->tmp_table_param.precomputed_group_by);
 
   // Disable any leftover rollup items used in children.
   m_current_rollup_position = -1;
   SetRollupLevel(INT_MAX);
 
-  // If the iterator has been executed before, restore the state of
-  // the table buffers. This is needed for correctness if there is an
-  // EQRefIterator below this iterator, as the restoring of the
-  // previous group in Read() may have disturbed the cache in
-  // EQRefIterator.
-  if (!m_first_row_next_group.is_empty()) {
-    LoadIntoTableBuffers(
-        m_tables, pointer_cast<const uchar *>(m_first_row_next_group.ptr()));
-    m_first_row_next_group.length(0);
+  // Invalidate the cache in all single-row index lookups below us. The previous
+  // execution of the aggregation may have overwritten the cached value in
+  // EQRefIterator with a value from a different row, and the next read from the
+  // EQRefIterator must read the correct value from the index.
+  for (AccessPath *lookup : m_single_row_index_lookups) {
+    lookup->eq_ref().ref->key_err = true;
   }
 
   if (m_source->Init()) {
@@ -222,10 +267,9 @@ bool AggregateIterator::Init() {
   // the slice coming from there might be wrongly set on Read(), and thus,
   // we need to properly restore it before returning any rows.
   //
-  // This is a hack. It would be good to get rid of the slice system altogether
-  // (the hypergraph join optimizer does not use it).
+  // This is a hack. It would be good to get rid of the slice system altogether.
   if (!(m_join->implicit_grouping || m_join->group_optimized_away) &&
-      !thd()->lex->using_hypergraph_optimizer) {
+      !thd()->lex->using_hypergraph_optimizer()) {
     m_output_slice = m_join->get_ref_item_slice();
   }
 
@@ -240,7 +284,7 @@ bool AggregateIterator::Init() {
   return false;
 }
 
-int AggregateIterator::Read() {
+int AggregateIterator::DoRead() {
   switch (m_state) {
     case READING_FIRST_ROW: {
       // Start the first group, if possible. (If we're not at the first row,
@@ -249,12 +293,9 @@ int AggregateIterator::Read() {
       if (err == -1) {
         m_seen_eof = true;
         m_state = DONE_OUTPUTTING_ROWS;
-        if (m_join->grouped || m_join->group_optimized_away) {
-          SetRollupLevel(m_join->send_group_parts);
-          return -1;
-        } else {
-          // If there's no GROUP BY, we need to output a row even if there are
-          // no input rows.
+        if (!(m_join->grouped || m_join->group_optimized_away) || m_rollup) {
+          // If there's no GROUP BY or if there is ROLLUP, we need to output
+          // a row even if there are no input rows.
 
           // Calculate aggregate functions for no rows
           for (Item *item : *m_join->get_current_fields()) {
@@ -277,10 +318,17 @@ int AggregateIterator::Read() {
           for (Item_sum **item = m_join->sum_funcs; *item != nullptr; ++item) {
             (*item)->clear();
           }
+          // No rows in result set, but we must output one grouping row: we
+          // just want the final totals row, not subtotals rows according
+          // to SQL standard.
+          SetRollupLevel(0);
+
           if (m_output_slice != -1) {
             m_join->set_ref_item_slice(m_output_slice);
           }
           return 0;
+        } else {
+          return -1;
         }
       }
       if (err != 0) return err;
@@ -315,6 +363,18 @@ int AggregateIterator::Read() {
         }
       }
 
+      // Invalidate the cache in EQRefIterators, if needed. The call to
+      // LoadIntoTableBuffers() above would usually restore the cache correctly
+      // to the values it had just after the previous call to m_source->Read().
+      // However, if the row was NULL-complemented, LoadIntoTableBuffers() will
+      // have overwritten the cached values with NULLs, and the cache must be
+      // invalidated.
+      for (AccessPath *lookup : m_single_row_index_lookups) {
+        if (lookup->eq_ref().table->has_null_row()) {
+          lookup->eq_ref().ref->key_err = true;
+        }
+      }
+
       // Keep reading rows as long as they are part of the existing group.
       for (;;) {
         int err = m_source->Read();
@@ -322,11 +382,6 @@ int AggregateIterator::Read() {
 
         if (err == -1) {
           m_seen_eof = true;
-
-          // We need to be able to restore the table buffers in Init()
-          // if the iterator is reexecuted (can happen if it's inside
-          // a correlated subquery).
-          StoreFromTableBuffers(m_tables, &m_first_row_next_group);
 
           // End of input rows; return the last group. (One would think this
           // LoadIntoTableBuffers() call is unneeded, since the last row read
@@ -457,7 +512,7 @@ void AggregateIterator::SetRollupLevel(int level) {
   }
 }
 
-bool NestedLoopIterator::Init() {
+bool NestedLoopIterator::DoInit() {
   if (m_source_outer->Init()) {
     return true;
   }
@@ -468,7 +523,7 @@ bool NestedLoopIterator::Init() {
   return false;
 }
 
-int NestedLoopIterator::Read() {
+int NestedLoopIterator::DoRead() {
   if (m_state == END_OF_ROWS) {
     return -1;
   }
@@ -545,6 +600,8 @@ int NestedLoopIterator::Read() {
   }
 }
 
+namespace {
+
 /**
    This is a no-op class with a public interface identical to that of the
    IteratorProfilerImpl class. This allows iterators with internal time
@@ -589,6 +646,621 @@ class DummyIteratorProfiler final : public IteratorProfiler {
 
   void StopRead([[maybe_unused]] TimeStamp start_time,
                 [[maybe_unused]] bool read_ok) {}
+};
+
+/// Calculates a hash for an ImmutableStringWithLength so that it can be used as
+/// a key in a hash map.
+class ImmutableStringHasher {
+ public:
+  // This is a marker telling ankerl::unordered_dense that the hash function has
+  // good quality.
+  using is_avalanching = void;
+
+  uint64_t operator()(ImmutableStringWithLength string) const {
+    return ankerl::unordered_dense::hash<std::string_view>()(string.Decode());
+  }
+};
+
+using materialize_iterator::Operand;
+using Operands = Mem_root_array<Operand>;
+using hash_map_type = ankerl::unordered_dense::segmented_map<
+    ImmutableStringWithLength, LinkedImmutableString, ImmutableStringHasher>;
+
+void reset_hash_map(hash_map_type *hash_map) {
+  std::destroy_at(hash_map);
+  std::construct_at(hash_map);
+}
+
+/**
+  Contains spill state for set operations' use of in-memory hash map.
+
+  If we encounter a situation in which the hash map for set operations
+  overflows allowed memory, we initiate a spill to disk procedure. This class
+  encapsulates state using during this procedure. Spill to disk starts
+  with a call to \c handle_hash_map_full.
+
+  We built a mechanism with an in-memory hash map which can spill
+  gracefully to disk if the volume of rows gets large and still perform
+  well. In the presence of wrong table cardinality information, we may not be
+  able to complete the spill to disk procedure (if we still run out of memory
+  when hashing chunks, see below). If so, we fall back on de-duplicating
+  using the non-unique key of the output (materialized) result table.
+
+  The spill code is partially based on code developed for hash join: e.g. we
+  reuse packing/unpacking functions like
+  \verbatim
+    StoreFromTableBuffersRaw            (pack_rows.h)
+    LoadImmutableStringIntoTableBuffers (hash_join_buffer.h)
+  \endverbatim
+  and furthermore, the ankerl::unordered_dense library, and the chunk
+  file abstraction.
+  \verbatim
+  Definitions:
+        A' - set of rows from operand 1 of set operation that fits in
+             the in-memory hash map, deduplicated, with counters
+        A  - set of rows from operand 1 before deduplication
+        B  - non-deduplicated set of rows from operand 1 that didn't
+             fit
+        C = A + B
+           - total set of rows in operand one; not known a priori, but we use
+             the statistics for an estimate.
+
+        M - (aka. m_num_chunks) total number of chunk files the tertiary
+            hash distributes the rows to. Multiple of 2, as used for hash join.
+
+        N - (aka. HashJoinIterator::kMaxChunks) the max number of HF and IF
+             files that may be open at one time. May be smaller than M.
+
+        S = ceiling(M/N)  (aka. m_no_of_chunk_file_sets)
+           - number of sets of open files we need
+
+        s - the set of chunk files opened (aka. m_chunk_files), sets are
+            enumerated from 0..S-1, cf. m_current_chunk_file_set.
+
+        n - number of operands in set operation
+
+        REMAININGINPUT (aka. m_remaining_input) - tmp file needed if S > 1.
+        MATERIALIZEDTABLE (aka. m_materialized_table) - output for
+            EXCEPT/INTERSECT algorithm
+
+        primary hash
+          - MySQL record hash, aka. calc_row_hash(m_materialized_table)
+        secondary hash
+          - the hash function used by ankerl::unordered_dense for the in-memory
+            hash map based on primary hash
+        tertiary hash
+          - hash function for distributing rows to chunk files, cf.
+            MY_XXH64 based on primary hash
+
+   ============
+   !In-memory !                  Two kinds of tmp chunk files, HF and IF
+   !hash map  !                  HF: already Hashed and de-duplicated rows File
+   !  A' rows !                  IF: Input File (not yet de-duplicated rows)
+   !==========!
+     |                            !---------!        !----------------!
+     |                            ! B       !        ! REMAININGINPUT !
+     |                            !---------!        !----------------!
+     |                                   |
+     ↓ tertiary  hash → 0:M-1            ↓
+     +--------+------------\             +--------+------------\
+     ↓        ↓            ↓             ↓        ↓            ↓
+  !----!    !----!     !------!       !----!    !----!     !------!
+  !HF_0!    !HF_1! ..  !HF_M-1!       !IF_0!    !IF_1! ..  !IF_M-1!
+  !----!    !----!     !------!       !----!    !----!     !------!
+                    ↑                                   ↑
+                    N                                   N
+
+   !-------------------!          !----------!    !----------!
+   ! MATERIALIZEDTABLE !          ! operand-2! .. ! operand-n!
+   !-------------------!          !----------!    !----------!
+
+  If M > N, we cannot have open all chunk files at the same time, so in each
+  chunk file we have this structure:
+
+                           +-------+
+                           |       | rows from set 0
+                           +-------+
+                               :
+                           +-------+
+                           |       | rows from set S-1
+                           +-------+
+
+  If we need more M than N, M will be a multiple of N as well as a multiple of
+  2, since N is also chosen a multiple of two (currently 128). So, the physical
+  tmp file contains several logical chunk files. For the HF chunks, we in
+  addition have several generations of these: each round of processing appends
+  a new generation (more updated) version of the chunks. For a 2 operand set
+  operation, we have three generations:
+
+  1. the initial row sets from the in-memory hash map (A' spread over M chunks)
+  2. updated sets with the rest of the left operand (C deduplicated and spread
+     over M chunks)
+  3. updated sets after we have processed the right operand
+
+  We keep track of the read and write positions on the tmp files, cf. methods
+  HashJoinChunk::SetAppend and HashJoinChunk::ContinueRead. This enables
+  reading back rows from the generation last written, and the writing of a new
+  generation at the tail of the chunk file. More set operands than two adds
+  further generations, one for each extra operand.
+
+  * Algorithm
+
+
+  1. The in-memory hash map can hit its memory limit when we read the
+     left set operand (block) after having read A rows, resulting in A' rows in
+     in-memory hash map. If we do not hit the limit, we are done, no spill to
+     disk is required.
+
+     Note: Spill can never happen when we read operand 2..n since operand 1 of
+     INTERSECT and EXCEPT determines the maximum rows in the result set and
+     hence the maximal size of the in-memory hash map.
+
+     So, we will have established the spill-over storage *before* reading of
+     operands 2..n starts.
+
+  2. Before looking at operand 2..n, we need to finish processing the remaining
+     rows in the left operand, cf. the details below:
+
+  3. When we hit limit, we:
+
+     Determine number N of chunk files based on the estimated number of rows in
+     operand 1 (the left operand). As mentioned, if number of chunks needed (M)
+     > maxOpenFiles, we still allow this but will keep open only a subset s at
+     any one time, presuming worst case of no deduplication, i.e. A'==A.  In
+     this case, M == N * S, but M can be as low as 2 (M << N). This is
+     performed in the method `compute_chunk_file_sets' and
+     `initialize_first_HF_chunk_files'.
+
+   3.a)
+        For all file sets s in 1..S:
+
+           - rehash with tertiary hash and write A' to files HF-{0..N-1} all
+             rows in in-mem hash map. Save the computed primary hash value in
+             the hash column, so we do not need to compute it over again when
+             we read HF-k into hash map again. This is done in method
+             `spread_hash_map_to_HF_chunk_files'. HF chunk file sets are now
+             in generation one.
+
+           - When s contains hash for offending row, write the offending row
+             |A|+1 that did't fit the in-memory hash map to IF-k in s.
+             (aka. m_offending_row)
+
+        Note these rows (A') have been de-duplicated down to A' and
+        counters set accordingly.
+
+
+     3.b)
+        For all file sets s in 1..S:
+
+        3.b.1) read the rest of the left input (or re-read them via
+               REMAININGINPUT if s>1), hash and write to destination file IF-k
+               the rows which, based on its tertiary hash value, have index k
+               in the current set.  If s is the first file set AND S>1 and row
+               didn't go to a file in s, also save input row to file
+               REMAININGINPUT since we need it for another file set (since we
+               cannot replay the source). See method
+               `save_rest_of_operand_to_IF_chunk_files' and
+               `reset_for_spill_handling'.
+
+     At this point we have the rest of the input rows B (that that have not
+     been matched against HFs) in IF-{0..N-1}.  HF rows already are unique and
+     have set operation counters already set based on first part of input rows
+     that did fit in memory (so we have no need to "remember" that part of
+     input except as initialized counters): only the remaining input rows (from
+     operand 1) are of concern to us now.
+
+     From here on, the logic is driven from the read_next_row. The set counter
+     logic is still handled by process_row_hash. Most of the machinery
+     for reading, writing and switching chunk files are driven by a state
+     machine from read_next_row, (almost) invisible to
+     process_row_hash, except for a simplified handling when we
+     re-enter HF rows into the hash map ready to process operand 2..n, cf. call
+     to `load_HF_row_into_hash_map': these rows have already been
+     de-duplicated and the hash table will not grow in size compared to
+     operand one (intersect and except can't increase result set size), so we
+     can use a shorter logic path.
+
+     3.c)
+        For each s in 1..S do
+        For each pair of {HF-k, IF-k} in s do
+           3.c.1) Read HF-k into hash map: optimization: use saved hash value
+                  Cf. ReadingState::SS_READING_LEFT_HF
+
+           3.c.2) Read rows from IF-k, continuing hash processing of
+                  operand one. Cf. ReadingState::SS_READING_LEFT_IF.
+
+                  If hash map overflows here, we recover by changing to
+                  de-duplicating via the tmp table (we re-initialize it with a
+                  non-unique index on the hash field in the row in
+                  handle_hash_map_full).  This overflow means we cannot fit
+                  even 1/M-th of set of unique rows in input set of operand 1
+                  in memory). If row estimates are reasonably good, it should
+                  not happen.  For details on secondary overflow recovery, see
+                  handle_hash_map_full and comments in materialize_hash_map,
+                  and logic in read_next_row_secondary_overflow.
+
+           3.c.3) We are done with pair {HF-k, IF-k}, append hash map to HF-k
+                  and empty in-memory hash map, cf. `append_hash_map_to_HF'.
+
+      We are done with operand 1, and we have min(M,N) HF files with unique rows
+      (incl counters) on disk in one or more sets, in generation two.
+
+     4.a) For each operand 2..n do
+        4.a.0) Empty all IFs and REMAININGINPUT.
+        For each s in S do
+
+           4.a.1) Read input operand (from block or REMAININGINPUT if s>1),
+                  hash to IF-k, and write. If s==1 AND S>1 also save input row
+                  to file REMAININGINPUT since we need them for the next file
+                  set s, cf. save_operand_to_IF_chunk_files.
+           4.a.2) Similar to same as 3.c, except with right side counter logic
+                  cf. states ReadingState::SS_READING_RIGHT_{HF,IF}.
+
+     5) We now have min(N,M) HF files with unique rows sets (incl set logic
+        counters) on disk (generation three), all operands have been
+        processed. For each HF-k read it and write to MATERIALIZEDTABLE.
+  \endverbatim
+*/
+class SpillState {
+ public:
+  SpillState(THD *thd, MEM_ROOT *mem_root)
+      : m_thd(thd),
+        m_chunk_files(mem_root),
+        m_row_counts(mem_root, HashJoinIterator::kMaxChunks) {}
+
+  /**
+    Inquire spill handling state
+
+    @returns true if we are in spill to disk processing mode
+  */
+  bool spill() { return m_spill_read_state != ReadingState::SS_NONE; }
+
+#ifndef NDEBUG
+  bool simulated_secondary_overflow(bool *spill);
+
+ private:
+  size_t m_simulated_set_idx{std::numeric_limits<size_t>::max()};
+  size_t m_simulated_chunk_idx{std::numeric_limits<size_t>::max()};
+  size_t m_simulated_row_no{std::numeric_limits<size_t>::max()};
+
+ public:
+#endif
+
+  void set_secondary_overflow() { m_secondary_overflow = true; }
+
+  /// Getter, cf. comment for \c m_secondary_overflow
+  bool secondary_overflow() const { return m_secondary_overflow; }
+  void secondary_overflow_handling_done() {
+    m_spill_read_state = ReadingState::SS_NONE;
+    m_secondary_overflow = false;
+    // free up resources from chunk files and hashmap
+    reset_hash_map(m_hash_map);
+    // Use Clear over ClearForReuse: we want all space recycled, ClearForReuse
+    // doesn't reclaim used space in the kept block (last allocated)
+    m_hash_map_mem_root->Clear();
+    m_chunk_files.clear();
+    m_row_counts.clear();
+  }
+
+  enum class ReadingState : uint8_t {
+    SS_NONE,
+    SS_READING_LEFT_HF,
+    SS_READING_LEFT_IF,
+    SS_COPY_OPERAND_N_TO_IF,  // done de-duplicating one operand, ready for next
+    SS_READING_RIGHT_HF,
+    SS_READING_RIGHT_IF,
+    SS_FLUSH_REST_OF_LEFT_IFS  // only used after secondary overflow
+  };
+
+  ReadingState read_state() { return m_spill_read_state; }
+
+  /**
+    Initialize the spill to disk processing state with some variables.
+
+    @param left_operand the left-most operand in a N-ary set operation
+    @param hash_map     the in-memory hash map that overflowed, causing the
+                        spill to disk
+    @param rows_in_hash_table
+                        the number of rows in the hash map
+    @param read_rows_before_dedup
+                        the number of rows read from the left operand
+                        before de-duplicating into the hash map
+    @param hash_map_mem_root
+                        the mem_root used for allocating space for the hash
+                        map's keys and values
+    @param t            the materialized table that receive the result set of
+                        the set operation
+  */
+  bool init(const Operand &left_operand, hash_map_type *hash_map,
+            size_t rows_in_hash_table, size_t read_rows_before_dedup,
+            MEM_ROOT *hash_map_mem_root, TABLE *t);
+
+  /**
+    Given current state of spill processing, return the next row up for
+    inserting into or matching against the hash map.
+    @param current_operand  the operand (query block) we are currently reading
+                            from
+    @retval
+       0   OK
+    @retval
+      -1   End of records
+    @retval
+       1   Error
+  */
+  int read_next_row(const Operand *current_operand);
+
+  /**
+    Given current state of secondary overflow processing, return the next row
+    up for inserting into or matching against the index in the result table (we
+    no longer use hashing, having fallen back on de-duplicating via index in
+    resulting output table.
+
+    First, return the row which caused the overflow as row #1.  Next, we read
+    the rest of the IF rows of the current chunk we were processing when the
+    secondary overflow occured.  Finally, we read all remaining left side IF
+    chunks, if any, which haven't been matched with their corresponding HF
+    chunk, i.e. we do not need to read IF files that have already been matched
+    up with their corresponding HF chunk files prior to the secondary overflow,
+    if any.
+
+    Processing of right operand(s) will proceed as for non-hashed
+    de-duplication (similarly to what is done for UNION), and is not handled
+    here. Cf. secondary_overflow_handling_done which completes secondary
+    overflow handling and reverts to normal non hashed de-duplication for
+    operands 2..n.
+
+    @retval
+       0   OK
+    @retval
+      -1   End of records
+    @retval
+       1   Error
+  */
+  int read_next_row_secondary_overflow();
+
+  /**
+    Used to write a complete (or incomplete in the case of secondary overflow)
+    HF chunk to the materialized tmp table. Will handle spill to disk if
+    needed.
+    @param thd               Session state
+    @param set               The set for which to write a chunk
+    @param chunk_idx         The chunk for which to write rows
+    @param operands          The operands of the set operation
+    @param [out] stored_rows Incremented with the number of row written from
+                             the specified chunk to the materialized tmp table
+    @returns true if error, else false
+  */
+  bool write_HF(THD *thd, size_t set, size_t chunk_idx,
+                const Operands &operands, ha_rows *stored_rows);
+  /**
+    Write the contents of the final generation of HD chunks to the materialized
+    table which will hold the result set of the set operation.
+    TODO: avoid materializing more rows than required if LIMIT is present
+    TODO: stream rows as soon as final generation of a HF chunk file is ready?
+
+    @param thd                Current session state
+    @param operands           The operands of the set operation
+    @param [out] stored_rows  Will be incremenented with the number of produced
+                              rows
+    @returns true on error, else false.
+   */
+  bool write_completed_HFs(THD *thd, const Operands &operands,
+                           ha_rows *stored_rows);  // 5.
+
+  /**
+    Write the contents of the HD chunks that were completed when a secondary
+    memory overflow has occurred. In the general case it is a mix of 1.
+    and 2. generation HF chunks.
+
+    @param thd                Current session state
+    @param operands           The operands of the set operation
+    @param [out] stored_rows  Will be updated with the written rows
+    @returns true on error
+   */
+  bool write_partially_completed_HFs(THD *thd, const Operands &operands,
+                                     ha_rows *stored_rows);
+
+ private:
+  void switch_to_HF() {
+    assert(m_spill_read_state == ReadingState::SS_READING_LEFT_IF ||
+           m_spill_read_state == ReadingState::SS_READING_RIGHT_IF);
+    if (m_spill_read_state == ReadingState::SS_READING_LEFT_IF)
+      m_spill_read_state = ReadingState::SS_READING_LEFT_HF;
+    else
+      m_spill_read_state = ReadingState::SS_READING_RIGHT_HF;
+  }
+
+  void switch_to_IF() {
+    assert(m_spill_read_state == ReadingState::SS_READING_LEFT_HF ||
+           m_spill_read_state == ReadingState::SS_READING_RIGHT_HF);
+    if (m_spill_read_state == ReadingState::SS_READING_LEFT_HF)
+      m_spill_read_state = ReadingState::SS_READING_LEFT_IF;
+    else
+      m_spill_read_state = ReadingState::SS_READING_RIGHT_IF;
+  }
+
+ public:
+  // Save away the contents of the row that made the hash table run out of
+  // memory - for later processing
+  bool save_offending_row();
+  THD *thd() { return m_thd; }
+
+ private:
+  /**
+    Compute sizing of and set aside space for the on-disk chunks and their
+    associated in-memory structures, based on the row estimate taken from
+    Operand::m_estimated_output_rows. Also save away the offending row (the one
+    that we read, but we couldn't put into the hash map) so that we can write
+    it to an IF chunk later.
+    @returns true on error
+   */
+  bool compute_chunk_file_sets(const Operand *current_operand);  // 3.
+  bool initialize_first_HF_chunk_files();                        // 3.
+
+  /**
+    The initial hash map that overflowed will be spread over the determined
+    number of chunk files, cf. initialize_next_HF_chunk_files
+    @returns true on error
+  */
+  bool spread_hash_map_to_HF_chunk_files();  // 3.a)
+  bool save_operand_to_IF_chunk_files(
+      const Operand *current_operand);  // 4.a.1)
+  bool save_rest_of_operand_to_IF_chunk_files(
+      const Operand *current_operand) {  // 3.b
+    // "rest of": what didn't fit of left operand in initial hash map
+    return save_operand_to_IF_chunk_files(current_operand);
+  }
+  bool reset_for_spill_handling();  // 3.b/3.c
+  /**
+    We are done processing a {HF, IF} chunk pair. The results are
+    in the in-memory hash map, which we now append to the current
+    HF chunk file, i.e. m_chunk_files[offset].build_chunk; clear the
+    in-memory hash map, and make the HF chunk file ready for reading
+    of what we now append.
+    @returns true on error
+  */
+  bool append_hash_map_to_HF();
+
+  THD *m_thd;
+
+  /// If not SS_NONE, we have detected an overflow in the in-memory hash map
+  /// while reading the left(-most) operand of an INTERSECT or EXCEPT operation
+  /// and are ready for reading next row from an operand (left or right).
+  ReadingState m_spill_read_state{ReadingState::SS_NONE};
+
+  /// If true, we have seen memory overflow also during spill handling. This is
+  /// because a HF chunk won't fit in memory, i.e. the computation we made to
+  /// ensure it would fit, was not sufficient to make it so. This can be because
+  /// table cardinality statistics is not up to date, or data density is very
+  /// skewed. In this case we fall back on using tmp table unique key for
+  /// de-duplicating.
+  bool m_secondary_overflow{false};
+
+  /// The materialized table we are eventualy writing the result of the set
+  /// operation to
+  TABLE *m_materialized_table{nullptr};
+
+  /// Cached value for {m_materialized_table}.
+  pack_rows::TableCollection m_table_collection;
+
+  /// The in-memory hash map that overflowed. We will use it also during
+  /// spill phase, so we need a pointer to it.
+  hash_map_type *m_hash_map{nullptr};
+
+  static constexpr uint32_t m_magic_prime = 4391;
+  /// Modify for each operator in a N-ary set operation to avoid initial
+  /// chunks filling up right away due to row order in previous operation
+  size_t m_hash_seed{0};
+
+  /// At the time of overflow: how many rows from left operand are in hash map
+  /// after deduplication
+  size_t m_rows_in_hash_map{0};
+
+  /// At the time of overflow: how many rows have we read from left operand
+  size_t m_read_rows_before_dedup{0};
+
+  /// The mem_root of m_hash_map. We need it for reusing its space.
+  MEM_ROOT *m_hash_map_mem_root{nullptr};
+
+  /// The number of chunks needed after rounding up to nearest power of two.
+  /// It may be larger thank HashJoinIterator::kMaxChunks in which case
+  /// m_no_of_chunk_file_sets > 1.
+  size_t m_num_chunks{0};
+
+  /// The number of chunk file sets needed to process all m_num_chunks
+  /// chunks.
+  size_t m_no_of_chunk_file_sets{0};
+
+  /// Anything more than two file sets is too slow, at least for large volume
+  /// which forces chunk file memory buffers to disk.
+  static const size_t m_max_sets{2};
+
+  /// The current chunk under processing. 0-based.
+  size_t m_current_chunk_file_set{0};
+
+ public:
+  /// If we find that we need more than \c m_max_sets, we need to increase
+  /// space set for \c 'set_operations_buffer_size' by this factor for best
+  /// performance.
+  size_t m_factor_too_little_memory{2};
+
+  size_t current_chunk_file_set() const { return m_current_chunk_file_set; }
+
+ private:
+  /// Keeps the row that was just read from the left operand when we discovered
+  /// that we were out of space in the in-memory hash map. Save it for
+  /// writing it to IF-k.
+  struct {
+    String m_buffer;
+    size_t m_chunk_offset{0};
+    size_t m_set{0};
+    bool m_unsaved{true};
+  } m_offending_row;
+
+  static size_t chunk_index_to_set(size_t chunk_index) {
+    return chunk_index / HashJoinIterator::kMaxChunks;
+  }
+
+  inline size_t hash_to_chunk_index(uint64_t hash) const {
+    // put all entropy into two bytes
+    uint16 word1 = 0xffff & (hash);
+    uint16 word2 = 0xffff & (hash >> 16);
+    uint16 word3 = 0xffff & (hash >> 32);
+    uint16 word4 = 0xffff & (hash >> 48);
+    uint16 folded_hash = word1 + word2 + word3 + word4;
+    assert(m_num_chunks <= 65535);
+    /// hash modulo m_num_chunks optimized calculation
+    const size_t result = folded_hash & (m_num_chunks - 1);
+    return result;
+  }
+
+  static size_t chunk_offset(size_t chunk_index) {
+    return chunk_index & (HashJoinIterator::kMaxChunks - 1);
+  }
+
+  /// Temporary space for (de)serializing a row. Cf also
+  /// m_offending_row.m_buffer for a similar dedicated space.
+  String m_row_buffer;
+
+  /// Array to hold the list of chunk files on disk in case we degrade into
+  /// on-disk set EXCEPT/INTERSECT. Maximally kMaxChunks can be open and used at
+  /// one time.
+  Mem_root_array<ChunkPair> m_chunk_files;
+
+  /// The index of the chunk pair being read, incremented before use
+  size_t m_current_chunk_idx{0};
+
+ public:
+  size_t current_chunk_idx() const { return m_current_chunk_idx; }
+
+ private:
+  /// The current row no (1-based) in a chunk being read, incremented before
+  /// use.
+  size_t m_current_row_in_chunk{0};
+
+  /// Used if m_no_of_chunk_file_sets > 1 so we can replay input rows from
+  /// operands over sets 1..S-1, i.e. not used for rows from set 0.
+  /// Not used if we only have one chunk file set.
+  HashJoinChunk m_remaining_input;
+
+  /// For a given chunk file pair {HF, IF}, the count of rows in each chunk
+  /// respectively.
+  struct CountPair {
+    size_t HF_count;  // left set operation operand
+    size_t IF_count;  // right set operation operand
+  };
+
+  /// For a chunk file pair, an array of counts indexed by
+  /// m_current_chunk_file_set
+  using SetCounts = Mem_root_array<CountPair>;
+
+  /// A matrix of counters keeping track of how many rows have been stashed
+  /// away in the chunk files for each set in each chunk file of the current
+  /// generation. Used to allow us to read back the correct set of rows from
+  /// each chunk given the current m_current_chunk_file_set.
+  /// It is indexed thus:
+  ///     m_row_counts[ chunk index ][ set index ]
+  Mem_root_array<SetCounts> m_row_counts;
 };
 
 /**
@@ -648,13 +1320,10 @@ class MaterializeIterator final : public TableRowIterator {
       query_blocks_to_materialize should contain only one member, with the same
       join.
    */
-  MaterializeIterator(THD *thd, materialize_iterator::Operands operands,
+  MaterializeIterator(THD *thd, Operands operands,
                       const MaterializePathParameters *path_params,
                       unique_ptr_destroy_only<RowIterator> table_iterator,
                       JOIN *join);
-
-  bool Init() override;
-  int Read() override;
 
   void SetNullRowFlag(bool is_null_row) override {
     m_table_iterator->SetNullRowFlag(is_null_row);
@@ -677,7 +1346,10 @@ class MaterializeIterator final : public TableRowIterator {
   }
 
  private:
-  materialize_iterator::Operands m_operands;
+  bool DoInit() override;
+  int DoRead() override;
+
+  Operands m_operands;
   unique_ptr_destroy_only<RowIterator> m_table_iterator;
 
   /// If we are materializing a CTE, points to it (otherwise nullptr).
@@ -762,11 +1434,7 @@ class MaterializeIterator final : public TableRowIterator {
   // Iff m_use_hash_map, the MEM_ROOT on which all of the hash map keys and
   // values are allocated. The actual hash map is on the regular heap.
   unique_ptr_destroy_only<MEM_ROOT> m_mem_root;
-  size_t m_row_size_upper_bound;
-
-  using hash_map_type = robin_hood::unordered_flat_map<
-      ImmutableStringWithLength, LinkedImmutableString,
-      hash_join_buffer::KeyHasher, hash_join_buffer::KeyEquals>;
+  size_t m_row_size_upper_bound{0};
 
   // The hash map where the rows are stored.
   std::unique_ptr<hash_map_type> m_hash_map;
@@ -794,7 +1462,7 @@ class MaterializeIterator final : public TableRowIterator {
 
   /// Spill to disk state for set operation: when in-memory hash map
   /// overflows, this keeps track of state.
-  materialize_iterator::SpillState m_spill_state;
+  SpillState m_spill_state;
 
   /// Whether we are deduplicating using a hash field on the temporary
   /// table. (This condition mirrors check_unique_fields().)
@@ -812,30 +1480,30 @@ class MaterializeIterator final : public TableRowIterator {
   bool doing_hash_deduplication() const { return table()->hash_field; }
 
   bool MaterializeRecursive();
-  bool MaterializeOperand(const materialize_iterator::Operand &operand,
-                          ha_rows *stored_rows);
-  int read_next_row(const materialize_iterator::Operand &operand);
+  bool MaterializeOperand(const Operand &operand, ha_rows *stored_rows);
+  int read_next_row(const Operand &operand);
   bool check_unique_fields_hash_map(TABLE *t, bool write, bool *found,
                                     bool *spill);
   void backup_or_restore_blob_pointers(bool backup);
   void update_row_in_hash_map();
-  bool store_row_in_hash_map();
-  bool handle_hash_map_full(const materialize_iterator::Operand &operand,
-                            ha_rows *stored_rows);
-  bool process_row(const materialize_iterator::Operand &operand,
-                   materialize_iterator::Operands &operands, TABLE *t,
+  bool store_row_in_hash_map(bool *single_row_too_large);
+  bool handle_hash_map_full(const Operand &operand, ha_rows *stored_rows,
+                            bool single_row_too_large);
+  bool process_row(const Operand &operand, Operands &operands, TABLE *t,
                    uchar *set_counter_0, uchar *set_counter_1, bool *read_next);
-  bool process_row_hash(const materialize_iterator::Operand &operand, TABLE *t,
-                        ha_rows *stored_rows);
-  bool materialize_hash_map(TABLE *t, ha_rows *stored_rows);
+  bool process_row_hash(const Operand &operand, TABLE *t, ha_rows *stored_rows);
+  bool materialize_hash_map(TABLE *t, ha_rows *stored_rows,
+                            bool single_row_too_large);
   bool load_HF_row_into_hash_map();
-  friend class materialize_iterator::SpillState;
+  bool init_hash_map_for_new_exec();
+  friend class SpillState;
 };
+
+}  // namespace
 
 template <typename Profiler>
 MaterializeIterator<Profiler>::MaterializeIterator(
-    THD *thd, materialize_iterator::Operands operands,
-    const MaterializePathParameters *path_params,
+    THD *thd, Operands operands, const MaterializePathParameters *path_params,
     unique_ptr_destroy_only<RowIterator> table_iterator, JOIN *join)
     : TableRowIterator(thd, path_params->table),
       m_operands(std::move(operands)),
@@ -885,7 +1553,7 @@ MaterializeIterator<Profiler>::MaterializeIterator(
 }
 
 template <typename Profiler>
-bool MaterializeIterator<Profiler>::Init() {
+bool MaterializeIterator<Profiler>::DoInit() {
   const typename Profiler::TimeStamp start_time = Profiler::Now();
 
   if (!table()->materialized && table()->pos_in_table_list != nullptr &&
@@ -905,19 +1573,28 @@ bool MaterializeIterator<Profiler>::Init() {
   // If this is a CTE, it could be referred to multiple times in the same query.
   // If so, check if we have already been materialized through any of our alias
   // tables.
-  if (!table()->materialized && m_cte != nullptr) {
-    for (Table_ref *table_ref : m_cte->tmp_tables) {
-      if (table_ref->table != nullptr && table_ref->table->materialized) {
-        table()->materialized = true;
-        break;
-      }
+  const bool use_shared_cte_materialization =
+      !table()->materialized && m_cte != nullptr && !m_rematerialize &&
+      any_of(m_cte->tmp_tables.begin(), m_cte->tmp_tables.end(),
+             [](const Table_ref *table_ref) {
+               return table_ref->table != nullptr &&
+                      table_ref->table->materialized;
+             });
+
+  if (use_shared_cte_materialization) {
+    // If using an already materialized shared CTE table, update the
+    // invalidators with the latest generation.
+    for (Invalidator &invalidator : m_invalidators) {
+      invalidator.generation_at_last_materialize =
+          invalidator.iterator->generation();
     }
+    table()->materialized = true;
   }
 
   if (table()->materialized) {
     bool rematerialize = m_rematerialize;
 
-    if (!rematerialize) {
+    if (!rematerialize && !use_shared_cte_materialization) {
       // See if any lateral tables that we depend on have changed since
       // last time (which would force a rematerialization).
       //
@@ -950,6 +1627,7 @@ bool MaterializeIterator<Profiler>::Init() {
   } else {
     table()->file->ha_index_or_rnd_end();  // @todo likely unneeded => remove
     table()->file->ha_delete_all_rows();
+    if (m_use_hash_map && init_hash_map_for_new_exec()) return true;
   }
 
   if (m_query_expression != nullptr)
@@ -980,9 +1658,32 @@ bool MaterializeIterator<Profiler>::Init() {
     if (table()->file->inited == handler::INDEX) table()->file->ha_index_end();
   });
 
-  if (doing_hash_deduplication() && !m_use_hash_map) {
-    if (table()->file->ha_index_init(0, /*sorted=*/false)) {
-      return true;
+  if (doing_hash_deduplication()) {
+    if (m_use_hash_map) {
+      if (!table()->uses_hash_map()) {
+        // The value of the user variable 'hash_set_operations' has changed to
+        // true, so we re-open the resulting tmp table without index: we will
+        // deduplicate set operation with hashing.
+        assert(table()->s->keys == 1);
+        close_tmp_table(table());
+        table()->s->keys = 0;  // don't need key for hash based dedup
+        table()->set_use_hash_map(true);
+        if (instantiate_tmp_table(thd(), table())) return true;
+      }
+    } else {
+      if (table()->uses_hash_map()) {
+        // The value of the user variable 'hash_set_operations' has changed to
+        // false, so we re-open the resulting tmp table with index so we can
+        // perform set operation de-duplication using index.
+        assert(table()->s->keys == 0);
+        close_tmp_table(table());
+        table()->s->keys = 1;  // activate key index de-duplication
+        table()->set_use_hash_map(false);
+        if (instantiate_tmp_table(thd(), table())) return true;
+      }
+      if (table()->file->ha_index_init(0, /*sorted=*/false)) {
+        return true;
+      }
     }
   }
 
@@ -991,7 +1692,7 @@ bool MaterializeIterator<Profiler>::Init() {
   if (m_query_expression != nullptr && m_query_expression->is_recursive()) {
     if (MaterializeRecursive()) return true;
   } else {
-    for (const materialize_iterator::Operand &operand : m_operands) {
+    for (const Operand &operand : m_operands) {
       if (MaterializeOperand(operand, &stored_rows)) {
         return true;
       }
@@ -1014,7 +1715,7 @@ bool MaterializeIterator<Profiler>::Init() {
     }
   }
 
-  end_unique_index.rollback();
+  end_unique_index.reset();
   table()->materialized = true;
 
   if (!m_rematerialize) {
@@ -1117,8 +1818,8 @@ bool MaterializeIterator<Profiler>::MaterializeRecursive() {
   ha_rows stored_rows = 0;
 
   // Give each recursive iterator access to the stored number of rows
-  // (see FollowTailIterator::Read() for details).
-  for (const materialize_iterator::Operand &operand : m_operands) {
+  // (see FollowTailIterator::DoRead() for details).
+  for (const Operand &operand : m_operands) {
     if (operand.is_recursive_reference) {
       operand.recursive_reader->set_stored_rows_pointer(&stored_rows);
     }
@@ -1128,7 +1829,7 @@ bool MaterializeIterator<Profiler>::MaterializeRecursive() {
   // Trash the pointers on exit, to ease debugging of dangling ones to the
   // stack.
   auto pointer_cleanup = create_scope_guard([this] {
-    for (const materialize_iterator::Operand &operand : m_operands) {
+    for (const Operand &operand : m_operands) {
       if (operand.is_recursive_reference) {
         operand.recursive_reader->set_stored_rows_pointer(nullptr);
       }
@@ -1137,7 +1838,7 @@ bool MaterializeIterator<Profiler>::MaterializeRecursive() {
 #endif
 
   // First, materialize all non-recursive operands.
-  for (const materialize_iterator::Operand &operand : m_operands) {
+  for (const Operand &operand : m_operands) {
     if (!operand.is_recursive_reference) {
       if (MaterializeOperand(operand, &stored_rows)) return true;
     }
@@ -1149,7 +1850,7 @@ bool MaterializeIterator<Profiler>::MaterializeRecursive() {
   ha_rows last_stored_rows;
   do {
     last_stored_rows = stored_rows;
-    for (const materialize_iterator::Operand &operand : m_operands) {
+    for (const Operand &operand : m_operands) {
       if (operand.is_recursive_reference) {
         if (MaterializeOperand(operand, &stored_rows)) return true;
       }
@@ -1180,21 +1881,25 @@ bool MaterializeIterator<Profiler>::MaterializeRecursive() {
   overflow HF chunks [1] and write said rows to table t, updating stored_rows
   counter.
 
-  [1] Depending on spill state. We have three cases:
+  [1] Depending on spill state. We have four cases:
 
-  a) No spill to disk: write rows from in-memory hash table.
+  a) No spill to disk: write rows from in-memory hash table
   b) Spill to disk: write completed HF chunks, all chunks exist in the same
      generation >= 2 (the number is the same as the number of set operands).
   c) We saw secondary overflow during spill processing and must recover: write
      completed HF chunks (mix of 1. and 2.generation) and write the in-memory
      hash table
+  d) too large single row, move to index based de-duplication
   @param t            output table
   @param stored_rows  counter for # of rows stored in output table
+  @param single_row_too_large
+                      move straight to index based de-duplication
   @returns true on error
 */
 template <typename Profiler>
-bool MaterializeIterator<Profiler>::materialize_hash_map(TABLE *t,
-                                                         ha_rows *stored_rows) {
+bool MaterializeIterator<Profiler>::materialize_hash_map(
+    TABLE *t, ha_rows *stored_rows, bool single_row_too_large) {
+  // b)
   if (m_spill_state.spill()) {
     if (m_spill_state.secondary_overflow()) {
       // c) write finished HF chunks (a strict subset with secondary overflow)
@@ -1249,12 +1954,13 @@ bool MaterializeIterator<Profiler>::materialize_hash_map(TABLE *t,
 
   if (m_hash_map == nullptr) return false;  // left operand is empty
 
-  // a), c)
-  for (auto f = m_hash_map->begin(); f != m_hash_map->end(); f++) {
+  // a), c), d)
+  for (const auto &[hash_key, first_row] : *m_hash_map) {
     if (*stored_rows >= m_limit_rows) break;
 
-    LinkedImmutableString row_with_same_hash = f->second;
-    while (row_with_same_hash != nullptr) {
+    for (LinkedImmutableString row_with_same_hash = first_row;
+         row_with_same_hash != nullptr;
+         row_with_same_hash = row_with_same_hash.Decode().next) {
       hash_join_buffer::LoadImmutableStringIntoTableBuffers(m_table_collection,
                                                             row_with_same_hash);
       int error = t->file->ha_write_row(t->record[0]);
@@ -1267,24 +1973,24 @@ bool MaterializeIterator<Profiler>::materialize_hash_map(TABLE *t,
                                     /*insert_last_record=*/true,
                                     /*ignore_last_dup=*/true, nullptr))
           return true; /* purecov: inspected */
-        if (m_spill_state.secondary_overflow()) {
+        if (m_spill_state.secondary_overflow() || single_row_too_large) {
+          // c), d)
           assert(t->s->keys == 1);
           if (t->file->ha_index_init(0, false) != 0) return true;
         } else {
-          // else: we use hashing, so skip ha_index_init
+          // else: a) we use hashing, so skip ha_index_init
           assert(t->s->keys == 0);
         }
         ++*stored_rows;
 
         // Inform each reader that the table has changed under their feet,
         // so they'll need to reposition themselves.
-        for (const materialize_iterator::Operand &operand : m_operands) {
+        for (const Operand &operand : m_operands) {
           if (operand.is_recursive_reference) {
             operand.recursive_reader->RepositionCursorAfterSpillToDisk();
           }
         }
       }
-      row_with_same_hash = row_with_same_hash.Decode().next;
     }
   }
 
@@ -1311,19 +2017,64 @@ bool MaterializeIterator<Profiler>::load_HF_row_into_hash_map() {
     // It fit before, should fit now
     assert(false);
     my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR),
-             current_thd->variables.set_operations_buffer_size);
+             thd()->variables.set_operations_buffer_size);
     return true;
   }
 
-  spill = store_row_in_hash_map();
+  bool dummy;
+  spill = store_row_in_hash_map(&dummy);
   if (spill) {
     // It fit before, should fit now
     assert(false);
     my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR),
-             current_thd->variables.set_operations_buffer_size);
+             thd()->variables.set_operations_buffer_size);
     return true;
   }
 
+  return false;
+}
+
+// Reset the mem_root used for the in-memory hash table for set operations.  On
+// the initial call, free all space and reallocate one single block big enough
+// to hold the allocated space from the first usage of the mem_root. This
+// avoids issues with fragmentation being different in different rounds
+// re-reading chunk files, and allows us to avoid de/re-allocating the space on
+// subsequent rounds; ClearForReuse will just trash the single large block, but
+// not free it.
+static bool reset_mem_root(MEM_ROOT *mem_root,
+                           bool initial [[maybe_unused]] = false) {
+#if !defined(HAVE_VALGRIND) && !defined(HAVE_ASAN)
+  if (initial) {
+    // reallocate the total space used as one block, should give more
+    // efficient allocation and less fragmentation when we re-read chunk files
+    const size_t heap_size = mem_root->allocated_size();
+    mem_root->Clear();
+    mem_root->set_max_capacity(0);
+    if (mem_root->ForceNewBlock(heap_size)) return true;  // malloc failed
+  } else {
+    // If we allocate with ASAN, my_alloc.cc will allocate from OS every single
+    // requested block, and also not reuse any block since ClearForReuse just
+    // calls Clean. So we cannot assert.
+    assert(mem_root->IsSingleBlock());
+    // should not deallocate the (single) large block:
+    mem_root->ClearForReuse();
+    mem_root->set_max_capacity(0);
+  }
+#else
+  // No point in the above; ClearForReuse just calls Clear, no reuse of blocks
+  // and the assert would fail. See my_alloc.cc use of MEM_ROOT_SINGLE_CHUNKS
+  mem_root->Clear();
+  mem_root->set_max_capacity(0);
+#endif
+  return false;
+}
+
+template <typename Profiler>
+bool MaterializeIterator<Profiler>::init_hash_map_for_new_exec() {
+  if (m_hash_map == nullptr) return false;  // not used yet
+  reset_hash_map(m_hash_map.get());
+  if (reset_mem_root(m_mem_root.get())) return true;
+  m_rows_in_hash_map = 0;
   return false;
 }
 
@@ -1385,8 +2136,8 @@ bool MaterializeIterator<Profiler>::check_unique_fields_hash_map(TABLE *t,
 #ifndef NDEBUG
   if (m_spill_state.spill()) {
     if (write &&  // Only inject error for left operand: can only happen there
-        m_spill_state.read_state() == materialize_iterator::SpillState::
-                                          ReadingState::SS_READING_LEFT_IF &&
+        m_spill_state.read_state() ==
+            SpillState::ReadingState::SS_READING_LEFT_IF &&
         m_spill_state.simulated_secondary_overflow(spill))
       return true;
     if (*spill) return false;
@@ -1397,24 +2148,24 @@ bool MaterializeIterator<Profiler>::check_unique_fields_hash_map(TABLE *t,
     m_mem_root = make_unique_destroy_only<MEM_ROOT>(
         thd()->mem_root, key_memory_hash_op, /* blocksize 16K */ 16384);
     if (m_mem_root == nullptr) return true;
-    m_hash_map.reset(new hash_map_type(
-        /*bucket_count=*/10, hash_join_buffer::KeyHasher()));
+    m_hash_map.reset(new hash_map_type());
 
     if (m_hash_map == nullptr) {
       my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR), sizeof(hash_map_type));
       return true;
     }
 
-    Prealloced_array<TABLE *, 4> ta(key_memory_hash_op, 1);
-    ta[0] = t;
-    TableCollection tc(ta, false, 0, 0);
-    m_table_collection = tc;
-    m_row_size_upper_bound = ComputeRowSizeUpperBound(m_table_collection);
+    m_table_collection = {/*tables=*/{t},
+                          /*store_rowids=*/false,
+                          /*tables_to_get_rowid_for=*/0};
+    if (!m_table_collection.has_blob_column()) {
+      m_row_size_upper_bound =
+          ComputeRowSizeUpperBoundSansBlobs(m_table_collection);
+    }
   }
 
   ulonglong primary_hash = 0;
-  if (m_spill_state.read_state() !=
-      materialize_iterator::SpillState::ReadingState::SS_NONE) {
+  if (m_spill_state.read_state() != SpillState::ReadingState::SS_NONE) {
     // We have read this row from a chunk file, so we know its hash already
     primary_hash = static_cast<ulonglong>(t->hash_field->val_int());
     assert(primary_hash == calc_row_hash(t));
@@ -1425,8 +2176,8 @@ bool MaterializeIterator<Profiler>::check_unique_fields_hash_map(TABLE *t,
     // but takes unnecessary space in memory hash map.
     t->hash_field->store(static_cast<longlong>(primary_hash), true);
   }
-  // A secondary hash based on primary hash used as robin hood key
-  ImmutableStringWithLength robin_hood_key;
+  // A secondary hash based on primary hash.
+  ImmutableStringWithLength secondary_hash_key;
   const size_t required_key_bytes =
       ImmutableStringWithLength::RequiredBytesForEncode(sizeof(primary_hash));
   std::pair<char *, char *> block = m_mem_root->Peek();
@@ -1438,11 +2189,12 @@ bool MaterializeIterator<Profiler>::check_unique_fields_hash_map(TABLE *t,
   size_t bytes_to_commit = 0;
   if (static_cast<size_t>(block.second - block.first) >= required_key_bytes) {
     char *ptr = block.first;
-    robin_hood_key = ImmutableStringWithLength::Encode(
+    secondary_hash_key = ImmutableStringWithLength::Encode(
         pointer_cast<const char *>(&primary_hash), sizeof(primary_hash), &ptr);
     assert(ptr < block.second);
     bytes_to_commit = ptr - block.first;
   } else if (write) {
+    assert(m_spill_state.read_state() == SpillState::ReadingState::SS_NONE);
     // spill to disk
     *spill = true;
     return false;
@@ -1453,8 +2205,8 @@ bool MaterializeIterator<Profiler>::check_unique_fields_hash_map(TABLE *t,
   if (write) {
     std::pair<hash_map_type::iterator, bool> key_it_and_inserted;
     try {
-      key_it_and_inserted =
-          m_hash_map->emplace(robin_hood_key, LinkedImmutableString{nullptr});
+      key_it_and_inserted = m_hash_map->emplace(secondary_hash_key,
+                                                LinkedImmutableString{nullptr});
     } catch (const std::overflow_error &) {
       // This can only happen if the hash function is extremely bad
       // (should never happen in practice).
@@ -1466,7 +2218,7 @@ bool MaterializeIterator<Profiler>::check_unique_fields_hash_map(TABLE *t,
     inserted = key_it_and_inserted.second;
     *found = false;
   } else {
-    m_hash_map_iterator = m_hash_map->find(robin_hood_key);
+    m_hash_map_iterator = m_hash_map->find(secondary_hash_key);
     if (m_hash_map_iterator == m_hash_map->end()) {
       return false;
     }
@@ -1478,7 +2230,10 @@ bool MaterializeIterator<Profiler>::check_unique_fields_hash_map(TABLE *t,
     // Update the capacity available for the MEM_ROOT; our total may
     // have gone slightly over already, and if so, we will signal
     // that and immediately start spilling to disk.
-    size_t bytes_used = m_hash_map->calcNumBytesTotal(m_hash_map->mask() + 1);
+    const size_t bytes_used =
+        m_hash_map->bucket_count() * sizeof(hash_map_type::bucket_type) +
+        m_hash_map->values().capacity() *
+            sizeof(hash_map_type::value_container_type::value_type);
     if (bytes_used >= max_mem_available) {
       // spill to disk
       *spill = true;
@@ -1535,30 +2290,61 @@ bool MaterializeIterator<Profiler>::check_unique_fields_hash_map(TABLE *t,
   return false;
 }
 
+/// Handle the situation that the in-memory hash map is full.
+/// @param operand       the left operand
+/// @param stored_rows   pointer to the number of stored rows on the output tmp
+///                      table
+/// @param single_row_too_large
+///                      if true, we found a (blob) row so large compared to
+///                      set_operations_buffer_size, that we do not attempt
+///                      spill handling, move directly to index based
+///                      de-duplication
+/// @return true on error, false on success
 template <typename Profiler>
 bool MaterializeIterator<Profiler>::handle_hash_map_full(
-    const materialize_iterator::Operand &operand, ha_rows *stored_rows) {
-  if (m_spill_state.spill()) {
-    m_spill_state.set_secondary_overflow();
+    const Operand &operand, ha_rows *stored_rows, bool single_row_too_large) {
+  if (thd()->is_error()) return true;
+  if (m_spill_state.spill() || single_row_too_large) {
+    assert((m_spill_state.spill() && !single_row_too_large) ||
+           (!m_spill_state.spill() && single_row_too_large));
     Opt_trace_context *trace = &thd()->opt_trace;
     Opt_trace_object trace_wrapper(trace);
-    Opt_trace_object trace_exec(trace,
-                                "spill handling overflow, reverting to index");
+    char buff[512];
+    snprintf(buff, sizeof(buff),
+             "hash spill handling overflow, reverting to slower method "
+             "of indexed tmp table. To avoid, try setting "
+             "set_operations_buffer_size to %lli or more. To avoid "
+             "spill to disk, further increase it with a factor of %zu "
+             "or %zu.",
+             m_spill_state.m_factor_too_little_memory *
+                 thd()->variables.set_operations_buffer_size,
+             HashJoinIterator::kMaxChunks / 2, HashJoinIterator::kMaxChunks);
+
+    Opt_trace_object trace_exec(
+        trace, m_spill_state.spill()
+                   ? buff
+                   : "spill handling not attempted due to large row, reverting "
+                     "to index");
     Opt_trace_array trace_steps(trace, "steps");
     m_use_hash_map = false;
 
-    // Save current row for later use, see save_operand_to_IF_chunk_files
-    if (m_spill_state.save_offending_row()) return true;
+    if (m_spill_state.spill()) {
+      m_spill_state.set_secondary_overflow();
+      // Save current row for later use, see save_operand_to_IF_chunk_files
+      if (m_spill_state.save_offending_row()) return true;
+
+      push_warning(thd(), Sql_condition::SL_NOTE, ER_WARN_SET_OPERATIONS_BUFFER,
+                   ER_THD(thd(), ER_WARN_SET_OPERATIONS_BUFFER));
+    }
 
     TABLE *const t = table();
     close_tmp_table(t);
     t->s->keys = 1;  // activate hash key index
-    t->set_hashing(false);
+    t->set_use_hash_map(false);
     if (instantiate_tmp_table(thd(), t)) return true;
     if (t->file->ha_index_init(0, false) != 0) return true;
 
-    if (materialize_hash_map(t, stored_rows)) return true;
-
+    if (materialize_hash_map(t, stored_rows, single_row_too_large)) return true;
     return false;
   }
   if (m_spill_state.init(operand, m_hash_map.get(), m_rows_in_hash_map,
@@ -1574,18 +2360,48 @@ bool MaterializeIterator<Profiler>::handle_hash_map_full(
   positioned on it.  Links any existing entry behind it, i.e. we insert at
   front of the hash bucket, cf.  StoreLinkedImmutableStringFromTableBuffers.
   Update \c m_rows_in_hash_map.
-  @returns true on error
+  @param[out] single_row_too_large
+                  set if we discover that we have a single
+                  blob which is so large that it consumes (most) of the entire
+                  allocated space (cf. set_operations_buffer_size).
+  @returns true on error, which will also set \c single_row_too_large if
+                  relevant
  */
 template <typename Profiler>
-bool MaterializeIterator<Profiler>::store_row_in_hash_map() {
+bool MaterializeIterator<Profiler>::store_row_in_hash_map(
+    bool *single_row_too_large) {
   // Save the contents of all columns and make the hash map iterator's value
   // field ("->second") point to it.
+
+  const bool is_right_operand = m_spill_state.read_state() ==
+                                SpillState::ReadingState::SS_READING_RIGHT_HF;
+  StoreLinkedInfo info{!is_right_operand, false, 0};
   LinkedImmutableString last_row_stored =
-      StoreLinkedImmutableStringFromTableBuffers(
-          m_mem_root.get(),
-          /*overflow_mem_root*/ nullptr, m_table_collection, m_next_ptr,
-          m_row_size_upper_bound, /*full*/ nullptr);
+      StoreLinkedImmutableStringFromTableBuffers(m_mem_root.get(), nullptr,
+                                                 m_table_collection, m_next_ptr,
+                                                 m_row_size_upper_bound, &info);
+
+  const bool too_large_row =
+      m_spill_state.read_state() == SpillState::ReadingState::SS_NONE &&
+      info.m_bytes_needed * 2 > thd()->variables.set_operations_buffer_size;
+
   if (last_row_stored == nullptr) {
+    if (too_large_row) {
+      // just store it in session's mem_root so we can immediately fall back
+      // on index based tmp table de-duplication; do not attempt spill
+      // handling.
+      last_row_stored = StoreLinkedImmutableStringFromTableBuffers(
+          m_mem_root.get(), thd()->mem_root, m_table_collection, m_next_ptr,
+          m_row_size_upper_bound, &info);
+      if (last_row_stored == nullptr) {
+        my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR),
+                 ComputeRowSizeUpperBound(m_table_collection));
+        return true;
+      }
+      m_hash_map_iterator->second = last_row_stored;
+      m_rows_in_hash_map++;
+      *single_row_too_large = true;
+    }  // else too many rows, initiate spill handling
     return true;
   }
   m_hash_map_iterator->second = last_row_stored;
@@ -1603,8 +2419,7 @@ void MaterializeIterator<Profiler>::update_row_in_hash_map() {
 }
 
 template <typename Profiler>
-int MaterializeIterator<Profiler>::read_next_row(
-    const materialize_iterator::Operand &operand) {
+int MaterializeIterator<Profiler>::read_next_row(const Operand &operand) {
   if (m_spill_state.spill()) {
     return m_spill_state.read_next_row(&operand);
   }
@@ -1620,16 +2435,16 @@ int MaterializeIterator<Profiler>::read_next_row(
 }
 
 template <typename Profiler>
-bool MaterializeIterator<Profiler>::process_row_hash(
-    const materialize_iterator::Operand &operand, TABLE *t,
-    ha_rows *stored_rows) {
+bool MaterializeIterator<Profiler>::process_row_hash(const Operand &operand,
+                                                     TABLE *t,
+                                                     ha_rows *stored_rows) {
   auto read_counter = [t]() -> ulonglong {
     ulonglong cnt = static_cast<ulonglong>(t->set_counter()->val_int());
     return cnt;
   };
 
   if (m_spill_state.read_state() ==
-      materialize_iterator::SpillState::ReadingState::SS_READING_RIGHT_HF) {
+      SpillState::ReadingState::SS_READING_RIGHT_HF) {
     // Need special handling here since otherwise for operand > 0, we wouldn't
     // be re-populating the hash map, just checking against it, cf comment
     // below: "never write"
@@ -1646,7 +2461,7 @@ bool MaterializeIterator<Profiler>::process_row_hash(
 
   if (spill_to_disk) {
     assert(left_operand);
-    return handle_hash_map_full(operand, stored_rows);
+    return handle_hash_map_full(operand, stored_rows, false);
   }
 
   switch (t->set_op_type()) {
@@ -1799,15 +2614,17 @@ bool MaterializeIterator<Profiler>::process_row_hash(
     case TABLE::SOT_NONE:
       assert(false);
   }
-
-  return store_row_in_hash_map() && handle_hash_map_full(operand, stored_rows);
+  bool single_row_too_large{false};
+  return store_row_in_hash_map(&single_row_too_large) &&
+         handle_hash_map_full(operand, stored_rows, single_row_too_large);
 }
 
 template <typename Profiler>
-bool MaterializeIterator<Profiler>::process_row(
-    const materialize_iterator::Operand &operand,
-    materialize_iterator::Operands &operands, TABLE *t, uchar *set_counter_0,
-    uchar *set_counter_1, bool *read_next) {
+bool MaterializeIterator<Profiler>::process_row(const Operand &operand,
+                                                Operands &operands, TABLE *t,
+                                                uchar *set_counter_0,
+                                                uchar *set_counter_1,
+                                                bool *read_next) {
   /**
     Read the value of TABLE::m_set_counter from record[1]. The value can be
     found there after a call to check_unique_fields if the row was
@@ -1823,9 +2640,9 @@ bool MaterializeIterator<Profiler>::process_row(
   };
 
   auto spill_to_disk_and_retry_update_row =
-      [t, &operands](int seen_tmp_table_error) -> int {
+      [this, t, &operands](int seen_tmp_table_error) -> int {
     bool dummy = false;
-    if (create_ondisk_from_heap(current_thd, t, seen_tmp_table_error,
+    if (create_ondisk_from_heap(thd(), t, seen_tmp_table_error,
                                 /*insert_last_record=*/false,
                                 /*ignore_last_dup=*/true, &dummy))
       return 1; /* purecov: inspected */
@@ -1834,7 +2651,7 @@ bool MaterializeIterator<Profiler>::process_row(
 
     // Inform each reader that the table has changed under their feet,
     // so they'll need to reposition themselves.
-    for (const materialize_iterator::Operand &op : operands) {
+    for (const Operand &op : operands) {
       if (op.is_recursive_reference) {
         op.recursive_reader->RepositionCursorAfterSpillToDisk();
       }
@@ -2012,8 +2829,8 @@ bool MaterializeIterator<Profiler>::process_row(
 }
 
 template <typename Profiler>
-bool MaterializeIterator<Profiler>::MaterializeOperand(
-    const materialize_iterator::Operand &operand, ha_rows *stored_rows) {
+bool MaterializeIterator<Profiler>::MaterializeOperand(const Operand &operand,
+                                                       ha_rows *stored_rows) {
   TABLE *const t = table();
   Opt_trace_context *const trace = &thd()->opt_trace;
   Opt_trace_object trace_wrapper(trace);
@@ -2110,7 +2927,7 @@ bool MaterializeIterator<Profiler>::MaterializeOperand(
       // operands (alias blocks).
       if (m_use_hash_map &&
           operand.m_operand_idx + 1 == operand.m_total_operands &&
-          materialize_hash_map(t, stored_rows))
+          materialize_hash_map(t, stored_rows, /*single_row_too_large=*/false))
         return true;
       break;
     }
@@ -2157,7 +2974,7 @@ bool MaterializeIterator<Profiler>::MaterializeOperand(
 
       // Inform each reader that the table has changed under their feet,
       // so they'll need to reposition themselves.
-      for (const materialize_iterator::Operand &query_b : m_operands) {
+      for (const Operand &query_b : m_operands) {
         if (query_b.is_recursive_reference) {
           query_b.recursive_reader->RepositionCursorAfterSpillToDisk();
         }
@@ -2173,7 +2990,7 @@ bool MaterializeIterator<Profiler>::MaterializeOperand(
 }
 
 template <typename Profiler>
-int MaterializeIterator<Profiler>::Read() {
+int MaterializeIterator<Profiler>::DoRead() {
   const typename Profiler::TimeStamp start_time = Profiler::Now();
   /*
     Enable the items which one should use if one wants to evaluate
@@ -2194,35 +3011,38 @@ int MaterializeIterator<Profiler>::Read() {
 
 template <typename Profiler>
 void MaterializeIterator<Profiler>::EndPSIBatchModeIfStarted() {
-  for (const materialize_iterator::Operand &operand : m_operands) {
+  for (const Operand &operand : m_operands) {
     operand.subquery_iterator->EndPSIBatchModeIfStarted();
   }
   m_table_iterator->EndPSIBatchModeIfStarted();
 }
 
-bool materialize_iterator::SpillState::save_offending_row() {
+bool SpillState::save_offending_row() {
   // Save offending row, we may not be able to write it in first set of
   // chunk files, so make a copy. This space goes out of the normal mem_root
   // since it's only one row.
-  if (m_offending_row.m_buffer.reserve(
-          m_table_collection.has_blob_column()
-              ? 0
-              : ComputeRowSizeUpperBound(m_table_collection)) ||
-      StoreFromTableBuffers(m_table_collection, &m_offending_row.m_buffer)) {
-    my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR),
-             ComputeRowSizeUpperBound(m_table_collection));
-    return true;
+  if (!m_table_collection.has_blob_column()) {
+    const size_t max_row_size =
+        ComputeRowSizeUpperBoundSansBlobs(m_table_collection);
+    if (m_offending_row.m_buffer.reserve(max_row_size)) {
+      return true;
+    }
   }
-  return false;
+  return StoreFromTableBuffers(m_table_collection, &m_offending_row.m_buffer);
 }
 
-bool materialize_iterator::SpillState::compute_chunk_file_sets(
-    const Operand *current_operand) {
-  const double total_estimated_rows = current_operand->m_estimated_output_rows;
-
+bool SpillState::compute_chunk_file_sets(const Operand *current_operand) {
   /// This could be 1 too high, if we managed to insert key but not value, but
   /// never mind.
   const size_t rows_in_hash_map = m_hash_map->size();
+
+  double total_estimated_rows =
+      // Check sanity of estimate and override if (way) too low. We
+      // make a shot in the dark and guess 800% of hash table size. If that
+      // proves too low, we will revert to tmp table index based de-duplication.
+      (current_operand->m_estimated_output_rows <= rows_in_hash_map
+           ? rows_in_hash_map * 8
+           : current_operand->m_estimated_output_rows);
 
   // Slightly underestimate number of rows in hash map to avoid
   // hash map overflow when reading chunk files.
@@ -2240,9 +3060,22 @@ bool materialize_iterator::SpillState::compute_chunk_file_sets(
   // Ensure that the number of chunks is always a power of two. This allows
   // us to do some optimizations when calculating which chunk a row should
   // be placed in.
-  m_num_chunks = my_round_up_to_next_power(num_chunks);
+  m_num_chunks = std::bit_ceil(num_chunks);
   m_no_of_chunk_file_sets = (m_num_chunks + HashJoinIterator::kMaxChunks - 1) /
                             HashJoinIterator::kMaxChunks;
+
+  if (m_no_of_chunk_file_sets > m_max_sets) {
+    // By increasing set_operations_buffer_size we should get down to
+    // one file set if uniform row sizes.
+    m_factor_too_little_memory = m_no_of_chunk_file_sets;
+
+    // We have too little memory set aside for set_operations_buffer_size and/or
+    // the number of estimated row is too high. Use max sets. If this is not
+    // enough, user needs to increase set_operations_buffer_size, cf.
+    // diagnostics given when we get secondary overflow (handle_hash_map_full).
+    m_num_chunks = HashJoinIterator::kMaxChunks;
+    m_no_of_chunk_file_sets = m_max_sets;
+  }
   m_current_chunk_file_set = 0;
 
   // Save offending row, we may not be able to write it in first set of
@@ -2261,21 +3094,25 @@ bool materialize_iterator::SpillState::compute_chunk_file_sets(
   m_offending_row.m_chunk_offset = chunk_offset(chunk_index);
   m_offending_row.m_set = chunk_index_to_set(chunk_index);
   // Set up the row buffer used when deserializing chunk rows.
-  const size_t upper_row_size =
-      m_table_collection.has_blob_column()
-          ? 0
-          : ComputeRowSizeUpperBound(m_table_collection);
-  if (m_row_buffer.reserve(upper_row_size)) {
-    my_error(ER_OUTOFMEMORY, MYF(0), upper_row_size);
-    return true;  // oom
+  if (!m_table_collection.has_blob_column()) {
+    const size_t upper_row_size =
+        ComputeRowSizeUpperBoundSansBlobs(m_table_collection);
+    if (m_row_buffer.reserve(upper_row_size)) {
+      return true;
+    }
   }
 
-  m_chunk_files.resize(std::min(m_num_chunks, HashJoinIterator::kMaxChunks));
+  if (m_chunk_files.resize(
+          std::min(m_num_chunks, HashJoinIterator::kMaxChunks))) {
+    return true;
+  }
 
   /// Set aside space for current generation of chunk row counters. This is
   /// a two dimensional matrix. Each element is allocated in
   /// initialize_first_HF_chunk_files
-  m_row_counts.resize(m_chunk_files.size());
+  if (m_row_counts.resize(m_chunk_files.size())) {
+    return true;
+  }
 
   Opt_trace_context *const trace = &m_thd->opt_trace;
   Opt_trace_object trace_wrapper(trace);
@@ -2287,7 +3124,7 @@ bool materialize_iterator::SpillState::compute_chunk_file_sets(
   return false;
 }
 
-bool materialize_iterator::SpillState::initialize_first_HF_chunk_files() {
+bool SpillState::initialize_first_HF_chunk_files() {
   // Initialize HF and IF chunk files. We assign HF as the "build" chunk and IF
   // as the "probe" chunk (the terms "build" and "probe" were chosen for the
   // hash join usage of the chunk abstraction).
@@ -2299,8 +3136,10 @@ bool materialize_iterator::SpillState::initialize_first_HF_chunk_files() {
       return true;
     }
     // Initialize counters matrix
-    Mem_root_array<CountPair> ma(current_thd->mem_root, 1);
-    ma.resize(m_no_of_chunk_file_sets);
+    Mem_root_array<CountPair> ma(m_thd->mem_root, 1);
+    if (ma.resize(m_no_of_chunk_file_sets)) {
+      return true;
+    }
     m_row_counts[i] = std::move(ma);
   }
 
@@ -2314,16 +3153,18 @@ bool materialize_iterator::SpillState::initialize_first_HF_chunk_files() {
 /// chunk file set 0 precede all rows for chunk file set 1 etc, so we can
 /// later retrieve all rows belonging to each file set by scanning only a
 /// section of each chunk file.
-bool materialize_iterator::SpillState::spread_hash_map_to_HF_chunk_files() {
+bool SpillState::spread_hash_map_to_HF_chunk_files() {
   for (size_t set = 0; set < m_no_of_chunk_file_sets; set++) {
-    for (auto f = m_hash_map->begin(); f != m_hash_map->end(); f++) {
-      LinkedImmutableString row_with_same_hash = f->second;
-      while (row_with_same_hash != nullptr) {
+    for (const auto &[hash_key, first_row] : *m_hash_map) {
+      for (LinkedImmutableString row_with_same_hash = first_row;
+           row_with_same_hash != nullptr;
+           row_with_same_hash = row_with_same_hash.Decode().next) {
         hash_join_buffer::LoadImmutableStringIntoTableBuffers(
             m_table_collection, row_with_same_hash);
         if (StoreFromTableBuffers(m_table_collection, &m_row_buffer)) {
           return true;
         }
+
         // Hash row's content with tertiary hash to determine its chunk index,
         // and write it if its set index equals the current set. This way,
         // all rows belonging to a set are stored consecutively, and sets in
@@ -2344,7 +3185,6 @@ bool materialize_iterator::SpillState::spread_hash_map_to_HF_chunk_files() {
             return true;
           }
         }
-        row_with_same_hash = row_with_same_hash.Decode().next;
       }
     }
 
@@ -2377,13 +3217,14 @@ bool materialize_iterator::SpillState::spread_hash_map_to_HF_chunk_files() {
   return false;
 }
 
-bool materialize_iterator::SpillState::append_hash_map_to_HF() {
+bool SpillState::append_hash_map_to_HF() {
   m_chunk_files[m_current_chunk_idx].build_chunk.SetAppend();
 
   size_t rows_visited = 0;
-  for (auto f = m_hash_map->begin(); f != m_hash_map->end(); f++) {
-    LinkedImmutableString row_with_same_hash = f->second;
-    while (row_with_same_hash != nullptr) {
+  for (const auto &[hash_key, first_row] : *m_hash_map) {
+    for (LinkedImmutableString row_with_same_hash = first_row;
+         row_with_same_hash != nullptr;
+         row_with_same_hash = row_with_same_hash.Decode().next) {
       hash_join_buffer::LoadImmutableStringIntoTableBuffers(m_table_collection,
                                                             row_with_same_hash);
       if (StoreFromTableBuffers(m_table_collection, &m_row_buffer)) {
@@ -2409,21 +3250,20 @@ bool materialize_iterator::SpillState::append_hash_map_to_HF() {
         my_error(ER_TEMP_FILE_WRITE_FAILURE, MYF(0));
         return true;
       }
-      row_with_same_hash = row_with_same_hash.Decode().next;
     }
   }
   m_row_counts[m_current_chunk_idx][m_current_chunk_file_set].HF_count =
       rows_visited;
 
   reset_hash_map(m_hash_map);
-  m_hash_map_mem_root->ClearForReuse();
+  if (reset_mem_root(m_hash_map_mem_root)) return true;
 
   m_chunk_files[m_current_chunk_idx].build_chunk.ContinueRead();
 
   return false;
 }
 
-bool materialize_iterator::SpillState::save_operand_to_IF_chunk_files(
+bool SpillState::save_operand_to_IF_chunk_files(
     const Operand *current_operand) {
   for (size_t set = 0; set < m_no_of_chunk_file_sets; set++) {
     size_t rows_left_in_remaining_input = 0;
@@ -2462,13 +3302,13 @@ bool materialize_iterator::SpillState::save_operand_to_IF_chunk_files(
 
       if (set == 0) {
         int error = current_operand->subquery_iterator->Read();
-        if (error > 0 || current_thd->is_error()) return true;
+        if (error > 0 || m_thd->is_error()) return true;
         if (error < 0) {
           done = true;  // done reading the rest of left operand
         } else {
           // Materialize items for this row.
           if (current_operand->copy_items) {
-            if (copy_funcs(current_operand->temp_table_param, current_thd))
+            if (copy_funcs(current_operand->temp_table_param, m_thd))
               return true;
           }
           if (StoreFromTableBuffers(m_table_collection, &m_row_buffer))
@@ -2522,11 +3362,11 @@ bool materialize_iterator::SpillState::save_operand_to_IF_chunk_files(
   return m_no_of_chunk_file_sets > 1 && m_remaining_input.Rewind();
 }
 
-bool materialize_iterator::SpillState::reset_for_spill_handling() {
+bool SpillState::reset_for_spill_handling() {
   // We have HF and IF on chunk files, get ready for reading rest of left
   // operand rows
   reset_hash_map(m_hash_map);
-  m_hash_map_mem_root->ClearForReuse();
+  if (reset_mem_root(m_hash_map_mem_root, /*initial*/ true)) return true;
   m_current_chunk_idx = 0;
   m_current_chunk_file_set = 0;
   m_current_row_in_chunk = 0;
@@ -2534,10 +3374,8 @@ bool materialize_iterator::SpillState::reset_for_spill_handling() {
   return false;
 }
 
-bool materialize_iterator::SpillState::write_HF(THD *thd, size_t set,
-                                                size_t chunk_idx,
-                                                const Operands &operands,
-                                                ha_rows *stored_rows) {
+bool SpillState::write_HF(THD *thd, size_t set, size_t chunk_idx,
+                          const Operands &operands, ha_rows *stored_rows) {
   for (size_t rowno = 0; rowno < m_row_counts[chunk_idx][set].HF_count;
        rowno++) {
     size_t set_idx = 0;
@@ -2578,7 +3416,7 @@ bool materialize_iterator::SpillState::write_HF(THD *thd, size_t set,
 
       // Inform each reader that the table has changed under their feet,
       // so they'll need to reposition themselves.
-      for (const materialize_iterator::Operand &query_b : operands) {
+      for (const Operand &query_b : operands) {
         if (query_b.is_recursive_reference) {
           query_b.recursive_reader->RepositionCursorAfterSpillToDisk();
         }
@@ -2588,8 +3426,9 @@ bool materialize_iterator::SpillState::write_HF(THD *thd, size_t set,
   return false;
 }
 
-bool materialize_iterator::SpillState::write_partially_completed_HFs(
-    THD *thd, const Operands &operands, ha_rows *stored_rows) {
+bool SpillState::write_partially_completed_HFs(THD *thd,
+                                               const Operands &operands,
+                                               ha_rows *stored_rows) {
   // State when secondary overflow occurred when making 2. generation HF chunks
   // is described by m_current_chunk_idx, m_current_chunk_file_set and
   // m_current_row_in_chunk, corresponding to OF ("overflow") below
@@ -2603,11 +3442,11 @@ bool materialize_iterator::SpillState::write_partially_completed_HFs(
   // |------+------+------+    +------+    +------|
   //                   :
   // |------+------+------+    +------+    +------|
-  // |   r  |   r  |   r  | .. |   r  | .. |   I  |  m_current_chunk_file_set
+  // |   r  |   r  |   r  | .. |   r  | .. |   i  |  m_current_chunk_file_set
   // |------+------+------+    +------+    +------|
   //                   :
   // |------+------+------+    +------+    +------|
-  // |   I  |   I  |   I  | .. |   I  | .. |   I  |  m_no_of_chunk_file_sets - 1
+  // |   i  |   i  |   i  | .. |   i  | .. |   i  |  m_no_of_chunk_file_sets - 1
   // |------+------+------+    +------+    +------|
   //
   // 2.generation
@@ -2623,11 +3462,11 @@ bool materialize_iterator::SpillState::write_partially_completed_HFs(
   // |      |      |      | .. |      | .. |      |  m_no_of_chunk_file_sets - 1
   // |------+------+------+    +------+    +------|
   //
-  // We sucessfully read all chunks labelled r and matched them with their
+  // We successfully read all chunks labelled r and matched them with their
   // respective IF chunks, so they exist in 2. generation labeled C ("complete")
   //
   // Now, read and write to output table the already de-duplicated rows.
-  // First the remaining chunk files from the 1. generation labeled I
+  // First the remaining chunk files from the 1. generation labeled i
   // ("incomplete").  Reading 1. generation chunks first ensures that the
   // reading positions are correct for reading the 2. generation chunks in the
   // next step.
@@ -2659,8 +3498,8 @@ bool materialize_iterator::SpillState::write_partially_completed_HFs(
   return false;
 }
 
-bool materialize_iterator::SpillState::write_completed_HFs(
-    THD *thd, const Operands &operands, ha_rows *stored_rows) {
+bool SpillState::write_completed_HFs(THD *thd, const Operands &operands,
+                                     ha_rows *stored_rows) {
   // Write >= 2. generation finished chunk files
   for (size_t set = 0; set < m_no_of_chunk_file_sets; set++) {
     for (size_t offset = 0; offset < m_chunk_files.size(); offset++) {
@@ -2671,23 +3510,20 @@ bool materialize_iterator::SpillState::write_completed_HFs(
 }
 
 #ifndef NDEBUG
-bool materialize_iterator::SpillState::simulated_secondary_overflow(
-    bool *spill) {
+bool SpillState::simulated_secondary_overflow(bool *spill) {
   const char *const common_msg =
       "in debug_set_operations_secondary_overflow_at too high: should be "
       "lower than or equal to:";
   // Have we indicated a value?
-  if (strlen(
-          current_thd->variables.debug_set_operations_secondary_overflow_at) >
-          0 &&
+  if (strlen(m_thd->variables.debug_set_operations_secondary_overflow_at) > 0 &&
       m_simulated_set_idx == std::numeric_limits<size_t>::max()) {
     // Parse out variables with
     // syntax: <set-idx:integer 0-based> <chunk-idx:integer 0-based>
     // <row_no:integer 1-based>
-    int tokens [[maybe_unused]] = sscanf(
-        current_thd->variables.debug_set_operations_secondary_overflow_at,
-        "%zu %zu %zu", &m_simulated_set_idx, &m_simulated_chunk_idx,
-        &m_simulated_row_no);
+    int tokens =
+        sscanf(m_thd->variables.debug_set_operations_secondary_overflow_at,
+               "%zu %zu %zu", &m_simulated_set_idx, &m_simulated_chunk_idx,
+               &m_simulated_row_no);
     if (tokens != 3 || m_simulated_row_no < 1 ||
         m_simulated_chunk_idx >= m_chunk_files.size()) {
       my_error(ER_SIMULATED_INJECTION_ERROR, MYF(0), "Chunk number", common_msg,
@@ -2725,12 +3561,9 @@ bool materialize_iterator::SpillState::simulated_secondary_overflow(
 }
 #endif
 
-bool materialize_iterator::SpillState::init(const Operand &left_operand,
-                                            hash_map_type *hash_map,
-                                            size_t rows_in_hash_table,
-                                            size_t read_rows_before_dedup,
-                                            MEM_ROOT *hash_map_mem_root,
-                                            TABLE *t) {
+bool SpillState::init(const Operand &left_operand, hash_map_type *hash_map,
+                      size_t rows_in_hash_table, size_t read_rows_before_dedup,
+                      MEM_ROOT *hash_map_mem_root, TABLE *t) {
   m_hash_map = hash_map;
   m_rows_in_hash_map = rows_in_hash_table;
   m_read_rows_before_dedup = read_rows_before_dedup;
@@ -2740,10 +3573,8 @@ bool materialize_iterator::SpillState::init(const Operand &left_operand,
   // prepare m_materialized_table as a TableCollection; this is needed by
   // some APIs we use
   {
-    Prealloced_array<TABLE *, 4> ta(key_memory_hash_op, 1);
-    ta[0] = t;
-    pack_rows::TableCollection tc(ta, false, 0, 0);
-    m_table_collection = tc;
+    m_table_collection = {/*tables=*/{t}, /*store_rowids=*/false,
+                          /*tables_to_get_rowid_for=*/0};
   }
   // Use different hash seed for chunking of EXCEPT and INTERSECT
   // to avoid effects of initial set of rows all from one set op
@@ -2764,8 +3595,7 @@ bool materialize_iterator::SpillState::init(const Operand &left_operand,
   return false;
 }
 
-int materialize_iterator::SpillState::read_next_row(
-    const Operand *current_operand) {
+int SpillState::read_next_row(const Operand *current_operand) {
   if (m_secondary_overflow) return read_next_row_secondary_overflow();
 
   ReadingState prev_state =
@@ -2888,7 +3718,7 @@ int materialize_iterator::SpillState::read_next_row(
   return 0;
 }
 
-int materialize_iterator::SpillState::read_next_row_secondary_overflow() {
+int SpillState::read_next_row_secondary_overflow() {
   do {
     switch (m_spill_read_state) {
       case ReadingState::SS_READING_LEFT_IF:
@@ -2937,7 +3767,8 @@ int materialize_iterator::SpillState::read_next_row_secondary_overflow() {
 }
 
 RowIterator *materialize_iterator::CreateIterator(
-    THD *thd, Operands operands, const MaterializePathParameters *path_params,
+    THD *thd, Mem_root_array<Operand> operands,
+    const MaterializePathParameters *path_params,
     unique_ptr_destroy_only<RowIterator> table_iterator, JOIN *join) {
   if (thd->lex->is_explain_analyze) {
     RowIterator *const table_iter_ptr = table_iterator.get();
@@ -2987,7 +3818,7 @@ StreamingIterator::StreamingIterator(
   }
 }
 
-bool StreamingIterator::Init() {
+bool StreamingIterator::DoInit() {
   if (m_join->query_expression()->clear_correlated_query_blocks()) return true;
 
   if (m_provide_rowid) {
@@ -3010,7 +3841,7 @@ bool StreamingIterator::Init() {
   return m_subquery_iterator->Init();
 }
 
-int StreamingIterator::Read() {
+int StreamingIterator::DoRead() {
   /*
     Enable the items which one should use if one wants to evaluate
     anything (e.g. functions in WHERE, HAVING) involving columns of this
@@ -3056,8 +3887,6 @@ class TemptableAggregateIterator final : public TableRowIterator {
       unique_ptr_destroy_only<RowIterator> table_iterator, JOIN *join,
       int ref_slice);
 
-  bool Init() override;
-  int Read() override;
   void SetNullRowFlag(bool is_null_row) override {
     m_table_iterator->SetNullRowFlag(is_null_row);
   }
@@ -3077,6 +3906,9 @@ class TemptableAggregateIterator final : public TableRowIterator {
   }
 
  private:
+  bool DoInit() override;
+  int DoRead() override;
+
   /// The iterator we are reading rows from.
   unique_ptr_destroy_only<RowIterator> m_subquery_iterator;
 
@@ -3146,7 +3978,7 @@ TemptableAggregateIterator<Profiler>::TemptableAggregateIterator(
       m_ref_slice(ref_slice) {}
 
 template <typename Profiler>
-bool TemptableAggregateIterator<Profiler>::Init() {
+bool TemptableAggregateIterator<Profiler>::DoInit() {
   // NOTE: We never scan these tables more than once, so we don't need to
   // check whether we have already materialized.
 
@@ -3156,6 +3988,8 @@ bool TemptableAggregateIterator<Profiler>::Init() {
   trace_exec.add_select_number(m_join->query_block->select_number);
   Opt_trace_array trace_steps(trace, "steps");
   const typename Profiler::TimeStamp start_time = Profiler::Now();
+  // The input to the aggregation should be read from the base slice.
+  m_join->set_ref_item_slice(REF_SLICE_SAVED_BASE);
 
   if (m_subquery_iterator->Init()) {
     return true;
@@ -3250,7 +4084,7 @@ bool TemptableAggregateIterator<Profiler>::Init() {
       */
       if (error != 0 && error != HA_ERR_RECORD_IS_THE_SAME) {
         if (move_table_to_disk(error, /*insert_operation=*/false)) {
-          end_unique_index.commit();
+          end_unique_index.release();
           return true;
         }
         /*
@@ -3351,7 +4185,7 @@ bool TemptableAggregateIterator<Profiler>::Init() {
       }
 
       if (move_table_to_disk(error, /*insert_operation=*/true)) {
-        end_unique_index.commit();
+        end_unique_index.release();
         return true;
       }
     } else {
@@ -3361,7 +4195,7 @@ bool TemptableAggregateIterator<Profiler>::Init() {
   }
 
   table()->file->ha_index_end();
-  end_unique_index.commit();
+  end_unique_index.release();
 
   table()->materialized = true;
 
@@ -3372,7 +4206,7 @@ bool TemptableAggregateIterator<Profiler>::Init() {
 }
 
 template <typename Profiler>
-int TemptableAggregateIterator<Profiler>::Read() {
+int TemptableAggregateIterator<Profiler>::DoRead() {
   const typename Profiler::TimeStamp start_time = Profiler::Now();
 
   /*
@@ -3425,7 +4259,7 @@ MaterializedTableFunctionIterator::MaterializedTableFunctionIterator(
       m_table_iterator(std::move(table_iterator)),
       m_table_function(table_function) {}
 
-bool MaterializedTableFunctionIterator::Init() {
+bool MaterializedTableFunctionIterator::DoInit() {
   if (!table()->materialized) {
     // Create the table if it's the very first time.
     if (table()->pos_in_table_list->create_materialized_table(thd())) {
@@ -3451,7 +4285,7 @@ WeedoutIterator::WeedoutIterator(THD *thd,
   assert(m_sj->tmp_table != nullptr);
 }
 
-bool WeedoutIterator::Init() {
+bool WeedoutIterator::DoInit() {
   if (m_sj->tmp_table->file->ha_delete_all_rows()) {
     return true;
   }
@@ -3468,7 +4302,7 @@ bool WeedoutIterator::Init() {
   return m_source->Init();
 }
 
-int WeedoutIterator::Read() {
+int WeedoutIterator::DoRead() {
   for (;;) {
     int ret = m_source->Read();
     if (ret != 0) {
@@ -3501,22 +4335,22 @@ int WeedoutIterator::Read() {
 
 RemoveDuplicatesIterator::RemoveDuplicatesIterator(
     THD *thd, unique_ptr_destroy_only<RowIterator> source, JOIN *join,
-    Item **group_items, int group_items_size)
+    std::span<Item *> group_items)
     : RowIterator(thd), m_source(std::move(source)) {
   m_caches = Bounds_checked_array<Cached_item *>::Alloc(thd->mem_root,
-                                                        group_items_size);
-  for (int i = 0; i < group_items_size; ++i) {
+                                                        group_items.size());
+  for (size_t i = 0; i < group_items.size(); ++i) {
     m_caches[i] = new_Cached_item(thd, group_items[i]);
     join->semijoin_deduplication_fields.push_back(m_caches[i]);
   }
 }
 
-bool RemoveDuplicatesIterator::Init() {
+bool RemoveDuplicatesIterator::DoInit() {
   m_first_row = true;
   return m_source->Init();
 }
 
-int RemoveDuplicatesIterator::Read() {
+int RemoveDuplicatesIterator::DoRead() {
   for (;;) {
     int err = m_source->Read();
     if (err != 0) {
@@ -3550,15 +4384,15 @@ RemoveDuplicatesOnIndexIterator::RemoveDuplicatesOnIndexIterator(
       m_source(std::move(source)),
       m_table(table),
       m_key(key),
-      m_key_buf(new (thd->mem_root) uchar[key_len]),
+      m_key_buf(new(thd->mem_root) uchar[key_len]),
       m_key_len(key_len) {}
 
-bool RemoveDuplicatesOnIndexIterator::Init() {
+bool RemoveDuplicatesOnIndexIterator::DoInit() {
   m_first_row = true;
   return m_source->Init();
 }
 
-int RemoveDuplicatesOnIndexIterator::Read() {
+int RemoveDuplicatesOnIndexIterator::DoRead() {
   for (;;) {
     int err = m_source->Read();
     if (err != 0) {
@@ -3570,7 +4404,9 @@ int RemoveDuplicatesOnIndexIterator::Read() {
       return 1;
     }
 
-    if (!m_first_row && key_cmp(m_key->key_part, m_key_buf, m_key_len) == 0) {
+    if (!m_first_row &&
+        key_cmp(m_key->key_part, m_key_buf, m_key_len,
+                /*is_reverse_multi_valued_index_scan=*/false) == 0) {
       // Same as previous row, so keep scanning.
       continue;
     }
@@ -3591,13 +4427,13 @@ NestedLoopSemiJoinWithDuplicateRemovalIterator::
       m_source_inner(std::move(source_inner)),
       m_table_outer(table),
       m_key(key),
-      m_key_buf(new (thd->mem_root) uchar[key_len]),
+      m_key_buf(new(thd->mem_root) uchar[key_len]),
       m_key_len(key_len) {
   assert(m_source_outer != nullptr);
   assert(m_source_inner != nullptr);
 }
 
-bool NestedLoopSemiJoinWithDuplicateRemovalIterator::Init() {
+bool NestedLoopSemiJoinWithDuplicateRemovalIterator::DoInit() {
   if (m_source_outer->Init()) {
     return true;
   }
@@ -3605,7 +4441,7 @@ bool NestedLoopSemiJoinWithDuplicateRemovalIterator::Init() {
   return false;
 }
 
-int NestedLoopSemiJoinWithDuplicateRemovalIterator::Read() {
+int NestedLoopSemiJoinWithDuplicateRemovalIterator::DoRead() {
   m_source_inner->SetNullRowFlag(false);
 
   for (;;) {  // Termination condition within loop.
@@ -3622,7 +4458,8 @@ int NestedLoopSemiJoinWithDuplicateRemovalIterator::Read() {
       }
 
       if (m_deduplicate_against_previous_row &&
-          key_cmp(m_key->key_part, m_key_buf, m_key_len) == 0) {
+          key_cmp(m_key->key_part, m_key_buf, m_key_len,
+                  /*is_reverse_multi_valued_index_scan=*/false) == 0) {
         // Same as previous row, so keep scanning.
         continue;
       }
@@ -3669,7 +4506,7 @@ MaterializeInformationSchemaTableIterator::
       m_table_list(table_list),
       m_condition(condition) {}
 
-bool MaterializeInformationSchemaTableIterator::Init() {
+bool MaterializeInformationSchemaTableIterator::DoInit() {
   if (!m_table_list->schema_table_filled) {
     m_table_list->table->file->ha_extra(HA_EXTRA_RESET_STATE);
     m_table_list->table->file->ha_delete_all_rows();
@@ -3692,13 +4529,13 @@ AppendIterator::AppendIterator(
   assert(!m_sub_iterators.empty());
 }
 
-bool AppendIterator::Init() {
+bool AppendIterator::DoInit() {
   m_current_iterator_index = 0;
   m_pfs_batch_mode_enabled = false;
   return m_sub_iterators[0]->Init();
 }
 
-int AppendIterator::Read() {
+int AppendIterator::DoRead() {
   if (m_current_iterator_index >= m_sub_iterators.size()) {
     // Already exhausted all iterators.
     return -1;

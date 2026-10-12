@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,12 +21,12 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
-#include <assert.h>
+#include <cassert>
 #ifdef _MSC_VER
 #include <stdint.h>
 #endif
 #include <rpc/rpc.h>
-#include <stdlib.h>
+#include <cstdlib>
 
 #include "xcom/app_data.h"
 #include "xcom/checked_data.h"
@@ -337,7 +338,7 @@ char *dbg_app_data(app_data_ptr a) {
 /* Replace target with copy of source list */
 
 void _replace_app_data_list(app_data_list target, app_data_ptr source) {
-  IFDBG(D_NONE, FN; PTREXP(target); PTREXP(source));
+  XCOM_IFDBG(D_NONE, FN; PTREXP(target); PTREXP(source));
   XCOM_XDR_FREE(xdr_app_data, *target); /* Will remove the whole list */
   *target = clone_app_data(source);
 }
@@ -346,18 +347,18 @@ void _replace_app_data_list(app_data_list target, app_data_ptr source) {
    Insert p after l.
  */
 void follow(app_data_list l, app_data_ptr p) {
-  IFDBG(D_NONE, FN; PTREXP(p));
+  XCOM_IFDBG(D_NONE, FN; PTREXP(p));
   if (p) {
     if (p->next) {
-      IFDBG(D_NONE, FN; STRLIT("unexpected next ");
-            COPY_AND_FREE_GOUT(dbg_app_data(p)));
+      XCOM_IFDBG(D_NONE, FN; STRLIT("unexpected next ");
+                 COPY_AND_FREE_GOUT(dbg_app_data(p)));
     }
     assert(p->next == nullptr);
     p->next = *l;
   }
   *l = p;
   assert(!p || p->next != p);
-  IFDBG(D_NONE, FN; COPY_AND_FREE_GOUT(dbg_app_data(p)));
+  XCOM_IFDBG(D_NONE, FN; COPY_AND_FREE_GOUT(dbg_app_data(p)));
 }
 
 /* purecov: begin deadcode */

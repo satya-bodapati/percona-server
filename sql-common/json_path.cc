@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -32,13 +33,16 @@
 
 #include "my_rapidjson_size_t.h"  // IWYU pragma: keep
 
-#include <assert.h>
-#include <rapidjson/encodings.h>
-#include <rapidjson/memorystream.h>  // rapidjson::MemoryStream
-#include <stddef.h>
 #include <algorithm>  // any_of
-#include <memory>     // unique_ptr
+#include <cassert>
+#include <cstddef>
 #include <string>
+#include <string_view>
+
+#include <rapidjson/encodings.h>
+#include <rapidjson/error/error.h>
+#include <rapidjson/memorystream.h>
+#include <rapidjson/reader.h>
 
 #include "my_inttypes.h"
 #include "mysql/strings/m_ctype.h"
@@ -47,7 +51,6 @@
 #include "sql/sql_const.h"       // STRING_BUFFER_USUAL_SIZE
 #include "sql_string.h"          // String
 #include "string_with_len.h"
-#include "template_utils.h"  // down_cast
 
 namespace {
 
@@ -64,15 +67,15 @@ class Stream;
 
 }  // namespace
 
-static bool is_ecmascript_identifier(const std::string &name);
+static bool is_ecmascript_identifier(const std::string_view &name);
 static bool is_digit(unsigned codepoint);
 static bool is_whitespace(char);
 
-static bool parse_path(Stream *, Json_path *, const JsonErrorHandler &);
-static bool parse_path_leg(Stream *, Json_path *, const JsonErrorHandler &);
+static bool parse_path(Stream *, Json_path *);
+static bool parse_path_leg(Stream *, Json_path *);
 static bool parse_ellipsis_leg(Stream *, Json_path *);
 static bool parse_array_leg(Stream *, Json_path *);
-static bool parse_member_leg(Stream *, Json_path *, const JsonErrorHandler &);
+static bool parse_member_leg(Stream *, Json_path *);
 
 static bool append_array_index(String *buf, size_t index, bool from_end) {
   if (!from_end) return buf->append_ulonglong(index);
@@ -253,10 +256,9 @@ class Stream {
 
 /** Top level parsing factory method */
 bool parse_path(size_t path_length, const char *path_expression,
-                Json_path *path, size_t *bad_index,
-                const JsonErrorHandler &depth_handler) {
+                Json_path *path, size_t *bad_index) {
   Stream stream(path_expression, path_length);
-  if (parse_path(&stream, path, depth_handler)) {
+  if (parse_path(&stream, path)) {
     *bad_index = stream.position() - path_expression;
     return true;
   }
@@ -275,13 +277,10 @@ static inline bool is_whitespace(char ch) {
 
    @param[in,out] stream The stream to read the path expression from.
    @param[in,out] path The Json_path object to fill.
-   @param[in] depth_handler Pointer to a function that should handle error
-                            occurred when depth is exceeded.
 
    @return true on error, false on success
 */
-static bool parse_path(Stream *stream, Json_path *path,
-                       const JsonErrorHandler &depth_handler) {
+static bool parse_path(Stream *stream, Json_path *path) {
   path->clear();
 
   // the first non-whitespace character must be $
@@ -291,16 +290,12 @@ static bool parse_path(Stream *stream, Json_path *path,
   // now add the legs
   stream->skip_whitespace();
   while (!stream->exhausted()) {
-    if (parse_path_leg(stream, path, depth_handler)) return true;
+    if (parse_path_leg(stream, path)) return true;
     stream->skip_whitespace();
   }
 
   // a path may not end with an ellipsis
-  if (path->leg_count() > 0 && path->last_leg()->get_type() == jpl_ellipsis) {
-    return true;
-  }
-
-  return false;
+  return path->leg_count() > 0 && path->last_leg()->get_type() == jpl_ellipsis;
 }
 
 /**
@@ -308,18 +303,15 @@ static bool parse_path(Stream *stream, Json_path *path,
 
    @param[in,out] stream The stream to read the path expression from.
    @param[in,out] path The Json_path object to fill.
-   @param[in] depth_handler Pointer to a function that should handle error
-                            occurred when depth is exceeded.
 
    @return true on error, false on success
 */
-static bool parse_path_leg(Stream *stream, Json_path *path,
-                           const JsonErrorHandler &depth_handler) {
+static bool parse_path_leg(Stream *stream, Json_path *path) {
   switch (stream->peek()) {
     case BEGIN_ARRAY:
       return parse_array_leg(stream, path);
     case BEGIN_MEMBER:
-      return parse_member_leg(stream, path, depth_handler);
+      return parse_member_leg(stream, path);
     case WILDCARD:
       return parse_ellipsis_leg(stream, path);
     default:
@@ -539,6 +531,28 @@ static const char *find_end_of_member_name(const char *start, const char *end) {
   return std::find_if(str, end, is_terminator);
 }
 
+namespace {
+/// A RapidJSON handler which accepts a scalar string and nothing else.
+class MemberNameHandler
+    : public rapidjson::BaseReaderHandler<rapidjson::UTF8<>,
+                                          MemberNameHandler> {
+ public:
+  explicit MemberNameHandler(::String *name) : m_name(name) {}
+
+  bool String(const char *str, size_t length, bool) {
+    return !m_name->copy(str, length, &my_charset_utf8mb4_bin);
+  }
+
+  bool Default() {
+    assert(false);
+    return false;
+  }
+
+ private:
+  ::String *m_name;
+};
+}  // namespace
+
 /**
   Parse a quoted member name using the rapidjson parser, so that we
   get the name without the enclosing quotes and with any escape
@@ -549,20 +563,14 @@ static const char *find_end_of_member_name(const char *start, const char *end) {
 
   @param str the input string
   @param len the length of the input string
-  @param depth_handler Pointer to a function that should handle error
-                       occurred when depth is exceeded.
-  @return a Json_string that represents the member name, or NULL if
-  the input string is not a valid name
+  @param[out] name the member name
+  @return false on success, true on error
 */
-static std::unique_ptr<Json_string> parse_name_with_rapidjson(
-    const char *str, size_t len, const JsonErrorHandler &depth_handler) {
-  Json_dom_ptr dom = Json_dom::parse(
-      str, len, [](const char *, size_t) {}, depth_handler);
-
-  if (dom == nullptr || dom->json_type() != enum_json_type::J_STRING)
-    return nullptr;
-
-  return std::unique_ptr<Json_string>(down_cast<Json_string *>(dom.release()));
+bool parse_name_with_rapidjson(const char *str, size_t len, String *name) {
+  MemberNameHandler handler(name);
+  rapidjson::MemoryStream stream(str, len);
+  rapidjson::Reader reader;
+  return !reader.Parse<rapidjson::kParseDefaultFlags>(stream, handler);
 }
 
 /**
@@ -570,13 +578,10 @@ static std::unique_ptr<Json_string> parse_name_with_rapidjson(
 
    @param[in,out] stream The stream to read the path expression from.
    @param[in,out] path The Json_path object to fill.
-   @param[in] depth_handler Pointer to a function that should handle error
-                            occurred when depth is exceeded.
 
    @return true on error, false on success
 */
-static bool parse_member_leg(Stream *stream, Json_path *path,
-                             const JsonErrorHandler &depth_handler) {
+static bool parse_member_leg(Stream *stream, Json_path *path) {
   // advance past the .
   assert(stream->peek() == BEGIN_MEMBER);
   stream->skip(1);
@@ -596,15 +601,16 @@ static bool parse_member_leg(Stream *stream, Json_path *path,
     const bool was_quoted = (*key_start == DOUBLE_QUOTE);
     stream->skip(key_end - key_start);
 
-    std::unique_ptr<Json_string> jstr;
+    StringBuffer<STRING_BUFFER_USUAL_SIZE> name;
 
     if (was_quoted) {
       /*
         Send the quoted name through the parser to unquote and
         unescape it.
       */
-      jstr = parse_name_with_rapidjson(key_start, key_end - key_start,
-                                       depth_handler);
+      if (parse_name_with_rapidjson(key_start, key_end - key_start, &name)) {
+        return true;
+      }
     } else {
       /*
         An unquoted name may contain escape sequences. Wrap it in
@@ -616,17 +622,18 @@ static bool parse_member_leg(Stream *stream, Json_path *path,
           strbuff.append(key_start, key_end - key_start) ||
           strbuff.append(DOUBLE_QUOTE))
         return true; /* purecov: inspected */
-      jstr = parse_name_with_rapidjson(strbuff.ptr(), strbuff.length(),
-                                       depth_handler);
+      if (parse_name_with_rapidjson(strbuff.ptr(), strbuff.length(), &name)) {
+        return true;
+      }
     }
 
-    if (jstr == nullptr) return true;
-
     // unquoted names must be valid ECMAScript identifiers
-    if (!was_quoted && !is_ecmascript_identifier(jstr->value())) return true;
+    if (!was_quoted && !is_ecmascript_identifier(to_string_view(name))) {
+      return true;
+    }
 
     // Looking good.
-    if (path->append(Json_path_leg(jstr->value())))
+    if (path->append(Json_path_leg(to_string_view(name))))
       return true; /* purecov: inspected */
   }
 
@@ -711,7 +718,7 @@ static bool is_connector_punctuation(unsigned codepoint) {
 
    @return True if the name is a valid ECMAScript identifier. False otherwise.
 */
-static bool is_ecmascript_identifier(const std::string &name) {
+static bool is_ecmascript_identifier(const std::string_view &name) {
   // An empty string is not a valid identifier.
   if (name.empty()) return false;
 
@@ -741,22 +748,51 @@ static bool is_ecmascript_identifier(const std::string &name) {
 
     if (first_codepoint) {
       return false;
-    } else {
-      // unicode combining mark
-      if (unicode_combining_mark(codepoint)) continue;
-
-      // a unicode digit
-      if (is_digit(codepoint)) continue;
-      if (is_connector_punctuation(codepoint)) continue;
-      // <ZWNJ>
-      if (codepoint == 0x200C) continue;
-      // <ZWJ>
-      if (codepoint == 0x200D) continue;
     }
+    // unicode combining mark
+    if (unicode_combining_mark(codepoint)) continue;
+
+    // a unicode digit
+    if (is_digit(codepoint)) continue;
+    if (is_connector_punctuation(codepoint)) continue;
+    // <ZWNJ>
+    if (codepoint == 0x200C) continue;
+    // <ZWJ>
+    if (codepoint == 0x200D) continue;
 
     // nope
     return false;
   }
 
   return true;
+}
+
+bool clone_without_autowrapping(const Json_path *source_path,
+                                Json_path_clone *target_path, Json_wrapper *doc,
+                                PSI_memory_key key) {
+  Json_wrapper_vector hits(key);
+  target_path->clear();
+  for (const Json_path_leg *path_leg : *source_path) {
+    if (path_leg->is_autowrap()) {
+      /*
+         We have a partial path of the form
+         pathExpression[0]
+         So see if pathExpression identifies a non-array value.
+      */
+      hits.clear();
+      if (doc->seek(*target_path, target_path->leg_count(), &hits, false, true))
+        return true; /* purecov: inspected */
+      if (!hits.empty() && hits[0].type() != enum_json_type::J_ARRAY) {
+        /*
+          pathExpression identifies a non-array value.
+          We satisfy the conditions of the rule above.
+          So we can throw away the [0] leg.
+        */
+        continue;
+      }
+    }
+    // The rule above is NOT satisfied. So add the leg.
+    if (target_path->append(path_leg)) return true; /* purecov: inspected */
+  }
+  return false;
 }

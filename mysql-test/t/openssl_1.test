@@ -4,6 +4,13 @@
 # Save the initial number of concurrent sessions
 --source include/count_sessions.inc
 
+let $messages =
+A partial dump from a server that has GTIDs
+A dump from a server that has GTIDs enabled
+;
+--let $suppress_on_current_connection = 1
+--source include/suppress_messages.inc
+
 set @orig_sql_mode= @@sql_mode;
 
 --disable_warnings
@@ -39,7 +46,7 @@ connect (con1,localhost,ssl_user1,,,,,SSL);
 connect (con2,localhost,ssl_user2,,,,,SSL);
 connect (con3,localhost,ssl_user3,,,,,SSL);
 connect (con4,localhost,ssl_user4,,,,,SSL);
---replace_result $MASTER_MYSOCK MASTER_SOCKET $MASTER_MYPORT MASTER_PORT
+--replace_result $MASTER_MYSOCK SOURCE_SOCKET $MASTER_MYPORT SOURCE_PORT
 --error ER_ACCESS_DENIED_ERROR
 connect (con5,localhost,ssl_user5,,,,,SSL);
 
@@ -220,10 +227,19 @@ DROP TABLE thread_status;
 CREATE TABLE t1(a int);
 INSERT INTO t1 VALUES (1), (2);
 
+--let $executed_gtid_set= `SELECT @@GLOBAL.GTID_EXECUTED`
+--replace_result "$executed_gtid_set" GTID_SET
+
 # Run mysqldump
 --exec $MYSQL_DUMP --skip-comments --ssl-key=$MYSQL_TEST_DIR/std_data/client-key.pem --ssl-cert=$MYSQL_TEST_DIR/std_data/client-cert.pem test t1
 
+--let $executed_gtid_set= `SELECT @@GLOBAL.GTID_EXECUTED`
+--replace_result "$executed_gtid_set" GTID_SET
+
 --exec $MYSQL_DUMP --skip-comments --ssl-ca=$MYSQL_TEST_DIR/std_data/cacert.pem --ssl-key=$MYSQL_TEST_DIR/std_data/client-key.pem --ssl-cert=$MYSQL_TEST_DIR/std_data/client-cert.pem test
+
+--let $executed_gtid_set= `SELECT @@GLOBAL.GTID_EXECUTED`
+--replace_result "$executed_gtid_set" GTID_SET
 
 --exec $MYSQL_DUMP --skip-comments --ssl-mode=VERIFY_CA --ssl-ca=$MYSQL_TEST_DIR/std_data/cacert.pem --ssl-key=$MYSQL_TEST_DIR/std_data/client-key.pem --ssl-cert=$MYSQL_TEST_DIR/std_data/client-cert.pem test
 

@@ -1,15 +1,16 @@
-# Copyright (c) 2005, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2005, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -47,7 +48,19 @@
 }
 
 {
-   semi_sync_master_plugin_init
+   pthread allocate_tls timer memory loss
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:calloc
+   ...
+   fun:_dl_allocate_tls
+   fun:pthread_create*
+   ...
+   fun:timer_create*
+}
+
+{
+   semi_sync_source_plugin_init
    Memcheck:Leak
    match-leak-kinds: reachable
    fun:malloc
@@ -1017,28 +1030,6 @@
    fun:malloc_info
 }
 
-# TokuDB suppressions
-{
-   tls_variables_1
-   Memcheck:Leak
-   fun:memalign
-   fun:__tls_get_addr
-}
-
-{
-   tls_variables_2
-   Memcheck:Leak
-   fun:memalign
-   fun:tls_get_addr_tail
-}
-
-{
-   lzma encoder prepare bug
-   Memcheck:Cond
-   fun:lz_encoder_prepare
-   fun:lzma_lz_encoder_init
-}
-
 #supress warnings from openssl random generator
 
 {
@@ -1206,6 +1197,44 @@
    fun:_Znwm
    ...
    fun:_dl_init
+}
+
+{
+   Mysqlx::Notice::GroupReplicationStateChanged
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:_Znwm
+   fun:_ZN6google8protobuf8internal13OnShutdownRunEPFvPKvES3_
+   fun:_ZN6google8protobuf8internal20InitProtobufDefaultsEv
+   fun:_ZN6google8protobuf8internal11InitSCCImplEPNS1_11SCCInfoBaseE
+   fun:_ZN6google8protobuf8internal7InitSCCEPNS1_11SCCInfoBaseE
+   fun:_ZN6Mysqlx6Notice28GroupReplicationStateChanged10SharedCtorEv
+   fun:_ZN6Mysqlx6Notice28GroupReplicationStateChangedC1EPN6google8protobuf5ArenaE
+   fun:_ZN6Mysqlx6Notice28GroupReplicationStateChangedC1Ev
+   ...
+}
+
+{
+   protobuf_replication_group_member_actions default instance
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:_Znwm
+   fun:_ZN6google8protobuf8internal13OnShutdownRunEPFvPKvES3_
+   fun:_ZN6google8protobuf8internal24OnShutdownDestroyMessageEPKv
+   fun:_ZL74InitDefaultsscc_info_Action_replication_5fgroup_5fmember_5factions_2eprotov
+   ...
+}
+
+{
+   protobuf_replication_group_recovery_metadata default instance
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:_Znwm
+   ...
+   fun:_ZN44protobuf_replication_group_recovery_metadata27CertificationInformationMapC1EPN6google8protobuf5ArenaE
+   fun:_ZN44protobuf_replication_group_recovery_metadata27CertificationInformationMapC1Ev
+   fun:_ZL98InitDefaultsscc_info_CertificationInformationMap_replication_5fgroup_5frecovery_5fmetadata_2eprotov
+   ...
 }
 
 {
@@ -2838,4 +2867,86 @@
    ...
    fun:_dl_catch_exception
    ...
+}
+
+# Suppress abseil leaks - see Bug#36945957
+
+{
+   suppress_abseil_1
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:_Znwm
+   fun:_ZN4absl12lts_2023080212log_internal12_GLOBAL__N_116GlobalLogSinkSetC1Ev
+   fun:_ZN4absl12lts_2023080212log_internal12_GLOBAL__N_111GlobalSinksEv
+   fun:_ZN4absl12lts_2023080212log_internal10LogToSinksERKNS0_8LogEntryENS0_4SpanIPNS0_7LogSinkEEEb
+   fun:_ZN4absl12lts_2023080212log_internal10LogMessage9SendToLogEv
+   fun:_ZN4absl12lts_2023080212log_internal10LogMessageD1Ev
+   ...
+}
+
+{
+   suppress_abseil_2
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:_Znwm
+   fun:_ZNSt6vectorIPN4absl12lts_202308027LogSinkESaIS3_EE17_M_realloc_insertIJRKS3_EEEvN9__gnu_cxx17__normal_iteratorIPS3_S5_EEDpOT_
+   fun:_ZN4absl12lts_2023080212log_internal12_GLOBAL__N_116GlobalLogSinkSet10AddLogSinkEPNS0_7LogSinkE
+   fun:_ZN4absl12lts_2023080212log_internal12_GLOBAL__N_116GlobalLogSinkSetC1Ev
+   fun:_ZN4absl12lts_2023080212log_internal12_GLOBAL__N_111GlobalSinksEv
+   fun:_ZN4absl12lts_2023080212log_internal10LogToSinksERKNS0_8LogEntryENS0_4SpanIPNS0_7LogSinkEEEb
+   fun:_ZN4absl12lts_2023080212log_internal10LogMessage9SendToLogEv
+   fun:_ZN4absl12lts_2023080212log_internal10LogMessageD1Ev
+   ...
+}
+
+{
+   suppress_abseil_3
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:_Znwm
+   fun:_ZN4absl12lts_2023080212log_internal12_GLOBAL__N_111GlobalSinksEv
+   fun:_ZN4absl12lts_2023080212log_internal10LogToSinksERKNS0_8LogEntryENS0_4SpanIPNS0_7LogSinkEEEb
+   fun:_ZN4absl12lts_2023080212log_internal10LogMessage9SendToLogEv
+   fun:_ZN4absl12lts_2023080212log_internal10LogMessageD1Ev
+   ...
+}
+
+{
+   mysqltest_do_shutdown_timeout
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   fun:allocate
+   ...
+   fun:_ZL18do_shutdown_serverP10st_command
+   fun:main
+}
+
+# This leak occurs when 3. party lib linked with plugin or component uses TLS
+{
+   supress_tls_allocations
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:malloc
+   fun:UnknownInlinedFun
+   fun:allocate_dtv_entry
+   fun:allocate_and_init
+   fun:tls_get_addr_tail.isra.0
+   fun:__tls_get_addr
+   obj:*
+   obj:*
+   obj:*
+   ...
+}
+# This leak occurs in mysqltest, so it is not relevant for mysqld, its plugins and components
+{
+   supress_shutdown_from_mysqltest
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:_Znwm
+   fun:_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE9_M_mutateEmmPKcm
+   fun:_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE10_M_replaceEmmPKcm.isra.0
+   fun:_Z16query_get_stringP5MYSQLPKciPNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE
+   fun:_ZL18do_shutdown_serverP10st_command
+   fun:main
 }

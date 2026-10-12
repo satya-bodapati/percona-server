@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -23,8 +24,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
 *****************************************************************************/
-#include <string.h>
 #include <cassert>
+#include <cstring>
 #include <iostream>
 #include <map>
 #include <set>
@@ -52,7 +53,7 @@ class buf_pool_t {
     Fname("buf_pool_t::buf_pool_t");
     ulint page_count;
     LOG("Requested buffer pool size = " << MB100);
-    ulint mem_size = ut_2pow_round(buf_pool_size, UNIV_PAGE_SIZE);
+    ulint const mem_size = ut_2pow_round(buf_pool_size, UNIV_PAGE_SIZE);
     LOG("Will be allocating = " << mem_size);
     page_count = mem_size / UNIV_PAGE_SIZE;
     LOG("Number of pages = " << page_count);
@@ -101,7 +102,7 @@ class buf_pool_t {
  private:
   buf_block_t *alloc(page_no_t page_no) {
     Fname("buf_pool_t::alloc");
-    buf_block_t *block = new (std::nothrow) buf_block_t;
+    auto *block = new (std::nothrow) buf_block_t;
     assert(block != nullptr);
     /* Ensure that the page_no is not already allocated. */
     assert(m_buf_pool.find(page_no) == m_buf_pool.end());
@@ -129,7 +130,7 @@ class buf_pool_t {
   }
 
   /** Copy constructor is disabled. */
-  buf_pool_t(const buf_pool_t &other);
+  buf_pool_t(const buf_pool_t &other) = delete;
 
   /** The map between the page number, and the actual page. */
   std::map<page_no_t, buf_block_t *> m_buf_pool;

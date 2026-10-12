@@ -1,15 +1,16 @@
-/*  Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/*  Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License, version 2.0,
     as published by the Free Software Foundation.
 
-    This program is also distributed with certain software (including
+    This program is designed to work with certain software (including
     but not limited to OpenSSL) that is licensed under separate terms,
     as designated in a particular file or component or in included license
     documentation.  The authors of MySQL hereby grant you an additional
     permission to link the program and your derivative works with the
-    separately licensed software that they have included with MySQL.
+    separately licensed software that they have either included with
+    the program or referenced in the documentation.
 
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,11 +23,11 @@
 
 #include <string>
 
-#include <ctype.h>
 #include <mysql/plugin.h>
 #include <mysql/plugin_audit.h>
 #include <mysql/psi/mysql_memory.h>
 #include <mysql/service_mysql_alloc.h>
+#include <cctype>
 
 #include "my_inttypes.h"
 #include "my_psi_config.h"
@@ -43,7 +44,7 @@ static PSI_memory_info all_rewrite_memory[] = {
 
 static int plugin_init(MYSQL_PLUGIN) {
   const char *category = "rewriter";
-  int count = static_cast<int>(array_elements(all_rewrite_memory));
+  int const count = static_cast<int>(array_elements(all_rewrite_memory));
   mysql_memory_register(category, all_rewrite_memory, count);
   return 0; /* success */
 }
@@ -55,7 +56,7 @@ static int plugin_init(MYSQL_PLUGIN) {
 static int rewrite_ddl(MYSQL_THD, mysql_event_class_t event_class,
                        const void *event) {
   /* We can exit early if this is not a pre-parse event. */
-  const struct mysql_event_parse *event_parse =
+  const auto *event_parse =
       static_cast<const struct mysql_event_parse *>(event);
   if (event_class != MYSQL_AUDIT_PARSE_CLASS ||
       event_parse->event_subclass != MYSQL_AUDIT_PARSE_PREPARSE)

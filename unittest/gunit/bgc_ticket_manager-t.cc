@@ -1,15 +1,16 @@
-/* Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -31,10 +32,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-namespace binlog {
-namespace unittests {
-
-using ticket_t = binlog::BgcTicket::ValueType;
+namespace binlog::unittests {
 
 /**
   Test for Bgc_ticket_manager API.
@@ -71,12 +69,12 @@ using ticket_t = binlog::BgcTicket::ValueType;
 class Bgc_ticket_manager_test : public ::testing::Test {
  protected:
   Bgc_ticket_manager_test() = default;
-  virtual void SetUp() {}
-  virtual void TearDown() {}
+  void SetUp() override {}
+  void TearDown() override {}
 };
 
 TEST_F(Bgc_ticket_manager_test, Several_tickets_test) {
-  size_t total_threads{300};
+  size_t const total_threads{300};
   std::vector<std::thread> threads;
   std::mutex mtx;
   std::condition_variable condition;
@@ -84,7 +82,7 @@ TEST_F(Bgc_ticket_manager_test, Several_tickets_test) {
   std::default_random_engine r_engine{r_device()};
   std::uniform_int_distribution<int> uniform_dist{25, 200};
   size_t thread_test_loops = 100;
-  size_t max_ticket = (total_threads / 10) * thread_test_loops;
+  size_t const max_ticket = (total_threads / 10) * thread_test_loops;
   std::vector<std::uint64_t> tickets;
   std::mutex mutex_tickets;
 
@@ -114,10 +112,8 @@ TEST_F(Bgc_ticket_manager_test, Several_tickets_test) {
               std::this_thread::sleep_for(
                   std::chrono::duration<int, std::micro>{
                       uniform_dist(r_engine)});
-              auto this_thread_ticket =
-                  ticket_manager
-                      .push_new_ticket(binlog::BgcTmOptions::inc_session_count)
-                      .first;
+              auto [this_thread_ticket, _] = ticket_manager.push_new_ticket(
+                  binlog::BgcTmOptions::inc_session_count);
 
               while (this_thread_ticket != ticket_manager.get_front_ticket()) {
                 std::this_thread::yield();
@@ -134,7 +130,7 @@ TEST_F(Bgc_ticket_manager_test, Several_tickets_test) {
                 std::this_thread::yield();
               }
               {
-                std::unique_lock lock{mtx};
+                std::unique_lock const lock{mtx};
                 condition.notify_all();
               }
             }
@@ -168,5 +164,4 @@ TEST_F(Bgc_ticket_manager_test, Several_tickets_test) {
   EXPECT_EQ(std::is_sorted(tickets.begin(), tickets.end()), true);
 }
 
-}  // namespace unittests
-}  // namespace binlog
+}  // namespace binlog::unittests

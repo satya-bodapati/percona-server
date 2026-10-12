@@ -1,7 +1,9 @@
 --echo # Test of SQL window functions.
 --echo # ----------------------------------------------------------------------
 --source include/have_innodb_16k.inc
-SET NAMES utf8;
+--source include/elide_costs.inc
+SET NAMES utf8mb3;
+SET explain_json_format_version = 1;
 
 --echo
 --echo Flag unsupported aggregates as window functions
@@ -1242,8 +1244,6 @@ SELECT t, FIRST_VALUE(t) OVER w FROM t_time WINDOW w AS (ORDER BY t RANGE BETWEE
 SELECT t, FIRST_VALUE(t) OVER w FROM t_time WINDOW w AS (ORDER BY t ROWS  BETWEEN 2 FOLLOWING AND 3 FOLLOWING);
 SELECT t, FIRST_VALUE(t) OVER w FROM t_time WINDOW w AS (ORDER BY t RANGE BETWEEN INTERVAL 2 HOUR FOLLOWING AND INTERVAL 3 HOUR FOLLOWING);
 
---sorted_result
-SELECT p, t, FIRST_VALUE(t) OVER w FROM t_time2 WINDOW w AS (PARTITION by p );
 SELECT p, t, FIRST_VALUE(t) OVER w FROM t_time2 WINDOW w AS (PARTITION by p ORDER BY t);
 SELECT p, t, FIRST_VALUE(t) OVER w FROM t_time2 WINDOW w AS (PARTITION by p ORDER BY t DESC);
 SELECT p, t, FIRST_VALUE(t) OVER w FROM t_time2 WINDOW w AS (PARTITION by p ORDER BY t ROWS  2 PRECEDING);
@@ -2090,68 +2090,51 @@ DROP TABLE t;
 
 --echo #
 --echo # Check window aggregate referencing columns from an outside query
---echo # All results checked against Postgresql which also allows this.
+--echo #
 
 CREATE TABLE t1(i INT, j INT, k INT);
 INSERT INTO t1 VALUES (1,1,1),(2,2,2);
 
 # The outer references in ORDER BY and PARTITIONING BY for windows is
-# a constant so essentially no-ops leading to indeterminate results, cf.
-# use of --replace_regex below.
-#
+# not allowed as per the SQL standard, cf. SQL 2016, section 7.15
+# window clause, SR 4.
+
+--error ER_INVALID_OUTER_REFERENCE
 SELECT (SELECT ROW_NUMBER() OVER (ORDER BY upper.j) FROM t1 LIMIT 1)
     FROM t1 AS upper;
 
+--error ER_INVALID_OUTER_REFERENCE
 SELECT (SELECT ROW_NUMBER() OVER (PARTITION BY upper.j) FROM t1 LIMIT 1)
     FROM t1 AS upper;
 
-SELECT (SELECT ROW_NUMBER() OVER (PARTITION BY upper.j)
-        FROM t1 LIMIT 1 OFFSET 1)
-    FROM t1 AS upper;
-
---replace_regex /[12]/Accepted/
-SELECT (SELECT FIRST_VALUE(j) OVER (ORDER BY upper.j) FROM t1 LIMIT 1)
-    FROM t1 AS upper;
---replace_regex /[12]/Accepted/
-SELECT (SELECT FIRST_VALUE(j) OVER (ORDER BY upper.j DESC) FROM t1 LIMIT 1)
-    FROM t1 AS upper;
-
-SELECT (SELECT FIRST_VALUE(upper.j) OVER (ORDER BY upper.j DESC)
+SELECT (SELECT FIRST_VALUE(upper.j) OVER (ORDER BY t1.j DESC)
         FROM t1 LIMIT 1)
-    FROM t1 AS upper;
-
---replace_regex /[12]/Accepted/
-SELECT (SELECT LAST_VALUE(j) OVER (ORDER BY upper.j) FROM t1 LIMIT 1)
-    FROM t1 AS upper;
---replace_regex /[12]/Accepted/
-SELECT (SELECT LAST_VALUE(j) OVER (ORDER BY upper.j DESC) FROM t1 LIMIT 1)
     FROM t1 AS upper;
 
 # Windowing embedded in WHERE clause of outer query
 SELECT * FROM t1 AS upper
-    WHERE (SELECT FIRST_VALUE(upper.j) OVER (ORDER BY upper.j)
+    WHERE (SELECT FIRST_VALUE(upper.j) OVER (ORDER BY t1.i)
            FROM t1 LIMIT 1) = 1
            ;
+
 SELECT * FROM t1 AS upper
-    WHERE (SELECT FIRST_VALUE(upper.j) OVER (ORDER BY upper.j)
+    WHERE (SELECT FIRST_VALUE(upper.j) OVER (ORDER BY t1.i)
            FROM t1 LIMIT 1) = 2;
 
 #
 # Windowing embedded inside ORDER BY of windowing query
 #
 SELECT FIRST_VALUE(j) OVER (ORDER BY 0 +
-                            (SELECT FIRST_VALUE(upper.j) OVER (ORDER BY upper.j)
+                            (SELECT FIRST_VALUE(upper.j) OVER (ORDER BY t1.i)
                              FROM t1 LIMIT 1))
     FROM t1 AS upper;
 
 SELECT LAST_VALUE(j)  OVER (ORDER BY 0 +
-                            (SELECT FIRST_VALUE(upper.j) OVER (ORDER BY upper.j)
+                            (SELECT FIRST_VALUE(upper.j) OVER (ORDER BY t1.i)
                              FROM t1 LIMIT 1))
     FROM t1 AS upper;
 
-# We may start banning subqueries in query order by. When this starts
-# failing, make sure the above fail too:
-SELECT * FROM t1 AS upper ORDER BY (0 + (SELECT FIRST_VALUE(upper.j) OVER (ORDER BY upper.j)
+SELECT * FROM t1 AS upper ORDER BY (0 + (SELECT FIRST_VALUE(upper.j) OVER (ORDER BY t1.i)
                                          FROM t1 LIMIT 1));
 
 
@@ -2719,7 +2702,7 @@ CREATE TABLE G (
 INSERT INTO G VALUES (1,7);
 
 CREATE TABLE H (
-  col_varchar_10_utf8 varchar(10) CHARACTER SET utf8 DEFAULT NULL,
+  col_varchar_10_utf8 varchar(10) CHARACTER SET utf8mb3 DEFAULT NULL,
   col_varchar_10_latin1 varchar(10) DEFAULT NULL,
   pk int(11) NOT NULL AUTO_INCREMENT,
   PRIMARY KEY (pk)
@@ -2873,6 +2856,7 @@ CREATE TABLE b (pk int PRIMARY KEY,  c varchar(255));
 INSERT INTO b VALUES (9,'s');
 
 --skip_if_hypergraph  # Does not currently push the sort, so gets a different plan.
+--replace_regex $elide_costs
 EXPLAIN FORMAT=tree SELECT ROW_NUMBER() OVER (ORDER BY a.c)
 FROM  a LEFT JOIN b
       ON a.c = b.c
@@ -2894,17 +2878,17 @@ SET SQL_MODE='';
 --disable_query_log
 
 CREATE TABLE `B` (
-  `col_varchar_255_utf8_2` varchar(255) CHARACTER SET utf8 DEFAULT NULL,
+  `col_varchar_255_utf8_2` varchar(255) CHARACTER SET utf8mb3 DEFAULT NULL,
   `col_varchar_10_latin1_2` varchar(10) DEFAULT NULL,
   `col_datetime_2` datetime DEFAULT NULL,
-  `col_varchar_255_utf8` varchar(255) CHARACTER SET utf8 DEFAULT NULL,
+  `col_varchar_255_utf8` varchar(255) CHARACTER SET utf8mb3 DEFAULT NULL,
   `col_date` date DEFAULT NULL,
-  `col_varchar_10_utf8_2` varchar(10) CHARACTER SET utf8 DEFAULT NULL,
+  `col_varchar_10_utf8_2` varchar(10) CHARACTER SET utf8mb3 DEFAULT NULL,
   `col_date_2` date DEFAULT NULL,
   `col_varchar_255_latin1_2` varchar(255) DEFAULT NULL,
   `pk` int(11) NOT NULL AUTO_INCREMENT,
   `col_int` int(11) DEFAULT NULL,
-  `col_varchar_10_utf8` varchar(10) CHARACTER SET utf8 DEFAULT NULL,
+  `col_varchar_10_utf8` varchar(10) CHARACTER SET utf8mb3 DEFAULT NULL,
   `col_varchar_255_latin1` varchar(255) DEFAULT NULL,
   `col_datetime` datetime DEFAULT NULL,
   `col_int_2` int(11) DEFAULT NULL,
@@ -2918,9 +2902,9 @@ INSERT INTO `B` VALUES ('HGEFW','q','0000-00-00 00:00:00','eejtkhpxkwzyojewtgvas
 
 CREATE TABLE `C` (
   `col_varchar_10_latin1` varchar(10) DEFAULT NULL,
-  `col_varchar_255_utf8` varchar(255) CHARACTER SET utf8 DEFAULT NULL,
-  `col_varchar_255_utf8_2` varchar(255) CHARACTER SET utf8 DEFAULT NULL,
-  `col_varchar_10_utf8` varchar(10) CHARACTER SET utf8 DEFAULT NULL,
+  `col_varchar_255_utf8` varchar(255) CHARACTER SET utf8mb3 DEFAULT NULL,
+  `col_varchar_255_utf8_2` varchar(255) CHARACTER SET utf8mb3 DEFAULT NULL,
+  `col_varchar_10_utf8` varchar(10) CHARACTER SET utf8mb3 DEFAULT NULL,
   `col_int_2` int(11) DEFAULT NULL,
   `col_datetime_2` datetime DEFAULT NULL,
   `col_datetime` datetime DEFAULT NULL,
@@ -2929,7 +2913,7 @@ CREATE TABLE `C` (
   `col_varchar_255_latin1_2` varchar(255) DEFAULT NULL,
   `col_varchar_10_latin1_2` varchar(10) DEFAULT NULL,
   `col_varchar_255_latin1` varchar(255) DEFAULT NULL,
-  `col_varchar_10_utf8_2` varchar(10) CHARACTER SET utf8 DEFAULT NULL,
+  `col_varchar_10_utf8_2` varchar(10) CHARACTER SET utf8mb3 DEFAULT NULL,
   `col_date_2` date DEFAULT NULL,
   `col_date` date DEFAULT NULL,
   PRIMARY KEY (`pk`)
@@ -2991,7 +2975,7 @@ INSERT INTO t1 VALUES (1,8,'2004-03-26 11:59:45'),(2,-692387840,'2000-11-03
 
 CREATE TEMPORARY TABLE t2 (
   pk int(11) NOT NULL AUTO_INCREMENT,
-  col1 varchar(10) CHARACTER SET utf8 DEFAULT NULL,
+  col1 varchar(10) CHARACTER SET utf8mb3 DEFAULT NULL,
   PRIMARY KEY (pk)
 ) ENGINE=Memory;
 
@@ -3367,17 +3351,17 @@ DROP TABLE te2;
 set sql_mode='';
 
 CREATE TABLE `A` (
-  `col_varchar_10_utf8` varchar(10) CHARACTER SET utf8 DEFAULT NULL,
+  `col_varchar_10_utf8` varchar(10) CHARACTER SET utf8mb3 DEFAULT NULL,
   `col_varchar_10_latin1_key` varchar(10) DEFAULT NULL,
   `col_int` int(11) DEFAULT NULL,
   `col_date` date DEFAULT NULL,
   `col_date_key` date DEFAULT NULL,
-  `col_varchar_255_utf8` varchar(255) CHARACTER SET utf8 DEFAULT NULL,
+  `col_varchar_255_utf8` varchar(255) CHARACTER SET utf8mb3 DEFAULT NULL,
   `pk` int(11) NOT NULL AUTO_INCREMENT,
   `col_varchar_255_latin1` varchar(255) DEFAULT NULL,
   `col_datetime_key` datetime DEFAULT NULL,
-  `col_varchar_10_utf8_key` varchar(10) CHARACTER SET utf8 DEFAULT NULL,
-  `col_varchar_255_utf8_key` varchar(255) CHARACTER SET utf8 DEFAULT NULL,
+  `col_varchar_10_utf8_key` varchar(10) CHARACTER SET utf8mb3 DEFAULT NULL,
+  `col_varchar_255_utf8_key` varchar(255) CHARACTER SET utf8mb3 DEFAULT NULL,
   `col_varchar_10_latin1` varchar(10) DEFAULT NULL,
   `col_datetime` datetime DEFAULT NULL,
   `col_varchar_255_latin1_key` varchar(255) DEFAULT NULL,
@@ -3398,17 +3382,17 @@ CREATE TABLE `AA` (
   `col_datetime` datetime DEFAULT NULL,
   `col_date` date DEFAULT NULL,
   `col_varchar_255_latin1` varchar(255) DEFAULT NULL,
-  `col_varchar_255_utf8_key` varchar(255) CHARACTER SET utf8 DEFAULT NULL,
+  `col_varchar_255_utf8_key` varchar(255) CHARACTER SET utf8mb3 DEFAULT NULL,
   `col_datetime_key` datetime DEFAULT NULL,
   `col_int` int(11) DEFAULT NULL,
-  `col_varchar_255_utf8` varchar(255) CHARACTER SET utf8 DEFAULT NULL,
+  `col_varchar_255_utf8` varchar(255) CHARACTER SET utf8mb3 DEFAULT NULL,
   `col_date_key` date DEFAULT NULL,
   `col_varchar_255_latin1_key` varchar(255) DEFAULT NULL,
-  `col_varchar_10_utf8_key` varchar(10) CHARACTER SET utf8 DEFAULT NULL,
+  `col_varchar_10_utf8_key` varchar(10) CHARACTER SET utf8mb3 DEFAULT NULL,
   `col_varchar_10_latin1_key` varchar(10) DEFAULT NULL,
   `pk` int(11) NOT NULL AUTO_INCREMENT,
   `col_varchar_10_latin1` varchar(10) DEFAULT NULL,
-  `col_varchar_10_utf8` varchar(10) CHARACTER SET utf8 DEFAULT NULL,
+  `col_varchar_10_utf8` varchar(10) CHARACTER SET utf8mb3 DEFAULT NULL,
   `col_int_key` int(11) DEFAULT NULL,
   PRIMARY KEY (`pk`),
   KEY `col_varchar_255_utf8_key` (`col_varchar_255_utf8_key`),
@@ -3425,15 +3409,15 @@ INSERT INTO `AA` VALUES (NULL,'0000-00-00','b','r','2003-08-19 23:01:25',154,'zg
 CREATE TABLE `B` (
   `pk` int(11) NOT NULL AUTO_INCREMENT,
   `col_int` int(11) DEFAULT NULL,
-  `col_varchar_255_utf8_key` varchar(255) CHARACTER SET utf8 DEFAULT NULL,
+  `col_varchar_255_utf8_key` varchar(255) CHARACTER SET utf8mb3 DEFAULT NULL,
   `col_datetime` datetime DEFAULT NULL,
   `col_varchar_255_latin1_key` varchar(255) DEFAULT NULL,
   `col_datetime_key` datetime DEFAULT NULL,
-  `col_varchar_255_utf8` varchar(255) CHARACTER SET utf8 DEFAULT NULL,
-  `col_varchar_10_utf8_key` varchar(10) CHARACTER SET utf8 DEFAULT NULL,
+  `col_varchar_255_utf8` varchar(255) CHARACTER SET utf8mb3 DEFAULT NULL,
+  `col_varchar_10_utf8_key` varchar(10) CHARACTER SET utf8mb3 DEFAULT NULL,
   `col_varchar_10_latin1_key` varchar(10) DEFAULT NULL,
   `col_date` date DEFAULT NULL,
-  `col_varchar_10_utf8` varchar(10) CHARACTER SET utf8 DEFAULT NULL,
+  `col_varchar_10_utf8` varchar(10) CHARACTER SET utf8mb3 DEFAULT NULL,
   `col_varchar_255_latin1` varchar(255) DEFAULT NULL,
   `col_varchar_10_latin1` varchar(10) DEFAULT NULL,
   `col_int_key` int(11) DEFAULT NULL,
@@ -3648,13 +3632,13 @@ DROP TABLE t1;
 
 CREATE TABLE E (
   col_int int(11) DEFAULT NULL,
-  col_varchar_10_utf8 varchar(10) CHARACTER SET utf8 DEFAULT NULL,
+  col_varchar_10_utf8 varchar(10) CHARACTER SET utf8mb3 DEFAULT NULL,
   pk int(11) NOT NULL AUTO_INCREMENT,
   col_varchar_10_latin1 varchar(10) DEFAULT NULL,
-  col_varchar_255_utf8 varchar(255) CHARACTER SET utf8 DEFAULT NULL,
+  col_varchar_255_utf8 varchar(255) CHARACTER SET utf8mb3 DEFAULT NULL,
   col_varchar_255_latin1 varchar(255) DEFAULT NULL,
   col_int_key int(11) GENERATED ALWAYS AS ((col_int + col_int)) VIRTUAL,
-  col_varchar_255_utf8_key varchar(255) CHARACTER SET utf8
+  col_varchar_255_utf8_key varchar(255) CHARACTER SET utf8mb3
    GENERATED ALWAYS AS
    (concat(repeat(col_varchar_10_utf8,3),repeat(col_varchar_10_utf8,3)))
    VIRTUAL,
@@ -3662,7 +3646,7 @@ CREATE TABLE E (
    GENERATED ALWAYS AS
    (concat(repeat(col_varchar_10_latin1,3),repeat(col_varchar_10_latin1,3)))
    VIRTUAL,
-  col_varchar_10_utf8_key varchar(10) CHARACTER SET utf8
+  col_varchar_10_utf8_key varchar(10) CHARACTER SET utf8mb3
    GENERATED ALWAYS AS
    (repeat(substr(col_varchar_10_utf8,-(1)),5)) VIRTUAL,
   col_varchar_10_latin1_key varchar(10) GENERATED ALWAYS AS
@@ -3708,20 +3692,20 @@ INSERT INTO E (col_int, col_varchar_10_utf8, pk, col_varchar_10_latin1,
 
 CREATE TABLE C (
   col_int int(11) DEFAULT NULL,
-  col_varchar_10_utf8 varchar(10) CHARACTER SET utf8 DEFAULT NULL,
+  col_varchar_10_utf8 varchar(10) CHARACTER SET utf8mb3 DEFAULT NULL,
   pk int(11) NOT NULL AUTO_INCREMENT,
   col_varchar_10_latin1 varchar(10) DEFAULT NULL,
-  col_varchar_255_utf8 varchar(255) CHARACTER SET utf8 DEFAULT NULL,
+  col_varchar_255_utf8 varchar(255) CHARACTER SET utf8mb3 DEFAULT NULL,
   col_varchar_255_latin1 varchar(255) DEFAULT NULL,
   col_int_key int(11) GENERATED ALWAYS AS ((col_int + col_int)) VIRTUAL,
-  col_varchar_255_utf8_key varchar(255) CHARACTER SET utf8
+  col_varchar_255_utf8_key varchar(255) CHARACTER SET utf8mb3
   GENERATED ALWAYS AS
    (concat(repeat(col_varchar_10_utf8,3),repeat(col_varchar_10_utf8,3)))
    VIRTUAL,
   col_varchar_255_latin1_key varchar(255) GENERATED ALWAYS AS
    (concat(repeat(col_varchar_10_latin1,3),repeat(col_varchar_10_latin1,3)))
    VIRTUAL,
-  col_varchar_10_utf8_key varchar(10) CHARACTER SET utf8 GENERATED ALWAYS AS
+  col_varchar_10_utf8_key varchar(10) CHARACTER SET utf8mb3 GENERATED ALWAYS AS
    (repeat(substr(col_varchar_10_utf8,-(1)),5)) VIRTUAL,
   col_varchar_10_latin1_key varchar(10) GENERATED ALWAYS AS
    (repeat(substr(col_varchar_10_latin1,-(1)),7)) VIRTUAL,
@@ -3955,7 +3939,7 @@ SELECT FROM_UNIXTIME(LAG('',99)OVER(ROWS UNBOUNDED PRECEDING),'%I %l %I');
 SELECT FROM_UNIXTIME(FIRST_VALUE(@b)RESPECT NULLS OVER(),
                  REPEAT('1',32))IS NOT FALSE;
 SELECT ((NTILE(70)OVER())<<(FROM_UNIXTIME(LEAD('',67) RESPECT NULLS
-                                      OVER(),SHA(''))));
+                                      OVER(),SHA2('',256))));
 SELECT FROM_UNIXTIME(LAG('-778:36:16.905133',246) RESPECT NULLS OVER(),
                  REPLACE('%M%V   ','',''));
 
@@ -4042,8 +4026,8 @@ SELECT AVG(i), RANK() OVER (ORDER BY i) FROM t1;
 SELECT AVG(i) FROM t1 ORDER BY RANK() OVER (PARTITION BY AVG(i) ORDER BY i);
 --error ER_MIX_OF_GROUP_FUNC_AND_FIELDS
 SELECT AVG(i), RANK() OVER w FROM t1 WINDOW w AS (ORDER BY i);
---error ER_MIX_OF_GROUP_FUNC_AND_FIELDS
-SELECT (select AVG(i)+RANK() OVER (ORDER BY i)) FROM t1;
+--error ER_INVALID_OUTER_REFERENCE
+SELECT (SELECT AVG(i)+RANK() OVER (ORDER BY i)) FROM t1;
 
 DROP TABLE t1;
 
@@ -4229,10 +4213,102 @@ DO NTILE(18446744073709551615) OVER();
 
 # Negative coverage tests for some non-literal arguments:
 
-CREATE PROCEDURE p1(n INT) DO NTILE(n) OVER();
+CREATE PROCEDURE p1(n INTEGER) DO NTILE(n) OVER();
 --error ER_WRONG_ARGUMENTS
 CALL p1(NULL);
 DROP PROCEDURE p1;
+
+CREATE PROCEDURE p1(n INTEGER) DO LEAD('x', n) OVER();
+--error ER_WRONG_ARGUMENTS
+CALL p1(NULL);
+CALL p1(0);
+--error ER_WRONG_ARGUMENTS
+CALL p1(-1);
+DROP PROCEDURE p1;
+
+CREATE PROCEDURE p1(n INTEGER) DO LAG('x', n) OVER();
+--error ER_WRONG_ARGUMENTS
+CALL p1(NULL);
+CALL p1(0);
+--error ER_WRONG_ARGUMENTS
+CALL p1(-1);
+DROP PROCEDURE p1;
+
+--error ER_PARSE_ERROR
+CREATE PROCEDURE p1(n DATE) DO NTILE(n) OVER();
+
+delimiter //;
+--error ER_PARSE_ERROR
+CREATE PROCEDURE p1()
+BEGIN
+  DECLARE d DATE;
+  DO NTILE(d) OVER();
+END
+//
+
+--error ER_PARSE_ERROR
+CREATE PROCEDURE p2()
+BEGIN
+  DECLARE d DATE;
+  DO LEAD('x', d) OVER();
+END
+//
+
+--error ER_PARSE_ERROR
+CREATE PROCEDURE p3()
+BEGIN
+  DECLARE d DATE;
+  DO LAG('x', d) OVER();
+END
+//
+
+CREATE PROCEDURE p1(n INTEGER)
+BEGIN
+  DECLARE i INTEGER;
+  SET i = n;
+  DO NTILE(i) OVER();
+END
+//
+
+CREATE PROCEDURE p2(n INTEGER)
+BEGIN
+  DECLARE i INTEGER;
+  SET i = n;
+  DO LEAD('x', i) OVER();
+END
+//
+
+CREATE PROCEDURE p3(n INTEGER)
+BEGIN
+  DECLARE i INTEGER;
+  SET i = n;
+  DO LAG('x', i) OVER();
+END
+//
+
+delimiter ;//
+
+--error ER_WRONG_ARGUMENTS
+CALL p1(NULL);
+--error ER_WRONG_ARGUMENTS
+CALL p1(0);
+CALL p1(1);
+
+--error ER_WRONG_ARGUMENTS
+CALL p2(NULL);
+CALL p2(0);
+--error ER_WRONG_ARGUMENTS
+CALL p2(-1);
+
+--error ER_WRONG_ARGUMENTS
+CALL p3(NULL);
+CALL p3(0);
+--error ER_WRONG_ARGUMENTS
+CALL p3(-1);
+
+DROP PROCEDURE p1;
+DROP PROCEDURE p2;
+DROP PROCEDURE p3;
 
 SET @v = NULL;
 

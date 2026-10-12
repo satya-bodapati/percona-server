@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,9 +26,9 @@
 #include "my_config.h"
 
 #include <fcntl.h>
-#include <stdarg.h>
-#include <stdlib.h>
 #include <sys/types.h>
+#include <cstdarg>
+#include <cstdlib>
 
 #include <algorithm>
 
@@ -662,8 +663,8 @@ static int read_string(IO_CACHE *file, uchar **to, uint length) {
 static int file_info_compare(const void *, const void *a, const void *b) {
   long lint;
 
-  const file_info *file_a = static_cast<const struct file_info *>(a);
-  const file_info *file_b = static_cast<const struct file_info *>(b);
+  const auto *file_a = static_cast<const struct file_info *>(a);
+  const auto *file_b = static_cast<const struct file_info *>(b);
   if ((lint = file_a->process - file_b->process)) return lint < 0L ? -1 : 1;
   return file_a->filenr - file_b->filenr;
 }
@@ -671,8 +672,8 @@ static int file_info_compare(const void *, const void *a, const void *b) {
 /* ARGSUSED */
 
 static int test_if_open(void *v_key, element_count, void *v_param) {
-  file_info *key = static_cast<file_info *>(v_key);
-  test_if_open_param *param = static_cast<test_if_open_param *>(v_param);
+  auto *key = static_cast<file_info *>(v_key);
+  auto *param = static_cast<test_if_open_param *>(v_param);
   if (!strcmp(key->name, param->name) && key->id > param->max_id)
     param->max_id = key->id;
   return 0;
@@ -695,9 +696,8 @@ static void fix_blob_pointers(MI_INFO *info, uchar *record) {
 
 static int test_when_accessed(void *v_key, element_count,
                               void *v_access_param) {
-  file_info *key = static_cast<file_info *>(v_key);
-  st_access_param *access_param =
-      static_cast<st_access_param *>(v_access_param);
+  auto *key = static_cast<file_info *>(v_key);
+  auto *access_param = static_cast<st_access_param *>(v_access_param);
   if (key->accessed < access_param->min_accessed && !key->closed) {
     access_param->min_accessed = key->accessed;
     access_param->found = key;
@@ -706,7 +706,7 @@ static int test_when_accessed(void *v_key, element_count,
 }
 
 static void file_info_free(void *v_fileinfo, TREE_FREE, const void *) {
-  file_info *fileinfo = static_cast<file_info *>(v_fileinfo);
+  auto *fileinfo = static_cast<file_info *>(v_fileinfo);
   DBUG_TRACE;
   if (update) {
     if (!fileinfo->closed) (void)mi_close(fileinfo->isam);
@@ -774,7 +774,7 @@ static void printf_log(const char *format, ...) {
 
 static bool cmp_filename(struct file_info *file_info, const char *name) {
   if (!file_info) return true;
-  return strcmp(file_info->name, name) ? true : false;
+  return strcmp(file_info->name, name) != 0;
 }
 
 #include "storage/myisam/mi_extrafunc.h"

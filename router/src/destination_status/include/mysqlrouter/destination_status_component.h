@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,15 +26,12 @@
 #ifndef MYSQLROUTER_DESTINATION_STATUS_COMPONENT_INCLUDED
 #define MYSQLROUTER_DESTINATION_STATUS_COMPONENT_INCLUDED
 
+#include <chrono>
 #include <memory>
-#include <mutex>
-#include <unordered_map>
-#include <vector>
 
+#include "mysql/harness/destination.h"
 #include "mysqlrouter/destination_status_export.h"
 #include "mysqlrouter/destination_status_types.h"
-
-#include "tcp_address.h"
 
 class UnreachableDestinationsQuarantine;
 
@@ -109,7 +107,7 @@ class DESTINATION_STATUS_EXPORT DestinationStatusComponent {
    * @returns true if the destination got added to the quarantine, false
    * otherwise
    */
-  bool report_connection_result(const mysql_harness::TCPAddress &dest,
+  bool report_connection_result(const mysql_harness::Destination &dest,
                                 bool success);
 
   /**
@@ -119,7 +117,7 @@ class DESTINATION_STATUS_EXPORT DestinationStatusComponent {
    * @param[in] dest Destination candidate address.
    * @returns true if the destination candidate is quarantined, false otherwise.
    */
-  bool is_destination_quarantined(const mysql_harness::TCPAddress &dest);
+  bool is_destination_quarantined(const mysql_harness::Destination &dest);
 
   /**
    * Stop all async operations and clear the quarantine list.

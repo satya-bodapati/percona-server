@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -54,11 +55,19 @@ using std::min;
 Cached_item *new_Cached_item(THD *thd, Item *item) {
   switch (item->result_type()) {
     case STRING_RESULT:
-      if (item->is_temporal())
-        return new (thd->mem_root) Cached_item_temporal(item);
-      if (item->data_type() == MYSQL_TYPE_JSON)
-        return new (thd->mem_root) Cached_item_json(item);
-      return new (thd->mem_root) Cached_item_str(item);
+      switch (item->data_type()) {
+        case MYSQL_TYPE_TIME:
+          return new (thd->mem_root) Cached_item_time(item);
+        case MYSQL_TYPE_DATE:
+          return new (thd->mem_root) Cached_item_date(item);
+        case MYSQL_TYPE_DATETIME:
+        case MYSQL_TYPE_TIMESTAMP:
+          return new (thd->mem_root) Cached_item_temporal(item);
+        case MYSQL_TYPE_JSON:
+          return new (thd->mem_root) Cached_item_json(item);
+        default:
+          return new (thd->mem_root) Cached_item_str(item);
+      }
     case INT_RESULT:
       return new (thd->mem_root) Cached_item_int(item);
     case REAL_RESULT:
@@ -93,9 +102,11 @@ bool Cached_item_str::cmp() {
 }
 
 Cached_item_json::Cached_item_json(Item *item_arg)
-    : Cached_item(item_arg), m_value(new (*THR_MALLOC) Json_wrapper()) {}
+    : Cached_item(item_arg), m_value(new(*THR_MALLOC) Json_wrapper()) {}
 
-Cached_item_json::~Cached_item_json() { destroy(m_value); }
+Cached_item_json::~Cached_item_json() {
+  if (m_value != nullptr) ::destroy_at(m_value);
+}
 
 /**
   Compare the new JSON value in member 'item' with the previous value.
@@ -164,9 +175,54 @@ bool Cached_item_int::cmp() {
   return false;
 }
 
+bool Cached_item_time::cmp() {
+  DBUG_TRACE;
+  Time_val time;
+  if (item->val_time(&time) && current_thd->is_error()) return true;
+
+  if (item->null_value) {
+    if (null_value) return false;
+    null_value = true;
+    return true;
+  } else if (null_value || m_time.compare(time) != 0) {
+    null_value = false;
+    m_time = time;
+    return true;
+  }
+  return false;
+}
+
+bool Cached_item_date::cmp() {
+  DBUG_TRACE;
+  Date_val date;
+  if (item->val_date(&date, 0) && current_thd->is_error()) return true;
+
+  if (item->null_value) {
+    if (null_value) return false;
+    null_value = true;
+    return true;
+  } else if (null_value || m_date.compare(date) != 0) {
+    null_value = false;
+    m_date = date;
+    return true;
+  }
+  return false;
+}
+
 bool Cached_item_temporal::cmp() {
   DBUG_TRACE;
-  const longlong nr = item->val_temporal_by_field_type();
+  assert(item->data_type() != MYSQL_TYPE_TIME &&
+         item->data_type() != MYSQL_TYPE_DATE);
+  longlong nr = 0;
+  switch (item->data_type()) {
+    case MYSQL_TYPE_DATETIME:
+    case MYSQL_TYPE_TIMESTAMP:
+      nr = item->val_date_temporal();
+      break;
+    default:
+      assert(false);
+      break;
+  }
   DBUG_PRINT("info", ("old: %lld, new: %lld", value, nr));
   if (item->null_value) {
     if (null_value) return false;

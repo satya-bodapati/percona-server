@@ -1,15 +1,16 @@
-/* Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -162,5 +163,24 @@ class Condition_pushdown {
   /// Optimizer trace context
   Opt_trace_context *trace;
 };
+
+/**
+  Given an item and a query block, this function creates a clone of the
+  item (unresolved) by reparsing the item. Used during condition pushdown
+  to derived tables and during inlining of stored functions.
+
+  @param thd            Current thread.
+  @param item           Item to be reparsed to get a clone.
+  @param query_block    query block where expression is being parsed
+  @param derived_table  derived table to which the item belongs to.
+                        "nullptr" either when cloning to make a copy of the
+                        original condition to be pushed down to a derived table
+                        that has SET operations or when the function is used for
+                        stored function inlining.
+
+  @returns A copy of the original item (unresolved) on success else nullptr.
+*/
+Item *parse_expression(THD *thd, Item *item, Query_block *query_block,
+                       Table_ref *derived_table);
 
 #endif /* SQL_DERIVED_INCLUDED */

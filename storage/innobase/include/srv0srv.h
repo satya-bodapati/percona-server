@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2026, Oracle and/or its affiliates.
 Copyright (c) 2008, 2009, Google Inc.
 Copyright (c) 2009, Percona Inc.
 
@@ -21,12 +21,13 @@ This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -64,6 +65,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "trx0types.h"
 #include "ut0counter.h"
 
+#include <cstdint>
 #include <future>
 
 /* Global counters used inside InnoDB. */
@@ -252,10 +254,14 @@ struct Srv_threads {
   same shared state as m_page_cleaner_coordinator. */
   IB_thread *m_page_cleaner_workers;
 
-  /** Number of LRU manager threads and size of array below. */
+  /** Number of LRU manager threads and size of array below. One per
+  buf_pool instance. */
   size_t m_lru_managers_n;
 
-  /** LRU manager threads. */
+  /** LRU manager threads. When innodb_lru_threads is enabled, they are the
+  sole owners of buf_flush_LRU_list for free-list refill and the page
+  cleaner only flushes the flush_list; when disabled, no threads are
+  started and the page cleaner performs LRU flushing. */
   IB_thread *m_lru_managers;
 
   /** Archiver's log archiver (used by Clone). */
@@ -318,12 +324,6 @@ extern Srv_threads srv_threads;
 extern Srv_cpu_usage srv_cpu_usage;
 
 extern Log_DDL *log_ddl;
-
-#ifdef INNODB_DD_TABLE
-extern bool srv_is_upgrade_mode;
-extern bool srv_downgrade_logs;
-extern bool srv_upgrade_old_undo_found;
-#endif /* INNODB_DD_TABLE */
 
 extern bool srv_downgrade_partition_files;
 
@@ -424,15 +424,22 @@ Currently we support native aio on windows and linux */
 extern bool srv_use_native_aio;
 extern bool srv_numa_interleave;
 
+/** When true, buffer pool blocks are created with lightweight initialization
+and their latches (mutex, rw-locks) are created lazily on first use. When
+false (default), latches are created eagerly while the buffer pool is built. */
+extern bool srv_buf_pool_lazy_latch_init;
+
+/** Whether buffer pool allocations (huge and regular pages) are pre-populated
+(MAP_POPULATE and the explicit prefault step) at allocation time. Backed by the
+innodb_buffer_pool_populate system variable. */
+extern bool srv_buf_pool_populate;
+
 /* The innodb_directories variable value. This a list of directories
 deliminated by ';', i.e the FIL_PATH_SEPARATOR. */
 extern char *srv_innodb_directories;
 
 /** Server undo tablespaces directory, can be absolute path. */
 extern char *srv_undo_dir;
-
-/** Number of undo tablespaces to use. */
-extern ulong srv_undo_tablespaces;
 
 /** The number of rollback segments per tablespace */
 extern ulong srv_rollback_segments;
@@ -466,12 +473,6 @@ extern bool srv_redo_log_encrypt;
 
 /* Maximum number of redo files of a cloned DB. */
 constexpr size_t SRV_N_LOG_FILES_CLONE_MAX = 1000;
-
-/** Value of innodb_log_files_in_group. This is deprecated. */
-extern ulong srv_log_n_files;
-
-/** Value of innodb_log_file_size. Expressed in bytes. This is deprecated. */
-extern ulonglong srv_log_file_size;
 
 /** Value of innodb_redo_log_capacity. Expressed in bytes. Might be set
 during startup automatically when started in "dedicated server mode". */
@@ -512,10 +513,10 @@ writes to log buffer. The slots are addressed by LSN values modulo number
 of the slots. */
 extern ulong srv_log_recent_written_size;
 
-/** Number of slots in a small buffer, which is used to break requirement
+/** Number of slots in a small link buffer, which is used to break requirement
 for total order of dirty pages, when they are added to flush lists.
 The slots are addressed by LSN values modulo number of the slots. */
-extern ulong srv_log_recent_closed_size;
+extern ulong srv_buf_flush_list_added_size;
 
 /** Whether to activate/pause the log writer threads. */
 extern bool srv_log_writer_threads;
@@ -634,6 +635,8 @@ extern bool srv_validate_tablespace_paths;
 extern bool srv_use_fdatasync;
 /** Scan depth for LRU flush batch i.e.: number of blocks scanned*/
 extern ulong srv_LRU_scan_depth;
+/** Whether per-pool LRU manager threads are enabled (after recovery). */
+extern bool srv_lru_threads_enabled;
 /** Whether or not to flush neighbors of a block */
 extern ulong srv_flush_neighbors;
 /** Previously requested size. Accesses protected by memory barriers. */
@@ -649,14 +652,6 @@ extern ulong srv_buf_pool_dump_pct;
 extern ulint srv_show_locks_held;
 
 extern ulint srv_lock_table_size;
-
-extern ulint srv_cleaner_max_lru_time; /*!< the maximum time limit for a
-                                      single LRU tail flush iteration by the
-                                      page cleaner thread */
-
-extern ulint srv_cleaner_max_flush_time; /*!< the maximum time limit for a
-                                      single flush list flush iteration by
-                                      the page cleaner thread */
 
 extern ulong srv_cleaner_lsn_age_factor;
 /*!< page cleaner LSN age factor
@@ -683,8 +678,8 @@ extern ulong srv_io_capacity;
 
 /* We use this dummy default value at startup for max_io_capacity.
 The real value is set based on the value of io_capacity. */
-constexpr uint32_t SRV_MAX_IO_CAPACITY_DUMMY_DEFAULT = ~0U;
-constexpr uint32_t SRV_MAX_IO_CAPACITY_LIMIT = ~0U;
+constexpr uint32_t SRV_MAX_IO_CAPACITY_DUMMY_DEFAULT = UINT32_MAX;
+constexpr uint32_t SRV_MAX_IO_CAPACITY_LIMIT = UINT32_MAX;
 extern ulong srv_max_io_capacity;
 /* Returns the number of IO operations that is X percent of the
 capacity. PCT_IO(5) -> returns the number of IO operations that
@@ -750,6 +745,10 @@ If innodb_fast_shutdown=2, shutdown will effectively 'crash' InnoDB
 (but lose no committed transactions). */
 extern ulong srv_fast_shutdown;
 extern bool srv_innodb_status;
+
+/** Upper bound in bytes on memory held by HNSW vector index graphs across
+all tables and indexes; 0 means no limit. */
+extern unsigned long long srv_hnsw_max_memory;
 
 extern unsigned long long srv_stats_transient_sample_pages;
 extern bool srv_stats_persistent;
@@ -903,9 +902,10 @@ extern srv_stats_t srv_stats;
 #ifdef UNIV_PFS_THREAD
 extern mysql_pfs_key_t log_archiver_thread_key;
 extern mysql_pfs_key_t page_archiver_thread_key;
+extern mysql_pfs_key_t buf_pool_create_thread_key;
 extern mysql_pfs_key_t buf_dump_thread_key;
-extern mysql_pfs_key_t buf_lru_manager_thread_key;
 extern mysql_pfs_key_t buf_resize_thread_key;
+extern mysql_pfs_key_t buf_lru_manager_thread_key;
 extern mysql_pfs_key_t clone_ddl_thread_key;
 extern mysql_pfs_key_t clone_gtid_thread_key;
 extern mysql_pfs_key_t ddl_thread_key;
@@ -924,6 +924,7 @@ extern mysql_pfs_key_t log_write_notifier_thread_key;
 extern mysql_pfs_key_t log_flush_notifier_thread_key;
 extern mysql_pfs_key_t page_flush_coordinator_thread_key;
 extern mysql_pfs_key_t page_flush_thread_key;
+extern mysql_pfs_key_t recv_writer_thread_key;
 extern mysql_pfs_key_t srv_error_monitor_thread_key;
 extern mysql_pfs_key_t srv_lock_timeout_thread_key;
 extern mysql_pfs_key_t srv_master_thread_key;
@@ -989,25 +990,23 @@ extern PSI_stage_info srv_stage_clone_page_copy;
 /** Alternatives for the file flush option in Unix.
 @see innodb_flush_method_names */
 enum srv_unix_flush_t {
-  SRV_UNIX_FSYNC = 0,  /*!< fsync, the default */
-  SRV_UNIX_O_DSYNC,    /*!< open log files in O_SYNC mode */
-  SRV_UNIX_LITTLESYNC, /*!< do not call os_file_flush()
-                       when writing data files, but do flush
-                       after writing to log files */
-  SRV_UNIX_NOSYNC,     /*!< do not flush after writing */
-  SRV_UNIX_O_DIRECT,   /*!< invoke os_file_set_nocache() on
-                       data files. This implies using
-                       non-buffered IO but still using fsync,
-                       the reason for which is that some FS
-                       do not flush meta-data when
-                       unbuffered IO happens */
+  /** fsync, the default if O_DIRECT is not supported */
+  SRV_UNIX_FSYNC = 0,
+  /** open log files in O_SYNC mode */
+  SRV_UNIX_O_DSYNC,
+  /** do not call os_file_flush() when writing data files, but do flush after
+     writing to log files */
+  SRV_UNIX_LITTLESYNC,
+  /** do not flush after writing */
+  SRV_UNIX_NOSYNC,
+  /** invoke os_file_set_nocache() on data files. This implies using
+     non-buffered IO but still using fsync, the reason for which is that some FS
+     do not flush meta-data when unbuffered IO happens. Default if supported */
+  SRV_UNIX_O_DIRECT,
+  /** do not use fsync() when using direct IO i.e.: it can be set to avoid the
+     fsync() call that we make when using SRV_UNIX_O_DIRECT. However, in this
+     case user/DBA should be sure about the integrity of the meta-data */
   SRV_UNIX_O_DIRECT_NO_FSYNC
-  /*!< do not use fsync() when using
-  direct IO i.e.: it can be set to avoid
-  the fsync() call that we make when
-  using SRV_UNIX_O_DIRECT. However, in
-  this case user/DBA should be sure about
-  the integrity of the meta-data */
 };
 extern enum srv_unix_flush_t srv_unix_file_flush_method;
 
@@ -1223,11 +1222,11 @@ This is called during CREATE UNDO TABLESPACE.
 dberr_t srv_undo_tablespace_create(const char *space_name,
                                    const char *file_name, space_id_t space_id);
 
-/** Initialize undo::spaces and trx_sys_undo_spaces,
+/** Initialize undo::spaces,
 called once during srv_start(). */
 void undo_spaces_init();
 
-/** Free the resources occupied by undo::spaces and trx_sys_undo_spaces,
+/** Free the resources occupied by undo::spaces,
 called once during thread de-initialization. */
 void undo_spaces_deinit();
 
@@ -1253,7 +1252,7 @@ void srv_master_thread_disabled_debug_update(THD *thd, SYS_VAR *var,
 innodb_temp_tablespace_encrypt is TRUE
 @param[in]	enable	true to enable encryption, false to disable
 @return DB_SUCCESS on success, DB_ERROR on failure */
-MY_NODISCARD
+[[nodiscard]]
 dberr_t srv_temp_encryption_update(bool enable);
 
 /** Status variables to be passed to MySQL */
@@ -1365,6 +1364,7 @@ struct export_var_t {
   // Percona-added status variables
   ulint innodb_checkpoint_age;
   ulint innodb_checkpoint_max_age;
+  uint64_t innodb_hnsw_memory_used; /*!< Vec_arena::global_bytes() */
   ulint innodb_ibuf_free_list;
   ulint innodb_ibuf_segment_size;
   lsn_t innodb_lsn_current;

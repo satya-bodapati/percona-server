@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -30,10 +31,11 @@
   More functions to be used with IO_CACHE files
 */
 
-#include <stdarg.h>
-#include <stdio.h>
-#include <string.h>
 #include <sys/types.h>
+#include <cassert>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
 
 #include "my_dbug.h"
 #include "my_inttypes.h"
@@ -112,10 +114,10 @@ void my_b_seek(IO_CACHE *info, my_off_t pos) {
       /* The read is in the current buffer; Reuse it */
       info->read_pos = info->buffer + offset;
       return;
-    } else {
-      /* Force a new read on next my_b_read */
-      info->read_pos = info->read_end = info->buffer;
     }
+    /* Force a new read on next my_b_read */
+    info->read_pos = info->read_end = info->buffer;
+
   } else if (info->type == WRITE_CACHE) {
     /* If write is in current buffer, reuse it */
     if ((ulonglong)offset <=

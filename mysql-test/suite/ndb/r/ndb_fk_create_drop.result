@@ -46,17 +46,17 @@ child	CREATE TABLE `child` (
   CONSTRAINT `fk6` FOREIGN KEY (`c`) REFERENCES `parent` (`b`)
 ) ENGINE=ndbcluster DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 alter table child algorithm=copy, add constraint fk7 foreign key (a) references parent(c);
-ERROR HY000: Failed to add the foreign key constraint. Missing index for constraint 'fk7' in the referenced table 'parent'
+ERROR HY000: Failed to add the foreign key constraint. Missing unique key for constraint 'fk7' in the referenced table 'parent'
 alter table child algorithm=copy, add constraint fk8 foreign key (a) references parent(c);
-ERROR HY000: Failed to add the foreign key constraint. Missing index for constraint 'fk8' in the referenced table 'parent'
+ERROR HY000: Failed to add the foreign key constraint. Missing unique key for constraint 'fk8' in the referenced table 'parent'
 alter table child algorithm=copy, add constraint fk9 foreign key (a) references parent(c);
-ERROR HY000: Failed to add the foreign key constraint. Missing index for constraint 'fk9' in the referenced table 'parent'
+ERROR HY000: Failed to add the foreign key constraint. Missing unique key for constraint 'fk9' in the referenced table 'parent'
 alter table child algorithm=inplace, add constraint fk7 foreign key (a) references parent(c);
-ERROR HY000: Failed to add the foreign key constraint. Missing index for constraint 'fk7' in the referenced table 'parent'
+ERROR HY000: Failed to add the foreign key constraint. Missing unique key for constraint 'fk7' in the referenced table 'parent'
 alter table child algorithm=inplace, add constraint fk8 foreign key (a) references parent(c);
-ERROR HY000: Failed to add the foreign key constraint. Missing index for constraint 'fk8' in the referenced table 'parent'
+ERROR HY000: Failed to add the foreign key constraint. Missing unique key for constraint 'fk8' in the referenced table 'parent'
 alter table child algorithm=inplace, add constraint fk9 foreign key (a) references parent(c);
-ERROR HY000: Failed to add the foreign key constraint. Missing index for constraint 'fk9' in the referenced table 'parent'
+ERROR HY000: Failed to add the foreign key constraint. Missing unique key for constraint 'fk9' in the referenced table 'parent'
 drop table child, parent;
 create table parent (
 a int primary key,
@@ -237,3 +237,18 @@ foreign key fk1(b) references test(a)
 ) engine ndb;
 #Cleanup
 drop table test;
+#
+# Bug#38534367 : Dropping foreign key (with drop constraint) causes assertion failure (bad dereference)
+#
+create table parent (
+a int primary key,
+b int
+) engine ndb;
+create table child (
+a int primary key,
+b int,
+c int
+) engine = ndb;
+alter table child add foreign key(c) references parent(a);
+alter table child drop constraint child_fk_1;
+drop table parent, child;

@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -33,7 +34,7 @@ namespace ddl_rewriter_unittest {
 class DDL_rewriter_test : public ::testing::Test {
  public:
   DDL_rewriter_test() = default;
-  ~DDL_rewriter_test() = default;
+  ~DDL_rewriter_test() override = default;
 };
 
 struct Query_pair {
@@ -160,9 +161,9 @@ std::vector<Query_pair> missing_rewrite_queries{
      " CREATE TABLE t(i int) ENCRYPTION='N'"}};
 
 void test_queries(const std::vector<Query_pair> &queries) {
-  for (auto &q : queries) {
+  for (const auto &q : queries) {
     std::string rewrite_result;
-    bool expect_rewrite = (q.query != q.rewritten_query);
+    bool const expect_rewrite = (q.query != q.rewritten_query);
     EXPECT_EQ(query_rewritten(q.query, &rewrite_result), expect_rewrite);
     if (expect_rewrite) {
       EXPECT_EQ(rewrite_result, q.rewritten_query);

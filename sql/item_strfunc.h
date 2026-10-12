@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -40,6 +41,7 @@
 #include "mysql/udf_registration_types.h"
 #include "mysql_com.h"
 #include "mysql_time.h"
+#include "sql/auth/auth_common.h"
 #include "sql/enum_query_type.h"
 #include "sql/field.h"
 #include "sql/item.h"
@@ -49,6 +51,9 @@
 #include "sql/sql_const.h"
 #include "sql_string.h"
 #include "template_utils.h"  // pointer_cast
+#include "vector-common/vector_constants.h"
+
+#include <openssl/evp.h>
 
 class MY_LOCALE;
 class PT_item_list;
@@ -114,11 +119,12 @@ class Item_str_func : public Item_func {
   longlong val_int() override { return val_int_from_string(); }
   double val_real() override { return val_real_from_string(); }
   my_decimal *val_decimal(my_decimal *) override;
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_string(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_string(date, flags);
   }
-  bool get_time(MYSQL_TIME *ltime) override {
-    return get_time_from_string(ltime);
+  bool val_time(Time_val *time) override { return get_time_from_string(time); }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_string(dt, flags);
   }
   enum Item_result result_type() const override { return STRING_RESULT; }
   void left_right_max_length(THD *thd);
@@ -181,24 +187,6 @@ class Item_str_ascii_func : public Item_str_func {
   String *val_str_ascii(String *) override = 0;
 };
 
-class Item_func_md5 final : public Item_str_ascii_func {
-  String tmp_value;
-
- public:
-  Item_func_md5(const POS &pos, Item *a) : Item_str_ascii_func(pos, a) {}
-  String *val_str_ascii(String *) override;
-  bool resolve_type(THD *thd) override;
-  const char *func_name() const override { return "md5"; }
-};
-
-class Item_func_sha : public Item_str_ascii_func {
- public:
-  Item_func_sha(const POS &pos, Item *a) : Item_str_ascii_func(pos, a) {}
-  String *val_str_ascii(String *) override;
-  bool resolve_type(THD *thd) override;
-  const char *func_name() const override { return "sha"; }
-};
-
 class Item_func_sha2 : public Item_str_ascii_func {
  public:
   Item_func_sha2(const POS &pos, Item *a, Item *b)
@@ -213,6 +201,7 @@ class Item_func_to_base64 final : public Item_str_ascii_func {
 
  public:
   Item_func_to_base64(const POS &pos, Item *a) : Item_str_ascii_func(pos, a) {}
+  explicit Item_func_to_base64(Item *a) : Item_str_ascii_func(a) {}
   String *val_str_ascii(String *) override;
   bool resolve_type(THD *) override;
   const char *func_name() const override { return "to_base64"; }
@@ -266,7 +255,7 @@ class Item_func_statement_digest_text final : public Item_str_func {
   uchar *m_token_buffer{nullptr};
 };
 
-class Item_func_from_base64 final : public Item_str_func {
+class Item_func_from_base64 : public Item_str_func {
   String tmp_value;
 
  public:
@@ -279,20 +268,38 @@ class Item_func_from_base64 final : public Item_str_func {
 class Item_func_aes_encrypt final : public Item_str_func {
   String tmp_value;
   typedef Item_str_func super;
+  EVP_CIPHER_CTX *ctx{nullptr};
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
+  EVP_CIPHER_CTX stack_ctx;
+#endif
 
  public:
   Item_func_aes_encrypt(const POS &pos, Item *a, Item *b)
-      : Item_str_func(pos, a, b) {}
+      : Item_str_func(pos, a, b) {
+    create_op_context();
+  }
   Item_func_aes_encrypt(const POS &pos, Item *a, Item *b, Item *c)
-      : Item_str_func(pos, a, b, c) {}
+      : Item_str_func(pos, a, b, c) {
+    create_op_context();
+  }
   Item_func_aes_encrypt(const POS &pos, Item *a, Item *b, Item *c, Item *d)
-      : Item_str_func(pos, a, b, c, d) {}
+      : Item_str_func(pos, a, b, c, d) {
+    create_op_context();
+  }
   Item_func_aes_encrypt(const POS &pos, Item *a, Item *b, Item *c, Item *d,
                         Item *e)
-      : Item_str_func(pos, a, b, c, d, e) {}
+      : Item_str_func(pos, a, b, c, d, e) {
+    create_op_context();
+  }
   Item_func_aes_encrypt(const POS &pos, Item *a, Item *b, Item *c, Item *d,
                         Item *e, Item *f)
-      : Item_str_func(pos, a, b, c, d, e, f) {}
+      : Item_str_func(pos, a, b, c, d, e, f) {
+    create_op_context();
+  }
+  ~Item_func_aes_encrypt() override { destroy_op_context(); }
+
+  void create_op_context();
+  void destroy_op_context();
   bool do_itemize(Parse_context *pc, Item **res) override;
   String *val_str(String *) override;
   bool resolve_type(THD *) override;
@@ -301,20 +308,38 @@ class Item_func_aes_encrypt final : public Item_str_func {
 
 class Item_func_aes_decrypt : public Item_str_func {
   typedef Item_str_func super;
+  EVP_CIPHER_CTX *ctx{nullptr};
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
+  EVP_CIPHER_CTX stack_ctx;
+#endif
 
  public:
   Item_func_aes_decrypt(const POS &pos, Item *a, Item *b)
-      : Item_str_func(pos, a, b) {}
+      : Item_str_func(pos, a, b) {
+    create_op_context();
+  }
   Item_func_aes_decrypt(const POS &pos, Item *a, Item *b, Item *c)
-      : Item_str_func(pos, a, b, c) {}
+      : Item_str_func(pos, a, b, c) {
+    create_op_context();
+  }
   Item_func_aes_decrypt(const POS &pos, Item *a, Item *b, Item *c, Item *d)
-      : Item_str_func(pos, a, b, c, d) {}
+      : Item_str_func(pos, a, b, c, d) {
+    create_op_context();
+  }
   Item_func_aes_decrypt(const POS &pos, Item *a, Item *b, Item *c, Item *d,
                         Item *e)
-      : Item_str_func(pos, a, b, c, d, e) {}
+      : Item_str_func(pos, a, b, c, d, e) {
+    create_op_context();
+  }
   Item_func_aes_decrypt(const POS &pos, Item *a, Item *b, Item *c, Item *d,
                         Item *e, Item *f)
-      : Item_str_func(pos, a, b, c, d, e, f) {}
+      : Item_str_func(pos, a, b, c, d, e, f) {
+    create_op_context();
+  }
+  ~Item_func_aes_decrypt() override { destroy_op_context(); }
+
+  void create_op_context();
+  void destroy_op_context();
   bool do_itemize(Parse_context *pc, Item **res) override;
   String *val_str(String *) override;
   bool resolve_type(THD *thd) override;
@@ -368,6 +393,31 @@ class Item_func_concat_ws : public Item_str_func {
   String *val_str(String *) override;
   bool resolve_type(THD *thd) override;
   const char *func_name() const override { return "concat_ws"; }
+};
+
+/**
+  This class represents the function ETAG which is used to traverse the input
+  arguments and compute a 128 bits hash value.
+ */
+class Item_func_etag : public Item_str_func {
+  String m_tmp_value{"", 0, collation.collation};
+
+ public:
+  Item_func_etag(const POS &pos, PT_item_list *opt_list)
+      : Item_str_func(pos, opt_list) {}
+  Item_func_etag(Item *a, Item *b) : Item_str_func(a, b) {}
+
+  String *val_str(String *) override;
+  bool resolve_type(THD *thd) override;
+  const char *func_name() const override { return "etag"; }
+  bool check_function_as_value_generator(uchar *checker_args) override {
+    Check_function_as_value_generator_parameters *func_arg =
+        pointer_cast<Check_function_as_value_generator_parameters *>(
+            checker_args);
+    func_arg->banned_function_name = func_name();
+    return ((func_arg->source == VGS_GENERATED_COLUMN) ||
+            (func_arg->source == VGS_CHECK_CONSTRAINT));
+  }
 };
 
 class Item_func_reverse : public Item_str_func {
@@ -587,8 +637,6 @@ class Item_func_sysconst : public Item_str_func {
   explicit Item_func_sysconst(const POS &pos) : super(pos) {
     collation.set(system_charset_info, DERIVATION_SYSCONST);
   }
-
-  Item *safe_charset_converter(THD *thd, const CHARSET_INFO *tocs) override;
   /*
     Used to create correct Item name in new converted item in
     safe_charset_converter, return string representation of this function
@@ -615,7 +663,7 @@ class Item_func_database : public Item_func_sysconst {
 
   String *val_str(String *) override;
   bool resolve_type(THD *) override {
-    set_data_type_string(uint32{MAX_FIELD_NAME});
+    set_data_type_string(uint32{NAME_CHAR_LEN});
     set_nullable(true);
     return false;
   }
@@ -675,11 +723,24 @@ class Item_func_user : public Item_func_sysconst {
 
 class Item_func_current_user : public Item_func_user {
   typedef Item_func_user super;
+  /**
+     Used to pass a security context to the resolver functions.
+     Only used for definer views. In all other contexts, the security context
+     passed here is nullptr and is instead looked up dynamically at run time
+     from the current THD.
+  */
+  Name_resolution_context *m_name_resolution_ctx = nullptr;
 
-  Name_resolution_context *context;
+  /// Copied from m_name_resolution_ctx in fix_fields if the definer
+  /// Security_context is set in Name_resolution_context
+  LEX_CSTRING m_definer_priv_user = {};
+  LEX_CSTRING m_definer_priv_host = {};
 
  protected:
   type_conversion_status save_in_field_inner(Field *field, bool) override;
+
+  /// Overridden to copy definer priv_user and priv_host
+  bool resolve_type(THD *) override;
 
  public:
   explicit Item_func_current_user(const POS &pos) : super(pos) {}
@@ -718,41 +779,19 @@ class Item_func_elt final : public Item_str_func {
 class Item_func_make_set final : public Item_str_func {
   typedef Item_str_func super;
 
-  Item *item;
   String tmp_str;
 
  public:
-  Item_func_make_set(const POS &pos, Item *a, PT_item_list *opt_list)
-      : Item_str_func(pos, opt_list), item(a) {}
+  Item_func_make_set(const POS &pos, PT_item_list *opt_list)
+      : Item_str_func(pos, opt_list) {}
 
-  bool do_itemize(Parse_context *pc, Item **res) override;
   String *val_str(String *str) override;
-  bool fix_fields(THD *thd, Item **ref) override {
-    assert(!fixed);
-    bool res = ((!item->fixed && item->fix_fields(thd, &item)) ||
-                item->check_cols(1) || Item_func::fix_fields(thd, ref));
-    set_nullable(is_nullable() || item->is_nullable());
-    return res;
-  }
-  void split_sum_func(THD *thd, Ref_item_array ref_item_array,
-                      mem_root_deque<Item *> *fields) override;
+  bool fix_fields(THD *thd, Item **ref) override;
   bool resolve_type(THD *) override;
-  void update_used_tables() override;
   const char *func_name() const override { return "make_set"; }
 
-  bool walk(Item_processor processor, enum_walk walk, uchar *arg) override {
-    if ((walk & enum_walk::PREFIX) && (this->*processor)(arg)) return true;
-    if (item->walk(processor, walk, arg)) return true;
-    for (uint i = 0; i < arg_count; i++) {
-      if (args[i]->walk(processor, walk, arg)) return true;
-    }
-    return ((walk & enum_walk::POSTFIX) && (this->*processor)(arg));
-  }
-
-  Item *transform(Item_transformer transformer, uchar *arg) override;
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
-  Item *get_item() { return item; }
 };
 
 class Item_func_format final : public Item_str_ascii_func {
@@ -778,14 +817,17 @@ class Item_func_char final : public Item_str_func {
   Item_func_char(const POS &pos, PT_item_list *list)
       : Item_str_func(pos, list) {
     collation.set(&my_charset_bin);
+    null_on_null = false;
   }
   Item_func_char(const POS &pos, PT_item_list *list, const CHARSET_INFO *cs)
       : Item_str_func(pos, list) {
     collation.set(cs);
+    null_on_null = false;
   }
   String *val_str(String *) override;
   bool resolve_type(THD *thd) override {
     if (param_type_is_default(thd, 0, -1, MYSQL_TYPE_LONGLONG)) return true;
+    if (reject_vector_args()) return true;
     set_data_type_string(arg_count * 4U);
     return false;
   }
@@ -874,6 +916,7 @@ class Item_func_is_uuid final : public Item_bool_func {
   longlong val_int() override;
   const char *func_name() const override { return "is_uuid"; }
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     bool res = super::resolve_type(thd);
     set_nullable(true);
     return res;
@@ -930,6 +973,7 @@ class Item_func_like_range : public Item_str_func {
   bool resolve_type(THD *thd) override {
     if (param_type_is_default(thd, 0, 1)) return true;
     if (param_type_is_default(thd, 1, 2, MYSQL_TYPE_LONGLONG)) return true;
+    if (reject_vector_args()) return true;
     set_data_type_string(uint32{MAX_BLOB_WIDTH}, args[0]->collation);
     return false;
   }
@@ -1031,7 +1075,7 @@ class Item_typecast_char final : public Item_charset_conversion {
     m_cast_length = length_arg;
   }
   enum Functype functype() const override { return TYPECAST_FUNC; }
-  bool eq(const Item *item, bool binary_cmp) const override;
+  bool eq_specific(const Item *item) const override;
   const char *func_name() const override { return "cast_as_char"; }
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
@@ -1053,6 +1097,7 @@ class Item_load_file final : public Item_str_func {
   }
   bool resolve_type(THD *thd) override {
     if (param_type_is_default(thd, 0, 1)) return true;
+    if (reject_vector_args()) return true;
     collation.set(&my_charset_bin, DERIVATION_COERCIBLE);
     set_data_type_blob(MYSQL_TYPE_LONG_BLOB, MAX_BLOB_WIDTH);
     set_nullable(true);
@@ -1065,9 +1110,6 @@ class Item_load_file final : public Item_str_func {
     func_arg->banned_function_name = func_name();
     return true;
   }
-
-  // prevent caching of the item value in Item_func_isnull
-  table_map used_tables() const override { return (table_map)1L; }
 };
 
 class Item_func_export_set final : public Item_str_func {
@@ -1109,22 +1151,23 @@ class Item_func_conv_charset final : public Item_charset_conversion {
   const char *func_name() const override { return "convert"; }
   void print(const THD *thd, String *str,
              enum_query_type query_type) const override;
+  bool eq_specific(const Item *item) const override;
 };
 
 class Item_func_set_collation final : public Item_str_func {
   typedef Item_str_func super;
 
-  LEX_STRING collation_string;
+  LEX_CSTRING collation_string;
 
  public:
   Item_func_set_collation(const POS &pos, Item *a,
-                          const LEX_STRING &collation_string_arg)
+                          const LEX_CSTRING &collation_string_arg)
       : super(pos, a, nullptr), collation_string(collation_string_arg) {}
 
   bool do_itemize(Parse_context *pc, Item **res) override;
   String *val_str(String *) override;
   bool resolve_type(THD *) override;
-  bool eq(const Item *item, bool binary_cmp) const override;
+  bool eq(const Item *item) const override;
   const char *func_name() const override { return "collate"; }
   enum Functype functype() const override { return COLLATE_FUNC; }
   void print(const THD *thd, String *str,
@@ -1194,7 +1237,7 @@ class Item_func_weight_string final : public Item_str_func {
   bool do_itemize(Parse_context *pc, Item **res) override;
 
   const char *func_name() const override { return "weight_string"; }
-  bool eq(const Item *item, bool binary_cmp) const override;
+  bool eq_specific(const Item *item) const override;
   String *val_str(String *) override;
   bool resolve_type(THD *) override;
   void print(const THD *thd, String *str,
@@ -1226,6 +1269,7 @@ class Item_func_uncompressed_length final : public Item_int_func {
   const char *func_name() const override { return "uncompressed_length"; }
   bool resolve_type(THD *thd) override {
     if (param_type_is_default(thd, 0, 1)) return true;
+    if (reject_vector_args()) return true;
     max_length = 10;
     return false;
   }
@@ -1242,12 +1286,60 @@ class Item_func_compress final : public Item_str_func {
   String *val_str(String *str) override;
 };
 
+class Item_func_to_vector final : public Item_str_func {
+  String buffer;
+
+ public:
+  Item_func_to_vector(const POS &pos, Item *a) : Item_str_func(pos, a) {}
+  bool resolve_type(THD *thd) override;
+  const char *func_name() const override { return "to_vector"; }
+  String *val_str(String *str) override;
+};
+
+class Item_func_from_vector final : public Item_str_ascii_func {
+  static const uint32 per_value_chars = 16;
+  static const uint32 max_output_bytes =
+      (Field_vector::max_dimensions * Item_func_from_vector::per_value_chars);
+  String buffer;
+
+ public:
+  explicit Item_func_from_vector(Item *a) : Item_str_ascii_func(a) {}
+  Item_func_from_vector(const POS &pos, Item *a)
+      : Item_str_ascii_func(pos, a) {}
+  bool resolve_type(THD *thd) override;
+  const char *func_name() const override { return "from_vector"; }
+  String *val_str_ascii(String *str) override;
+};
+
+class Item_func_vector_distance final : public Item_real_func {
+  using Metric = vector_constants::Metric;
+  Metric m_metric{Metric::kEuclidean};
+
+ public:
+  Item_func_vector_distance(const POS &pos, Item *a, Item *b, Item *c)
+      : Item_real_func(pos, a, b, c) {}
+  bool do_itemize(Parse_context *pc, Item **res) override;
+  bool resolve_type(THD *thd) override;
+  const char *func_name() const override { return "distance"; }
+  enum Functype functype() const override { return VECTOR_DISTANCE_FUNC; }
+  double val_real() override;
+
+  /** @return true if an L2 (euclidean) HNSW index orders rows the same
+  way this call does - EUCLIDEAN is a monotonic (sqrt) transform of the
+  index's native squared metric, so both are servable. */
+  bool l2_index_servable() const {
+    return m_metric == Metric::kEuclidean ||
+           m_metric == Metric::kEuclideanSquared;
+  }
+};
+
 class Item_func_uncompress final : public Item_str_func {
   String buffer;
 
  public:
   Item_func_uncompress(const POS &pos, Item *a) : Item_str_func(pos, a) {}
   bool resolve_type(THD *thd) override {
+    if (reject_vector_args()) return true;
     if (Item_str_func::resolve_type(thd)) return true;
     set_nullable(true);
     set_data_type_string(uint32{MAX_BLOB_WIDTH});
@@ -1658,6 +1750,28 @@ class Item_func_get_dd_property_key_value final : public Item_str_func {
   String *val_str(String *) override;
 };
 
+class Item_func_get_jdv_property_key_value final : public Item_str_func {
+ public:
+  Item_func_get_jdv_property_key_value(const POS &pos, Item *a, Item *b,
+                                       Item *c, Item *d)
+      : Item_str_func(pos, a, b, c, d) {}
+
+  enum Functype functype() const override { return DD_INTERNAL_FUNC; }
+  bool resolve_type(THD *) override {
+    set_data_type_string(MAX_BLOB_WIDTH, system_charset_info);
+    set_nullable(true);
+    null_on_null = false;
+
+    return false;
+  }
+
+  const char *func_name() const override {
+    return "get_jdv_property_key_value";
+  }
+
+  String *val_str(String *) override;
+};
+
 class Item_func_remove_dd_property_key final : public Item_str_func {
  public:
   Item_func_remove_dd_property_key(const POS &pos, Item *a, Item *b)
@@ -1801,6 +1915,86 @@ class Item_func_internal_get_dd_column_extra final : public Item_str_func {
   }
 
   String *val_str(String *) override;
+};
+
+class Item_func_current_auth_id_type_in : public Item_bool_func {
+  typedef Item_bool_func super;
+
+ public:
+  Item_func_current_auth_id_type_in(const POS &pos, Item *a)
+      : Item_bool_func(pos, a) {}
+
+  bool check_function_as_value_generator(uchar *checker_args) final {
+    Check_function_as_value_generator_parameters *func_arg =
+        pointer_cast<Check_function_as_value_generator_parameters *>(
+            checker_args);
+    func_arg->banned_function_name = func_name();
+    return ((func_arg->source >= VGS_GENERATED_COLUMN) &&
+            (func_arg->source <= VGS_CHECK_CONSTRAINT));
+  }
+
+  longlong val_int() final;
+
+  bool do_itemize(Parse_context *pc, Item **res) final;
+
+  table_map get_initial_pseudo_tables() const final { return INNER_TABLE_BIT; }
+
+ private:
+  /**
+    Used to pass a security context to the resolver functions.
+    Only used for definer views. In all other contexts, the security context
+    passed here is nullptr and is instead looked up dynamically at run time
+    from the current THD.
+  */
+  Name_resolution_context *m_name_resolution_ctx = nullptr;
+
+#ifndef NDEBUG
+  // Keeps track of whether this function has been called. For testing only.
+  bool m_called = false;
+#endif
+
+  /**
+    Checks if the user or role in the security context is part of the
+    comma-separated list. Subclasses override this to check for correct auth ID
+    type (either user or role).
+  */
+  virtual bool auth_id_in(
+      const Security_context &sctx,
+      std::string_view comma_separated_auth_id_list) const = 0;
+};
+
+inline void tohex(char *to, uint64_t from, uint len) {
+  to += len;
+  while (len--) {
+    *--to = dig_vec_lower[from & 15];
+    from >>= 4;
+  }
+}
+
+class Item_func_current_role_in final
+    : public Item_func_current_auth_id_type_in {
+ public:
+  Item_func_current_role_in(const POS &pos, Item *a)
+      : Item_func_current_auth_id_type_in{pos, a} {}
+  const char *func_name() const override { return "current_role_in"; }
+  enum Functype functype() const override { return CURRENT_ROLE_IN_FUNC; }
+
+ private:
+  bool auth_id_in(const Security_context &sctx,
+                  std::string_view comma_separated_auth_id_list) const override;
+};
+
+class Item_func_current_user_in final
+    : public Item_func_current_auth_id_type_in {
+ public:
+  Item_func_current_user_in(const POS &pos, Item *a)
+      : Item_func_current_auth_id_type_in{pos, a} {}
+  const char *func_name() const override { return "current_user_in"; }
+  enum Functype functype() const override { return CURRENT_USER_IN_FUNC; }
+
+ private:
+  bool auth_id_in(const Security_context &sctx,
+                  std::string_view comma_separated_auth_id_list) const override;
 };
 
 #endif /* ITEM_STRFUNC_INCLUDED */

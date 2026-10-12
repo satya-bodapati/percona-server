@@ -7,9 +7,9 @@
 DROP TABLE IF EXISTS t1;
 
 CREATE TABLE t1 (
-  a varchar(32) character set utf8 collate utf8_bin NOT NULL,
-  b varchar(32) character set utf8 collate utf8_bin NOT NULL )
-DEFAULT CHARSET=utf8;
+  a varchar(32) character set utf8mb3 COLLATE utf8mb3_bin NOT NULL,
+  b varchar(32) character set utf8mb3 COLLATE utf8mb3_bin NOT NULL )
+DEFAULT CHARSET=utf8mb3;
 
 INSERT INTO t1 VALUES
   ('AAAAAAAAAA','AAAAAAAAAA'), ('AAAAAAAAAB','AAAAAAAAAB '),
@@ -26,7 +26,7 @@ set tmp_table_size=1024;
 # tmp table in query is converted from heap to myisam
 set session debug="d,raise_error";
 
---skip_if_hypergraph   # Does not use temporary tables for GROUP BY.
+--skip_if_hypergraph  # Does not fail for some plan choices with hypergraph.
 --replace_regex /in table '[^']+'/in table 'tmp_table'/
 SELECT MAX(a) FROM t1 GROUP BY a,b;
 

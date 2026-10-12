@@ -1,15 +1,16 @@
-/* Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -34,11 +35,10 @@
 #include "storage/perfschema/unittest/stub_pfs_global.h"
 #include "storage/perfschema/unittest/stub_pfs_plugin_table.h"
 #include "storage/perfschema/unittest/stub_pfs_tls_channel.h"
+#include "storage/perfschema/unittest/stub_server_logs.h"
 #include "storage/perfschema/unittest/stub_server_telemetry.h"
 #include "storage/perfschema/unittest/stub_telemetry_metrics.h"
 #include "unittest/mytap/tap.h"
-
-extern struct PSI_bootstrap PFS_bootstrap;
 
 static void test_oom() {
   int rc;
@@ -61,6 +61,8 @@ static void test_oom() {
   PSI_data_lock_bootstrap *data_lock_boot;
   PSI_system_bootstrap *system_boot;
   PSI_tls_channel_bootstrap *tls_channel_boot;
+  PSI_metric_bootstrap *metric_boot;
+  PSI_logs_client_bootstrap *logs_client_boot;
 
   memset(&param, 0xFF, sizeof(param));
   param.m_enabled = true;
@@ -101,6 +103,7 @@ static void test_oom() {
   param.m_memory_class_sizing = 10;
   param.m_meter_class_sizing = 5;
   param.m_metric_class_sizing = 10;
+  param.m_logger_class_sizing = 10;
   param.m_metadata_lock_sizing = 0;
   param.m_max_digest_length = 0;
   param.m_max_sql_text_length = 0;
@@ -132,7 +135,8 @@ static void test_oom() {
       &param, &thread_boot, &mutex_boot, &rwlock_boot, &cond_boot, &file_boot,
       &socket_boot, &table_boot, &mdl_boot, &idle_boot, &stage_boot,
       &statement_boot, &transaction_boot, &memory_boot, &error_boot,
-      &data_lock_boot, &system_boot, &tls_channel_boot);
+      &data_lock_boot, &system_boot, &tls_channel_boot, &metric_boot,
+      &logs_client_boot);
   ok(rc == 0, "init ok");
   thread_service = (PSI_thread_service_t *)thread_boot->get_interface(
       PSI_CURRENT_THREAD_VERSION);

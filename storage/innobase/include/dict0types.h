@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -51,6 +52,14 @@ struct ind_node_t;
 struct tab_node_t;
 struct dict_add_v_col_t;
 
+struct table_name_components {
+  std::string schema_name;
+  std::string table_name;
+  std::string partition;
+  std::string subpartition;
+  std::string directory;
+};
+
 namespace dd {
 class Partition;
 }
@@ -71,12 +80,6 @@ constexpr char SUB_PART_SEPARATOR[] = "#sp#";
 
 /** Sub-Partition separator length excluding terminating NULL */
 constexpr size_t SUB_PART_SEPARATOR_LEN = sizeof(SUB_PART_SEPARATOR) - 1;
-
-/** Alternative partition separator from 8.0.17 and older versions. */
-constexpr char ALT_PART_SEPARATOR[] = "#P#";
-
-/** Alternative sub-partition separator from 8.0.17 and older versions. */
-constexpr char ALT_SUB_PART_SEPARATOR[] = "#SP#";
 
 /** Schema separator is forward slash irrespective of platform. */
 constexpr char SCHEMA_SEPARATOR[] = "/";
@@ -152,6 +155,12 @@ void get_table(const std::string &dict_name, bool convert, std::string &schema,
 void get_table(const std::string &dict_name, std::string &schema,
                std::string &table);
 
+/** Get schema, table name, partition, subpartition and absolute directory
+from dictionary from filepath.
+@param[in]      path            path where the ibd file is located
+@return table_name_components struct with parsed out parts of the table name */
+std::optional<table_name_components> parse_tablespace_path(std::string path);
+
 /** Get partition and sub-partition name from partition string
 @param[in]      partition       partition string from dictionary table name
 @param[in]      convert         convert partition names to system cs
@@ -177,11 +186,6 @@ void build_table(const std::string &schema, const std::string &table,
 @param[out]     partition       partition string for dictionary table name */
 void build_partition(const dd::Partition *dd_part, std::string &partition);
 
-/** Build 5.7 style partition string from dd object.
-@param[in]      dd_part         partition object from DD
-@param[out]     partition       partition string for dictionary table name */
-void build_57_partition(const dd::Partition *dd_part, std::string &partition);
-
 /** Check if dd partition matches with innodb dictionary table name.
 @param[in]      dict_name       table name in innodb dictionary
 @param[in]      dd_part         partition object from DD
@@ -193,11 +197,6 @@ bool match_partition(const std::string &dict_name,
 names within a dictionary table name.
 @param[in,out]  dict_name       table name in dictionary */
 void convert_to_space(std::string &dict_name);
-
-/* Rebuild space name by replacing partition string from dictionary table name.
-@param[in]      dict_name       table name in dictionary
-@param[in,out]  space_name      space name to be rebuilt */
-void rebuild_space(const std::string &dict_name, std::string &space_name);
 
 /** Rebuild table name to convert from 5.7 format to 8.0.
 @param[in,out]  dict_name       table name in dictionary */

@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -31,6 +32,7 @@
 // http://wg21.link/p2164
 
 #include <iterator>
+#include <ranges>
 #include <tuple>
 #include <utility>  // declval, forward
 
@@ -142,6 +144,22 @@ constexpr auto enumerate(T &&iterable) {
   return enumerate_view{std::forward<T>(iterable)};
 }
 }  // namespace views
+
+/**
+ * Checks if a container contains a specified element. Implements
+ * https://en.cppreference.com/w/cpp/algorithm/ranges/contains
+ *
+ * @param container The container in which to search for the needle.
+ * @param needle The element to search for in the container.
+ * @return `true` if the needle is found in the container, `false` otherwise.
+ */
+template <std::ranges::input_range Range, typename T>
+  requires std::convertible_to<T, typename Range::value_type> bool
+contains(const Range &container, const T &needle) {
+  return std::find(container.begin(), container.end(), needle) !=
+         container.end();
+}
+
 }  // namespace stdx::ranges
 
 namespace stdx {

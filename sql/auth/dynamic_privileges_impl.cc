@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -156,7 +157,7 @@ DEFINE_BOOL_METHOD(dynamic_privilege_services_impl::unregister_privilege,
                                           Acl_cache_lock_mode::WRITE_MODE);
       DBUG_EXECUTE_IF("bug34594035_simulate_lock_failure",
                       DBUG_SET("+d,bug34594035_fail_acl_cache_lock"););
-      acl_cache_lock.lock();
+      if (!acl_cache_lock.lock()) return true;
       /* do a best effort erase from the deprecations too */
       get_dynamic_privilege_deprecations()->erase(priv);
 
@@ -269,6 +270,9 @@ bool dynamic_privilege_init(void) {
   my_service<SERVICE_TYPE(dynamic_privilege_register)> service(
       "dynamic_privilege_register.mysql_server", srv_registry);
   assert(service.is_valid());
+  my_service<SERVICE_TYPE(dynamic_privilege_deprecation)> deprecation_svc(
+      "dynamic_privilege_deprecation.mysql_server", srv_registry);
+  assert(deprecation_svc.is_valid());
   ret += service->register_privilege(STRING_WITH_LEN("ROLE_ADMIN"));
   ret += service->register_privilege(STRING_WITH_LEN("SYSTEM_VARIABLES_ADMIN"));
   ret += service->register_privilege(STRING_WITH_LEN("BINLOG_ADMIN"));
@@ -278,7 +282,6 @@ bool dynamic_privilege_init(void) {
       service->register_privilege(STRING_WITH_LEN("GROUP_REPLICATION_ADMIN"));
   ret += service->register_privilege(STRING_WITH_LEN("ENCRYPTION_KEY_ADMIN"));
   ret += service->register_privilege(STRING_WITH_LEN("CONNECTION_ADMIN"));
-  ret += service->register_privilege(STRING_WITH_LEN("SET_USER_ID"));
   ret += service->register_privilege(STRING_WITH_LEN("XA_RECOVER_ADMIN"));
   ret += service->register_privilege(
       STRING_WITH_LEN("PERSIST_RO_VARIABLES_ADMIN"));
@@ -300,11 +303,15 @@ bool dynamic_privilege_init(void) {
   ret += service->register_privilege(STRING_WITH_LEN("TELEMETRY_LOG_ADMIN"));
   ret += service->register_privilege(STRING_WITH_LEN("REPLICATION_APPLIER"));
   ret += service->register_privilege(STRING_WITH_LEN("SHOW_ROUTINE"));
+  ret += service->register_privilege(
+      STRING_WITH_LEN("CREATE_SPATIAL_REFERENCE_SYSTEM"));
   ret += service->register_privilege(STRING_WITH_LEN("INNODB_REDO_LOG_ENABLE"));
   ret += service->register_privilege(STRING_WITH_LEN("FLUSH_OPTIMIZER_COSTS"));
   ret += service->register_privilege(STRING_WITH_LEN("FLUSH_STATUS"));
   ret += service->register_privilege(STRING_WITH_LEN("FLUSH_USER_RESOURCES"));
   ret += service->register_privilege(STRING_WITH_LEN("FLUSH_TABLES"));
+  ret += service->register_privilege(STRING_WITH_LEN("FLUSH_PRIVILEGES"));
+  ret += deprecation_svc->add(STRING_WITH_LEN("FLUSH_PRIVILEGES"));
   ret +=
       service->register_privilege(STRING_WITH_LEN("GROUP_REPLICATION_STREAM"));
   ret += service->register_privilege(
@@ -316,12 +323,10 @@ bool dynamic_privilege_init(void) {
   ret += service->register_privilege(STRING_WITH_LEN("SET_ANY_DEFINER"));
   ret +=
       service->register_privilege(STRING_WITH_LEN("ALLOW_NONEXISTENT_DEFINER"));
-
-  // Set up default dynamic privileges deprecations
-  my_service<SERVICE_TYPE(dynamic_privilege_deprecation)> deprecation_service(
-      "dynamic_privilege_deprecation.mysql_server", srv_registry);
-  assert(deprecation_service.is_valid());
-  ret += deprecation_service->add(STRING_WITH_LEN("SET_USER_ID"));
+  ret += service->register_privilege(STRING_WITH_LEN("TRANSACTION_GTID_TAG"));
+  ret += service->register_privilege(STRING_WITH_LEN("OPTIMIZE_LOCAL_TABLE"));
+  ret += service->register_privilege(
+      STRING_WITH_LEN("MANAGE_DATA_MASKING_POLICY"));
 
   return ret != 0;
 }

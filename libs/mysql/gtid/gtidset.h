@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,8 +21,14 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
-#ifndef MYSQL_GTID_GTID_SET_H
-#define MYSQL_GTID_GTID_SET_H
+#ifndef MYSQL_GTID_GTIDSET_H
+#define MYSQL_GTID_GTIDSET_H
+
+#include "mysql/utils/deprecate_header.h"  // DEPRECATE_HEADER
+
+#ifndef NO_DEPRECATION_WARNING_FOR_HEADER_GTIDSET_H
+DEPRECATE_HEADER(libbinlogevents_include_gtids_gtidset)
+#endif
 
 #include <cstddef>
 #include <map>
@@ -30,6 +37,8 @@
 
 #include "mysql/gtid/global.h"
 #include "mysql/gtid/gtid.h"
+#include "mysql/gtid/tag.h"
+#include "mysql/gtid/tsid.h"
 
 /// @addtogroup GroupLibsMysqlGtid
 /// @{
@@ -236,39 +245,35 @@ class Gno_interval {
  */
 class Gtid_set {
  public:
-  static const inline std::string EMPTY_GTID_SET{""};
+  static const inline std::string empty_gtid_set_str{""};
   /// In 'UUID:INTERVAL:INTERVAL', this is the second ':'
-  static const inline std::string SEPARATOR_SEQNO_INTERVALS{":"};
+  static const inline std::string separator_interval{":"};
   /// In 'SID:GNO,SID:GNO', this is the ','
-  static const inline std::string SEPARATOR_UUID_SETS{","};
-
-  struct Uuid_comparator {
-    bool operator()(const Uuid &lhs, const Uuid &rhs) const;
-  };
+  static const inline std::string separator_uuid_set{","};
+  using Tag = mysql::gtid::Tag;
+  using Tsid = mysql::gtid::Tsid;
 
  protected:
-  virtual bool do_add(const Uuid &uuid, const Gno_interval &interval);
+  [[nodiscard]] virtual bool do_add(const Tsid &tsid,
+                                    const Gno_interval &interval);
+  [[nodiscard]] virtual bool do_add(const Uuid &uuid, const Tag &tag,
+                                    const Gno_interval &interval);
 
  public:
   /**
-   * @brief Gno_interval_list is a map between uuids and an ordered set of
-   * Gno_intervals.
+   * @brief Tsid_interval_map is a 2-level map between tsids and an ordered
+   * set of Gno_intervals.
+   * Uuid is mapped into GTID tags, each pair of Uuid and Tag (TSID) is mapped
+   * into ordered set of gno intervals
    */
-  typedef std::map<Uuid, std::set<Gno_interval>, Uuid_comparator>
-      Gno_interval_list;
+  using Interval_set = std::set<Gno_interval>;
+  using Tag_interval_map = std::map<Tag, Interval_set>;
+  using Tsid_interval_map = std::map<Uuid, Tag_interval_map>;
 
   Gtid_set() = default;
   virtual ~Gtid_set();
-  /**
-   * @brief Construct a new Gtid_set object from the other one provided.
-   *
-   * @note This operator does not check whether the parameters are valid
-   * or not. The caller should perform such check before calling this member
-   * function.
-   *
-   * @param other Gtid_set to be copied
-   */
-  Gtid_set(const Gtid_set &other);
+
+  Gtid_set(const Gtid_set &other) = delete;
 
   /**
    * @brief Copy assignment.
@@ -292,6 +297,15 @@ class Gtid_set {
   virtual bool operator==(const Gtid_set &other) const;
 
   /**
+   * @brief Iterates through recorded TSIDs and returns
+   * format of the Gtid_set
+   *
+   * @return Format of this GTID set
+   * @see Gtid_format
+   */
+  virtual Gtid_format get_gtid_set_format() const;
+
+  /**
    * @brief Adds a new interval indexed by the given uuid.
    *
    * @note This member function does not check whether the parameters are valid
@@ -301,14 +315,15 @@ class Gtid_set {
    * @return true if the there was an error adding the interval, false
    * otherwise.
    */
-  virtual bool add(const Uuid &uuid, const Gno_interval &interval);
+  [[nodiscard]] virtual bool add(const Tsid &tsid,
+                                 const Gno_interval &interval);
 
   /**
    * @brief Gets a copy of the internal set.
    *
    * @return an internal copy of the given set.
    */
-  virtual const Gno_interval_list &get_gtid_set() const;
+  virtual const Tsid_interval_map &get_gtid_set() const;
 
   /**
    * @brief Add a set of identifiers to this one.
@@ -322,6 +337,13 @@ class Gtid_set {
    * @return false otherwise.
    */
   virtual bool add(const Gtid_set &other);
+
+  /**
+   * @brief Get the num TSIDs held in the GTID set
+   *
+   * @return std::size_t Number of TSIDs
+   */
+  virtual std::size_t get_num_tsids() const;
 
   /**
    * @brief Adds the given identifier to this set.
@@ -380,14 +402,12 @@ class Gtid_set {
  protected:
   /**
    * @brief An ordered map of entries mapping Uuid to a list of intervals.
-   *
-   * The order is established using the Uuid_comparator.
    */
-  Gno_interval_list m_gtid_set{};
+  Tsid_interval_map m_gtid_set{};
 };
 
 }  // namespace mysql::gtid
 
 /// @}
 
-#endif  // MYSQL_GTID_GTID_SET_H
+#endif  // MYSQL_GTID_GTIDSET_H

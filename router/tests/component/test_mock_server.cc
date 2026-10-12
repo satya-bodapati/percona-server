@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -31,11 +32,13 @@
 #include "mysqlxclient.h"
 #include "mysqlxclient/xerror.h"
 #include "mysqlxclient/xrow.h"
+#include "process_wrapper.h"
 #include "router/src/routing/tests/mysql_client.h"
 #include "router_component_test.h"
 #include "router_config.h"
 #include "stdx_expected_no_error.h"
 #include "tcp_port_pool.h"
+#include "test/temp_directory.h"
 
 using namespace std::chrono_literals;
 using namespace std::string_literals;
@@ -97,8 +100,10 @@ class MockServerCLITest
 
 TEST_P(MockServerCLITest, check) {
   SCOPED_TRACE("// start binary");
-  auto &cmd = launch_mysql_server_mock(GetParam().cmdline_args, 0 /* = port */,
-                                       GetParam().expected_exit_code, -1s);
+  auto &cmd = mock_server_spawner()
+                  .expected_exit_code(GetParam().expected_exit_code)
+                  .wait_for_sync_point(Spawner::SyncPoint::NONE)
+                  .spawn(GetParam().cmdline_args);
 
   SCOPED_TRACE("// wait for exit");
   check_exit_code(cmd, GetParam().expected_exit_code, 5s);
@@ -242,25 +247,11 @@ INSTANTIATE_TEST_SUITE_P(Spec, MockServerCLITest,
 class MockServerCLITestBase : public RouterComponentTest {};
 
 TEST_F(MockServerCLITestBase, classic_many_connections) {
-  auto mysql_server_mock_path = get_mysqlserver_mock_exec().str();
   auto bind_port = port_pool_.get_next_available();
-  ASSERT_THAT(mysql_server_mock_path, ::testing::StrNe(""));
 
-  std::map<std::string, std::string> config{
-      {"--module-prefix", get_data_dir().str()},
-      {"--filename", get_data_dir().join("my_port.js").str()},
-      {"--port", std::to_string(bind_port)},
-  };
-
-  std::vector<std::string> cmdline_args;
-
-  for (const auto &arg : config) {
-    cmdline_args.push_back(arg.first);
-    cmdline_args.push_back(arg.second);
-  }
-
-  SCOPED_TRACE("// start " + mysql_server_mock_path);
-  spawner(mysql_server_mock_path).with_core_dump(true).spawn(cmdline_args);
+  SCOPED_TRACE("// start mock-server");
+  mock_server_spawner().spawn(
+      mock_server_cmdline("my_port.js").port(bind_port).args());
 
   // Opening a new connection takes ~12ms on a dev-machine.
   //
@@ -406,11 +397,12 @@ TEST_P(MockServerConnectOkTest, classic_protocol) {
     }
   }
 
+  cmdline_args.emplace_back("--bind-address=127.0.0.1");
   cmdline_args.emplace_back("--port");
   cmdline_args.push_back(std::to_string(bind_port));
 
   SCOPED_TRACE("// start binary");
-  launch_mysql_server_mock(cmdline_args, bind_port);
+  mock_server_spawner().spawn(cmdline_args);
 
   SCOPED_TRACE("// checking "s + GetParam().test_name);
   classic_protocol_connect_ok(config.at("hostname"), bind_port);
@@ -425,6 +417,7 @@ TEST_P(MockServerConnectOkTest, x_protocol) {
       {"datadir", get_data_dir().str()},
       {"certdir", SSL_TEST_DATA_DIR},
       {"hostname", "127.0.0.1"},
+      {"bind_address", "127.0.0.1"},
   };
 
   std::vector<std::string> cmdline_args{"--logging-folder",
@@ -438,6 +431,7 @@ TEST_P(MockServerConnectOkTest, x_protocol) {
     }
   }
 
+  cmdline_args.emplace_back("--bind-address=127.0.0.1");
   // set the classic port even though we don't use it.
   // otherwise it defaults to bind to port 3306 which may lead to "Address
   // already in use"
@@ -448,7 +442,7 @@ TEST_P(MockServerConnectOkTest, x_protocol) {
   cmdline_args.push_back(std::to_string(bind_port));
 
   SCOPED_TRACE("// start binary");
-  launch_mysql_server_mock(cmdline_args, other_bind_port);
+  mock_server_spawner().spawn(cmdline_args);
 
   SCOPED_TRACE("// checking "s + GetParam().test_name);
   x_protocol_connect_ok(config.at("hostname"), bind_port);
@@ -584,6 +578,8 @@ class MockServerConnectTest
       public ::testing::WithParamInterface<MockServerConnectTestParam> {};
 
 TEST_P(MockServerConnectTest, check) {
+  TempDirectory tmp_dir;
+
   auto classic_port = port_pool_.get_next_available();
   std::map<std::string, std::string> config{
       {"http_port", std::to_string(port_pool_.get_next_available())},
@@ -592,6 +588,8 @@ TEST_P(MockServerConnectTest, check) {
       {"datadir", get_data_dir().str()},
       {"certdir", SSL_TEST_DATA_DIR},
       {"hostname", "127.0.0.1"},
+      {"socket", Path(tmp_dir.name()).join("mock.sock").str()},
+      {"plugin_dir", plugin_output_directory()},
   };
 
   std::vector<std::string> cmdline_args{"--logging-folder",
@@ -606,7 +604,7 @@ TEST_P(MockServerConnectTest, check) {
   }
 
   SCOPED_TRACE("// start binary");
-  launch_mysql_server_mock(cmdline_args, classic_port);
+  mock_server_spawner().spawn(cmdline_args);
 
   SCOPED_TRACE("// checking "s + GetParam().test_name);
   GetParam().checker(config);
@@ -619,6 +617,7 @@ const MockServerConnectTestParam mock_server_connect_test_param[] = {
          "--filename", "@datadir@/mock_server_require_password.js",  //
          "--module-prefix", "@datadir@",                             //
          "--port", "@port@",                                         //
+         "--bind-address", "127.0.0.1",                              //
          "--verbose",                                                //
      },
      [](const std::map<std::string, std::string> &config) {
@@ -637,6 +636,9 @@ const MockServerConnectTestParam mock_server_connect_test_param[] = {
        // if auth-method-name is invalid, the connect will fail.
        ASSERT_TRUE(opt_res) << opt_res.error().message();
 
+       sess.set_option(mysqlrouter::MySQLSession::PluginDir(
+           config.at("plugin_dir").c_str()));
+
        try {
          sess.connect(host, port,
                       username,  // user
@@ -644,6 +646,11 @@ const MockServerConnectTestParam mock_server_connect_test_param[] = {
                       "",        // socket
                       ""         // schema
          );
+       } catch (const mysqlrouter::MySQLSession::Error &e) {
+         // Authentication plugin 'mysql_native_password' cannot be loaded: ...
+         // (2059)
+
+         ASSERT_EQ(e.code(), 2059) << e.what();
        } catch (const std::exception &e) {
          FAIL() << e.what();
        }
@@ -653,6 +660,7 @@ const MockServerConnectTestParam mock_server_connect_test_param[] = {
      {
          "--filename", "@datadir@/mock_server_cert_verify_cert.js",  //
          "--module-prefix", "@datadir@",                             //
+         "--bind-address", "127.0.0.1",                              //
          "--port", "@port@",                                         //
          "--ssl-mode", "required",                                   //
          "--ssl-ca", "@certdir@/crl-ca-cert.pem",                    //
@@ -669,6 +677,7 @@ const MockServerConnectTestParam mock_server_connect_test_param[] = {
      {
          "--filename", "@datadir@/mock_server_require_password.js",  //
          "--module-prefix", "@datadir@",                             //
+         "--bind-address", "127.0.0.1",                              //
          "--port", "@port@",                                         //
          "--ssl-mode", "preferred",                                  //
          "--ssl-key", "@certdir@/server-key.pem",                    //
@@ -684,6 +693,7 @@ const MockServerConnectTestParam mock_server_connect_test_param[] = {
      {
          "--filename", "@datadir@/mock_server_require_username.js",  //
          "--module-prefix", "@datadir@",                             //
+         "--bind-address", "127.0.0.1",                              //
          "--port", "@port@",                                         //
          "--ssl-mode", "preferred",                                  //
          "--ssl-key", "@certdir@/server-key.pem",                    //
@@ -700,6 +710,7 @@ const MockServerConnectTestParam mock_server_connect_test_param[] = {
      {
          "--filename", "@datadir@/my_port.js",       //
          "--module-prefix", "@datadir@",             //
+         "--bind-address", "127.0.0.1",              //
          "--port", "@port@",                         //
          "--ssl-mode", "preferred",                  //
          "--ssl-key", "@certdir@/server-key.pem",    //
@@ -725,6 +736,7 @@ const MockServerConnectTestParam mock_server_connect_test_param[] = {
      {
          "--filename", "@datadir@/mock_server_cert_verify_cert.js",  //
          "--module-prefix", "@datadir@",                             //
+         "--bind-address", "127.0.0.1",                              //
          "--port", "@port@",                                         //
          "--ssl-mode", "required",                                   //
          "--ssl-ca", "@certdir@/crl-ca-cert.pem",                    //
@@ -756,6 +768,7 @@ const MockServerConnectTestParam mock_server_connect_test_param[] = {
      {
          "--filename", "@datadir@/mock_server_cert_verify_issuer.js",  //
          "--module-prefix", "@datadir@",                               //
+         "--bind-address", "127.0.0.1",                                //
          "--port", "@port@",                                           //
          "--ssl-mode", "required",                                     //
          "--ssl-ca", "@certdir@/crl-ca-cert.pem",                      //
@@ -786,6 +799,7 @@ const MockServerConnectTestParam mock_server_connect_test_param[] = {
      {
          "--filename", "@datadir@/mock_server_cert_verify_subject.js",  //
          "--module-prefix", "@datadir@",                                //
+         "--bind-address", "127.0.0.1",                                 //
          "--port", "@port@",                                            //
          "--ssl-mode", "required",                                      //
          "--ssl-ca", "@certdir@/crl-ca-cert.pem",                       //
@@ -816,6 +830,7 @@ const MockServerConnectTestParam mock_server_connect_test_param[] = {
      {
          "--filename", "@datadir@/mock_server_cert_verify_subject.js",  //
          "--module-prefix", "@datadir@",                                //
+         "--bind-address", "127.0.0.1",                                 //
          "--port", "@port@",                                            //
          "--ssl-mode", "required",                                      //
          "--ssl-ca", "@certdir@/crl-ca-cert.pem",                       //
@@ -850,6 +865,7 @@ const MockServerConnectTestParam mock_server_connect_test_param[] = {
      {
          "--filename", "@datadir@/mock_server_cert_verify_subject.js",  //
          "--module-prefix", "@datadir@",                                //
+         "--bind-address", "127.0.0.1",                                 //
          "--port", "@port@",                                            //
          "--ssl-mode", "required",                                      //
          "--ssl-ca", "@certdir@/crl-ca-cert.pem",                       //
@@ -888,6 +904,7 @@ const MockServerConnectTestParam mock_server_connect_test_param[] = {
      {
          "--filename", "@datadir@/mock_server_cert_verify_subject.js",  //
          "--module-prefix", "@datadir@",                                //
+         "--bind-address", "127.0.0.1",                                 //
          "--port", "@port@",                                            //
          "--ssl-mode", "required",                                      //
          "--ssl-ca", "@certdir@/crl-ca-cert.pem",                       //
@@ -922,6 +939,7 @@ const MockServerConnectTestParam mock_server_connect_test_param[] = {
      {
          "--filename", "@datadir@/mock_server_cert_verify_subject.js",  //
          "--module-prefix", "@datadir@",                                //
+         "--bind-address", "127.0.0.1",                                 //
          "--port", "@port@",                                            //
          "--ssl-mode", "required",                                      //
          "--ssl-ca", "@certdir@/crl-ca-cert.pem",                       //
@@ -963,6 +981,7 @@ const MockServerConnectTestParam mock_server_connect_test_param[] = {
      {
          "--filename", "@datadir@/mock_server_cert_verify_subject.js",  //
          "--module-prefix", "@datadir@",                                //
+         "--bind-address", "127.0.0.1",                                 //
          "--port", "@port@",                                            //
          "--ssl-mode", "required",                                      //
          "--ssl-ca", "@certdir@/crl-ca-cert.pem",                       //
@@ -1005,15 +1024,16 @@ const MockServerConnectTestParam mock_server_connect_test_param[] = {
      }},
     {"xproto_mysqlsh_select_connection_id",
      {
-         "--filename", "@datadir@/tls_endpoint.js",      //
-         "--module-prefix", "@datadir@",                 //
-         "--port", "@port@",                             //
-         "--xport", "@xport@",                           //
-         "--ssl-mode", "required",                       //
-         "--ssl-ca", "@certdir@/crl-ca-cert.pem",        //
-         "--ssl-key", "@certdir@/crl-server-key.pem",    //
-         "--ssl-cert", "@certdir@/crl-server-cert.pem",  //
-         "--tls-version", "TLSv1.2",                     //
+         "--filename",      "@datadir@/tls_endpoint.js",      //
+         "--module-prefix", "@datadir@",                      //
+         "--bind-address",  "127.0.0.1",                      //
+         "--port",          "@port@",                         //
+         "--xport",         "@xport@",                        //
+         "--ssl-mode",      "required",                       //
+         "--ssl-ca",        "@certdir@/crl-ca-cert.pem",      //
+         "--ssl-key",       "@certdir@/crl-server-key.pem",   //
+         "--ssl-cert",      "@certdir@/crl-server-cert.pem",  //
+         "--tls-version",   "TLSv1.2",                        //
      },
      [](const std::map<std::string, std::string> &config) {
        auto sess = xcl::create_session();
@@ -1054,8 +1074,44 @@ const MockServerConnectTestParam mock_server_connect_test_param[] = {
        std::string version_string;
        ASSERT_TRUE(row->get_string(1, &version_string));
        ASSERT_THAT(version_string,
-                   ::testing::SizeIs(::testing::Gt(5)));  // x.y.z
+                   ::testing::SizeIs(::testing::Ge(5)));  // x.y.z
      }},
+    {"via_socket",
+     // connect via unix-domain socket.
+     {
+         "--filename", "@datadir@/my_port.js",  //
+         "--module-prefix", "@datadir@",        //
+         "--socket", "@socket@",                //
+     },
+     [](const std::map<std::string, std::string> &config) {
+#ifdef _WIN32
+       GTEST_SKIP() << "libmysqlclient does not support connecting to "
+                       "unix-sockets on windows.";
+#endif
+       auto sock = config.at("socket");
+       const char username[] = "username";
+       const char password[] = "password";
+
+       mysqlrouter::MySQLSession sess;
+
+       try {
+         sess.connect("localhost", 0,
+                      username,  // user
+                      password,  // pass
+                      sock,      // socket
+                      ""         // schema
+         );
+       } catch (const mysqlrouter::MySQLSession::Error &e) {
+         FAIL() << e.what();
+       } catch (const std::exception &e) {
+         FAIL() << e.what();
+       }
+
+       auto row = sess.query_one("select @@port");
+       ASSERT_EQ(row->size(), 1);
+       EXPECT_STREQ((*row)[0], "0");
+     }},
+
 };
 
 INSTANTIATE_TEST_SUITE_P(Spec, MockServerConnectTest,
@@ -1083,6 +1139,7 @@ TEST_P(MockServerCoreTest, check) {
 
   std::map<std::string, std::string> config{
       {"http_port", std::to_string(port_pool_.get_next_available())},
+      {"bind_address", "127.0.0.1"},
       {"port", std::to_string(port_pool_.get_next_available())},
       {"xport", std::to_string(port_pool_.get_next_available())},
       {"datadir", get_data_dir().str()},
@@ -1124,6 +1181,7 @@ const MockServerCoreTestParam mock_server_core_test_param[] = {
      {
          "--filename", "@datadir@/mock_server_require_password.js",  //
          "--module-prefix", "@datadir@",                             //
+         "--bind-address", "127.0.0.1",                              //
          "--port", "@port@",                                         //
          "--core-file",                                              //
      },
@@ -1132,6 +1190,7 @@ const MockServerCoreTestParam mock_server_core_test_param[] = {
      {
          "--filename", "@datadir@/mock_server_require_password.js",  //
          "--module-prefix", "@datadir@",                             //
+         "--bind-address", "127.0.0.1",                              //
          "--port", "@port@",                                         //
          "--core-file", "0",                                         //
      },
@@ -1140,6 +1199,7 @@ const MockServerCoreTestParam mock_server_core_test_param[] = {
      {
          "--filename", "@datadir@/mock_server_require_password.js",  //
          "--module-prefix", "@datadir@",                             //
+         "--bind-address", "127.0.0.1",                              //
          "--port", "@port@",                                         //
          "--core-file", "1",                                         //
      },
@@ -1148,6 +1208,7 @@ const MockServerCoreTestParam mock_server_core_test_param[] = {
      {
          "--filename", "@datadir@/mock_server_require_password.js",  //
          "--module-prefix", "@datadir@",                             //
+         "--bind-address", "127.0.0.1",                              //
          "--port", "@port@",                                         //
          "--core-file", "abc",                                       //
      },
@@ -1171,28 +1232,23 @@ class MockServerCommandTest
       public ::testing::WithParamInterface<MockServerCommandTestParam> {};
 
 TEST_P(MockServerCommandTest, check) {
-  auto mysql_server_mock_path = get_mysqlserver_mock_exec().str();
-
-  ASSERT_THAT(mysql_server_mock_path, ::testing::StrNe(""));
-
   auto port = port_pool_.get_next_available();
   auto xport = port_pool_.get_next_available();
 
   SCOPED_TRACE("// start mock-server");
-  spawner(mysql_server_mock_path)
-      .with_core_dump(true)
-      .spawn({
-          "--logging-folder",
-          get_test_temp_dir_name(),
-          "--module-prefix",
-          get_data_dir().str(),
-          "--port",
-          std::to_string(port),
-          "--xport",
-          std::to_string(xport),
-          "--filename",
-          get_data_dir().join("session_tracker.js").str(),
-      });
+  mock_server_spawner().spawn({
+      "--logging-folder",
+      get_test_temp_dir_name(),
+      "--module-prefix",
+      get_data_dir().str(),
+      "--bind-address=127.0.0.1",
+      "--port",
+      std::to_string(port),
+      "--xport",
+      std::to_string(xport),
+      "--filename",
+      get_data_dir().join("session_tracker.js").str(),
+  });
 
   MysqlClient cli;
   ASSERT_NO_ERROR(cli.connect("127.0.0.1", port));

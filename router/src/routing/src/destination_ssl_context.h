@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -33,7 +34,7 @@
 #include <string>
 
 #include "mysql/harness/tls_client_context.h"
-#include "ssl_mode.h"  // SslVerify
+#include "mysqlrouter/ssl_mode.h"  // SslVerify
 
 /**
  * TlsClientContext per destination.
@@ -81,6 +82,19 @@ class ROUTING_EXPORT DestinationTlsContext {
    */
   void ciphers(const std::string &ciphers);
 
+  SslVerify get_verify();
+  const std::string &get_ca_file();
+  const std::string &get_ca_path();
+  const std::string &get_crl_file();
+  const std::string &get_crl_path();
+  const std::string &get_curves();
+  const std::string &get_ciphers();
+
+  /**
+   * set client-key and its cert.
+   */
+  void client_key_and_cert_file(std::string key, std::string cert);
+
   /**
    * get a TlsClientContent for a destination.
    *
@@ -115,6 +129,9 @@ class ROUTING_EXPORT DestinationTlsContext {
   std::string crl_path_;
   std::string curves_;
   std::string ciphers_;
+
+  std::string cert_file_;
+  std::string key_file_;
 
   std::map<std::string, std::unique_ptr<TlsClientContext>> tls_contexts_;
 

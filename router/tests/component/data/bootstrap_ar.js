@@ -1,9 +1,30 @@
 var common_stmts = require("common_statements");
 
+if (mysqld.global.upd_attr_config_json === undefined) {
+  mysqld.global.upd_attr_config_json = "";
+}
+
+if (mysqld.global.upd_attr_config_defaults_and_schema_json === undefined) {
+  mysqld.global.upd_attr_config_defaults_and_schema_json = "";
+}
+
+if (mysqld.global.config_defaults_stored_is_null === undefined) {
+  mysqld.global.config_defaults_stored_is_null = 0;
+}
+
 var options = {
   cluster_type: "ar",
-  innodb_cluster_name: "mycluster",
+  router_version: mysqld.global.router_version,
+  config_defaults_stored_is_null: mysqld.global.config_defaults_stored_is_null,
+
+  innodb_cluster_name: "my-cluster",
+  innodb_cluster_instances:
+      [["localhost", 5500], ["localhost", 5510], ["localhost", 5520]],
 };
+
+if (mysqld.global.server_version === undefined) {
+  mysqld.global.server_version = "8.3.0";
+}
 
 var common_responses = common_stmts.prepare_statement_responses(
     [
@@ -20,6 +41,7 @@ var common_responses = common_stmts.prepare_statement_responses(
       "router_start_transaction",
       "router_commit",
       "router_select_metadata_v2_ar_account_verification",
+      "get_routing_guidelines_version",
     ],
     options);
 
@@ -28,16 +50,27 @@ var common_responses_regex = common_stmts.prepare_statement_responses_regex(
       "router_insert_into_routers",
       "router_delete_old_accounts",
       "router_create_user_if_not_exists",
+      "router_check_auth_plugin",
       "router_grant_on_metadata_db",
       "router_grant_on_pfs_db",
       "router_grant_on_routers",
       "router_grant_on_v2_routers",
-      "router_update_routers_in_metadata",
+      "router_grant_on_router_stats",
       "router_update_router_options_in_metadata",
+      "router_select_config_defaults_stored_ar_cluster",
+      "get_local_cluster_name",
+      "router_update_local_cluster_in_metadata",
     ],
     options);
 
+var router_update_attributes =
+    common_stmts.get("router_update_routers_in_metadata", options);
+
+var router_store_config_defaults_ar_cluster =
+    common_stmts.get("router_store_config_defaults_ar_cluster", options);
+
 ({
+  handshake: {greeting: {server_version: mysqld.global.server_version}},
   stmts: function(stmt) {
     var res;
     if (common_responses.hasOwnProperty(stmt)) {
@@ -46,6 +79,13 @@ var common_responses_regex = common_stmts.prepare_statement_responses_regex(
         (res = common_stmts.handle_regex_stmt(stmt, common_responses_regex)) !==
         undefined) {
       return res;
+    } else if (res = stmt.match(router_update_attributes.stmt_regex)) {
+      mysqld.global.upd_attr_config_json = res[1];
+      return router_update_attributes;
+    } else if (
+        res = stmt.match(router_store_config_defaults_ar_cluster.stmt_regex)) {
+      mysqld.global.upd_attr_config_defaults_and_schema_json = res[1];
+      return router_store_config_defaults_ar_cluster;
     } else {
       return common_stmts.unknown_statement_response(stmt);
     }

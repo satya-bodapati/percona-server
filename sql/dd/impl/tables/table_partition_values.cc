@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -38,11 +39,10 @@
 #include "sql/key.h"
 #include "sql/table.h"
 
-namespace dd {
-namespace tables {
+namespace dd::tables {
 
 const Table_partition_values &Table_partition_values::instance() {
-  static Table_partition_values *s_instance = new Table_partition_values();
+  static auto *s_instance = new Table_partition_values();
   return *s_instance;
 }
 
@@ -77,7 +77,8 @@ Table_partition_values::Table_partition_values() {
 
 class Table_partition_values_pk : public Object_key {
  public:
-  Table_partition_values_pk(int partition_id, int list_num, int column_num)
+  Table_partition_values_pk(Object_id partition_id, int list_num,
+                            int column_num)
       : m_partition_id(partition_id),
         m_list_num(list_num),
         m_column_num(column_num) {}
@@ -88,7 +89,7 @@ class Table_partition_values_pk : public Object_key {
   String_type str() const override;
 
  private:
-  int m_partition_id;
+  Object_id m_partition_id;
   int m_list_num;
   int m_column_num;
 };
@@ -130,7 +131,7 @@ Raw_key *Table_partition_values_pk::create_access_key(
 
   KEY *key_info = t->key_info + INDEX_NO;
 
-  Raw_key *k =
+  auto *k =
       new (std::nothrow) Raw_key(INDEX_NO, key_info->key_length, HA_WHOLE_KEY);
 
   key_copy(k->key, t->record[0], key_info, k->key_len);
@@ -150,5 +151,4 @@ String_type Table_partition_values_pk::str() const {
 
 ///////////////////////////////////////////////////////////////////////////
 
-}  // namespace tables
-}  // namespace dd
+}  // namespace dd::tables

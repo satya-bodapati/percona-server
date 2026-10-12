@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,12 +26,11 @@
 #include <charconv>
 #include <chrono>
 #include <fstream>
+#include <span>
 #include <thread>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-
-#define RAPIDJSON_HAS_STDSTRING 1
 
 #include "mock_server_testutils.h"
 #include "mysql/harness/net_ts/impl/socket.h"
@@ -68,7 +68,7 @@ static stdx::expected<uint64_t, std::error_code> from_string(
   uint64_t num;
   auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), num);
 
-  if (ec != std::errc{}) return stdx::make_unexpected(make_error_code(ec));
+  if (ec != std::errc{}) return stdx::unexpected(make_error_code(ec));
 
   return num;
 }
@@ -106,11 +106,11 @@ static std::vector<std::vector<std::vector<std::string>>> result_as_vector(
 static stdx::expected<std::vector<std::vector<std::string>>, MysqlError>
 query_one_result(MysqlClient &cli, std::string_view stmt) {
   auto cmd_res = cli.query(stmt);
-  if (!cmd_res) return stdx::make_unexpected(cmd_res.error());
+  if (!cmd_res) return stdx::unexpected(cmd_res.error());
 
   auto results = result_as_vector(*cmd_res);
   if (results.size() != 1) {
-    return stdx::make_unexpected(MysqlError{1, "Too many results", "HY000"});
+    return stdx::unexpected(MysqlError{1, "Too many results", "HY000"});
   }
 
   return results.front();
@@ -118,14 +118,13 @@ query_one_result(MysqlClient &cli, std::string_view stmt) {
 
 static stdx::expected<std::vector<std::vector<std::string>>, MysqlError>
 query_one_result(MysqlClient &cli, std::string_view stmt,
-                 stdx::span<MYSQL_BIND> params,
-                 stdx::span<const char *> names) {
+                 std::span<MYSQL_BIND> params, std::span<const char *> names) {
   auto cmd_res = cli.query(stmt, params, names);
-  if (!cmd_res) return stdx::make_unexpected(cmd_res.error());
+  if (!cmd_res) return stdx::unexpected(cmd_res.error());
 
   auto results = result_as_vector(*cmd_res);
   if (results.size() != 1) {
-    return stdx::make_unexpected(MysqlError{1, "Too many results", "HY000"});
+    return stdx::unexpected(MysqlError{1, "Too many results", "HY000"});
   }
 
   return results.front();
@@ -186,7 +185,7 @@ class RoutingSplittingTestBase : public RouterComponentTest {
       }
     }
 
-    return stdx::make_unexpected(make_error_code(std::errc::no_such_process));
+    return stdx::unexpected(make_error_code(std::errc::no_such_process));
   }
 
   void start_mock_cluster() {
@@ -194,39 +193,38 @@ class RoutingSplittingTestBase : public RouterComponentTest {
     std::vector<ClusterNode> cluster_nodes;
 
     SCOPED_TRACE("// start mock-server");
+    std::vector<uint16_t> classic_ports;
     for (auto &node : nodes_) {
-      node.classic_port = port_pool_.get_next_available();
+      const auto classic_port = port_pool_.get_next_available();
+      node.classic_port = classic_port;
+      classic_ports.push_back(classic_port);
       node.x_port = port_pool_.get_next_available();
       node.http_port = port_pool_.get_next_available();
 
-      node.proc = &ProcessManager::launch_mysql_server_mock(
-          get_data_dir().join("splitting.js").str(), node.classic_port,
-          EXIT_SUCCESS, false, node.http_port, node.x_port,
-          "",  // module-prefix
-          "127.0.0.1",
-          30s,  // wait notify.
-          true  // enable-ssl
-      );
-
-      gr_nodes.push_back(node.classic_port);
-      cluster_nodes.push_back(node.classic_port);
+      node.proc = &mock_server_spawner().wait_for_notify_ready(30s).spawn(
+          mock_server_cmdline("splitting.js")
+              .port(node.classic_port)
+              .http_port(node.http_port)
+              .x_port(node.x_port)
+              .enable_ssl(true)
+              .args());
     }
+
+    gr_nodes = classic_ports_to_gr_nodes(classic_ports);
+    cluster_nodes = classic_ports_to_cluster_nodes(classic_ports);
 
     SCOPED_TRACE("// configure mock-servers");
     for (auto [ndx, node] : stdx::views::enumerate(nodes_)) {
       SCOPED_TRACE(
           "// Make our metadata server to return single node as a cluster "
           "member (meaning single metadata server)");
-      set_mock_metadata(node.http_port,
-                        cluster_id,     // gr-id
-                        gr_nodes,       // gr-nodes
-                        ndx,            // gr-pos
-                        cluster_nodes,  // cluster-nodes
-                        0,              // primary-id
-                        0,              // view-id
-                        false,          // error-on-md-query
-                        "127.0.0.1"     // gr-node-host
-      );
+      MockGrMetadata()
+          .gr_node_host("127.0.0.1")
+          .gr_id(cluster_id)
+          .gr_nodes(gr_nodes)
+          .gr_pos(ndx)
+          .cluster_nodes(cluster_nodes)
+          .send(node.http_port);
     }
   }
 
@@ -287,16 +285,16 @@ class RoutingSplittingTestBase : public RouterComponentTest {
       MysqlClient &cli) {
     auto warnings_res = query_one_result(cli, "SHOW warnings");
     if (!warnings_res) {
-      return stdx::make_unexpected(testing::AssertionFailure()
-                                   << warnings_res.error());
+      return stdx::unexpected(testing::AssertionFailure()
+                              << warnings_res.error());
     }
 
     auto warnings = *warnings_res;
 
     EXPECT_THAT(warnings, SizeIs(::testing::Ge(1)));
     if (warnings.empty()) {
-      return stdx::make_unexpected(testing::AssertionFailure()
-                                   << "expected warnings to be not empty.");
+      return stdx::unexpected(testing::AssertionFailure()
+                              << "expected warnings to be not empty.");
     }
 
     auto json_row = warnings_res->back();
@@ -305,8 +303,8 @@ class RoutingSplittingTestBase : public RouterComponentTest {
 
     if (json_row.size() != 3 || json_row[0] != "Note" ||
         json_row[1] != kErRouterTrace) {
-      return stdx::make_unexpected(testing::AssertionFailure()
-                                   << "expected warnings to be not empty.");
+      return stdx::unexpected(testing::AssertionFailure()
+                              << "expected warnings to be not empty.");
     }
 
     return json_row[2];
@@ -619,10 +617,8 @@ TEST_F(RoutingSplittingTest, instance_local_stmt_is_forbidden) {
            "SHUTDOWN",
            "START GROUP_REPLICATION",
            "START REPLICA",
-           "START SLAVE",
            "STOP GROUP_REPLICATION",
            "STOP REPLICA",
-           "STOP SLAVE",
            "UNLOCK TABLES",
        }) {
     SCOPED_TRACE(stmt);
@@ -1295,7 +1291,7 @@ TEST_F(RoutingSplittingTest,
     EXPECT_THAT(
         *query_res,
         ElementsAre(ElementsAre("Wait_for_executed_gtid_set", "1"),
-                    ElementsAre("Wait_for_executed_gtid_set_no_timeout", "2")));
+                    ElementsAre("Wait_for_executed_gtid_set_no_timeout", "1")));
   }
 }
 
@@ -1315,7 +1311,7 @@ TEST_F(RoutingSplittingTest, reset_connection_resets_stickiness) {
 
   ASSERT_NO_ERROR(cli.connect("127.0.0.1", router_port_));
 
-  // remember a read-only backend
+  SCOPED_TRACE("// remember a read-only backend");
   {
     auto query_res = query_one_result(cli, "select @@port");
     ASSERT_NO_ERROR(query_res);
@@ -1323,7 +1319,7 @@ TEST_F(RoutingSplittingTest, reset_connection_resets_stickiness) {
     EXPECT_THAT(*query_res, ElementsAre(ElementsAre(testing::_)));
   }
 
-  // remember a read-write backend
+  SCOPED_TRACE("// remember a read-write backend");
   ASSERT_NO_ERROR(cli.query("START TRANSACTION"));
 
   {
@@ -1333,7 +1329,8 @@ TEST_F(RoutingSplittingTest, reset_connection_resets_stickiness) {
     EXPECT_THAT(*query_res, ElementsAre(ElementsAre(testing::_)));
   }
 
-  // abort the transaction and allow the read-only on another backend.
+  SCOPED_TRACE(
+      "// abort the transaction and allow the read-only on another backend.");
   ASSERT_NO_ERROR(cli.reset_connection());
 
   uint16_t ro_port{};
@@ -1348,10 +1345,12 @@ TEST_F(RoutingSplittingTest, reset_connection_resets_stickiness) {
     ro_port = *ro_port_res;
   }
 
-  // allow the read-only on another backend.
+  SCOPED_TRACE("// allow the read-only on another backend.");
   ASSERT_NO_ERROR(cli.reset_connection());
 
-  // stop the backend for this port, it should fail over to the other RO.
+  SCOPED_TRACE(
+      "// stop the backend for this port, it should fail over to the other "
+      "RO.");
   ASSERT_NO_ERROR(shutdown_server(ro_port));
 
   {
@@ -1509,10 +1508,10 @@ TEST_F(RoutingSplittingNoSslTest,
       auto connections_res = from_string((*query_res)[0][0]);
       ASSERT_NO_ERROR(connections_res);
 
-      // one node may get more than 4 connections (metadata-cache)
+      // one node may get more than 3 connections (metadata-cache)
       // all others should get one from:
       // - this query
-      EXPECT_THAT(*connections_res, AnyOf(1, testing::Ge(4)));
+      EXPECT_THAT(*connections_res, AnyOf(1, testing::Ge(3)));
     }
   }
 }
@@ -1717,19 +1716,39 @@ TEST_F(RoutingSplittingTest, insert_is_sticky) {
                          rapidjson::Value("mysql/prepare_server_connection")},
                std::pair{"/events/1/events/0/events/0/name",
                          rapidjson::Value("mysql/from_pool_or_connect")},
-               // authentication was against the first node, so this is pooled.
                std::pair{"/events/1/events/0/events/0/events/0/name",
                          rapidjson::Value("mysql/from_pool")},
-               std::pair{
-                   "/events/1/events/0/events/0/events/0/attributes/"
-                   "mysql.remote.endpoint",
-                   rapidjson::Value(
-                       "127.0.0.1:" + std::to_string(nodes_[0].classic_port),
-                       doc.GetAllocator())},
            }) {
         ASSERT_TRUE(json_pointer_eq(doc, rapidjson::Pointer(pntr), val))
             << json_trace;
       }
+
+      auto endpoint_val = rapidjson::Value(
+          "127.0.0.1:" + std::to_string(nodes_[0].classic_port),
+          doc.GetAllocator());
+
+      // if localhost resolves to 127.0.0.1 the connect to 127.0.0.1 succeeds:
+      // then the trace will have:
+      //
+      // - from_pool: success. -> /0/
+      //
+      // if localhost resolves to ::1 and 127.0.0.1 and the connect to ::1
+      // fails, then the trace will have:
+      //
+      // - from_pool: fails    -> /0/
+      // - connect: fails      -> /1/
+      // - from_pool: success. -> /2/
+      ASSERT_TRUE(
+          json_pointer_eq(doc,
+                          rapidjson::Pointer(
+                              "/events/1/events/0/events/0/events/0/attributes/"
+                              "mysql.remote.endpoint"),
+                          endpoint_val) ||
+          json_pointer_eq(doc,
+                          rapidjson::Pointer(
+                              "/events/1/events/0/events/0/events/2/attributes/"
+                              "mysql.remote.endpoint"),
+                          endpoint_val));
     }
 
     SCOPED_TRACE("check a 2nd INSERT goes to the same backend");
@@ -1760,11 +1779,9 @@ TEST_F(RoutingSplittingTest, insert_is_sticky) {
                std::pair{"/events/1/events/0/name",
                          rapidjson::Value("mysql/prepare_server_connection")},
                std::pair{"/events/1/events/0/events/0/name",
-                         rapidjson::Value("mysql/from_pool_or_connect")},
-               std::pair{"/events/1/events/0/events/0/events/0/name",
-                         rapidjson::Value("mysql/from_pool")},
+                         rapidjson::Value("mysql/from_stash")},
                std::pair{
-                   "/events/1/events/0/events/0/events/0/attributes/"
+                   "/events/1/events/0/events/0/attributes/"
                    "mysql.remote.endpoint",
                    rapidjson::Value(
                        "127.0.0.1:" + std::to_string(nodes_[0].classic_port),
@@ -1875,12 +1892,9 @@ TEST_F(RoutingSplittingTest, select_is_sticky) {
              std::pair{"/events/1/events/0/name",
                        rapidjson::Value("mysql/prepare_server_connection")},
              std::pair{"/events/1/events/0/events/0/name",
-                       rapidjson::Value("mysql/from_pool_or_connect")},
-             // pool is empty.
-             std::pair{"/events/1/events/0/events/0/events/0/name",
-                       rapidjson::Value("mysql/from_pool")},
+                       rapidjson::Value("mysql/from_stash")},
              std::pair{
-                 "/events/1/events/0/events/0/events/0/attributes/"
+                 "/events/1/events/0/events/0/attributes/"
                  "mysql.remote.endpoint",
                  rapidjson::Value(
                      "127.0.0.1:" + std::to_string(nodes_[1].classic_port),
@@ -2203,6 +2217,43 @@ TEST_F(RoutingSplittingTest, multi_statements_are_forbidden) {
       EXPECT_EQ(query_res.error().value(),
                 4501);  // multi-statements are forbidden.
     }
+
+    // trailing comma is ok.
+    {
+      auto query_res = cli.query("DO 2;");
+      ASSERT_ERROR(query_res);
+      EXPECT_EQ(query_res.error().value(),
+                1273);  // syntax error (from mock-server)
+    }
+  }
+}
+
+TEST_F(RoutingSplittingTest, empty_lines) {
+  RecordProperty("Description",
+                 "empty lines and comments should be forwarded as is.");
+
+  SCOPED_TRACE("// connect");
+
+  MysqlClient cli;
+
+  cli.username("foo");
+  cli.password("bar");
+
+  ASSERT_NO_ERROR(cli.connect("127.0.0.1", router_port_));
+
+  for (std::string stmt : {"", "  ", ";"}) {
+    SCOPED_TRACE("// stmt: " + stmt);
+
+    auto query_res = cli.query(stmt);
+    ASSERT_ERROR(query_res);
+    EXPECT_EQ(query_res.error().value(), 1065) << query_res.error();
+  }
+
+  for (std::string stmt : {"-- ", "/* */"}) {
+    SCOPED_TRACE("// stmt: " + stmt);
+
+    auto query_res = cli.query(stmt);
+    ASSERT_NO_ERROR(query_res);
   }
 }
 
@@ -2271,10 +2322,8 @@ TEST_F(RoutingSplittingTest, wait_for_my_writes_default) {
                        rapidjson::Value("mysql/authenticate")},
              std::pair{"/events/1/events/0/events/2/name",
                        rapidjson::Value("mysql/set_var")},
-             std::pair{"/events/1/events/0/events/3/name",
-                       rapidjson::Value("mysql/check_read_only")},
              // it waited.
-             std::pair{"/events/1/events/0/events/4/name",
+             std::pair{"/events/1/events/0/events/3/name",
                        rapidjson::Value("mysql/wait_gtid_executed")},
              // if wait-gtid-executed passes, next will be forward.
              std::pair{"/events/1/events/1/name",
@@ -2360,8 +2409,6 @@ TEST_F(RoutingSplittingTest, router_set_wait_for_my_writes_off) {
                        rapidjson::Value("mysql/authenticate")},
              std::pair{"/events/1/events/0/events/2/name",
                        rapidjson::Value("mysql/set_var")},
-             std::pair{"/events/1/events/0/events/3/name",
-                       rapidjson::Value("mysql/check_read_only")},
              // if wait-gtid-executed passes, next will be forward.
              std::pair{"/events/1/events/1/name",
                        rapidjson::Value("mysql/forward")},
@@ -2453,10 +2500,8 @@ TEST_F(RoutingSplittingTest, router_set_wait_for_my_writes_timeout_0) {
                        rapidjson::Value("mysql/authenticate")},
              std::pair{"/events/1/events/0/events/2/name",
                        rapidjson::Value("mysql/set_var")},
-             std::pair{"/events/1/events/0/events/3/name",
-                       rapidjson::Value("mysql/check_read_only")},
              // it waited, with timeout 0.
-             std::pair{"/events/1/events/0/events/4/name",
+             std::pair{"/events/1/events/0/events/3/name",
                        rapidjson::Value("mysql/wait_gtid_executed")},
              // if wait-gtid-executed passes, next will be forward.
              std::pair{"/events/1/events/1/name",
@@ -2549,10 +2594,8 @@ TEST_F(RoutingSplittingManualTest, config_wait_for_my_writes_is_not_set) {
                        rapidjson::Value("mysql/authenticate")},
              std::pair{"/events/1/events/0/events/2/name",
                        rapidjson::Value("mysql/set_var")},
-             std::pair{"/events/1/events/0/events/3/name",
-                       rapidjson::Value("mysql/check_read_only")},
              // it waited.
-             std::pair{"/events/1/events/0/events/4/name",
+             std::pair{"/events/1/events/0/events/3/name",
                        rapidjson::Value("mysql/wait_gtid_executed")},
              // if wait-gtid-executed passes, next will be forward.
              std::pair{"/events/1/events/1/name",
@@ -2635,8 +2678,6 @@ TEST_F(RoutingSplittingManualTest, config_wait_for_my_writes_is_zero) {
                        rapidjson::Value("mysql/authenticate")},
              std::pair{"/events/1/events/0/events/2/name",
                        rapidjson::Value("mysql/set_var")},
-             std::pair{"/events/1/events/0/events/3/name",
-                       rapidjson::Value("mysql/check_read_only")},
              // if wait-gtid-executed passes, next will be forward.
              std::pair{"/events/1/events/1/name",
                        rapidjson::Value("mysql/forward")},
@@ -3221,9 +3262,13 @@ TEST_F(RoutingSplittingTest,
   }
 }
 
-class RouterBootstrapTest : public RouterComponentBootstrapTest {};
+class RouterBootstrapTest : public RouterComponentBootstrapTest,
+                            public ::testing::WithParamInterface<bool> {
+ public:
+  RouterBootstrapTest() : RouterComponentBootstrapTest(GetParam()) {}
+};
 
-TEST_F(RouterBootstrapTest, default_has_rw_split) {
+TEST_P(RouterBootstrapTest, default_has_rw_split) {
   RecordProperty("Worklog", "12794");
   RecordProperty("RequirementId", "FR18.1");
   RecordProperty("Requirement",
@@ -3232,9 +3277,12 @@ TEST_F(RouterBootstrapTest, default_has_rw_split) {
                  "section which enables read-write splitting.");
 
   std::vector<Config> config{
-      {"127.0.0.1", port_pool_.get_next_available(),
-       port_pool_.get_next_available(),
-       get_data_dir().join("bootstrap_gr.js").str()},
+      {
+          "127.0.0.1",
+          port_pool_.get_next_available(),
+          port_pool_.get_next_available(),
+          "bootstrap_gr.js",
+      },
   };
 
   ASSERT_NO_FATAL_FAILURE(bootstrap_failover(
@@ -3248,7 +3296,7 @@ TEST_F(RouterBootstrapTest, default_has_rw_split) {
               ::testing::HasSubstr("[routing:bootstrap_rw_split]"));
 }
 
-TEST_F(RouterBootstrapTest, disable_rw_split) {
+TEST_P(RouterBootstrapTest, disable_rw_split) {
   RecordProperty("Worklog", "12794");
   RecordProperty("RequirementId", "FR18.2");
   RecordProperty("Requirement",
@@ -3257,9 +3305,12 @@ TEST_F(RouterBootstrapTest, disable_rw_split) {
                  "section which enables read-write splitting.");
 
   std::vector<Config> config{
-      {"127.0.0.1", port_pool_.get_next_available(),
-       port_pool_.get_next_available(),
-       get_data_dir().join("bootstrap_gr.js").str()},
+      {
+          "127.0.0.1",
+          port_pool_.get_next_available(),
+          port_pool_.get_next_available(),
+          "bootstrap_gr.js",
+      },
   };
 
   ASSERT_NO_FATAL_FAILURE(bootstrap_failover(
@@ -3276,6 +3327,9 @@ TEST_F(RouterBootstrapTest, disable_rw_split) {
       config_file_str,
       ::testing::Not(::testing::HasSubstr("[routing:bootstrap_rw_split]")));
 }
+
+INSTANTIATE_TEST_SUITE_P(InstantiationOldNewExe, RouterBootstrapTest,
+                         testing::Values(false, true));
 
 // fail-to-start.
 
@@ -3323,23 +3377,25 @@ class RoutingSplittingConfigInvalid
     std::vector<ClusterNode> cluster_nodes;
 
     SCOPED_TRACE("// start mock-server");
+    std::vector<uint16_t> classic_ports;
     for (auto &node : nodes_) {
-      node.classic_port = port_pool_.get_next_available();
+      const auto classic_port = port_pool_.get_next_available();
+      node.classic_port = classic_port;
+      classic_ports.push_back(classic_port);
       node.x_port = port_pool_.get_next_available();
       node.http_port = port_pool_.get_next_available();
 
-      node.proc = &ProcessManager::launch_mysql_server_mock(
-          get_data_dir().join("splitting.js").str(), node.classic_port,
-          EXIT_SUCCESS, false, node.http_port, node.x_port,
-          "",  // module-prefix
-          "127.0.0.1",
-          30s,  // wait notify.
-          true  // enable-ssl
-      );
-
-      gr_nodes.push_back(node.classic_port);
-      cluster_nodes.push_back(node.classic_port);
+      node.proc = &mock_server_spawner().wait_for_notify_ready(30s).spawn(
+          mock_server_cmdline("splitting.js")
+              .port(node.classic_port)
+              .http_port(node.http_port)
+              .x_port(node.x_port)
+              .enable_ssl(true)
+              .args());
     }
+
+    gr_nodes = classic_ports_to_gr_nodes(classic_ports);
+    cluster_nodes = classic_ports_to_cluster_nodes(classic_ports);
 
     SCOPED_TRACE("// configure mock-servers");
     for (auto [ndx, node] : stdx::views::enumerate(nodes_)) {
@@ -3351,7 +3407,6 @@ class RoutingSplittingConfigInvalid
                         gr_nodes,       // gr-nodes
                         ndx,            // gr-pos
                         cluster_nodes,  // cluster-nodes
-                        0,              // primary-id
                         0,              // view-id
                         false,          // error-on-md-query
                         "127.0.0.1"     // gr-node-host

@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -46,12 +47,12 @@ enum Copy_func_type : int;
 */
 class Func_ptr {
  public:
-  Func_ptr(Item *item, Field *result_field);
+  Func_ptr(Item *item, Field *result_field, Item *result_item = nullptr);
 
   Item *func() const { return m_func; }
   void set_func(Item *func);
   Field *result_field() const { return m_result_field; }
-  Item_field *result_item() const;
+  Item *result_item() const;
   bool should_copy(Copy_func_type type) const {
     return m_func_bits & (1 << type);
   }
@@ -60,8 +61,8 @@ class Func_ptr {
   Item *m_func;
   Field *m_result_field;
 
-  // A premade Item_field for m_result_field (may be nullptr if allocation
-  // failed). This has two purposes:
+  // A premade Item for m_result_field (may be nullptr if allocation failed).
+  // This has two purposes:
   //
   //  - It avoids repeated constructions if the field is used multiple times
   //    (e.g., first in a SELECT list, then in a sort order).
@@ -72,7 +73,9 @@ class Func_ptr {
   //
   // It is created on-demand to avoid getting into the thd->stmt_arena field
   // list for a temporary table that is freed later anyway.
-  mutable Item_field *m_result_item = nullptr;
+  // It is usually an Item_field, but if supplied from constructor, can be of
+  // any type.
+  mutable Item *m_result_item = nullptr;
 
   // A bitmap where all CFT_* enums are bit indexes, and we have a 1 if m_func
   // is of the type given by that enum. E.g., if m_func is an Item_field,
@@ -173,20 +176,15 @@ class Temp_table_param {
     @see Table_ref::update_derived_keys.
   */
   bool skip_create_table;
-  /*
-    If true, create_tmp_field called from create_tmp_table will convert
-    all BIT fields to 64-bit longs. This is a workaround the limitation
-    that MEMORY tables cannot index BIT columns.
-  */
-  bool bit_fields_as_long;
 
   /// Whether the UNIQUE index can be promoted to PK
   bool can_use_pk_for_unique;
 
-  /// Whether UNIQUE keys should always be implemented by way of a hidden
-  /// hash field, never a unique index. Needed for materialization of mixed
-  /// UNION ALL / UNION DISTINCT queries (see comments in
-  /// create_result_table()).
+  /// Whether UNIQUE keys should always be implemented by way of a hidden hash
+  /// field, never a unique index. Needed for materialization of mixed
+  /// UNION ALL / UNION DISTINCT queries (see comments in create_result_table())
+  /// and for DISTINCT deduplication using materialization (See
+  /// CreateTemporaryTableFromSelectList()).
   bool force_hash_field_for_unique{false};
 
   /// This tmp table is used for a window's frame buffer
@@ -226,7 +224,6 @@ class Temp_table_param {
         precomputed_group_by(false),
         force_copy_fields(false),
         skip_create_table(false),
-        bit_fields_as_long(false),
         can_use_pk_for_unique(true),
         m_window(nullptr) {}
 
@@ -250,11 +247,43 @@ class Temp_table_param {
         precomputed_group_by(other.precomputed_group_by),
         force_copy_fields(other.force_copy_fields),
         skip_create_table(other.skip_create_table),
-        bit_fields_as_long(other.bit_fields_as_long),
         can_use_pk_for_unique(other.can_use_pk_for_unique),
         force_hash_field_for_unique(other.force_hash_field_for_unique),
         m_window_frame_buffer(other.m_window_frame_buffer),
         m_window(other.m_window) {}
+
+  // Used by CTE derived table clones to set correct info, see
+  // Common_table_expr::clone_tmp_table. The info may be consulted e.g.
+  // by get_hidden_field_count_for_derived(), e.g. by HW.
+  Temp_table_param &operator=(const Temp_table_param &other) {
+    if (this == &other) {
+      return *this;
+    }
+    for (const auto &cf : other.copy_fields) copy_fields.push_back(cf);
+    group_buff = other.group_buff;
+    items_to_copy = other.items_to_copy;
+    keyinfo = other.keyinfo;
+    end_write_records = other.end_write_records;
+    func_count = other.func_count;
+    sum_func_count = other.sum_func_count;
+    hidden_field_count = other.hidden_field_count;
+    group_parts = other.group_parts;
+    group_length = other.group_length;
+    group_null_parts = other.group_null_parts;
+    allow_group_via_temp_table = other.allow_group_via_temp_table;
+    outer_sum_func_count = other.outer_sum_func_count;
+    using_outer_summary_function = other.using_outer_summary_function;
+    table_charset = other.table_charset;
+    schema_table = other.schema_table;
+    precomputed_group_by = other.precomputed_group_by;
+    force_copy_fields = other.force_copy_fields;
+    skip_create_table = other.skip_create_table;
+    can_use_pk_for_unique = other.can_use_pk_for_unique;
+    force_hash_field_for_unique = other.force_hash_field_for_unique;
+    m_window_frame_buffer = other.m_window_frame_buffer;
+    m_window = other.m_window;
+    return *this;
+  }
 
   void cleanup() { copy_fields.clear(); }
 };

@@ -1,15 +1,16 @@
-# Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # Without limiting anything contained in the foregoing, this file,
 # which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -5674,11 +5675,11 @@ ER_FORBID_SCHEMA_CHANGE
         eng "Changing schema from '%-.192s' to '%-.192s' is not allowed."
         ger "Wechsel des Schemas von '%-.192s' auf '%-.192s' ist nicht erlaubt"
 ER_ROW_IS_REFERENCED_2 23000
-        eng "Cannot delete or update a parent row: a foreign key constraint fails (%.192s)"
-        ger "Kann Eltern-Zeile nicht löschen oder aktualisieren: eine Fremdschlüsselbedingung schlägt fehl (%.192s)"
+        eng "Cannot delete or update a parent row: a foreign key constraint fails%.192s"
+        ger "Kann Eltern-Zeile nicht löschen oder aktualisieren: eine Fremdschlüsselbedingung schlägt fehl%.192s"
 ER_NO_REFERENCED_ROW_2 23000
-        eng "Cannot add or update a child row: a foreign key constraint fails (%.192s)"
-        ger "Kann Kind-Zeile nicht hinzufügen oder aktualisieren: eine Fremdschlüsselbedingung schlägt fehl (%.192s)"
+        eng "Cannot add or update a child row: a foreign key constraint fails%.192s"
+        ger "Kann Kind-Zeile nicht hinzufügen oder aktualisieren: eine Fremdschlüsselbedingung schlägt fehl%.192s"
 ER_SP_BAD_VAR_SHADOW 42000
         eng "Variable '%-.64s' must be quoted with `...`, or renamed"
         ger "Variable '%-.64s' muss mit `...` geschützt oder aber umbenannt werden"
@@ -6288,7 +6289,7 @@ ER_TOO_LONG_TABLE_COMMENT
   por "Comentário para a tabela '%-.64s' é longo demais (max = %lu)"
   ger "Kommentar für Tabelle '%-.64s' ist zu lang (max = %lu)"
 ER_TOO_LONG_FIELD_COMMENT
-  eng "Comment for field '%-.64s' is too long (max = %lu)"
+  eng "The maximum supported character limit for the field, '%-.64s', has been exceeded (max = %lu)"
   por "Comentário para o campo '%-.64s' é longo demais (max = %lu)"
   ger "Kommentar für Feld '%-.64s' ist zu lang (max = %lu)"
 ER_FUNC_INEXISTENT_NAME_COLLISION 42000
@@ -6883,7 +6884,7 @@ ER_TABLESPACE_EXISTS
   eng "Tablespace '%-.192s' exists."
 
 ER_TABLESPACE_DISCARDED
-  eng "Tablespace has been discarded for table '%-.192s'"
+  eng "Tablespace is discarded for table, '%-.192s'"
 
 ER_INTERNAL_ERROR
   eng "Internal error: %s"
@@ -7249,7 +7250,7 @@ ER_AGGREGATE_ORDER_NON_AGG_QUERY
 ER_REPLICA_WORKER_STOPPED_PREVIOUS_THD_ERROR
   eng "Replica worker has stopped after at least one previous worker encountered an error when replica-preserve-commit-order was enabled. To preserve commit order, the last transaction executed by this thread has not been committed. When restarting the replica after fixing any failed threads, you should fix this worker as well."
 
-ER_DONT_SUPPORT_REPLICA_PRESERVE_COMMIT_ORDER
+OBSOLETE_ER_DONT_SUPPORT_REPLICA_PRESERVE_COMMIT_ORDER
   eng "replica_preserve_commit_order is not supported %s."
 
 ER_SERVER_OFFLINE_MODE
@@ -7573,11 +7574,11 @@ ER_GIS_MAX_POINTS_IN_GEOMETRY_OVERFLOWED
 ER_SQL_MODE_MERGED
   eng "'NO_ZERO_DATE', 'NO_ZERO_IN_DATE' and 'ERROR_FOR_DIVISION_BY_ZERO' sql modes should be used with strict mode. They will be merged with strict mode in a future release."
 
-ER_VTOKEN_PLUGIN_TOKEN_MISMATCH
+OBSOLETE_ER_VTOKEN_PLUGIN_TOKEN_MISMATCH
   eng "Version token mismatch for %.*s. Correct value %.*s"
   bgn "Клеймото за версия %.*s не съвпада. Правилната стойност е %.*s"
 
-ER_VTOKEN_PLUGIN_TOKEN_NOT_FOUND
+OBSOLETE_ER_VTOKEN_PLUGIN_TOKEN_NOT_FOUND
   eng "Version token %.*s not found."
   bgn "Не е намерено клеймо за версия %.*s"
 
@@ -8195,7 +8196,7 @@ ER_WINDOW_FRAME_ILLEGAL
   eng "Window '%s': frame start or end is negative, NULL or of non-integral type"
 
 ER_WINDOW_RANGE_FRAME_ORDER_TYPE
-  eng "Window '%s' with RANGE N PRECEDING/FOLLOWING frame requires exactly one ORDER BY expression, of numeric or temporal type"
+  eng "Window '%s' with RANGE N PRECEDING/FOLLOWING frame requires exactly one deterministic ORDER BY expression, of numeric or temporal type"
 
 ER_WINDOW_RANGE_FRAME_TEMPORAL_TYPE
   eng "Window '%s' with RANGE frame has ORDER BY expression of datetime type. Only INTERVAL bound value allowed."
@@ -8327,7 +8328,7 @@ ER_MISSING_TABLESPACE_FILE
 ER_PERSIST_ONLY_ACCESS_DENIED_ERROR 42000
   eng "Access denied; you need %-.128s privileges for this operation"
 
-ER_CMD_NEED_SUPER
+OBSOLETE_ER_CMD_NEED_SUPER
   eng "You need the SUPER privilege for command '%-.192s'"
 
 ER_PATH_IN_DATADIR
@@ -8372,7 +8373,7 @@ ER_CANNOT_ALTER_SRID_DUE_TO_INDEX
 ER_WARN_BINLOG_PARTIAL_UPDATES_DISABLED
   eng "When %.192s, the option binlog_row_value_options=%.192s will be ignored and updates will be written in full format to binary log."
 
-ER_WARN_BINLOG_V1_ROW_EVENTS_DISABLED
+OBSOLETE_ER_WARN_BINLOG_V1_ROW_EVENTS_DISABLED
   eng "When %.192s, the option log_bin_use_v1_row_events=1 will be ignored and row events will be written in new format to binary log."
 
 ER_WARN_BINLOG_PARTIAL_UPDATES_SUGGESTS_PARTIAL_IMAGES
@@ -8960,7 +8961,7 @@ ER_DEPENDENT_BY_FUNCTIONAL_INDEX
   eng "Column '%s' has a functional index dependency and cannot be dropped or renamed."
 
 ER_PLUGIN_NOT_EARLY
-  eng "Plugin '%s' is not to be used as an "early" plugin. Don't add it to --early-plugin-load, keyring migration etc."
+  eng "Plugin '%s' is not to be used as an \"early\" plugin. Don't add it to --early-plugin-load, keyring migration etc."
   bgn "Приставката '%s' не може да се използва като ранна приставка. Не я добавайте в --early-plugin-load и т.н."
 
 ER_INNODB_REDO_LOG_ARCHIVE_START_SUBDIR_PATH
@@ -9125,7 +9126,7 @@ ER_SECONDARY_ENGINE
   eng "Secondary engine operation failed. %s."
 
 ER_SECONDARY_ENGINE_DDL
-  eng "DDLs on a table with a secondary engine defined are not allowed."
+  eng "You cannot perform DDLs on a table that has a secondary engine defined."
 
 ER_INCORRECT_CURRENT_PASSWORD
   eng "Incorrect current password. Specify the correct password which has to be replaced."
@@ -9370,7 +9371,7 @@ ER_HOSTNAME_TOO_LONG
   eng "Hostname cannot be longer than %d characters."
 
 # When using this error message, use the ER_WARN_DEPRECATED_SYNTAX_NO_REPLACEMENT error code.
-ER_WARN_CLIENT_DEPRECATED_PARTITION_PREFIX_KEY
+OBSOLETE_ER_WARN_CLIENT_DEPRECATED_PARTITION_PREFIX_KEY
   eng "Column '%.64s.%.64s.%.64s' having prefix key part '%.64s(%u)' is ignored by the partitioning function. Use of prefixed columns in the PARTITION BY KEY() clause is deprecated and will be removed in a future release."
 
 ER_GROUP_REPLICATION_USER_EMPTY_MSG
@@ -9383,10 +9384,10 @@ ER_GROUP_REPLICATION_PASSWORD_LENGTH
   eng "The START GROUP_REPLICATION command failed since the password provided for the recovery channel exceeds the maximum length of 32 characters."
 
 ER_SUBQUERY_TRANSFORM_REJECTED
-  eng "Statement requires a transform of a subquery to a non-SET operation (like IN2EXISTS, or subquery-to-LATERAL-derived-table). This is not allowed with optimizer switch 'subquery_to_derived' on".
+  eng "Statement requires a transform of a subquery to a non-SET operation (like IN2EXISTS, or subquery-to-LATERAL-derived-table). This is not allowed with optimizer switch 'subquery_to_derived' on."
 
 ER_DA_GRP_RPL_RECOVERY_ENDPOINT_FORMAT
-  eng "Invalid input value for recovery socket endpoints '%s'. Please, provide a valid, comma separated, list of endpoints (IP:port)".
+  eng "Invalid input value for recovery socket endpoints '%s'. Please, provide a valid, comma separated, list of endpoints (IP:port)."
 
 ER_DA_GRP_RPL_RECOVERY_ENDPOINT_INVALID
   eng "The server is not listening on endpoint '%s'. Only endpoints that the server is listening on are valid recovery endpoints."
@@ -9401,7 +9402,7 @@ ER_FOREIGN_KEY_WITH_ATOMIC_CREATE_SELECT
   eng "Foreign key creation is not allowed with CREATE TABLE as SELECT and CREATE TABLE with START TRANSACTION statement."
 
 ER_NOT_ALLOWED_WITH_START_TRANSACTION
-  eng "START TRANSACTION clause cannot be used %.128s".
+  eng "START TRANSACTION clause cannot be used %.128s"
 
 ER_INVALID_JSON_ATTRIBUTE
   eng "Invalid json attribute, error: \"%s\" at pos %u: '%s'"
@@ -9463,7 +9464,7 @@ ER_INVALID_CAST
 ER_HYPERGRAPH_NOT_SUPPORTED_YET 42000
   eng "The hypergraph optimizer does not yet support '%s'"
 
-ER_WARN_HYPERGRAPH_EXPERIMENTAL
+OBSOLETE_ER_WARN_HYPERGRAPH_EXPERIMENTAL
   eng "The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer."
 
 ER_DA_NO_ERROR_LOG_PARSER_CONFIGURED
@@ -9621,7 +9622,7 @@ ER_WARN_AUDIT_LOG_FORMAT_UNIX_TIMESTAMP_ONLY_WHEN_JSON
   eng "audit_log_format_unix_timestamp is applicable only when audit_log_format = JSON."
 
 ER_INVALID_MFA_PLUGIN_SPECIFIED
-  eng "Invalid plugin \"%s\" specified as %d factor during \"%s\"."D
+  eng "Invalid plugin \"%s\" specified as %d factor during \"%s\"."
 
 ER_IDENTIFIED_BY_UNSUPPORTED
   eng "IDENTIFIED BY clause during \"%s\" not supported for plugin \"%s\"."
@@ -9630,7 +9631,7 @@ ER_INVALID_PLUGIN_FOR_REGISTRATION
   eng "This operation is not supported for plugin \"%s\"."
 
 ER_PLUGIN_REQUIRES_REGISTRATION
-  eng "Authentication plugin requires registration. Please refer ALTER USER syntax or set --fido-register-factor command line option to do registration."
+  eng "Authentication plugin requires registration. Please refer ALTER USER syntax or set --register-factor command line option to do registration."
 
 ER_MFA_METHOD_EXISTS
   eng "%d factor authentication method exists. Please do ALTER USER... DROP %d factor before doing this operation OR do ALTER USER... MODIFY %d factor... to modify existing %d factor authentication method."
@@ -9813,7 +9814,7 @@ ER_COMMAND_BACKEND_FAILED_TO_FETCH_SECURITY_CTX
   eng "Error when trying to fetch information from security context object, when trying to connect the server."
 
 ER_COMMAND_SERVICE_BACKEND_FAILED
-  eng "Error in command service backend interface, because of : "%s""
+  eng "Error in command service backend interface, because of : \"%s\""
 
 ER_CLIENT_FILE_PRIVILEGE_FOR_REPLICATION_CHECKS
   eng "The PRIVILEGE_CHECKS_USER for channel '%.192s' would need FILE privilege to execute a LOAD DATA INFILE statement replicated in statement format. Consider using binlog_format=ROW on source. If the replicated events are trusted, recover from the failure by temporarily granting FILE to the PRIVILEGE_CHECKS_USER."
@@ -9896,7 +9897,7 @@ ER_BULK_LOADER_FILE_CONTAINS_LESS_LINES_THAN_IGNORE_CLAUSE
   eng "The first file being loaded contained less lines than the ignore clause"
 
 ER_BULK_PARSER_MISSING_ENCLOSED_BY
-  eng "Missing ENCLOSED BY character at row %ld in file '%s'. Add OPTIONALLY to the ENCLOSED BY clause to allow this input."
+  eng "Missing ENCLOSED BY character at row %ld in file '%s'."
 
 ER_BULK_PARSER_ROW_BUFFER_MAX_TOTAL_COLS_EXCEEDED
   eng "The number of input columns that need to be buffered for parsing exceeded predefined buffer max size for file '%s'."
@@ -9914,7 +9915,7 @@ ER_BULK_PARSER_UNEXPECTED_CHAR_AFTER_ENDING_ENCLOSED_BY
   eng "Unexpected characters after ending ENCLOSED BY character found at row %ld in file '%s'."
 
 ER_BULK_PARSER_UNEXPECTED_CHAR_AFTER_NULL_ESCAPE
-  eng "Unexpected characters after NULL escape (\N) found at row %ld in file '%s'."
+  eng "Unexpected characters after NULL escape (\\N) found at row %ld in file '%s'."
 
 ER_BULK_PARSER_UNEXPECTED_CHAR_AFTER_COLUMN_TERMINATOR
   eng "Unexpected characters after column terminator found at row %ld in file '%s'."
@@ -9967,6 +9968,12 @@ ER_VALIDATE_PASSWORD_INSUFFICIENT_CHANGED_CHARACTERS
 ER_WARN_DEPRECATED_WITH_NOTE
   eng "'%s' is deprecated and will be removed in a future release. %s"
 
+ER_CANT_RUN_COMMAND_SERVICES_RECURSIVELY
+  eng "Running recursive calls to SQL execution service is not supported"
+
+ER_WARN_AUDIT_LOG_FILTER_RECOVERY_LOGGING_DISABLED
+  eng "The 'audit_log_filter_recovery_mode' variable is set to LOG_NOTHING_IF_INVALID_FILTER_DETECTED, meaning audit events will not be logged if the filter is invalid. Consider changing this variable to LOG_ALL_IF_INVALID_FILTER_DETECTED to ensure that all events are logged, even when the filter is invalid."
+
 #
 #  End of 8.0 error messages (server-to-client).
 #
@@ -10009,18 +10016,18 @@ ER_LANGUAGE_COMPONENT
   eng "%s"
 
 ER_LANGUAGE_COMPONENT_NOT_AVAILABLE
-  eng "No Language component available"
+  eng "Language component: Not available."
 
 ER_LANGUAGE_COMPONENT_UNSUPPORTED_LANGUAGE
-  eng "Unsupported external language: %s"
+  eng "Language component: Unsupported language '%s'"
 
 ER_LANGUAGE_COMPONENT_CANNOT_UNINSTALL
-  eng "Cannot uninstall Multilingual Engine - there are sessions still connected. Please disconnect all sessions and try again."
+  eng "Language component: Cannot uninstall due to connected sessions. Please disconnect all sessions and try again."
 
 ER_SP_NO_ALTER_LANGUAGE
   eng "Altering the language of an existing routine is not possible."
 
-ER_EXPLAIN_INTO_ANALYZE_NOT_SUPPORTED 0A000
+OBSOLETE_ER_EXPLAIN_INTO_ANALYZE_NOT_SUPPORTED 0A000
   eng "EXPLAIN ANALYZE does not support the INTO clause."
 
 ER_EXPLAIN_INTO_IMPLICIT_FORMAT_NOT_SUPPORTED 0A000
@@ -10101,11 +10108,892 @@ ER_BULK_READER_FILE_DOESNT_EXIST
 ER_BULK_READER_COULDNT_RESOLVE_HOST
   eng "Couldn't resolve host: %s"
 
+ER_START_REPLICA_CHANNEL_INVALID_CONFIGURATION
+  eng "Cannot start replication channel '%s' because %s."
+
+ER_CANNOT_EXECUTE_IN_PRIMARY
+   eng "'%s' is not supported"
+
+ER_TOO_MANY_GROUP_BY_MODIFIER_BRANCHES
+   eng "'%s' is supported with maximum %d elements in the GROUP BY list"
+
+# When using this error message, use the ER_WARN_DEPRECATED_SYNTAX_NO_REPLACEMENT error code.
+ER_WARN_DEPRECATED_ENGINE_SYNTAX_NO_REPLACEMENT
+  eng "'%s' for '%s' storage engine is deprecated and will be removed in a future release."
+
+ER_QUALIFY_WITHOUT_WINDOW_FUNCTION
+  eng "QUALIFY clause cannot be used without a window function."
+
+ER_SUPPORTED_ONLY_WITH_HYPERGRAPH
+  eng "'%s' can be used only if the hypergraph optimizer is enabled."
+
+ER_SPECIFIC_ACCESS_DENIED
+  eng "Access denied; you need %-.256s privilege(s) for this operation"
+
+ER_CANT_SET_GTID_NEXT_TO_AUTOMATIC_TAGGED_WHEN_GTID_MODE_IS_OFF
+  eng "@@SESSION.GTID_NEXT cannot be set to AUTOMATIC:<TAG> when @@GLOBAL.GTID_MODE = OFF or OFF_PERMISSIVE"
+
+ER_GTID_NEXT_TAG_GTID_MODE_OFF
+  eng "@@SESSION.GTID_NEXT cannot be set to UUID:TAG:NUMBER when @@GLOBAL.GTID_MODE = OFF."
+
+ER_LH_COL_NOT_NULLABLE
+  eng "Column %d of %s : Column contains null but it is not nullable."
+
+ER_LH_WARN_COL_MISSING_NOT_NULLABLE
+  eng "Column %d of %s : Column is missing, but it is not nullable and no explicit default value is provided."
+
+ER_LH_COL_IS_EMPTY
+  eng "Column %d of %s : Column is empty."
+
+ER_LH_COL_IS_EMPTY_WARN
+  eng "Column %d of %s : Column is empty, setting default value."
+
+ER_LH_BAD_VALUE
+  eng "Column %d of %s : Invalid %s value."
+
+ER_LH_DECIMAL_UNKNOWN_ERR
+  eng "Column %d of %s : Unknown error while parsing decimal."
+
+ER_LH_DECIMAL_OOM_ERR
+  eng "Column %d of %s : Out of memory loading decimal."
+
+ER_LH_WARN_DECIMAL_ROUNDING
+  eng "Column %d of %s : Fraction exceeds schema, rounding value."
+
+ER_LH_DECIMAL_PRECISION_EXCEEDS_SCHEMA
+  eng "Column %d of %s : decimal precision exceeds schema."
+
+ER_LH_EXCEEDS_MIN
+  eng "Column %d of %s : %s exceeds min."
+
+ER_LH_EXCEEDS_MAX
+  eng "Column %d of %s : %s exceeds max."
+
+ER_LH_WARN_EXCEEDS_MIN_TRUNCATING
+  eng "Column %d of %s : %s exceeds min, setting to min value possible."
+
+ER_LH_WARN_EXCEEDS_MAX_TRUNCATING
+  eng "Column %d of %s : %s exceeds max, setting to max value possible."
+
+ER_LH_REAL_IS_NAN
+  eng "Column %d of %s : Real value is NaN."
+
+ER_LH_OUT_OF_RANGE
+  eng "Column %d of %s : %s value is out of range."
+
+ER_LH_DATETIME_FORMAT
+  eng "Column %d of %s : Error while applying %s."
+
+ER_LH_WARN_TRUNCATED
+  eng "Column %d of %s : %s value was truncated."
+
+ER_LH_CANNOT_CONVERT_STRING
+  eng "Column %d of %s : Cannot convert string %s."
+
+ER_LH_RESOURCE_PRINCIPAL_ERR
+  eng "Resource principal error."
+
+ER_LH_AWS_AUTH_ERR
+  eng "AWS authentication error."
+
+ER_LH_CSV_PARSING_ERR
+  eng "%s at byte offset %lu: Parsing error. %s"
+
+ER_LH_COLUMN_MISMATCH_ERR
+  eng "%s: Mismatch in the number of columns. Expected %u, found %u."
+
+ER_LH_COLUMN_MAX_ERR
+  eng "%s: More than %u column(s) found."
+
+ER_LH_CHARSET_UNSUPPORTED
+  eng "Column %d in %s: Charset is not supported."
+
+ER_LH_PARQUET_DECIMAL_CONVERSION_ERR
+  eng "Column %d in %s: Decimal conversion error."
+
+ER_LH_STRING_TOO_LONG
+  eng "Column %d in %s: String is too long."
+
+ER_LH_RESOURCE_PRINCIPAL_BUCKET_ERR
+  eng "Resource Principal endpoint is not configured. Cannot access following buckets: %s."
+
+ER_LH_NO_FILES_FOUND
+  eng "No files found corresponding to the following data locations: %s."
+
+ER_LH_EMPTY_FILE
+  eng "File %s is empty."
+
+ER_LH_DUPLICATE_FILE
+  eng "File %s was not processed (duplicate)."
+
+ER_LH_AVRO_SCHEMA_DEPTH_EXCEEDS_MAX
+  eng "File %s: Avro schema depth exceeds max allowed depth."
+
+ER_LH_AVRO_HEADER_MISMATCH
+  eng "File %s: Header does not match other files."
+
+ER_LH_AVRO_ENUM_CANNOT_CONVERT_CHARSET
+  eng "File %s: Enum symbol can't convert to column charset."
+
+ER_LH_AVRO_ENUM_MISMATCH
+  eng "File %s: Enum symbols are not the same, or are not in the same order."
+
+ER_LH_AVRO_TYPE_CANNOT_CONVERT
+  eng "Column %d in %s: Avro value of physical type %.*s logical type %.*s cannot be converted to mysql type %s."
+
+ER_LH_AVRO_FILE_ENDS_UNEXPECTEDLY
+  eng "File %.*s: Ends unexpectedly."
+
+ER_LH_AVRO_FILE_DATA_CORRUPT
+  eng "File %.*s: File data might be corrupt."
+
+ER_LH_AVRO_INVALID_UNION
+  eng "Column %d in %s: Invalid Avro union encountered. Unions are only supported to represent nullable columns. One of the two types of the union must be null."
+
+ER_LH_AVRO_INVALID_BLOCK_SIZE
+  eng "File %.*s: Invalid avro block size."
+
+ER_LH_AVRO_INVALID_BLOCK_RECORD_COUNT
+  eng "File %.*s: Invalid Avro block record count."
+
+ER_LH_FORMAT_HEADER_NO_MAGIC_BYTES
+  eng "File %.*s: Cannot locate %s specific metadata. Either the file is corrupted or this is not an %s file."
+
+ER_LH_AVRO_HEADER_METADATA_ERR
+  eng "File %.*s: Could not process Avro header metadata. The metadata is corrupted or invalid."
+
+ER_LH_AVRO_HEADER_NO_SCHEMA
+  eng "File %.*s: No schema in Avro header metadata."
+
+ER_LH_AVRO_NO_CODEC_IN_HEADER
+  eng "File %.*s: No codec in Avro header metadata."
+
+ER_LH_AVRO_INVALID_NAME_IN_SCHEMA
+  eng "File %.*s: Invalid name in Avro schema."
+
+ER_LH_AVRO_DECODING_ERR
+  eng "File %.*s: Error decoding Avro %.*s. %s"
+
+ER_LH_PARQUET_NON_UTF8_FILE_ENC
+  eng "Column %d in %s: String with non-utf8 file encoding."
+
+ER_LH_PARQUET_SCHEMA_MISMATCH
+  eng "Column %d in %s: Difference in column type among Parquet files."
+
+ER_LH_PARQUET_ROW_GROUP_SIZE_EXCEEDS_MAX
+  eng "File %s: Size of row group %ld is larger than maximum allowed size (%d)."
+
+ER_LH_PARQUET_CANNOT_LOCATE_OFFSET
+  eng "File %s: Cannot locate offset of row group %ld in metadata."
+
+ER_LH_PARQUET_TYPE_CANNOT_CONVERT
+  eng "Column %d in %s: Parquet type cannot be converted to mysql %s."
+
+ER_LH_PARQUET_CANNOT_LOCATE_SCHEMA
+  eng "Cannot locate schema in %s."
+
+ER_LH_INFER_NUM_COL_MISMATCH
+  eng "Column count mismatch between files: '%s' has %d columns, but '%s' has %d columns."
+
+ER_LH_OOM
+  eng "Insufficient memory."
+
+ER_LH_WARN_INFER_SKIPPED_LINES
+  eng "Skipped %lu line(s) due to mismatched num of cols."
+
+ER_LH_WARN_INFER_SKIPPED_FILES
+  eng "Skipped %lu file(s) due to mismatched num of cols."
+
+ER_LH_INFER_FILE_HAS_NO_DATA
+  eng "File %s is skipped because it has no valid data. File is either empty or all rows are skipped."
+
+ER_LH_INFER_NO_DATA
+  eng "No valid data found for processing."
+
+ER_LH_INFER_NO_FILES
+  eng "No valid files found for processing."
+
+ER_LH_WARN_INFER_USE_DEFAULT_COL_NAMES
+  eng "Used default column names for column index(es) %s as they are %s."
+
+ER_LH_PARQUET_CANNOT_READ_HEADER
+  eng "File %s: Unable to read Parquet header."
+
+ER_LH_INFER_WARN_GOT_EXCEPTION
+  eng "Got an exception while trying to process file task."
+
+ER_LH_AVRO_CANNOT_PARSE_HEADER
+  eng "File %.*s: Could not parse avro header. Probably corrupted avro file."
+
+ER_LH_PARQUET_CANT_OPEN_FILE
+  eng "Parquet reader cannot open %s. %s"
+
+ER_LH_TOO_LARGE_VALUE_ERR
+   eng "File %.*s: %s"
+
+ER_LH_TOO_LARGE_ROW_ERR
+   eng "File %.*s: %s"
+
+ER_TABLESAMPLE_PERCENTAGE 2202H
+  eng "Tablesample percentage should range between 0 and 100."
+
+ER_TABLESAMPLE_ONLY_ON_BASE_TABLES
+  eng "Tablesample can be applied only on base tables."
+
+OBSOLETE_ER_PARAMETER_INDEX_OUT_OF_RANGE
+  eng "Parameter index %llu is out of range"
+
+ER_RESULT_SIZE_LIMIT_EXCEEDED
+  eng "Result size limit exceeded."
+
+ER_LANGUAGE_COMPONENT_INTERNAL
+  eng "Language component: Internal error."
+
+ER_LANGUAGE_COMPONENT_CONCURRENCY_LIMIT
+  eng "Language component: Concurrency limit (%s) has been reached."
+
+ER_LANGUAGE_COMPONENT_RUNTIME
+  eng "%s> %s"
+
+ER_LANGUAGE_COMPONENT_TIMEZONE
+  eng "%s> Time zone %s is not supported."
+
+ER_LANGUAGE_COMPONENT_KEYWORD
+  eng "%s> The identifier '%s' is not valid."
+
+ER_LANGUAGE_COMPONENT_SET_SYSTEM_VARIABLE
+  eng "Language component: System variable '%s' cannot be configured when component is active."
+
+ER_LANGUAGE_COMPONENT_UNSUPPORTED_TYPE
+  eng "%s> %s"
+
+ER_LANGUAGE_COMPONENT_CONVERSION
+  eng "%s> %s"
+
+ER_WARN_SP_STATEMENT_PARTIALLY_EXECUTED
+  eng "Stored program statement is partially completed. Result set might not contain all the rows."
+
+ER_STMT_EXECUTION_NOT_ALLOWED_WITHIN_SP_OR_TRG_OR_UDF
+  eng "Executing SQL statement using %s Statement Handle Interface is not allowed within stored function, trigger or loadable function (UDF)."
+
+ER_LH_JSON_PARSING
+  eng "Column %d of %s : %s"
+
+ER_ENGINE_CANNOT_BE_DEFAULT
+  eng "Engine %s cannot be set as default_storage_engine."
+
+ER_PARTITION_PREFIX_KEY_NOT_SUPPORTED
+  eng "Column '%.64s.%.64s.%.64s' having prefix key part '%.64s(%u)' in the PARTITION BY KEY() clause is not supported."
+
+ER_WARN_DEPRECATED_NON_STANDARD_KEY
+  eng "Foreign key '%.64s' refers to non-unique key or partial key. This is deprecated and will be removed in a future release."
+
+ER_FK_NO_UNIQUE_INDEX_PARENT
+  eng "Failed to add the foreign key constraint. Missing unique key for constraint '%s' in the referenced table '%s'"
+
+ER_ACCESS_DENIED_NO_PROXY_GRANT
+  eng "Access denied for user '%-.48s'@'%-.64s', missing proxy privilege."
+
+ER_ACCESS_DENIED_NO_PROXY
+  eng "Access denied for user '%-.48s'@'%-.64s', proxied user doesn't exist."
+
+ER_LH_USER_DATA_ACCESS_FAILED
+  eng "Unable to access the following data locations: %s"
+
+ER_BULK_READER_ZSTD_ERROR
+  eng "ZSTD decompression failed: %s"
+
+ER_BULK_PARSER_ERROR
+  eng "%s"
+
+ER_LH_INVALID_JSON_FILE_FORMAT_SCHEMA
+  eng "Invalid json file format schema: %s"
+
+ER_LH_INFER_JSON_INVALID_SCHEMA
+  eng "Inferred invalid schema. A single column with JSON type is the only valid schema for JSON file format."
+
+ER_LH_JSON_FILE_FORMAT_WARN_INFER_SCHEMA
+  eng "Altered the inferred schema to a single JSON column."
+
+ER_NON_SCALAR_USED_AS_KEY
+  eng "Non-scalar (e.g., vector) column '%.64s' cannot be used as key."
+
+ER_INCOMPATIBLE_TYPE_AGG
+  eng "Columns aggregated with incompatible types: '%.64s', '%.64s'."
+
+ER_DATA_INCOMPATIBLE_WITH_VECTOR
+  eng "Value of type '%.16s, size: %zu' cannot be converted to 'vector' type."
+
+ER_EXCEEDS_VECTOR_MAX_DIMENSIONS
+  eng "Data size (%zu Bytes, %u dimensions) exceeds VECTOR max (%zu Bytes, %u dimensions) for column: '%.64s'"
+
+ER_TO_VECTOR_CONVERSION
+  eng "Data cannot be converted to a valid vector: '%.*s'"
+
+OBSOLETE_ER_EXTERNAL_UNSUPPORTED_INDEX_ALGORITHM
+  eng "This storage engine ignores the %s index algorithm."
+
+ER_TP_CANNOT_DISABLE_MTL_WITH_DL
+  eng "The variable thread_pool_max_transactions_limit cannot be set to 0 when thread_pool_dedicated_listernes is ON."
+
 #
-#  End of 8.1+ error messages (server-to-client).
-#  Do NOT add messages intended for the error log above!
+# End of 8.1+ (server-to-client) error messages.
 #
 
+
+################################################################################
+# Error numbers starting at 6400: server-to-client messages 9.x
+################################################################################
+
+# Do NOT add messages intended for the error log here;
+# they belong in a separate file, messages_to_error_log.txt.
+#
+# Do NOT add messages to clients for server versions < 9 here;
+# they have their own sections above.
+#
+# See the FAQ at the end of the file for more information.
+
+start-error-number 6400
+
+ER_SERVER_OFFLINE_MODE_REASON
+  eng "The server is currently in offline mode since %s, reason: %s"
+
+OBSOLETE_ER_SERVER_OFFLINE_MODE_USER
+  eng "The server is currently in offline mode since %s, set by user %s"
+
+ER_LH_UNSTRUCTURED_NO_DATA_FOUND
+  eng "No data was extracted from provided files."
+
+ER_LH_UNSTRUCTURED_FILE_PARSE_ERR
+  eng "File: %.*s Could not be parsed. %s"
+
+ER_LH_UNSTRUCTURED_ENCODING_ERR
+  eng "Segments %d to %d in file: %.*s Could not be encoded."
+
+ER_LH_UNSTRUCTURED_FILE_TYPE_MISMATCH_ERR
+  eng "File: %.*s is not a supported file type."
+
+ER_LH_UNSTRUCTURED_SCHEMA_ERR
+  eng "Defined schema does not match expected for column: %s."
+
+ER_LH_COLUMN_ENGINE_ATTR_ERR
+  eng "Invalid column engine attribute: %s."
+
+ER_LH_UNSTRUCTURED_OBJ_READ_ERR
+  eng "File: %.*s Could not be read."
+
+ER_LH_NO_SEGMENTS_GENERATED
+  eng "File: %.*s did not result in segments."
+
+ER_LH_UNSTRUCTURED_FILE_TOO_LARGE
+  eng "File: %s is too large."
+
+ER_EXCEEDED_MAX_REGULAR_STATEMENT_HANDLE_LIMIT
+  eng "Exceeded limit of %u regular SQL statement handles per session."
+
+ER_EXPLAIN_ANALYZE_JSON_FORMAT_VERSION_NOT_SUPPORTED 0A000
+  eng "EXPLAIN ANALYZE does not support FORMAT=JSON with explain_json_format_version=1."
+
+ER_NON_DML_DYNAMIC_PARAMETERS
+  eng "Dynamic parameters can only be used in DML statements."
+
+ER_DEPRECATE_NON_COMPOSABLE_MULTIPLE_ENGINE
+  eng "Combining the storage engines %.64s and %.64s is deprecated, but the statement or transaction updates both the %.64s table %.64s.%.64s and the %.64s table %.64s.%.64s."
+
+ER_BULK_JSON_INVALID
+  eng "Bulk load reports invalid JSON: error='%s', table='%s', field='%s'"
+
+ER_BULK_BLOB_TOO_BIG
+  eng "Column data bigger than %zu bytes for column='%s' of table='%s'"
+
+ER_NO_QUERY_PLAN_FOUND
+  eng "No query execution plan was found for the statement."
+
+ER_LH_CP_TOO_MANY_CHANGES
+  eng "More than %llu changes detected. Certain changes are ignored."
+
+ER_LH_CP_NOT_ENABLED
+  eng "Lakehouse Incremental Load is not enabled."
+
+ER_LH_CP_NO_VECTOR_STORE
+  eng "Lakehouse Incremental Load is not supported for vector store tables."
+
+ER_LH_CP_NO_VALIDATION_MODE
+  eng "Lakehouse Incremental Load is not supported with validation mode."
+
+OBSOLETE_ER_LH_CP_MISSING_FILES_MODE
+  eng "Lakehouse Incremental Load is not supported with allow_missing_files disabled."
+
+ER_LH_CP_COMMIT_FAILED
+  eng "Lakehouse Incremental Load commit operation failed."
+
+ER_LH_UNSTRUCTURED_INVALID_LANGUAGE
+  eng "Invalid language code. %s."
+
+ER_LH_VECTOR_TOO_MANY_ENTRIES
+  eng "Column %d in %s: Vector has more entries than its dimension: %s"
+
+ER_BULK_PARSER_UNEXPECTED_ENCLOSED_BY_CHARACTER
+  eng "Unexpected enclosed by character found inside unenclosed string at row %ld in file '%s' resulting in malformed CSV."
+
+ER_CMD_NEED_SUPER_OR_CREATE_SPATIAL_REFERENCE_SYSTEM
+  eng "You need the SUPER or CREATE_SPATIAL_REFERENCE_SYSTEM privilege for command '%-.192s'"
+
+ER_CLAUSE_IGNORED
+  eng "%s is ignored in %s."
+
+ER_INVALID_CLAUSE_IN_CONTEXT
+  eng "Clause %s is not valid with %s."
+
+ER_INVALID_CLAUSE_COMBINATION
+  eng "Clauses %s and %s cannot be combined."
+
+ER_WARN_REDACTED_PRIVILEGES
+  eng "Result of SHOW was redacted due to insufficient privileges for table %s."
+
+ER_INVALID_OUTER_REFERENCE
+  eng "Outer reference %s in window's ORDER BY or PARTITION BY clause not allowed."
+
+ER_LIBRARIES_NOT_SUPPORTED
+  eng "Libraries are not supported for %s."
+
+ER_LH_WARN_SUMMARY
+  eng "%s"
+
+ER_LH_WARN_INFER_USE_DEFAULT_DELIMITERS
+  eng "Feature Auto delimiter detection is skipped (%s)."
+
+ER_LIBRARY_INVALID
+  eng "The routine '%-.192s' references a missing library '%-.192s.%-.192s' or definer/invoker of the routine lack rights to use it."
+
+ER_CANNOT_PERSIST_TRANSACTION_ISOLATION
+  eng "Cannot persist transaction isolation."
+
+ER_LH_AVRO_INVALID_RECORD
+  eng "Column %d in %s: Invalid Avro record encountered. Nested records are not supported."
+
+ER_LH_INVALID_VALUE_IN_VECTOR
+  eng "Column %d in %s: Invalid vector: contains a value %s."
+
+ER_LH_WARN_VECTOR_LOSSY_CONVERSION
+  eng "Column %d in %s: Conversion from type Int to type Float could result in loss of precision."
+
+ER_LH_UNSTRUCTURED_TRUNCATION_ERROR
+  eng "Vector chunks are truncated for file: %.*s"
+
+ER_LH_UNSTRUCTURED_PAGE_CHUNK_WARN
+  eng "Split by 'page' chunking is changed to 'document' chunking for %.*s because split by 'page' is not possible for docx, doc, html, or txt formats."
+
+ER_LH_UNSTRUCTURED_TOO_MANY_CHUNKS
+  eng "Too many chunks for file: %.*s"
+
+ER_ACCESS_DENIED_FIREWALL 28000
+  eng "Access denied."
+
+ER_LH_DECOMPRESSION_ERR
+  eng "Failed to extract from %s: corrupted file, wrong compression format, or multiple files in archive."
+
+ER_JDV_INVALID_DEFINITION_WRONG_ANNOTATIONS
+  eng "Invalid JSON duality view definition: Invalid, Duplicate or Conflicting annotations for the JSON field."
+
+ER_JDV_ALGO_TEMPTABLE_NOT_SUPPORTED
+  eng "ALGORITHM = TEMPTABLE is not supported for duality views."
+
+ER_JDV_WITH_CHECK_OPTION_NOT_SUPPORTED
+  eng "Invalid JSON duality view definition: WITH [LOCAL/CASCADED] CHECK OPTION clause is not supported."
+
+ER_JDV_INVALID_DEFINITION_NON_SIMPLE_SELECT_NOT_SUPPORTED
+  eng "Invalid JSON duality view definition: Invalid JSON duality view definition: Set Operations such as UNION, INTERSECT, EXCEPT and multi-level ORDER are not supported. Object \"%s\" violates this rule."
+
+ER_JDV_INVALID_DEFINITION_CTE_NOT_SUPPORTED
+  eng "Invalid JSON duality view definition: Common Table Expressions (CTE) are not supported. Object \"%s\" violates this rule."
+
+ER_JDV_INVALID_DEFINITION_GROUPBY_NOT_SUPPORTED
+  eng "Invalid JSON duality view definition: Clauses like GROUP BY, HAVING are not supported. Object \"%s\" violates this rule."
+
+ER_JDV_INVALID_DEFINITION_WINDOW_FUNCTION_NOT_SUPPORTED
+  eng "Invalid JSON duality view definition: WINDOW functions are not supported. Object \"%s\" violates this rule."
+
+ER_JDV_INVALID_DEFINITION_LIMIT_NOT_SUPPORTED
+  eng "Invalid JSON duality view definition: LIMIT clause is not supported. Object \"%s\" violates this rule."
+
+ER_JDV_INVALID_DEFINITION_ORDERBY_NOT_SUPPORTED
+  eng "Invalid JSON duality view definition: ORDER BY clause is not supported. Object \"%s\" violates this rule."
+
+ER_JDV_INVALID_DEFINITION_MULTI_TABLES_NOT_SUPPORTED
+  eng "Invalid JSON duality view definition: FROM clause must include exactly one table. Object \"%s\" violates this rule."
+
+ER_JDV_INVALID_DEFINITION_NO_WHERE_CONDITION_IN_SUBOBJECT
+  eng "Invalid JSON duality view definition: WHERE clause is mandatory with sub-objects. Object \"%s\" is missing this clause."
+
+ER_JDV_INVALID_DEFINITION_WHERE_CONDITION_IN_ROOTOBJECT
+  eng "Invalid JSON duality view definition: WHERE clause is not supported with root object."
+
+ER_JDV_INVALID_DEFINITION_WRONG_WHERE_FORMAT_FOR_SUBOBJECT
+  eng "Invalid JSON Duality View Definition: The WHERE clause in sub-objects must consist of a single condition being an equality comparison between parent object and sub-object's table columns. Object \"%s\" violates this rule."
+
+ER_JDV_INVALID_DEFINITION_WRONG_FIELD_TYPE
+  eng "Invalid JSON duality view definition: JSON_DUALITY_OBJECT value must be either a table column or a sub-query. Object \"%s\" contains an invalid value."
+
+ER_JDV_INVALID_DEFINITION_CONTEXT_PREPARE_FAILED
+  eng "JSON duality view context initialization failed."
+
+ER_JDV_INVALID_DEFINITION_NO_JSON_OBJECT_IN_ROOT
+  eng "Invalid JSON duality view definition: Only JSON_DUALITY_OBJECT() is allowed in the select list of root object's query."
+
+ER_JDV_INVALID_DEFINITION_MUSTBE_JSON_OBJECT_FOR_SINGLETON
+  eng "Invalid JSON duality view definition: Only JSON_DUALITY_OBJECT() is allowed in the select list of singleton descendant object's query. Object \"%s\" violates this rule."
+
+ER_JDV_INVALID_DEFINITION_MUSTBE_JSON_OBJECT_FOR_NESTED
+  eng "Invalid JSON duality view definition: Only JSON_ARRAYAGG() is allowed in the select list of nested descendant object's query. Object \"%s\" violates this rule."
+
+ER_JDV_INVALID_DEFINITION_NO_JSON_OBJ_IN_ARRAYAGG
+  eng "Invalid JSON duality view definition: Only JSON_DUALITY_OBJECT() is allowed in the argument list of JSON_ARRAYAGG(). Object \"%s\" violates this rule."
+
+ER_JDV_INVALID_DEFINITION_RELATIONSHIP_RULES_VIOLATED
+  eng "Invalid JSON duality view definition: For singleton descendant object, the primary key column of a current object's table must be used in the WHERE condition. For a nested descendant object, the primary key column of the parent object's table must be used in where condition. Object \"%s\" violates the rule."
+
+ER_JDV_INVALID_DEFINITION_COLUMN_TYPE_NOT_SUPPORTED
+  eng "Invalid JSON duality view definition: Object \"%s\" projecting \"%s.%s\" includes column \"%s\" of type \"%s\". This type of projection is not supported."
+
+ER_JDV_INVALID_DEFINITION_NON_BASE_TABLE_NOT_SUPPORTED
+  eng "Invalid JSON duality view definition: Only base tables can be used to create JSON DUALITY VIEW. \"%s.%s\" is not a base table."
+
+ER_JDV_INVALID_DEFINITION_TABLE_WITHOUT_PK_FOUND
+  eng "Invalid JSON duality view definition: All participating tables should have a primary key, \"%s.%s\" does not have it."
+
+ER_JDV_INVALID_DEFINITION_TABLE_WITHOUT_PK_PROJECTION_FOUND
+  eng "Invalid JSON duality view definition: Primary key column of every table should be projected, object \"%s\" that projects table \"%s.%s\" does not."
+
+ER_JDV_INVALID_DEFINITION_ID_KEY_USED_BY_NOT_ROOT_TABLE
+  eng "Invalid JSON duality view definition: The key name \"_id\" can only be used for primary key column of the root object and cannot be assigned to column \"%s\" of table \"%s.%s\"."
+
+ER_JDV_INVALID_DEFINITION_ID_KEY_NOT_USED_BY_ROOT_TABLE
+  eng "Invalid JSON duality view definition: Primary key column of a root object's table must always be projected as \"_id\"."
+
+ER_JDV_INVALID_TABLE_ANNOTATIONS_FOR_SINGLETON_OBJ
+  eng "Invalid JSON duality view definition: Incorrect annotations for \"%s\". For singleton child object linked using primary key column with parent, table annotations must enforce both read-only or INSERT and UPDATE. DELETE is not allowed."
+
+ER_JDV_INVALID_TABLE_ANNOTATIONS_FOR_NESTED_OBJ
+  eng "Invalid JSON duality view definition: Incorrect annotations for \"%s\". Table annotations for Root, Nested child object and Singleton child linked using non-primary key column should enforce read-only or full writability (i.e. usage of UPDATE, INSERT and DELETE tags)."
+
+ER_JDV_INVALID_DEFINITION_DUPLICATE_KEYS_NOT_SUPPORTED
+  eng "Invalid JSON duality view definition: Object \"%s\" projects key \"%s\" more than once."
+
+ER_JDV_INVALID_DEFINITION_DUPLICATE_COLUMN_NOT_SUPPORTED
+  eng "Invalid JSON duality view definition: Object \"%s\" projecting table \"%s\", projects column \"%s\" more than once."
+
+ER_JDV_INVALID_DEFINITION_SAME_TABLE_INCONSISTENT_PROJECTION
+  eng "Invalid JSON duality view definition: If a table is projected multiple times, the set of columns projected must be consistent across all instances of the table projection. Table \"%s.%s\" violates the rule."
+
+ER_JDV_INVALID_DEFINITION_COLUMN_LIST_NOT_SUPPORTED
+  eng "Invalid JSON duality view definition: Specifying column list is not supported for duality views."
+
+ER_JDV_INVALID_DEFINITION_INCONSISTENT_TABLE_FIELD_IN_THE_OBJECT
+  eng "Invalid JSON duality view definition: JSON_DUALITY_OBJECT can only contain columns from the projected table. Object \"%s\" is expected to project columns from \"%s.%s\" but includes columns from \"%s.%s\", violating this rule."
+
+ER_JDV_INVALID_DEFINITION_WHERE_USES_NON_IMMEDIATE_PARENT
+  eng "Invalid JSON duality view definition: The WHERE condition in sub-objects can only reference columns from the table being projected in the current object and columns from the table projected in the parent object. The object \"%s\" violates this rule."
+
+ER_JDV_INVALID_DEFINITION_COMPOSITE_KEY_USED
+  eng "Invalid JSON duality view definition: Composite primary key is not supported. Object \"%s\" projecting \"%s\" table violates the rule."
+
+ER_JDV_INVALID_DEFINITION_ALIAS_NOT_USED_FOR_SAME_TABLES
+  eng "Invalid JSON duality view definition: Parent and child objects cannot project the same table without aliasing at least one of them. Objects \"%s\" and \"%s\" violate this rule."
+
+# SQLSTATE 0A000 == "feature not supported"
+ER_JDV_OPERATION_NOT_SUPPORTED 0A000
+  eng "%s is not supported for JSON Duality Views."
+
+ER_JDV_ALTER_OR_REPLACE_NOT_SUPPORTED
+  eng "View '%s.%s' of '%s' type already exists. Replacing view with mismatched type is not supported."
+
+ER_JDV_INVALID_JSON_DUALITY_OBJECT_USAGE
+  eng "JSON_DUALITY_OBJECT() can only be used to define a JSON duality view."
+
+ER_JDV_UNEXPECTED_JSON_TYPE
+  eng "Path '%s' is not of type '%s'."
+
+ER_JDV_PRIMARY_KEY_MUST_BE_PROVIDED
+  eng "Primary key column %s.%s must be provided as path '%s.%s'."
+
+ER_JDV_JOIN_CONDITION_NOT_SATISFIED
+  eng "Join condition is not satisfied as path '%s' for child column %s.%s is not equal to path '%s' for parent column %s.%s."
+
+ER_JDV_PK_DUPLICATES_NOT_IDENTICAL
+  eng "Path '%s' is a duplicate for primary key column %s.%s but has conflicting values for column %s: path '%s' vs path '%s'"
+
+ER_JDV_UNMAPPED_KEY
+  eng "Path '%s' is not mapped to any column of %s."
+
+ER_JDV_MISSING_INSERT_TAG
+  eng "Missing INSERT tag on table %s, path '%s'."
+
+ER_JDV_MISSING_READONLY_SUBOBJECT
+  eng "Read-only subobject with path '%s', maps to row where %s.%s = (%s), which does not exist."
+
+ER_JDV_JOIN_CONDITION_VIOLATION
+  eng "Path '%s' references a READ-ONLY subobject for which column %s.%s violates the join condition of the attempted INSERT."
+
+ER_JDV_MISSING_ETAG
+  eng "ETAG missing for updated value"
+
+ER_JDV_ETAG_MISMATCH
+  eng "Cannot update JSON duality view. The ETAG of the document in the database did not match the ETAG '%s' passed in."
+
+ER_JDV_MISSING_VALUE
+  eng "Value was not provided for path '%s' and could not be inferred for column %s.%s."
+
+ER_JDV_PK_UPDATES_NOT_ALLOWED
+  eng "Cannot update primary key column %s.%s from path '%s'."
+
+ER_JDV_MISSING_UPDATE_TAG
+  eng "Missing UPDATE tag on %s.%s, path '%s'."
+
+ER_JDV_MISSING_DELETE_TAG
+  eng "Missing DELETE tag on table %s, path '%s'."
+
+ER_JDV_NULL_INSERT_VALUE
+  eng "NULL is not allowed when inserting into a JSON DUALITY VIEW."
+
+ER_JDV_INSERT_VALUE_NOT_FIXED
+  eng "Insert value must be fixed (not require resolving)."
+
+ER_JDV_NULL_UPDATE_VALUE
+  eng "NULL is not allowed when updating a JSON DUALITY VIEW."
+
+ER_JDV_UPDATE_VALUE_NOT_FIXED
+  eng "Update values must be fixed (not require resolving)."
+
+OBSOLETE_ER_JDV_FEATURE_EDITION_LIMIT
+  eng "Feature not available in this edition."
+
+ER_JDV_CANNOT_BE_USED_WITH
+   eng "JSON DUALITY VIEW %s cannot be used with %s."
+
+ER_JDV_DML_INFO
+  eng "Rows affected: %ld  Warnings: %ld."
+
+OBSOLETE_ER_JDV_MISSING_VALUE_FOR_AG_COLUMN
+  eng "A value must be provided explicitly for auto-generated column %s.%s, referenced by path '%s', key '%s'"
+
+ER_JDV_INVALID_BINARY_TYPE_HEADER
+  eng "Path '%s' is mapped to a binary column, but its value does not have a valid base64 type header."
+
+ER_ETAG_NOT_SUPPORTED
+   eng "ETAG is not supported with Vector/ Geometry types."
+
+ER_ENGINE_ATTRIBUTE_CONFLICT
+  eng "ENGINE_ATTRIBUTE conflicts with %s %s."
+
+ER_EXTERNAL_FORMAT_NOT_SUPPORTED
+  eng "Column '%-.192s': EXTERNAL_FORMAT is only supported for temporal data types."
+
+ER_EXTERNAL_TABLE_INVALID_OPTION
+  eng "Invalid option specified for %s of external table: %s"
+
+ER_EXTERNAL_TABLE_ENGINE_NOT_SUPPORTED
+  eng "The '%s' storage engine does not support external tables"
+
+ER_EXTERNAL_TABLE_ENGINE_NOT_SPECIFIED
+  eng "External storage engine is not specified"
+ER_LH_NO_FILES_FOUND_NO_SECURE_FILE_PRIV
+  eng "No files found or files provided not under secure-file-priv."
+
+ER_LH_COL_NAME_MISSING
+  eng "Column %d of %s: Column name is not present in the file header or metadata."
+
+ER_LH_COL_NAME_DUPLICATE
+  eng "File %s: Duplicate column name in the file header or metadata."
+
+ER_LH_UNSTRUCTURED_OCI_GENAI_FAILURE
+  eng "Error when using OCI GenAI Service: %s"
+
+ER_LH_UNSTRUCTURED_PARTIAL_FILE_PARSE_ERR
+  eng "File: %.*s – Part of the document was parsed. %s."
+
+ER_JDV_EXPLICIT_AUTO_INCREMENT_NOT_ALLOWED
+  eng "Using 0 to request the next value of an AUTO_INCREMENT column is not allowed in JDVs, column %s.%s, referenced by path '%s', key '%s'."
+
+ER_LH_INFER_COL_NAME_MISMATCH
+  eng "Column '%s' found in file '%s', but not in file '%s' during column name matching."
+
+ER_LH_DELTA_SCHEMA_MISMATCH
+  eng "Detected schema mismatch for delta table '%s'.'%s'. %s"
+
+ER_LH_DELTA_METADATA_READ_ERROR
+  eng "Error while reading metadata for delta table: %s"
+
+ER_LH_DELTA_UNSUPPORTED_ERROR
+  eng "Feature %s of delta tables is unsupported"
+
+ER_WARN_ACCOUNT_TRIMMED
+  eng "Leading or trailing spaces have been trimmed from user or host, account: %s."
+
+ER_LH_WARN_DATETIME_MULTIPLE_PARAM_USE
+  eng "Both 'datetime_format' and 'timestamp_format' are specified%s. Only 'datetime_format' will be considered."
+ER_LH_GENCOL_ERROR
+  eng "File %.*s: Error encountered during generated column evaluation"
+
+ER_TEMPORAL_FUNCTION_OVERFLOW 22008
+  eng "%s value is out of range in '%s'"
+
+ER_LH_INFER_COLUMN_MAX_ERR
+  eng "More than %u column(s) found in total."
+
+ER_LH_EXTRA_COLUMNS_IN_FILE
+  eng "%s: %u column(s) in file are not present in the table."
+
+ER_LH_PARQUET_COMPLEX_CONVERSION
+  eng "Column %d in %s: Cannot load column. %s."
+
+ER_AUDIT_LOG_DISABLED
+  eng "File output is disabled. Enable it with %s = false."
+
+ER_AUDIT_LOG_COMPONENT_JSON_FILTER_PARSING_ERROR
+  eng "%s"
+
+ER_AUDIT_LOG_FAILED_TO_OPEN_TABLES
+  eng "Failed to open the %s filter tables."
+
+ER_AUDIT_LOG_FAILED_TO_OPEN_TABLE
+  eng "Failed to open '%s.%s' %s table."
+
+ER_AUDIT_LOG_COMPONENT_JSON_FILTER_NAME_CANNOT_BE_EMPTY
+  eng "Filter name cannot be empty."
+
+ER_AUDIT_LOG_COMPONENT_USER_NAME_INVALID_CHARACTER
+  eng "Invalid character in the user name."
+
+ER_AUDIT_LOG_NO_KEYRING_INSTALLED
+  eng "No keyring installed."
+
+ER_AUDIT_LOG_COMPONENT_CANNOT_READ_PASSWORD
+  eng "Cannot read password: '%.32s'."
+
+ER_AUDIT_LOG_COMPONENT_HOST_NAME_INVALID_CHARACTER
+  eng "Invalid character in the host name."
+
+ER_AUDIT_LOG_COMPONENT_JSON_USER_NAME_CANNOT_BE_EMPTY
+  eng "User name cannot be empty."
+
+ER_AUDIT_LOG_COMPONENT_KEYRING_ID_TIMESTAMP_VALUE_IS_INVALID
+  eng "Keyring ID timestamp value is invalid: '%s'."
+
+ER_AUDIT_LOG_COMPONENT_UDF_INVALID_ARGUMENT_TYPE
+  eng "Invalid argument type."
+
+ER_AUDIT_LOG_COMPONENT_UDF_INVALID_ARGUMENT_COUNT
+  eng "Invalid number of arguments."
+
+ER_AUDIT_LOG_ABORT
+  eng "Statement was aborted by an audit log filter."
+
+ER_AUDIT_LOG_COULD_NOT_RELOAD_FILTERS
+  eng "Could not reload filters."
+
+ER_AUDIT_LOG_UDF_INVALID_ARGUMENT_NULL
+  eng "Null value not supported."
+
+ER_AUDIT_LOG_MAX_SIZE_CLOSE_TO_ROTATE_ON_SIZE
+  eng "%s is not granular enough for the value of %s supplied. Should be at least %d times smaller."
+
+ER_AUDIT_LOG_MAX_SIZE_AND_PRUNE_SECONDS_PRECEDENCE
+  eng "Both %s and %s are set to non-zero. %s takes precedence and %s is ignored."
+
+ER_AUDIT_LOG_PASSWORD_HAS_NOT_BEEN_SET
+  eng "Encryption password has not been set. Use %s to set a new one."
+
+ER_AUDIT_LOG_INVALID_TABLE_DEFINITION
+  eng "Invalid table definition for '%s.%s'."
+
+ER_AUDIT_LOG_COMPONENT_FILTER_FAILED_TO_STORE_TABLE_FLDS
+  eng "Could not store field of the '%s.%s' table."
+
+ER_AUDIT_LOG_COMPONENT_FILTER_FAILED_TO_INIT_TABLE_FOR_READ
+  eng "Could not initialize '%s.%s' table for reading."
+
+ER_AUDIT_LOG_COMPONENT_FILTER_FAILED_TO_DELETE_FROM_TABLE
+  eng "Could not delete from '%s.%s' table."
+
+ER_AUDIT_LOG_JSON_FILTER_DOES_NOT_EXIST_USER
+  eng "A filter cannot be assigned to user '%s'. The filter '%s' does not exist."
+
+ER_LH_CUSTOM_DATA_PLACEMENT_OVERRIDES
+  eng "Custom data placement set for '%s.%s' table overrides %s data placement."
+
+ER_LH_AVRO_FILES_DATA_TYPE_MISMATCH
+  eng "File %s: Col '%s' has different data type compared to other Avro files."
+
+ER_AUDIT_LOG_COMPONENT_INVALID_FILTER_ABORT
+  eng "The '%s' filter is invalid: %s The operation has been aborted. Please fix the filter using the '%s' UDF, or change the '%s' variable as required."
+
+ER_AUDIT_LOG_COMPONENT_JSON_INVALID_FILTER_CANNOT_BE_USED
+  eng "The '%s' filter is invalid and cannot be used until corrected. Please apply the '%s' UDF to resolve the issue."
+
+ER_WARN_AUDIT_LOG_FILTERS_INVALID
+ eng "Some filters are invalid. Details have been logged in the error log."
+
+ER_JDV_GENERATED_AND_EXPLICIT_PKS_NOT_ALLOWED
+  eng "Paths %s and %s use generated and explicit values for the same primary key, which is not allowed."
+
+ER_MASKING_POLICY_COMPONENT_ERROR
+  eng "MASKING POLICY component error: %s."
+
+ER_MASKING_POLICY_ALREADY_EXISTS 42000
+  eng "MASKING POLICY '%s' already exists."
+
+ER_MASKING_POLICY_EXPECTS_CASE 42000
+  eng "MASKING POLICY must use CASE."
+
+ER_MASKING_POLICY_EXPECTS_CASE_WHEN 42000
+  eng "MASKING POLICY must use CASE WHEN <gatekeeper_expr>."
+
+ER_MASKING_POLICY_MISSING_ELSE 42000
+  eng "MASKING POLICY must have an ELSE clause."
+
+ER_MASKING_POLICY_ONE_WHEN_REQUIRED 42000
+  eng "MASKING POLICY must have exactly one WHEN clause."
+
+ER_MASKING_POLICY_MUST_RETURN_ARGUMENT 42000
+  eng "MASKING POLICY must return the unmasked value in THEN or ELSE."
+
+ER_MASKING_POLICY_INVALID_GATEKEEPER 42000
+  eng "MASKING POLICY gatekeeper must be CURRENT_USER_IN or CURRENT_ROLE_IN."
+
+ER_MASKING_POLICY_NON_LITERAL_GATEKEEPER_ARG 42000
+  eng "MASKING POLICY gatekeeper arguments must be string literals."
+
+ER_MASKING_POLICY_DISALLOWED_CONSTRUCT 42000
+  eng "MASKING POLICY references a disallowed construct: %s."
+
+ER_MASKING_POLICY_INVALID_COLUMN_REFERENCE 42000
+  eng "MASKING POLICY expression may only reference its argument '%s' (found '%s')."
+
+ER_MASKING_POLICY_INCOMPATIBLE_COLUMN_FEATURE 42000
+  eng "Column '%s' cannot have a MASKING POLICY and %s."
+
+ER_MASKING_POLICY_INCOMPATIBLE_TYPES 42000
+  eng "MASKING POLICY expression has an incompatible type."
+
+ER_MASKING_POLICY_NON_DETERMINISTIC_FUNC 42000
+  eng "MASKING POLICY expression is non-deterministic."
+
+ER_FK_MAX_TABLES_IN_CASCADE_CHAIN_EXCEEDED
+  eng "Foreign key cascade delete/update exceeds max tables limit of %d."
+
+ER_FK_CASCADE_TRIGGER_UPDATING_FK_COLUMNS_NOT_SUPPORTED
+  eng "Updating a foreign key column in a child-table trigger during a foreign key cascade operation is not allowed."
+
+ER_CANT_UPDATE_USED_TABLE_IN_FK_CASCADE
+  eng "Can not update table '%-.192s' in a foreign key cascade action induced by a stored function/trigger because the table is already used in foreign key cascade handling."
+
+ER_WARN_SET_OPERATIONS_BUFFER
+  eng "System variable \"set_operations_buffer_size\" set too low for hashed set operation. Consult optimizer trace for recommendations."
+
+#
+#  End of 9.x error messages (server-to-client).
+#
 
 #
 # Start of Percona Server 8.0 error messages to be sent to client
@@ -10160,7 +11048,7 @@ ER_DA_UNDO_NO_KEYRING
   eng "Undo log can't be encrypted if the keyring is not loaded."
 
 ER_DA_ENCRYPTION_TABLE_CHECK_FAILED
-  eng "Table %s is encrypted but decryption failed. Seems that the encryption key fetched from keyring is not the correct one. Are you using the correct keyring?";
+  eng "Table %s is encrypted but decryption failed. Seems that the encryption key fetched from keyring is not the correct one. Are you using the correct keyring?"
 
 ER_EXCLUDE_ENCRYPTION_TABLE_ENCRYPTED
   eng "Tablespace %s is fully or partially encrypted by encryption threads and thus cannot be excluded from encryption threads. Please first finish off encryption/decryption and try again."
@@ -10184,7 +11072,7 @@ ER_KEYRING_ILLEGAL_ENCRYPTION_OPTION
   eng "Encryption option is not allowed. %s"
 
 ER_SEQUENCE_TABLE_SIZE_LIMIT
-  eng "The number of records generated by SEQUENCE_TABLE() cannot exceed %llu (%llu requested). Try increasing @@tf_sequence_table_max_upper_bound to a larger value."
+  eng "The number of records generated by PERCONA_SEQUENCE_TABLE() cannot exceed %llu (%llu requested). Try increasing @@tf_sequence_table_max_upper_bound to a larger value."
 
 ER_SYSTEM_KEY_ROTATION_KEY_DOESNT_EXIST
   eng "InnoDB system key %lu cannot be rotated, because it does not exist."
@@ -10218,6 +11106,45 @@ ER_LOG_NAME_NOT_MATCHING_SEC_LOG_PATH_CLIENT
 #
 # End of Percona Server 8.0 client messages
 #
+
+
+#
+# Start of Percona Server 8.4/9.7 error messages to be sent to client
+#
+
+ER_INDEX_MUST_HAVE_COMPATIBLE_COLUMN
+  eng "A %.20s index may only contain a %.20s type column."
+
+ER_TABLE_CANT_HANDLE_INDEX
+  eng "The used table type doesn't support %.20s indexes"
+
+ER_INDEX_TYPE_NOT_SUPPORTED
+  eng "The index type %.20s is not supported for %.20s indexes."
+
+ER_NO_INDEX_TYPE
+  eng "Type is required for vector indexes."
+
+ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER
+  eng "Illegal index construction parameter: %.20s."
+
+ER_ILLEGAL_INDEX_CONSTRUCTION_PARAMETER_VALUE
+  eng "Illegal index construction parameter value: %.20s."
+
+ER_VECTOR_INDEX_WRONG_DIMENSIONS
+  eng "Column '%-.192s' has a vector without the %u dimensions its vector index needs."
+
+ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_NOLOCK
+  eng "InnoDB does not support LOCK=NONE on a table with a vector index"
+
+ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_INSTANT
+  eng "InnoDB does not support ALGORITHM=INSTANT on a table with a vector index"
+
+start-error-number 7100
+
+#
+# End of Percona Server 8.4/9.7 client messages
+#
+
 
 
 #
@@ -10266,7 +11193,7 @@ ER_SK_POPULATE_DURING_ALTER
   eng "MyRocks failed populating secondary key during alter."
 
 ER_CF_DIFFERENT
-  eng "Column family ('%s') flag (%d) is different from an existing flag (%d). Assign a new CF flag, or do not change existing CF flag."
+  eng "Column family ('%.*s') flag (%d) is different from an existing flag (%d). Assign a new CF flag, or do not change existing CF flag."
 
 ER_RDB_TTL_UNSUPPORTED
   eng "TTL support is currently disabled when table has a hidden PK."

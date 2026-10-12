@@ -1,15 +1,16 @@
-/* Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -114,9 +115,10 @@ static bool mysql_explain_query_expression(THD *explain_thd,
                                            const THD *query_thd,
                                            Query_expression *unit);
 
-const char *join_type_str[] = {
-    "UNKNOWN", "system", "const",    "eq_ref",      "ref",        "ALL",
-    "range",   "index",  "fulltext", "ref_or_null", "index_merge"};
+const char *join_type_str[] = {"UNKNOWN",     "system",      "const",
+                               "eq_ref",      "ref",         "ALL",
+                               "range",       "index",       "fulltext",
+                               "ref_or_null", "index_merge", "vector_ann"};
 
 static const enum_query_type cond_print_flags =
     enum_query_type(QT_ORDINARY | QT_SHOW_SELECT_NUMBER);
@@ -697,8 +699,8 @@ bool Explain::explain_subqueries() {
     */
     if (fmt->is_hierarchical() &&
         (context == CTX_WHERE || context == CTX_HAVING ||
-         context == CTX_SELECT_LIST || context == CTX_GROUP_BY_SQ ||
-         context == CTX_ORDER_BY_SQ) &&
+         context == CTX_QUALIFY || context == CTX_SELECT_LIST ||
+         context == CTX_GROUP_BY_SQ || context == CTX_ORDER_BY_SQ) &&
         (!explain_other ||
          (sl->join && sl->join->get_plan_state() != JOIN::NO_PLAN)) &&
         // Check below requires complete plan
@@ -845,7 +847,7 @@ bool Explain_setop_result::explain_id() { return Explain::explain_id(); }
 bool Explain_setop_result::explain_table_name() {
   // Get the last of UNION's selects
   Query_block *last_query_block =
-      m_query_term->m_children.back()->query_block();
+      m_query_term->child(m_query_term->child_count() - 1)->query_block();
   ;
   // # characters needed to print select_number of last select
   const int last_length =
@@ -882,14 +884,14 @@ bool Explain_setop_result::explain_table_name() {
       '...,'<last_query_block->select_number>'>\0'
   */
   bool overflow = false;
-  for (auto qt : m_query_term->m_children) {
+  for (size_t idx = 0; idx < m_query_term->child_count(); ++idx) {
     if (len + lastop + op_type_len + last_length >= NAME_CHAR_LEN) {
       overflow = true;
       break;
     }
     len += lastop;
     lastop = snprintf(table_name_buffer + len, NAME_CHAR_LEN - len, "%u,",
-                      qt->query_block()->select_number);
+                      m_query_term->child(idx)->query_block()->select_number);
   }
 
   if (overflow || len + lastop >= NAME_CHAR_LEN) {
@@ -1519,7 +1521,7 @@ bool Explain_join::explain_key_and_len() {
   if (tab->ref().key_parts)
     return explain_key_and_len_index(tab->ref().key, tab->ref().key_length,
                                      tab->ref().key_parts);
-  else if (type == JT_INDEX_SCAN || type == JT_FT)
+  else if (type == JT_INDEX_SCAN || type == JT_FT || type == JT_VECTOR)
     return explain_key_and_len_index(tab->index());
   else if (type == JT_RANGE || type == JT_INDEX_MERGE ||
            ((type == JT_REF || type == JT_REF_OR_NULL) && range_scan_path))
@@ -1911,12 +1913,19 @@ bool explain_single_table_modification(THD *explain_thd, const THD *query_thd,
   const bool is_explain_into =
       explain_thd->lex->explain_format->is_explain_into();
 
-  if (explain_thd->lex->explain_format->is_iterator_based()) {
+  if (query_thd->lex->query_block->get_table_list()->is_json_duality_view()) {
+    my_error(ER_JDV_OPERATION_NOT_SUPPORTED, MYF(0),
+             "EXPLAIN for INSERT/UPDATE/DELETE");
+    return true;
+  }
+
+  if (explain_thd->lex->explain_format->is_iterator_based(explain_thd,
+                                                          query_thd)) {
     // These kinds of queries don't have a JOIN with an iterator tree.
     return ExplainIterator(explain_thd, query_thd, nullptr);
   }
 
-  if (query_thd->lex->using_hypergraph_optimizer) {
+  if (query_thd->lex->using_hypergraph_optimizer()) {
     my_error(ER_HYPERGRAPH_NOT_SUPPORTED_YET, MYF(0),
              "EXPLAIN with TRADITIONAL format");
     return true;
@@ -1961,7 +1970,6 @@ bool explain_single_table_modification(THD *explain_thd, const THD *query_thd,
       // Derived tables and const subqueries are already optimized
       if (!unit->is_optimized() &&
           unit->optimize(explain_thd, /*materialize_destination=*/nullptr,
-                         /*create_iterators=*/false,
                          /*finalize_access_paths=*/true))
         return true; /* purecov: inspected */
     }
@@ -2179,8 +2187,6 @@ class Query_result_null : public Query_result_interceptor {
 */
 void print_query_for_explain(const THD *query_thd, Query_expression *unit,
                              String *str) {
-  if (unit == nullptr) return;
-
   /* Only certain statements can be explained.  */
   if (query_thd->query_plan.get_command() == SQLCOM_SELECT ||
       query_thd->query_plan.get_command() == SQLCOM_INSERT_SELECT ||
@@ -2188,7 +2194,9 @@ void print_query_for_explain(const THD *query_thd, Query_expression *unit,
       query_thd->query_plan.get_command() == SQLCOM_DELETE ||
       query_thd->query_plan.get_command() == SQLCOM_DELETE_MULTI ||
       query_thd->query_plan.get_command() == SQLCOM_UPDATE ||
-      query_thd->query_plan.get_command() == SQLCOM_UPDATE_MULTI)  // (2)
+      query_thd->query_plan.get_command() == SQLCOM_UPDATE_MULTI ||
+      query_thd->query_plan.get_command() == SQLCOM_INSERT ||
+      query_thd->query_plan.get_command() == SQLCOM_REPLACE)  // (2)
   {
     /*
       The warnings system requires input in utf8, see mysqld_show_warnings().
@@ -2203,7 +2211,12 @@ void print_query_for_explain(const THD *query_thd, Query_expression *unit,
     if (query_thd->query_plan.get_command() != SQLCOM_SELECT)
       eqt = enum_query_type(eqt | QT_NO_DATA_EXPANSION);
 
-    unit->print(query_thd, str, eqt);
+    if (unit != nullptr) {
+      unit->print(query_thd, str, eqt);
+    } else if (query_thd->query_plan.get_command() == SQLCOM_INSERT ||
+               query_thd->query_plan.get_command() == SQLCOM_REPLACE) {
+      query_thd->lex->query_block->print(query_thd, str, eqt);
+    }
   }
 }
 /**
@@ -2249,7 +2262,7 @@ bool explain_query(THD *explain_thd, const THD *query_thd,
 
   const bool is_explain_into = lex->explain_format->is_explain_into();
 
-  if (lex->explain_format->is_iterator_based()) {
+  if (lex->explain_format->is_iterator_based(explain_thd, query_thd)) {
     if (lex->is_explain_analyze) {
       if (secondary_engine) {
         my_error(ER_NOT_SUPPORTED_YET, MYF(0),
@@ -2281,11 +2294,15 @@ bool explain_query(THD *explain_thd, const THD *query_thd,
   }
 
   // Non-iterator-based formats are not supported with EXPLAIN ANALYZE.
-  if (lex->is_explain_analyze)
-    my_error(ER_NOT_SUPPORTED_YET, MYF(0),
-             (lex->explain_format->is_hierarchical()
-                  ? "EXPLAIN ANALYZE with JSON format"
-                  : "EXPLAIN ANALYZE with TRADITIONAL format"));
+  if (lex->is_explain_analyze) {
+    if (lex->explain_format->is_hierarchical()) {
+      my_error(ER_EXPLAIN_ANALYZE_JSON_FORMAT_VERSION_NOT_SUPPORTED, MYF(0));
+    } else {
+      my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+               "EXPLAIN ANALYZE with TRADITIONAL format");
+    }
+    return true;
+  }
 
   // Non-iterator-based formats are not supported with the hypergraph
   // optimizer. But we still want to be able to use EXPLAIN with no format
@@ -2293,10 +2310,10 @@ bool explain_query(THD *explain_thd, const THD *query_thd,
   // offloaded to a secondary engine, so we return a fake plan with that
   // information.
   const bool fake_explain_for_secondary_engine =
-      query_thd->lex->using_hypergraph_optimizer && secondary_engine &&
+      query_thd->lex->using_hypergraph_optimizer() && secondary_engine &&
       !lex->explain_format->is_hierarchical();
 
-  if (query_thd->lex->using_hypergraph_optimizer &&
+  if (query_thd->lex->using_hypergraph_optimizer() &&
       !fake_explain_for_secondary_engine) {
     // With hypergraph, JSON is iterator-based. So it must be TRADITIONAL.
     my_error(ER_HYPERGRAPH_NOT_SUPPORTED_YET, MYF(0),

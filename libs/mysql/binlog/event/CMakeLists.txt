@@ -1,15 +1,16 @@
-# Copyright (c) 2023, Oracle and/or its affiliates.
+# Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,7 +24,9 @@
 SET(LINK_LIBRARIES
   ext::zstd
   ext::zlib
+  mysql_containers
   mysql_gtid
+  mysql_serialization
 )
 
 SET(TARGET_HEADERS
@@ -76,13 +79,19 @@ SET(TARGET_SRCS
   compression/payload_event_buffer_istream.cpp
   compression/zstd_comp.cpp
   compression/zstd_dec.cpp
-  compression/buffer/grow_calculator.cpp
-  compression/buffer/grow_constraint.cpp
-  compression/buffer/grow_status.cpp
 )
 
 ADD_WSHADOW_WARNING()
 DISABLE_MISSING_PROFILE_WARNING()
+
+# GCC 16's -O2 analysis emits false-positive -Wmaybe-uninitialized warnings
+# inside Write/Update/Delete_rows_event constructors and their inlined
+# Event_reader helpers. The events are populated by READER_TRY_INITIALIZATION
+# down a path the optimizer cannot fully follow.
+IF(MY_COMPILER_IS_GNU AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 16)
+  ADD_COMPILE_FLAGS(rows_event.cpp
+    COMPILE_FLAGS "-Wno-maybe-uninitialized")
+ENDIF()
 
 LIBS_MYSQL_CREATE_LIBRARY(mysql_binlog_event
   TARGET_SRCS ${TARGET_SRCS}

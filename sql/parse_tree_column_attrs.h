@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -57,6 +58,7 @@
 #include "sql/sql_error.h"
 #include "sql/sql_lex.h"
 #include "sql/sql_list.h"
+#include "sql/sql_masking_policy.h"
 #include "sql/sql_parse.h"
 #include "sql/system_variables.h"
 
@@ -87,6 +89,29 @@ class PT_column_attr_base : public Parse_tree_node_tmpl<Column_parse_context> {
       : Parse_tree_node_tmpl<Column_parse_context>(pos) {}
 
  public:
+  enum Attr_type {
+    AT_NONE,
+    AT_COLLATE_COLUMN_ATTR,
+    AT_DEFAULT_COLUMN_ATTR,
+    AT_GENERATED_DEFAULT_VAL_COLUMN_ATTR,
+    AT_SECONDARY_COLUMN_ATTR,
+    AT_NOT_NULL_COLUMN_ATTR,
+    AT_NULL_COLUMN_ATTR,
+    AT_UNIQUE_KEY_COLUMN_ATTR,
+    AT_PRIMARY_KEY_COLUMN_ATTR,
+    AT_CHECK_CONSTRAINT_COLUMN_ATTR,
+    AT_CONSTRAINT_ENFORCEMENT_ATTR,
+    AT_COMMENT_COLUMN_ATTR,
+    AT_ON_UPDATE_COLUMN_ATTR,
+    AT_AUTO_INCREMENT_COLUMN_ATTR,
+    AT_SERIAL_DEFAULT_VALUE_COLUMN_ATTR,
+    AT_COLUMN_FORMAT_COLUMN_ATTR,
+    AT_STORAGE_MEDIA_COLUMN_ATTR,
+    AT_SRID_COLUMN_ATTR,
+    AT_COLUMN_VISIBILITY_ATTR,
+    AT_MASKING_POLICY_NAME_ATTR,
+  };
+
   typedef decltype(Alter_info::flags) alter_info_flags_t;
 
   virtual void apply_type_flags(ulong *) const {}
@@ -94,6 +119,7 @@ class PT_column_attr_base : public Parse_tree_node_tmpl<Column_parse_context> {
   virtual void apply_comment(LEX_CSTRING *) const {}
   virtual void apply_default_value(Item **) const {}
   virtual void apply_gen_default_value(Value_generator **) {}
+  virtual void apply_mask(LEX_CSTRING *) {}
   virtual void apply_on_update_value(Item **) const {}
   virtual void apply_srid_modifier(std::optional<gis::srid_t> *) const {}
   virtual bool apply_collation(Column_parse_context *,
@@ -106,6 +132,7 @@ class PT_column_attr_base : public Parse_tree_node_tmpl<Column_parse_context> {
       Sql_check_constraint_spec_list *check_const_list [[maybe_unused]]) {
     return false;
   }
+  virtual Attr_type attr_type() const { return AT_NONE; }
 
   /**
     Check for the [NOT] ENFORCED characteristic.
@@ -152,6 +179,8 @@ class PT_null_column_attr : public PT_column_attr_base {
     *type_flags &= ~NOT_NULL_FLAG;
     *type_flags |= EXPLICIT_NULL_FLAG;
   }
+
+  enum Attr_type attr_type() const override { return AT_NULL_COLUMN_ATTR; }
 };
 
 /**
@@ -165,6 +194,8 @@ class PT_not_null_column_attr : public PT_column_attr_base {
   void apply_type_flags(ulong *type_flags) const override {
     *type_flags |= NOT_NULL_FLAG;
   }
+
+  enum Attr_type attr_type() const override { return AT_NOT_NULL_COLUMN_ATTR; }
 };
 
 /**
@@ -179,6 +210,8 @@ class PT_secondary_column_attr : public PT_column_attr_base {
   void apply_type_flags(unsigned long *type_flags) const override {
     *type_flags |= NOT_SECONDARY_FLAG;
   }
+
+  enum Attr_type attr_type() const override { return AT_SECONDARY_COLUMN_ATTR; }
 };
 
 /**
@@ -186,22 +219,22 @@ class PT_secondary_column_attr : public PT_column_attr_base {
 
   @ingroup ptn_column_attrs
 */
-class PT_unique_combo_clustering_key_column_attr : public PT_column_attr_base {
+class PT_unique_key_column_attr : public PT_column_attr_base {
  public:
-  explicit PT_unique_combo_clustering_key_column_attr(const POS &pos, enum keytype key_type)
-      : PT_column_attr_base(pos), m_key_type(key_type) {}
+  explicit PT_unique_key_column_attr(const POS &pos)
+      : PT_column_attr_base(pos) {}
 
   void apply_type_flags(ulong *type_flags) const noexcept override {
-    if (m_key_type & KEYTYPE_UNIQUE) *type_flags |= UNIQUE_FLAG;
-    if (m_key_type & KEYTYPE_CLUSTERING) *type_flags |= CLUSTERING_FLAG;
+    *type_flags |= UNIQUE_FLAG;
   }
 
   void apply_alter_info_flags(ulonglong *flags) const override {
     *flags |= Alter_info::ALTER_ADD_INDEX;
   }
 
- private:
-  const enum keytype m_key_type;
+  enum Attr_type attr_type() const override {
+    return AT_UNIQUE_KEY_COLUMN_ATTR;
+  }
 };
 
 /**
@@ -220,6 +253,10 @@ class PT_primary_key_column_attr : public PT_column_attr_base {
 
   void apply_alter_info_flags(ulonglong *flags) const override {
     *flags |= Alter_info::ALTER_ADD_INDEX;
+  }
+
+  enum Attr_type attr_type() const override {
+    return AT_PRIMARY_KEY_COLUMN_ATTR;
   }
 };
 
@@ -259,6 +296,10 @@ class PT_check_constraint_column_attr : public PT_column_attr_base {
     return (super::do_contextualize(pc) ||
             col_cc_spec.check_expr->itemize(pc, &col_cc_spec.check_expr));
   }
+
+  enum Attr_type attr_type() const override {
+    return AT_CHECK_CONSTRAINT_COLUMN_ATTR;
+  }
 };
 
 /**
@@ -274,6 +315,10 @@ class PT_constraint_enforcement_attr : public PT_column_attr_base {
   bool has_constraint_enforcement() const override { return true; }
 
   bool is_constraint_enforced() const override { return m_enforced; }
+
+  enum Attr_type attr_type() const override {
+    return AT_CONSTRAINT_ENFORCEMENT_ATTR;
+  }
 
  private:
   const bool m_enforced;
@@ -292,6 +337,8 @@ class PT_comment_column_attr : public PT_column_attr_base {
       : PT_column_attr_base(pos), comment(comment) {}
 
   void apply_comment(LEX_CSTRING *to) const override { *to = comment; }
+
+  enum Attr_type attr_type() const override { return AT_COMMENT_COLUMN_ATTR; }
 };
 
 /**
@@ -316,6 +363,8 @@ class PT_collate_column_attr : public PT_column_attr_base {
     return merge_charset_and_collation(*to, m_collation, to);
   }
 
+  enum Attr_type attr_type() const override { return AT_COLLATE_COLUMN_ATTR; }
+
  private:
   const CHARSET_INFO *const m_collation;
 };
@@ -336,7 +385,6 @@ class PT_default_column_attr : public PT_column_attr_base {
   explicit PT_default_column_attr(const POS &pos, Item *item)
       : super(pos), item(item) {}
   void apply_default_value(Item **value) const override { *value = item; }
-
   bool do_contextualize(Column_parse_context *pc) override {
     if (pc->is_generated) {
       my_error(ER_WRONG_USAGE, MYF(0), "DEFAULT", "generated column");
@@ -347,6 +395,8 @@ class PT_default_column_attr : public PT_column_attr_base {
   void apply_type_flags(ulong *type_flags) const override {
     if (item->type() == Item::NULL_ITEM) *type_flags |= EXPLICIT_NULL_FLAG;
   }
+
+  enum Attr_type attr_type() const override { return AT_DEFAULT_COLUMN_ATTR; }
 };
 
 /**
@@ -375,6 +425,8 @@ class PT_on_update_column_attr : public PT_column_attr_base {
     item = new (pc->thd->mem_root) Item_func_now_local(precision);
     return item == nullptr;
   }
+
+  enum Attr_type attr_type() const override { return AT_ON_UPDATE_COLUMN_ATTR; }
 };
 
 /**
@@ -398,6 +450,10 @@ class PT_auto_increment_column_attr : public PT_column_attr_base {
       return true;
     }
     return super::do_contextualize(pc);
+  }
+
+  enum Attr_type attr_type() const override {
+    return AT_AUTO_INCREMENT_COLUMN_ATTR;
   }
 };
 
@@ -426,6 +482,9 @@ class PT_serial_default_value_column_attr : public PT_column_attr_base {
     }
     return super::do_contextualize(pc);
   }
+  enum Attr_type attr_type() const override {
+    return AT_SERIAL_DEFAULT_VALUE_COLUMN_ATTR;
+  }
 };
 
 /**
@@ -449,6 +508,9 @@ class PT_column_format_column_attr : public PT_column_attr_base {
   }
   bool do_contextualize(Column_parse_context *pc) override {
     return super::do_contextualize(pc);
+  }
+  enum Attr_type attr_type() const override {
+    return AT_COLUMN_FORMAT_COLUMN_ATTR;
   }
   void apply_zip_dict(LEX_CSTRING *to) const noexcept override {
     *to = m_zip_dict_name;
@@ -483,6 +545,9 @@ class PT_storage_media_column_attr : public PT_column_attr_base {
     }
     return super::do_contextualize(pc);
   }
+  enum Attr_type attr_type() const override {
+    return AT_STORAGE_MEDIA_COLUMN_ATTR;
+  }
 };
 
 /// Node for the SRID column attribute
@@ -498,6 +563,8 @@ class PT_srid_column_attr : public PT_column_attr_base {
   void apply_srid_modifier(std::optional<gis::srid_t> *srid) const override {
     *srid = m_srid;
   }
+
+  enum Attr_type attr_type() const override { return AT_SRID_COLUMN_ATTR; }
 };
 
 /// Node for the generated default value, column attribute
@@ -529,8 +596,37 @@ class PT_generated_default_val_column_attr : public PT_column_attr_base {
                &expr_pc, &m_default_value_expression.expr_item);
   }
 
+  enum Attr_type attr_type() const override {
+    return AT_GENERATED_DEFAULT_VAL_COLUMN_ATTR;
+  }
+
  private:
   Value_generator m_default_value_expression;
+};
+
+/// Node for the masking policy, column attribute
+class PT_masking_policy_name_column_attr final : public PT_column_attr_base {
+  typedef PT_column_attr_base super;
+
+ public:
+  PT_masking_policy_name_column_attr(const POS &pos, LEX_CSTRING policy_name)
+      : super{pos}, m_policy_name{policy_name} {}
+
+  bool do_contextualize(Column_parse_context *pc) override {
+    return super::do_contextualize(pc) ||
+           check_masking_policy_name(m_policy_name);
+  }
+
+  void apply_mask(LEX_CSTRING *masking_policy_name) override {
+    *masking_policy_name = m_policy_name;
+  }
+
+  enum Attr_type attr_type() const override {
+    return AT_MASKING_POLICY_NAME_ATTR;
+  }
+
+ private:
+  LEX_CSTRING m_policy_name;
 };
 
 /**
@@ -547,6 +643,10 @@ class PT_column_visibility_attr : public PT_column_attr_base {
   void apply_type_flags(unsigned long *type_flags) const override {
     *type_flags &= ~FIELD_IS_INVISIBLE;
     if (!m_is_visible) *type_flags |= FIELD_IS_INVISIBLE;
+  }
+
+  enum Attr_type attr_type() const override {
+    return AT_COLUMN_VISIBILITY_ATTR;
   }
 
  private:
@@ -695,6 +795,21 @@ class PT_char_type : public PT_type {
   }
   const char *get_length() const override { return length; }
   const CHARSET_INFO *get_charset() const override { return charset; }
+};
+
+class PT_vector_type : public PT_type {
+  char vector_length_buffer[33]{};
+
+ public:
+  PT_vector_type(const POS &pos, const char *length)
+      : PT_type(pos, MYSQL_TYPE_VECTOR) {
+    const char *length_arg = length == nullptr ? "2048" : length;
+    uint vector_length = atoi(length_arg) * sizeof(float);
+    sprintf(vector_length_buffer, "%u", vector_length);
+  }
+
+  const char *get_length() const override { return vector_length_buffer; }
+  const CHARSET_INFO *get_charset() const override { return &my_charset_bin; }
 };
 
 enum class Blob_type {
@@ -927,6 +1042,7 @@ class PT_field_def_base : public Parse_tree_node {
   Value_generator *gcol_info = nullptr;
   /// Holds the expression to generate default values
   Value_generator *default_val_info = nullptr;
+  LEX_CSTRING masking_policy = EMPTY_CSTR;
   std::optional<gis::srid_t> m_srid{};
   // List of column check constraint's specification.
   Sql_check_constraint_spec_list *check_const_spec_list = nullptr;
@@ -965,11 +1081,48 @@ class PT_field_def_base : public Parse_tree_node {
     return false;
   }
 
+ private:
+  bool is_overridden(Mem_root_array<PT_column_attr_base *> *attrs,
+                     PT_column_attr_base *cand) {
+    // skip de-duplicating these types. NONE is used for (secondary) engine
+    // attributes, cf. make_column_engine_attribute and
+    // make_column_secondary_engine_attribute
+    switch (cand->attr_type()) {
+      case PT_column_attr_base::AT_NONE:  // engine attributes
+      case PT_column_attr_base::AT_CHECK_CONSTRAINT_COLUMN_ATTR:  // additive
+      case PT_column_attr_base::AT_COLLATE_COLUMN_ATTR:  // avoid test breaks
+        return false;
+      default:
+        break;
+    }
+
+    for (auto attr : *attrs) {
+      if (attr->attr_type() == cand->attr_type()) return true;
+    }
+    return false;
+  }
+
  protected:
-  template <class T>
   bool contextualize_attrs(Column_parse_context *pc,
-                           Mem_root_array<T *> *attrs) {
+                           Mem_root_array<PT_column_attr_base *> *attrs) {
     if (attrs != nullptr) {
+      if (attrs->size() > 1) {
+        // Keep only last instance of most attributes that override any
+        // preceding ones. This avoids contextualizing attributes that will
+        // later be ignored anyway.
+        Mem_root_array<PT_column_attr_base *> *unique_attrs = new (pc->mem_root)
+            Mem_root_array<PT_column_attr_base *>(pc->mem_root);
+        unique_attrs->reserve(attrs->size());
+        for (long i = static_cast<long>(attrs->size()) - 1; i >= 0; i--) {
+          if (is_overridden(unique_attrs, (*attrs)[i])) continue;
+          unique_attrs->push_back((*attrs)[i]);  // reversed order..
+        }
+        attrs->clear();
+        // Reverse order again to get back original order. Needed for attributes
+        // which are opposed, e.g. NOT NULL vs NULL.
+        for (auto attr : *unique_attrs) attrs->push_front(attr);
+      }
+
       for (auto attr : *attrs) {
         if (attr->contextualize(pc)) return true;
         attr->apply_type_flags(&type_flags);
@@ -977,6 +1130,7 @@ class PT_field_def_base : public Parse_tree_node {
         attr->apply_comment(&comment);
         attr->apply_default_value(&default_value);
         attr->apply_gen_default_value(&default_val_info);
+        attr->apply_mask(&masking_policy);
         attr->apply_on_update_value(&on_update_value);
         attr->apply_srid_modifier(&m_srid);
         attr->apply_zip_dict(&m_zip_dict);

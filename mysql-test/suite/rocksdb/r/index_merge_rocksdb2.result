@@ -24,6 +24,18 @@ INDEX i6(key6),
 INDEX i7(key7),
 INDEX i8(key8)
 );
+create procedure populate_t0()
+begin
+declare d int default 2;
+insert into t0 values (1,1,1,1,1,1,1,1023),(2,2,2,2,2,2,2,1022);
+while d<=POW(2,9) do
+insert into t0 select key1+d, key2+d, key3+d, key4+d, key5+d,
+key6+d, key7+d, key8-d from t0;
+set d = d*2;
+end while;
+end|
+call populate_t0();
+drop procedure populate_t0;
 set global rocksdb_force_flush_memtable_now=1;
 analyze table t0;
 Table	Op	Msg_type	Msg_text
@@ -87,7 +99,7 @@ EXPLAIN
 explain select * from t0 where (key1 < 3 or key2 <4) and key3 = 50;
 EXPLAIN
 -> Filter: ((t0.key1 < 3) or (t0.key2 < 4))  (rows=1.11)
-    -> Index lookup on t0 using i3 (key3=50)  (rows=2)
+    -> Index lookup on t0 using i3 (key3 = 50)  (rows=2)
 
 explain select * from t0 use index (i1,i2) where (key1 < 2 or key2 <3) and key3 = 50;
 EXPLAIN
@@ -133,7 +145,7 @@ EXPLAIN
 
 explain select * from t0 where key2 = 45 or key1 is null;
 EXPLAIN
--> Index lookup on t0 using i2 (key2=45)  (rows=2)
+-> Index lookup on t0 using i2 (key2 = 45)  (rows=2)
 
 #   the last conj. is always false and will be discarded
 explain select * from t0 where key2=10 or key3=3 or key4 <=> null;
@@ -395,12 +407,12 @@ EXPLAIN
 explain select * from t4 where key2 = 1 and (key2_1 = 1 or key3 = 5);
 EXPLAIN
 -> Filter: ((t4.key2_1 = 1) or (t4.key3 = 5))  (rows=0.38)
-    -> Index lookup on t4 using i2_1 (key2=1)  (rows=2)
+    -> Index lookup on t4 using i2_1 (key2 = 1)  (rows=2)
 
 explain select * from t4 where key2 = 1 and (key2_1 = 1 or key2_2 = 5);
 EXPLAIN
 -> Filter: ((t4.key2_1 = 1) or (t4.key2_2 = 5))  (rows=0.38)
-    -> Index lookup on t4 using i2_1 (key2=1)  (rows=2)
+    -> Index lookup on t4 using i2_1 (key2 = 1)  (rows=2)
 
 explain select * from t4 where key2_1 = 1 or key2_2 = 5;
 EXPLAIN
@@ -419,7 +431,7 @@ EXPLAIN
         -> Deduplicate rows sorted by row ID  (...)
             -> Index range scan on t0 using i1 over (key1 = 3)  (...)
             -> Index range scan on t0 using i2 over (key2 = 4)  (...)
-    -> Index lookup on t1 using i1 (key1=t0.key1)  (...)
+    -> Index lookup on t1 using i1 (key1 = t0.key1)  (...)
 
 select * from t0 left join t1 on (t0.key1=t1.key1)
 where t0.key1=3 or t0.key2=4;
@@ -434,7 +446,7 @@ EXPLAIN
         -> Deduplicate rows sorted by row ID  (...)
             -> Index range scan on t0 using i1 over (key1 = 3)  (...)
             -> Index range scan on t0 using i2 over (key2 = 4)  (...)
-    -> Index lookup on t1 using i1 (key1=t0.key1)  (...)
+    -> Index lookup on t1 using i1 (key1 = t0.key1)  (...)
 
 #  index_merge vs. ref
 #  index_merge vs. ref
@@ -444,8 +456,8 @@ select * from t0,t1 where (t0.key1=t1.key1) and
 EXPLAIN
 -> Nested loop inner join  (rows=0.1)
     -> Filter: (t0.key2 < 4)  (rows=0.05)
-        -> Index lookup on t0 using i1 (key1=2)  (rows=2)
-    -> Index lookup on t1 using i1 (key1=2)  (rows=2)
+        -> Index lookup on t0 using i1 (key1 = 2)  (rows=2)
+    -> Index lookup on t1 using i1 (key1 = 2)  (rows=2)
 
 #  index_merge on second table in join
 explain select * from t0,t1 where t0.key1 = 5 and
@@ -457,7 +469,7 @@ EXPLAIN
             -> Index range scan on t1 using i1 over (key1 = 5)  (rows=2)
             -> Index range scan on t1 using i8 over (key8 = 5)  (rows=2)
     -> Hash
-        -> Index lookup on t0 using i1 (key1=5)  (rows=2)
+        -> Index lookup on t0 using i1 (key1 = 5)  (rows=2)
 
 # Fix for bug#1974
 explain select * from t0,t1 where t0.key1 < 3 and
@@ -595,27 +607,27 @@ max(a.key1 + b.key1 + a.key2 + b.key2 + a.key3 + b.key3 + a.key4 + b.key4 + a.ke
 update t0 set key1=1;
 explain select max(a.key1 + b.key1 + a.key2 + b.key2 + a.key3 + b.key3 + a.key4 + b.key4 + a.key5 + b.key5)
 from t0 as a force index(i1,i2), t0 as b force index (i1,i2)
-where (a.key1 = 1 or a.key2 = 1)
-and   (b.key1 = 1 or b.key2 = 1);
+where (a.key1 = 2 or a.key2 = 2)
+and   (b.key1 = 2 or b.key2 = 2);
 EXPLAIN
 -> Aggregate: max((((((((((a.key1 + b.key1) + a.key2) + b.key2) + a.key3) + b.key3) + a.key4) + b.key4) + a.key5) + b.key5))  (rows=1)
     -> Inner hash join (no condition)  (rows=16)
-        -> Filter: ((b.key1 = 1) or (b.key2 = 1))  (rows=4)
+        -> Filter: ((b.key1 = 2) or (b.key2 = 2))  (rows=4)
             -> Deduplicate rows sorted by row ID  (rows=4)
-                -> Index range scan on b using i1 over (key1 = 1)  (rows=2)
-                -> Index range scan on b using i2 over (key2 = 1)  (rows=2)
+                -> Index range scan on b using i1 over (key1 = 2)  (rows=2)
+                -> Index range scan on b using i2 over (key2 = 2)  (rows=2)
         -> Hash
-            -> Filter: ((a.key1 = 1) or (a.key2 = 1))  (rows=4)
+            -> Filter: ((a.key1 = 2) or (a.key2 = 2))  (rows=4)
                 -> Deduplicate rows sorted by row ID  (rows=4)
-                    -> Index range scan on a using i1 over (key1 = 1)  (rows=2)
-                    -> Index range scan on a using i2 over (key2 = 1)  (rows=2)
+                    -> Index range scan on a using i1 over (key1 = 2)  (rows=2)
+                    -> Index range scan on a using i2 over (key2 = 2)  (rows=2)
 
 select max(a.key1 + b.key1 + a.key2 + b.key2 + a.key3 + b.key3 + a.key4 + b.key4 + a.key5 + b.key5)
 from t0 as a force index(i1,i2), t0 as b force index (i1,i2)
-where (a.key1 = 1 or a.key2 = 1)
-and   (b.key1 = 1 or b.key2 = 1);
+where (a.key1 = 2 or a.key2 = 2)
+and   (b.key1 = 2 or b.key2 = 2);
 max(a.key1 + b.key1 + a.key2 + b.key2 + a.key3 + b.key3 + a.key4 + b.key4 + a.key5 + b.key5)
-8194
+NULL
 alter table t0 add filler1 char(200), add filler2 char(200), add filler3 char(200);
 update t0 set key2=1, key3=1, key4=1, key5=1,key6=1,key7=1 where key7 < 500;
 # The next query will not use index i7 in intersection if the OS doesn't
@@ -626,21 +638,21 @@ from t0 as a, t0 as b
 where (a.key1 = 1 and a.key2 = 1 and a.key3 = 1 and a.key4=1 and a.key5=1 and a.key6=1 and a.key7 = 1 or a.key8=1)
 and (b.key1 = 1 and b.key2 = 1 and b.key3 = 1 and b.key4=1 and b.key5=1 and b.key6=1 and b.key7 = 1 or b.key8=1);
 EXPLAIN
--> Aggregate: max((((((((((a.key1 + b.key1) + a.key2) + b.key2) + a.key3) + b.key3) + a.key4) + b.key4) + a.key5) + b.key5))  (rows=1)
-    -> Inner hash join (no condition)  (rows=9)
-        -> Filter: (((b.key7 = 1) and (b.key6 = 1) and (b.key5 = 1) and (b.key4 = 1) and (b.key3 = 1) and (b.key2 = 1) and (b.key1 = 1)) or (b.key8 = 1))  (rows=3)
-            -> Deduplicate rows sorted by row ID  (rows=3)
-                -> Intersect rows sorted by row ID  (rows=1)
-                    -> Index range scan on b using i1 over (key1 = 1)  (rows=2)
-                    -> Index range scan on b using i2 over (key2 = 1)  (rows=2)
-                -> Index range scan on b using i8 over (key8 = 1)  (rows=2)
+-> Aggregate: max((((((((((a.key1 + b.key1) + a.key2) + b.key2) + a.key3) + b.key3) + a.key4) + b.key4) + a.key5) + b.key5))  (...)
+    -> Inner hash join (no condition)  (...)
+        -> Filter: (((b.key7 = 1) and (b.key6 = 1) and (b.key5 = 1) and (b.key4 = 1) and (b.key3 = 1) and (b.key2 = 1) and (b.key1 = 1)) or (b.key8 = 1))  (...)
+            -> Deduplicate rows sorted by row ID  (...)
+                -> Intersect rows sorted by row ID  (...)
+                    -> Index range scan on b using i1 over (key1 = 1)  (...)
+                    -> Index range scan on b using i2 over (key2 = 1)  (...)
+                -> Index range scan on b using i8 over (key8 = 1)  (...)
         -> Hash
-            -> Filter: (((a.key7 = 1) and (a.key6 = 1) and (a.key5 = 1) and (a.key4 = 1) and (a.key3 = 1) and (a.key2 = 1) and (a.key1 = 1)) or (a.key8 = 1))  (rows=3)
-                -> Deduplicate rows sorted by row ID  (rows=3)
-                    -> Intersect rows sorted by row ID  (rows=1)
-                        -> Index range scan on a using i1 over (key1 = 1)  (rows=2)
-                        -> Index range scan on a using i2 over (key2 = 1)  (rows=2)
-                    -> Index range scan on a using i8 over (key8 = 1)  (rows=2)
+            -> Filter: (((a.key7 = 1) and (a.key6 = 1) and (a.key5 = 1) and (a.key4 = 1) and (a.key3 = 1) and (a.key2 = 1) and (a.key1 = 1)) or (a.key8 = 1))  (...)
+                -> Deduplicate rows sorted by row ID  (...)
+                    -> Intersect rows sorted by row ID  (...)
+                        -> Index range scan on a using i1 over (key1 = 1)  (...)
+                        -> Index range scan on a using i2 over (key2 = 1)  (...)
+                    -> Index range scan on a using i8 over (key8 = 1)  (...)
 
 select max(a.key1 + b.key1 + a.key2 + b.key2 + a.key3 + b.key3 + a.key4 + b.key4 + a.key5 + b.key5)
 from t0 as a, t0 as b
@@ -830,7 +842,7 @@ explain select * from t1
 where exists (select 1 from t2, t3 
 where t2.a=t1.a and (t3.a=t2.b or t3.b=t2.b or t3.b=t2.b+1));
 EXPLAIN
--> Nested loop semijoin  (...)
+-> Nested loop semijoin (FirstMatch)  (...)
     -> Table scan on t1  (...)
     -> Nested loop inner join  (...)
         -> Filter: (t2.a = t1.a)  (...)
@@ -880,6 +892,7 @@ ORDER BY a,b;
 SET SESSION sort_buffer_size=DEFAULT;
 DROP TABLE t1;
 End of 5.0 tests
+include/rpl/set_gtid_mode_off.inc
 set global rocksdb_force_flush_memtable_now=1;
 #---------------- ROR-index_merge tests -----------------------
 # (Start of test file: index_merge_ror.inc)
@@ -1029,22 +1042,22 @@ key1	key2	key3	key4	filler1
 # Check that the shortest key is used for ROR-intersection, covering and non-covering.
 explain select * from t1 where st_a=1 and st_b=1;
 EXPLAIN
--> Filter: ((t1.st_b = 1) and (t1.st_a = 1))  (cost=0.601 rows=1)
-    -> Intersect rows sorted by row ID  (cost=0.601 rows=1)
-        -> Index range scan on t1 using st_a over (st_a = 1)  (cost=0.125..0.25 rows=2)
-        -> Index range scan on t1 using st_b over (st_b = 1)  (cost=0.125..0.25 rows=2)
+-> Filter: ((t1.st_b = 1) and (t1.st_a = 1))  (rows=1)
+    -> Intersect rows sorted by row ID  (rows=1)
+        -> Index range scan on t1 using st_a over (st_a = 1)  (rows=2)
+        -> Index range scan on t1 using st_b over (st_b = 1)  (rows=2)
 
 explain select st_a,st_b from t1 where st_a=1 and st_b=1;
 EXPLAIN
--> Filter: ((t1.st_b = 1) and (t1.st_a = 1))  (cost=0.601 rows=1)
-    -> Intersect rows sorted by row ID  (cost=0.601 rows=1)
-        -> Index range scan on t1 using st_a over (st_a = 1)  (cost=0.125..0.25 rows=2)
-        -> Index range scan on t1 using st_b over (st_b = 1)  (cost=0.125..0.25 rows=2)
+-> Filter: ((t1.st_b = 1) and (t1.st_a = 1))  (rows=1)
+    -> Intersect rows sorted by row ID  (rows=1)
+        -> Index range scan on t1 using st_a over (st_a = 1)  (rows=2)
+        -> Index range scan on t1 using st_b over (st_b = 1)  (rows=2)
 
 explain select st_a from t1 ignore index (st_a) where st_a=1 and st_b=1;
 EXPLAIN
--> Filter: (t1.st_b = 1)  (cost=0.505 rows=0.05)
-    -> Index lookup on t1 using sta_swt12a (st_a=1)  (cost=0.505 rows=2)
+-> Filter: (t1.st_b = 1)  (rows=0.05)
+    -> Index lookup on t1 using sta_swt12a (st_a = 1)  (rows=2)
 
 # Do many tests
 # Check that keys that don't improve selectivity are skipped.
@@ -1065,11 +1078,11 @@ select count(a) from t2 where b='BBBBBBBB';
 count(a)
 4
 # BUG#1:
-expla_or_bin select count(a_or_b) from t2 where a_or_b='AAAAAAAA' a_or_bnd a_or_b='AAAAAAAA';
+explain select count(a) from t2 where a='AAAAAAAA' and b='AAAAAAAA';
 EXPLAIN
--> Aggrega_or_bte: count(t2.a_or_b)  (...)
-    -> Filter: ((t2.a_or_b = 'AAAAAAAA') a_or_bnd (t2.a_or_b = 'AAAAAAAA'))  (...)
-        -> Index lookup on t2 using a_or_b (a_or_b='AAAAAAAA')  (...)
+-> Aggregate: count(t2.a)  (...)
+    -> Filter: ((t2.b = 'AAAAAAAA') and (t2.a = 'AAAAAAAA'))  (...)
+        -> Index lookup on t2 using a (a = 'AAAAAAAA')  (...)
 
 select count(a) from t2 where a='AAAAAAAA' and b='AAAAAAAA';
 count(a)
@@ -1081,7 +1094,7 @@ insert into t2 values ('ab', 'ab', 'uh', 'oh');
 explain select a from t2 where a='ab';
 EXPLAIN
 -> Filter: (t2.a = 'ab')  (...)
-    -> Index lookup on t2 using a (a='ab')  (...)
+    -> Index lookup on t2 using a (a = 'ab')  (...)
 
 drop table t2;
 #
@@ -1192,7 +1205,7 @@ Level	Code	Message
 explain select pk from t1 where key1 = 1 and key2 = 1;
 EXPLAIN
 -> Filter: (t1.key2 = 1)  (rows=0.133)
-    -> Index lookup on t1 using key1 (key1=1)  (rows=2)
+    -> Index lookup on t1 using key1 (key1 = 1)  (rows=2)
 
 select pk from t1 where key2 = 1 and key1 = 1;
 pk
@@ -1422,7 +1435,7 @@ drop table t1;
 # BUG#21277: Index Merge/sort_union: wrong query results
 create table t1
 (
-key1 int not null, 
+key1 int not null,
 key2 int not null default 0,
 key3 int not null default 0
 );
@@ -1479,8 +1492,8 @@ SELECT a
 FROM t1
 WHERE c = 1 AND b = 1 AND d = 1;
 EXPLAIN
--> Filter: ((t1.d = 1) and (t1.b = 1))  (cost=0.6 rows=1)
-    -> Index lookup on t1 using c (c=1)  (cost=0.6 rows=2)
+-> Filter: ((t1.d = 1) and (t1.b = 1))  (rows=1)
+    -> Index lookup on t1 using c (c = 1)  (rows=2)
 
 CREATE TABLE t2 ( a INT )
 SELECT a
@@ -1530,20 +1543,21 @@ INSERT INTO t1 VALUES (1,1,'a'), (2,2,'b');
 EXPLAIN
 SELECT col_int_key
 FROM t1
-WHERE col_varchar_key >= 'l' OR 
-(((pk BETWEEN 141 AND 141) OR col_varchar_key <> 'l') 
+WHERE col_varchar_key >= 'l' OR
+(((pk BETWEEN 141 AND 141) OR col_varchar_key <> 'l')
 AND ((pk BETWEEN 141 AND 141) OR (col_int_key > 141)));
 EXPLAIN
--> Filter: ((t1.col_varchar_key >= 'l') or (((t1.pk = 141) or (t1.col_varchar_key <> 'l')) and ((t1.pk = 141) or (t1.col_int_key > 141))))  (cost=2.73 rows=1.56)
-    -> Covering index scan on t1 using col_varchar_key  (cost=2.73 rows=2)
+-> Filter: ((t1.col_varchar_key >= 'l') or (((t1.pk = 141) or (t1.col_varchar_key <> 'l')) and ((t1.pk = 141) or (t1.col_int_key > 141))))  (rows=1.56)
+    -> Covering index scan on t1 using col_varchar_key  (rows=2)
 
 SELECT col_int_key
 FROM t1
-WHERE col_varchar_key >= 'l' OR 
-(((pk BETWEEN 141 AND 141) OR col_varchar_key <> 'l') 
+WHERE col_varchar_key >= 'l' OR
+(((pk BETWEEN 141 AND 141) OR col_varchar_key <> 'l')
 AND ((pk BETWEEN 141 AND 141) OR (col_int_key > 141)));
 col_int_key
 DROP TABLE t1;
+include/rpl/set_gtid_mode_on.inc
 set global rocksdb_force_flush_memtable_now=1;
 #---------------- 2-sweeps read Index merge test 2 -------------------------------
 # (Start of test file: index_merge_2sweeps.inc)
@@ -1761,14 +1775,14 @@ pk1	pk2
 # The expected number of rows can vary depending on page size
 explain select * from t1 where badkey=1 and key1=10;
 EXPLAIN
--> Filter: (t1.badkey = 1)  (rows=0.2)
-    -> Index lookup on t1 using key1 (key1=10)  (rows=2)
+-> Filter: (t1.badkey = 1)  (...)
+    -> Index lookup on t1 using key1 (key1 = 10)  (...)
 
 # The expected number of rows can vary depending on page size
 explain select * from t1 where pk1 < 7500 and key1 = 10;
 EXPLAIN
--> Filter: ((t1.key1 = 10) and (t1.pk1 < 7500))  (rows=0.05)
-    -> Index range scan on t1 using PRIMARY over (pk1 < 7500)  (rows=2)
+-> Filter: ((t1.key1 = 10) and (t1.pk1 < 7500))  (...)
+    -> Index range scan on t1 using PRIMARY over (pk1 < 7500)  (...)
 
 # Verify that keys with 'tails' of PK members are ok.
 explain select * from t1 where pktail1ok=1 and key1=10;
@@ -1797,17 +1811,17 @@ EXPLAIN
 explain select * from t1 where pktail3bad=1 and key1=10;
 EXPLAIN
 -> Filter: (t1.pktail3bad = 1)  (...)
-    -> Index lookup on t1 using key1 (key1=10)  (...)
+    -> Index lookup on t1 using key1 (key1 = 10)  (...)
 
 explain select * from t1 where pktail4bad=1 and key1=10;
 EXPLAIN
 -> Filter: (t1.pktail4bad = 1)  (...)
-    -> Index lookup on t1 using key1 (key1=10)  (...)
+    -> Index lookup on t1 using key1 (key1 = 10)  (...)
 
 explain select * from t1 where pktail5bad=1 and key1=10;
 EXPLAIN
 -> Filter: (t1.pktail5bad = 1)  (...)
-    -> Index lookup on t1 using key1 (key1=10)  (...)
+    -> Index lookup on t1 using key1 (key1 = 10)  (...)
 
 # Test for problem with innodb key values prefetch buffer:
 explain select pk1,pk2,key1,key2 from t1 where key1 = 10 and key2=10 limit 10;
@@ -1870,7 +1884,7 @@ f1
 EXPLAIN SELECT t1.f1 FROM t1
 WHERE (SELECT COUNT(*) FROM t2 WHERE t2.f3 = 'h' AND t2.f2 = t1.f1) = 0 AND t1.f1 = 2;
 EXPLAIN
--> Rows fetched before execution  (cost=0..0 rows=1)
+-> Rows fetched before execution  (rows=1)
 
 Warnings:
 Note	1276	Field or reference 'test.t1.f1' of SELECT #2 was resolved in SELECT #1
@@ -2055,8 +2069,8 @@ INSERT INTO t1 SELECT id + 8, id2 + 8, id3 +8 FROM t1;
 INSERT INTO t1 SELECT id + 16, 7, 0 FROM t1;
 EXPLAIN SELECT SQL_NO_CACHE count(*) FROM t1 WHERE id2=7 AND id3=0;
 EXPLAIN
--> Aggregate: count(0)  (cost=0.65 rows=1)
-    -> Covering index lookup on t1 using covering_index (id2=7, id3=0)  (cost=0.45 rows=2)
+-> Aggregate: count(0)  (cost=0.911 rows=1)
+    -> Covering index lookup on t1 using covering_index (id2 = 7, id3 = 0)  (cost=0.45 rows=2)
 
 Warnings:
 Warning	1681	'SQL_NO_CACHE' is deprecated and will be removed in a future release.

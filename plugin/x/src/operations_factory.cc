@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,8 +25,8 @@
 
 #include "plugin/x/src/operations_factory.h"
 
-#include <errno.h>
 #include <fcntl.h>
+#include <cerrno>
 #ifndef _WIN32
 #include <netdb.h>
 #endif
@@ -38,9 +39,9 @@
 #include "my_systime.h"  // NOLINT(build/include_subdir)
 
 #ifdef HAVE_SYS_UN_H
-#include <signal.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <csignal>
 #endif
 
 #include "plugin/x/src/config/config.h"
@@ -146,7 +147,7 @@ class File : public iface::File {
 const int File::INVALID_FILE_DESCRIPTOR = -1;
 
 class System : public iface::System {
-  int32_t unlink(const char *name) override {
+  int32_t unlink(const char *name [[maybe_unused]]) override {
     return HAVE_UNIX_SOCKET(::unlink(name), 0);
   }
 
@@ -156,7 +157,8 @@ class System : public iface::System {
 
   int32_t get_pid() override { return HAVE_UNIX_SOCKET(::getpid(), 0); }
 
-  int32_t kill(int32_t pid, int32_t signal) override {
+  int32_t kill(int32_t pid [[maybe_unused]],
+               int32_t signal [[maybe_unused]]) override {
     return HAVE_UNIX_SOCKET(::kill(pid, signal), 0);
   }
 

@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,11 +27,14 @@
 #define ROUTER_TESTS_TEST_HELPERS_INCLUDED
 
 #include <chrono>
+#include <exception>  // IWYU pragma: keep std::exception_ptr
 #include <functional>
 #include <map>
 #include <stdexcept>
 #include <typeinfo>
+#include <vector>
 
+#include "mysql/harness/net_ts/internet.h"
 #include "mysql/harness/stdx/attribute.h"
 
 #ifdef HAVE_DEBUG_EXTNAME
@@ -38,13 +42,6 @@
 #else
 #define MYSQLD_BIN "mysqld"
 #endif
-
-#define SKIP_GIT_TESTS(COND)                                       \
-  if (COND) {                                                      \
-    std::cout << "[  SKIPPED ] Tests using Git repository skipped" \
-              << std::endl;                                        \
-    return;                                                        \
-  }
 
 #define HARNESS_TEST_THROW_LIKE_(statement, expected_exception,                \
                                  expected_message, fail)                       \
@@ -175,7 +172,14 @@ void init_windows_sockets();
  *
  * @returns true if the selected port can be bind to, false otherwise
  */
-[[nodiscard]] bool is_port_bindable(const uint16_t port);
+[[nodiscard]] stdx::expected<void, std::error_code> is_port_bindable(
+    const uint16_t port);
+
+[[nodiscard]] stdx::expected<void, std::error_code> is_port_bindable(
+    const net::ip::tcp::endpoint &ep);
+
+[[nodiscard]] stdx::expected<void, std::error_code> is_port_bindable(
+    net::io_context &io_ctx, const net::ip::tcp::endpoint &ep);
 
 /** @brief Check if a given unix socket can be bind to.
  *
@@ -211,18 +215,25 @@ void init_windows_sockets();
     const uint16_t port,
     std::chrono::milliseconds timeout = std::chrono::seconds(10));
 
+struct KeyringEntry {
+  std::string uid;
+  std::string attribute;
+  std::string value;
+};
+
+using KeyringEntries = std::vector<KeyringEntry>;
+
 /** @brief Initializes keyring and adds keyring-related config items to
  * [DEFAULT] section
  *
  * @param default_section [DEFAULT] section
  * @param keyring_dir directory inside of which keyring files will be created
- * @param user Router user
- * @param password Router user password
+ * @param keyring_entries collection of entries to store in the keyring
  */
 void init_keyring(std::map<std::string, std::string> &default_section,
                   const std::string &keyring_dir,
-                  const std::string &user = "mysql_router1_user",
-                  const std::string &password = "root");
+                  const KeyringEntries &keyring_entries = {
+                      {"mysql_router1_user", "password", "root"}});
 
 /** @brief returns true if the selected file contains a string
  *          that is true for a given predicate
@@ -265,21 +276,6 @@ void connect_client_and_query_port(unsigned router_port, std::string &out_port,
                                    bool should_fail = false);
 
 /**
- * Add a "<key>=<value>" line in a configuration file in a given config section.
- *
- * @param config_path configuration file path
- * @param section_name configuration section name
- * @param key part of configuration to be added
- * @param value part of configuration to be added
- *
- * @retval true config line inserted successfully
- * @retval false config line not inserted
- */
-bool add_line_to_config_file(const std::string &config_path,
-                             const std::string &section_name,
-                             const std::string &key, const std::string &value);
-
-/**
  * Wait for the nth occurrence of the log_regex in the log_file with timeout
  * If it's found returns the timepoint from the matched line prefix
  * If timed out or failed to convert the timestamp returns unexpected
@@ -298,5 +294,14 @@ get_log_timestamp(
     const std::string &log_file, const std::string &log_regex,
     const unsigned occurence = 1,
     const std::chrono::milliseconds timeout = std::chrono::seconds(1));
+
+/**
+ * Escape special regexp characters with '\'.
+ *
+ * @param input Input string.
+ *
+ * @returns input string with special regexp characters escaped with '\'
+ */
+std::string escape_regexp(std::string input);
 
 #endif  // ROUTER_TESTS_TEST_HELPERS_INCLUDED

@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -45,8 +46,9 @@
 #include <sstream>
 #include <utility>
 
-#include "caching_sha2_passwordopt-vars.h"
-#include "client/client_priv.h"
+#include "client/include/caching_sha2_passwordopt-vars.h"
+#include "client/include/client_priv.h"
+#include "client/include/sslopt-vars.h"
 #include "compression.h"
 #include "m_string.h"
 #include "my_byteorder.h"
@@ -60,8 +62,13 @@
 #include "mysql/binlog/event/compression/factory.h"
 #include "mysql/binlog/event/compression/payload_event_buffer_istream.h"
 #include "mysql/binlog/event/trx_boundary_parser.h"
+#include "mysql/gtids/gtids.h"        // Gtid_set
+#include "mysql/gtids/legacy_glue.h"  // old_to_new
+#include "mysql/sets/sets.h"          // contains_element
+#include "mysql/strconv/strconv.h"    // encode
 #include "mysql/strings/int2str.h"
 #include "mysql/strings/m_ctype.h"
+#include "mysql/utils/return_status.h"  // Return_status
 #include "nulls.h"
 #include "prealloced_array.h"
 #include "print_version.h"
@@ -73,7 +80,6 @@
 #include "sql/rpl_gtid.h"
 #include "sql_common.h"
 #include "sql_string.h"
-#include "sslopt-vars.h"
 #include "typelib.h"
 #include "welcome_copyright_notice.h"  // ORACLE_WELCOME_COPYRIGHT_NOTICE
 
@@ -175,7 +181,7 @@ class Database_rewrite {
       using Compress_status_t =
           mysql::binlog::event::compression::Compress_status;
       using Managed_buffer_sequence_t =
-          mysql::binlog::event::compression::buffer::Managed_buffer_sequence<>;
+          mysql::containers::buffers::Managed_buffer_sequence<>;
       using Char_t = Managed_buffer_sequence_t::Char_t;
       Managed_buffer_sequence_t managed_buffer_sequence;
       auto compressor =
@@ -712,7 +718,6 @@ Buff_ev *buff_ev{nullptr};
 
 // needed by net_serv.c
 ulong bytes_sent = 0L, bytes_received = 0L;
-ulong mysqld_net_retry_count = 10L;
 ulong open_files_limit;
 ulong opt_binlog_rows_event_max_size;
 uint test_flags = 0;
@@ -783,10 +788,8 @@ static MYSQL *mysql_handle = nullptr;
 static char *dirname_for_local_load = nullptr;
 static uint opt_server_id_bits = 0;
 ulong opt_server_id_mask = 0;
-Sid_map *global_sid_map = nullptr;
-Checkable_rwlock *global_sid_lock = nullptr;
-Gtid_set *gtid_set_included = nullptr;
-Gtid_set *gtid_set_excluded = nullptr;
+mysql::gtids::Gtid_set gtid_set_included;
+mysql::gtids::Gtid_set gtid_set_excluded;
 static uint opt_zstd_compress_level = default_zstd_compression_level;
 static char *opt_compress_algorithm = nullptr;
 
@@ -1130,17 +1133,23 @@ static bool shall_skip_gtids(const Log_event *ev) {
 
   switch (ev->get_type_code()) {
     case mysql::binlog::event::GTID_LOG_EVENT:
+    case mysql::binlog::event::GTID_TAGGED_LOG_EVENT:
     case mysql::binlog::event::ANONYMOUS_GTID_LOG_EVENT: {
-      Gtid_log_event *gtid =
+      auto *gtid_event =
           const_cast<Gtid_log_event *>(down_cast<const Gtid_log_event *>(ev));
+      auto old_tsid = gtid_event->get_tsid();
+      mysql::gtids::Tsid tsid;
+      mysql::gtids::old_to_new(old_tsid, tsid);
+      auto sequence_number = gtid_event->get_gno();
+
       if (opt_include_gtids_str != nullptr) {
-        filtered = filtered || !gtid_set_included->contains_gtid(
-                                   gtid->get_sidno(true), gtid->get_gno());
+        filtered = filtered || !mysql::sets::contains_element(
+                                   gtid_set_included, tsid, sequence_number);
       }
 
       if (opt_exclude_gtids_str != nullptr) {
-        filtered = filtered || gtid_set_excluded->contains_gtid(
-                                   gtid->get_sidno(true), gtid->get_gno());
+        filtered = filtered || mysql::sets::contains_element(
+                                   gtid_set_excluded, tsid, sequence_number);
       }
       filter_based_on_gtids = filtered;
       filtered = filtered || opt_skip_gtids;
@@ -1245,14 +1254,14 @@ static bool shall_skip_gtids(const Log_event *ev) {
   R1. After FLUSH [RELAY] LOGS
   R2. When mysqld receives SIGHUP
   R3. When relay log size grows too big
-  R4. Immediately after START SLAVE
+  R4. Immediately after START REPLICA
   R5. When slave IO thread reconnects without user doing
-      START SLAVE/STOP SLAVE
+      START REPLICA/STOP REPLICA
   R6. When master dump thread starts a new binlog
-  R7. CHANGE MASTER which deletes all relay logs
-  R8. RESET SLAVE
+  R7. CHANGE REPLICATION SOURCE which deletes all relay logs
+  R8. RESET REPLICA
 
-  (Remark: CHANGE MASTER which does not delete any relay log,
+  (Remark: CHANGE REPLICATION SOURCE which does not delete any relay log,
   does not cause any rotation at all.)
 
   The 8 cases generate the three types of FD events as follows:
@@ -1264,9 +1273,9 @@ static bool shall_skip_gtids(const Log_event *ev) {
     previously, there is no master FD event.
   - In case R3, the slave IO thread generates a fake master FD
     event.
-  - In cases R4 and R5, if AUTOPOSITION=0 and MASTER_LOG_POS>4,
+  - In cases R4 and R5, if AUTOPOSITION=0 and SOURCE_LOG_POS>4,
     the master dump thread generates a fake master FD event.
-  - In cases R4 and R5, if AUTOPOSITION=1 or MASTER_LOG_POS<=4,
+  - In cases R4 and R5, if AUTOPOSITION=1 or SOURCE_LOG_POS<=4,
     the master dump thread generates a real master FD event.
   - In case R6, the master dump thread generates a real master FD
     event.
@@ -1621,18 +1630,12 @@ static Exit_status process_event(PRINT_EVENT_INFO *print_event_info,
       case mysql::binlog::event::WRITE_ROWS_EVENT:
       case mysql::binlog::event::DELETE_ROWS_EVENT:
       case mysql::binlog::event::UPDATE_ROWS_EVENT:
-      case mysql::binlog::event::WRITE_ROWS_EVENT_V1:
-      case mysql::binlog::event::UPDATE_ROWS_EVENT_V1:
-      case mysql::binlog::event::DELETE_ROWS_EVENT_V1:
       case mysql::binlog::event::PARTIAL_UPDATE_ROWS_EVENT: {
         bool stmt_end = false;
         Table_map_log_event *ignored_map = nullptr;
         if (ev_type == mysql::binlog::event::WRITE_ROWS_EVENT ||
             ev_type == mysql::binlog::event::DELETE_ROWS_EVENT ||
             ev_type == mysql::binlog::event::UPDATE_ROWS_EVENT ||
-            ev_type == mysql::binlog::event::WRITE_ROWS_EVENT_V1 ||
-            ev_type == mysql::binlog::event::DELETE_ROWS_EVENT_V1 ||
-            ev_type == mysql::binlog::event::UPDATE_ROWS_EVENT_V1 ||
             ev_type == mysql::binlog::event::PARTIAL_UPDATE_ROWS_EVENT) {
           Rows_log_event *new_ev = (Rows_log_event *)ev;
           if (new_ev->get_flags(Rows_log_event::STMT_END_F)) stmt_end = true;
@@ -1742,6 +1745,7 @@ static Exit_status process_event(PRINT_EVENT_INFO *print_event_info,
         break;
       }
       case mysql::binlog::event::ANONYMOUS_GTID_LOG_EVENT:
+      case mysql::binlog::event::GTID_TAGGED_LOG_EVENT:
       case mysql::binlog::event::GTID_LOG_EVENT: {
         seen_gtid = true;
         print_event_info->immediate_server_version =
@@ -1967,8 +1971,8 @@ static struct my_option my_long_options[] = {
      nullptr},
     {"socket", 'S', "The socket file to use for connection.", &sock, &sock,
      nullptr, GET_STR, REQUIRED_ARG, 0, 0, 0, nullptr, 0, nullptr},
-#include "caching_sha2_passwordopt-longopts.h"
-#include "sslopt-longopts.h"
+#include "client/include/caching_sha2_passwordopt-longopts.h"
+#include "client/include/sslopt-longopts.h"
 
     {"start-datetime", OPT_START_DATETIME,
      "Start reading the binlog at first event having a datetime equal or "
@@ -2213,7 +2217,7 @@ extern "C" bool get_one_option(int optid, const struct my_option *opt,
       DBUG_PUSH(argument ? argument : default_dbug_option);
       break;
 #endif
-#include "sslopt-case.h"
+#include "client/include/sslopt-case.h"
 
     case 'd':
       one_database = true;
@@ -2269,8 +2273,10 @@ extern "C" bool get_one_option(int optid, const struct my_option *opt,
                                          "--read-from-remote-source"));
       [[fallthrough]];
     case OPT_REMOTE_PROTO:
-      opt_remote_proto = (enum_remote_proto)(
-          find_type_or_exit(argument, &remote_proto_typelib, opt->name) - 1);
+      opt_remote_proto =
+          (enum_remote_proto)(find_type_or_exit(argument, &remote_proto_typelib,
+                                                opt->name) -
+                              1);
       break;
     case OPT_MYSQL_PROTOCOL:
       opt_protocol =
@@ -2283,9 +2289,11 @@ extern "C" bool get_one_option(int optid, const struct my_option *opt,
       stop_datetime = convert_str_to_timestamp(stop_datetime_str);
       break;
     case OPT_BASE64_OUTPUT_MODE:
-      opt_base64_output_mode = (enum_base64_output_mode)(
-          find_type_or_exit(argument, &base64_output_mode_typelib, opt->name) -
-          1);
+      opt_base64_output_mode =
+          (enum_base64_output_mode)(find_type_or_exit(
+                                        argument, &base64_output_mode_typelib,
+                                        opt->name) -
+                                    1);
       break;
     case 'v':
       if (argument == disabled_my_option)
@@ -2398,7 +2406,6 @@ static Exit_status safe_connect() {
   if (ssl_client_check_post_connect_ssl_setup(
           mysql_handle, [](const char *err) { error("%s", err); }))
     return ERROR_STOP;
-  mysql_handle->reconnect = true;
   return OK_CONTINUE;
 }
 
@@ -2592,16 +2599,13 @@ static uint get_dump_flags() { return stop_never ? 0 : BINLOG_DUMP_NON_BLOCK; }
                           data should be stored.
 */
 static void fix_gtid_set(MYSQL_RPL *rpl, uchar *packet_gtid_set) {
-  Gtid_set *gtid_set = (Gtid_set *)rpl->gtid_set_arg;
+  auto *gtid_set =
+      reinterpret_cast<mysql::gtids::Gtid_set *>(rpl->gtid_set_arg);
 
-  gtid_set->encode(packet_gtid_set);
-
-  /*
-    Note: we acquire lock in the dump_remote_log_entries()
-    just before mysql_binlog_open() call if GTID used.
-  */
-  global_sid_lock->assert_some_rdlock();
-  global_sid_lock->unlock();
+  mysql::strconv::encode(mysql::strconv::Binary_format{},
+                         mysql::strconv::out_str_fixed_nz(
+                             packet_gtid_set, rpl->gtid_set_encoded_size),
+                         *gtid_set);
 }
 
 /*
@@ -2692,10 +2696,10 @@ static Exit_status dump_remote_log_entries(PRINT_EVENT_INFO *print_event_info,
   if (opt_remote_proto != BINLOG_DUMP_NON_GTID) {
     rpl.flags |= MYSQL_RPL_GTID;
 
-    global_sid_lock->rdlock();
-    rpl.gtid_set_encoded_size = gtid_set_excluded->get_encoded_length();
+    rpl.gtid_set_encoded_size = mysql::strconv::compute_encoded_length(
+        mysql::strconv::Binary_format{}, gtid_set_excluded);
     rpl.fix_gtid_set = fix_gtid_set;
-    rpl.gtid_set_arg = (void *)gtid_set_excluded;
+    rpl.gtid_set_arg = (void *)&gtid_set_excluded;
   }
 
   if (mysql_binlog_open(mysql_handle, &rpl)) {
@@ -3195,27 +3199,27 @@ static int args_post_process(void) {
     }
   }
 
-  global_sid_lock->rdlock();
-
   if (opt_include_gtids_str != nullptr) {
-    if (gtid_set_included->add_gtid_text(opt_include_gtids_str) !=
-        RETURN_STATUS_OK) {
-      error("Could not configure --include-gtids '%s'", opt_include_gtids_str);
-      global_sid_lock->unlock();
+    auto parse_state =
+        mysql::strconv::decode_text(opt_include_gtids_str, gtid_set_included);
+    if (!parse_state.is_ok()) {
+      error("Could not configure --include-gtids '%s': %s",
+            opt_include_gtids_str,
+            mysql::strconv::throwing::encode_text(parse_state).data());
       return ERROR_STOP;
     }
   }
 
   if (opt_exclude_gtids_str != nullptr) {
-    if (gtid_set_excluded->add_gtid_text(opt_exclude_gtids_str) !=
-        RETURN_STATUS_OK) {
-      error("Could not configure --exclude-gtids '%s'", opt_exclude_gtids_str);
-      global_sid_lock->unlock();
+    auto parse_state =
+        mysql::strconv::decode_text(opt_exclude_gtids_str, gtid_set_excluded);
+    if (!parse_state.is_ok()) {
+      error("Could not configure --exclude-gtids '%s': %s",
+            opt_exclude_gtids_str,
+            mysql::strconv::throwing::encode_text(parse_state).data());
       return ERROR_STOP;
     }
   }
-
-  global_sid_lock->unlock();
 
   if (connection_server_id == 0 && stop_never)
     error("Cannot set --server-id=0 when --stop-never is specified.");
@@ -3226,38 +3230,6 @@ static int args_post_process(void) {
           connection_server_id, stop_never_slave_server_id);
 
   return OK_CONTINUE;
-}
-
-/**
-   GTID cleanup destroys objects and reset their pointer.
-   Function is reentrant.
-*/
-inline void gtid_client_cleanup() {
-  delete global_sid_lock;
-  delete global_sid_map;
-  delete gtid_set_excluded;
-  delete gtid_set_included;
-  global_sid_lock = nullptr;
-  global_sid_map = nullptr;
-  gtid_set_excluded = nullptr;
-  gtid_set_included = nullptr;
-}
-
-/**
-   GTID initialization.
-
-   @return true if allocation does not succeed
-           false if OK
-*/
-inline bool gtid_client_init() {
-  const bool res = (!(global_sid_lock = new Checkable_rwlock) ||
-                    !(global_sid_map = new Sid_map(global_sid_lock)) ||
-                    !(gtid_set_excluded = new Gtid_set(global_sid_map)) ||
-                    !(gtid_set_included = new Gtid_set(global_sid_map)));
-  if (res) {
-    gtid_client_cleanup();
-  }
-  return res;
 }
 
 int main(int argc, char **argv) {
@@ -3290,10 +3262,6 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  if (gtid_client_init()) {
-    error("Could not initialize GTID structuress.");
-    return EXIT_FAILURE;
-  }
   if ((argc == 1) && (stop_position != (ulonglong)(~(my_off_t)0)) &&
       (!strcmp(argv[0], "-"))) {
     error("stop_position not allowed when input is STDIN");
@@ -3402,7 +3370,6 @@ int main(int argc, char **argv) {
   load_processor.destroy();
   /* We cannot free DBUG, it is used in global destructors after exit(). */
   my_end(my_end_arg | MY_DONT_FREE_DBUG);
-  gtid_client_cleanup();
 
   return (retval == ERROR_STOP ? EXIT_FAILURE : EXIT_SUCCESS);
 }

@@ -1,18 +1,19 @@
 #ifndef SQL_ITERATORS_WINDOW_ITERATORS_H_
 #define SQL_ITERATORS_WINDOW_ITERATORS_H_
 
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -96,10 +97,6 @@ class WindowIterator final : public RowIterator {
                  Temp_table_param *temp_table_param,  // Includes the window.
                  JOIN *join, int output_slice);
 
-  bool Init() override;
-
-  int Read() override;
-
   void SetNullRowFlag(bool is_null_row) override {
     m_source->SetNullRowFlag(is_null_row);
   }
@@ -114,6 +111,9 @@ class WindowIterator final : public RowIterator {
   }
 
  private:
+  bool DoInit() override;
+  int DoRead() override;
+
   /// The iterator we are reading from.
   unique_ptr_destroy_only<RowIterator> const m_source;
 
@@ -207,10 +207,6 @@ class BufferingWindowIterator final : public RowIterator {
       Temp_table_param *temp_table_param,  // Includes the window.
       JOIN *join, int output_slice);
 
-  bool Init() override;
-
-  int Read() override;
-
   void SetNullRowFlag(bool is_null_row) override {
     m_source->SetNullRowFlag(is_null_row);
   }
@@ -225,6 +221,8 @@ class BufferingWindowIterator final : public RowIterator {
   }
 
  private:
+  bool DoInit() override;
+  int DoRead() override;
   int ReadBufferedRow(bool new_partition_or_eof);
 
   /// The iterator we are reading from.

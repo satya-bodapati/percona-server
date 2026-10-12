@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2016, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,9 +25,9 @@
 
 #include "plugin/x/src/io/xpl_listener_unix_socket.h"
 
-#include <errno.h>
 #include <fcntl.h>
-#include <stdlib.h>
+#include <cerrno>
+#include <cstdlib>
 
 #include "m_string.h"
 #include "my_config.h"  // NOLINT(build/include_subdir)
@@ -39,9 +40,10 @@
 #include "plugin/x/src/xpl_performance_schema.h"
 
 #ifdef HAVE_SYS_UN_H
-#include <signal.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <csignal>
+#include <utility>
 #endif
 
 namespace xpl {
@@ -65,8 +67,9 @@ class Unixsocket_creator {
   }
 
   std::shared_ptr<iface::Socket> create_and_bind_unixsocket(
-      const std::string &unix_socket_file, std::string &error_message,
-      const uint32_t backlog) {
+      const std::string &unix_socket_file [[maybe_unused]],
+      std::string &error_message [[maybe_unused]],
+      const uint32_t backlog [[maybe_unused]]) {
     std::shared_ptr<iface::Socket> listener_socket(
         m_operations_factory.create_socket(MYSQL_INVALID_SOCKET));
 
@@ -121,7 +124,7 @@ class Unixsocket_creator {
     m_system_interface->unlink(unix_socket_file.c_str());
 
     // bind
-    int old_mask = umask(0);
+    int const old_mask = umask(0);
     if (listener_socket->bind(reinterpret_cast<struct sockaddr *>(&addr),
                               sizeof(addr)) < 0) {
       umask(old_mask);
@@ -172,8 +175,9 @@ class Unixsocket_creator {
     return unix_socket_file + ".lock";
   }
 
-  bool create_unixsocket_lockfile(const std::string &unix_socket_file,
-                                  std::string &error_message) {
+  bool create_unixsocket_lockfile(const std::string &unix_socket_file
+                                  [[maybe_unused]],
+                                  std::string &error_message [[maybe_unused]]) {
     std::shared_ptr<iface::File> lockfile_fd;
 #if !defined(HAVE_SYS_UN_H)
     return false;
@@ -248,8 +252,8 @@ class Unixsocket_creator {
         ++pid_begin;
       }
 
-      pid_t parent_pid = m_system_interface->get_ppid();
-      pid_t read_pid = atoi(pid_begin);
+      pid_t const parent_pid = m_system_interface->get_ppid();
+      pid_t const read_pid = atoi(pid_begin);
 
       if (read_pid <= 0) {
         error_message = "invalid PID in UNIX socket lock file ";
@@ -328,7 +332,7 @@ Listener_unix_socket::Listener_unix_socket(
     std::shared_ptr<iface::Operations_factory> operations_factory,
     const std::string &unix_socket_path, iface::Socket_events &event,
     const uint32_t backlog)
-    : m_operations_factory(operations_factory),
+    : m_operations_factory(std::move(operations_factory)),
       m_unix_socket_path(unix_socket_path),
       m_backlog(backlog),
       m_state(iface::Listener::State::k_initializing,

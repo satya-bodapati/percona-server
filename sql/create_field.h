@@ -1,18 +1,19 @@
 #ifndef SQL_CREATE_FIELD_INCLUDED
 #define SQL_CREATE_FIELD_INCLUDED
 
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -95,7 +96,7 @@ class Create_field {
     Name of column modified by ALTER TABLE's CHANGE/MODIFY COLUMN clauses,
     NULL for columns added.
   */
-  const char *change;
+  const char *change{nullptr};
   const char *after{nullptr};  // Put column after this one
   LEX_CSTRING comment;         // Comment for field
 
@@ -122,8 +123,8 @@ class Create_field {
                       // Used only for UCS2 intervals
   List<String> interval_list;
   const CHARSET_INFO *charset;
-  bool is_explicit_collation;  // User exeplicitly provided charset ?
-  Field::geometry_type geom_type;
+  bool is_explicit_collation{false};  // User explicitly provided charset?
+  Field::geometry_type geom_type{Field::GEOM_GEOMETRY};
   Field *field;  // For alter table
 
   uint offset;
@@ -134,9 +135,9 @@ class Create_field {
     Initialized based on flags and other members at prepare_create_field()/
     init_for_tmp_table() stage.
   */
-  bool is_nullable;
-  bool is_zerofill;
-  bool is_unsigned;
+  bool is_nullable{false};
+  bool is_zerofill{false};
+  bool is_unsigned{false};
 
   /**
     Indicates that storage engine doesn't support optimized BIT field
@@ -148,7 +149,7 @@ class Create_field {
     Initialized at mysql_prepare_create_table()/sp_prepare_create_field()/
     init_for_tmp_table() stage.
   */
-  bool treat_bit_as_char;
+  bool treat_bit_as_char{false};
 
   /**
     Row based replication code sometimes needs to create ENUM and SET
@@ -163,19 +164,22 @@ class Create_field {
   */
   uint pack_length_override{0};
 
-  LEX_CSTRING zip_dict_name;  // Compression dictionary name
+  LEX_CSTRING zip_dict_name{NULL_CSTR};  // Compression dictionary name
 
-  /* Generated column expression information */
+  /// Generated column expression information.
   Value_generator *gcol_info{nullptr};
-  /*
+  /**
     Indication that the field is phycically stored in tables
     rather than just generated on SQL queries.
     As of now, false can only be set for virtual generated columns.
   */
-  bool stored_in_db;
+  bool stored_in_db{false};
 
   /// Holds the expression to be used to generate default values.
   Value_generator *m_default_val_expr{nullptr};
+  /// The name of the masking policy to apply on the column when reading from
+  /// it. An empty string if there is no masking policy.
+  LEX_CSTRING m_masking_policy_name = EMPTY_CSTR;
   std::optional<gis::srid_t> m_srid;
 
   // Whether the field is actually an array of the field's type;
@@ -186,29 +190,14 @@ class Create_field {
     is filled in dd::Column::options and later used to fill TABLE_SHARE*
     zip_dict_name and zip_dict_data
   */
-  uint64_t zip_dict_id;
+  uint64_t zip_dict_id{0};
 
   LEX_CSTRING m_engine_attribute = EMPTY_CSTR;
   LEX_CSTRING m_secondary_engine_attribute = EMPTY_CSTR;
+  /// Will be converted to m_engine_attribute for persistence
+  LEX_CSTRING m_external_format = EMPTY_CSTR;
 
-  Create_field()
-      : after(nullptr),
-        is_explicit_collation(false),
-        geom_type(Field::GEOM_GEOMETRY),
-        is_nullable(false),
-        is_zerofill(false),
-        is_unsigned(false),
-        /*
-          Initialize treat_bit_as_char for all field types even if
-          it is only used for MYSQL_TYPE_BIT. This avoids bogus
-          valgrind warnings in optimized builds.
-        */
-        treat_bit_as_char(false),
-        pack_length_override(0),
-        zip_dict_name(NULL_CSTR),
-        stored_in_db(false),
-        m_default_val_expr(nullptr),
-        zip_dict_id(0) {}
+  Create_field() = default;
   Create_field(Field *field, Field *orig_field);
 
   /* Used to make a clone of this object for ALTER/CREATE TABLE */
@@ -233,7 +222,7 @@ class Create_field {
             List<String> *interval_list, const CHARSET_INFO *cs,
             bool has_explicit_collation, uint uint_geom_type,
             const LEX_CSTRING *zip_dict_name, Value_generator *gcol_info,
-            Value_generator *default_val_expr, std::optional<gis::srid_t> srid,
+            Value_generator *default_val_expr, LEX_CSTRING fld_masking_policy, std::optional<gis::srid_t> srid,
             dd::Column::enum_hidden_type hidden, bool is_array = false);
 
   ha_storage_media field_storage_type() const {

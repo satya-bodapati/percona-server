@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -31,6 +32,7 @@ Clone Plugin: Client Interface
 
 #include "plugin/clone/include/clone.h"
 #include "plugin/clone/include/clone_hton.h"
+#include "plugin/clone/include/clone_json.h"
 #include "plugin/clone/include/clone_status.h"
 
 #include "mysql/psi/mysql_thread.h"
@@ -384,6 +386,9 @@ struct Remote_Parameters {
 
   /** Remote plugins with shared object name */
   Key_Values m_plugins_with_so;
+
+  /** Remote configurations required to support cloning to next LTS */
+  rapidjson::Document m_json_configs;
 };
 
 /** For Remote Clone, "Clone Client" is created at recipient. It receives data
@@ -687,6 +692,12 @@ class Client {
   @return error code */
   int add_config(const uchar *packet, size_t length, bool other);
 
+  /** Extract and add json remote configuration from network packet.
+  @param[in]	packet	network packet
+  @param[in]	length	packet length
+  @return error code */
+  int add_json_configs(const uchar *packet, size_t length);
+
   /** Use additional configurations if sent by donor. */
   void use_other_configs();
 
@@ -709,7 +720,7 @@ class Client {
   int set_error(const uchar *buffer, size_t length);
 
   /** Suspends client thread for the specified time
-  @param[in]	Time_Sec Time in seconds
+  @param[in]	wait_time Time in seconds
   @return error code */
   int wait(Time_Sec wait_time);
 

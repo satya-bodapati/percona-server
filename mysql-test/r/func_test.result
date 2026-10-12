@@ -367,7 +367,7 @@ DROP TABLE t1, t2;
 # Bug#22839888 UNINITIALIZED VALUE WHEN CONVERTING
 #              MULTIBYTE STRINGS TO NUMBERS
 #
-select greatest(1,_utf16'.',_utf8'');
+select greatest(1,_utf16'.',_utf8mb3'');
 ERROR HY000: Illegal mix of collations (latin1_swedish_ci,NUMERIC), (utf16_general_ci,COERCIBLE), (utf8mb3_general_ci,COERCIBLE) for operation 'greatest'
 #
 # Bug#25123839: LEAST AND GREATEST MAKES INCONSISTENT DATA TYPES,
@@ -445,7 +445,7 @@ GREATEST(5.5, 5.5e5) AS c12,
 GREATEST(5.5, '5') AS c13,
 GREATEST(010101.5, date '2005-05-05') AS c14,
 GREATEST(5.5, time '05:05:05.555555') AS c15,
-GREATEST(010101.5, timestamp '2005-05-05 05:05:05.555555') AS c16,
+GREATEST(010101.0, timestamp '2005-05-05 05:05:05.555555') AS c16,
 GREATEST(5.5e5, '5') AS c21,
 GREATEST(2004041e1, date '2005-05-05') AS c22,
 GREATEST(150505.0e5, time '05:05:05.555555') AS c23,
@@ -888,3 +888,137 @@ CAST( LEAST( c1, CONVERT(c1, UNSIGNED) ) AS DECIMAL );
 ERROR HY000: Incorrect string value: '2007-05-16 19:15:59' for function bin_to_uuid
 DROP TABLE t1;
 SET SESSION sql_mode=default;
+#
+# Bug#33045412: ASSERTION `M_TYPELIB != NULLPTR' FAILED|SQL/ITEM.CC
+#
+CREATE TABLE t(id INT PRIMARY KEY,
+set_col SET('a', 'b', 'c'),
+enum_col ENUM('d', 'e'));
+INSERT INTO t VALUES (1, 'a,b', 'd'), (2, 'b,c', 'e');
+SELECT LEAST(set_col, NULL) AS col1,
+LEAST(NULL, set_col) AS col2,
+LEAST(set_col, set_col) AS col3,
+LEAST(set_col, enum_col) AS col4
+FROM t UNION SELECT 1, 2, 3, 4;
+col1	col2	col3	col4
+1	2	3	4
+NULL	NULL	a,b	a,b
+NULL	NULL	b,c	b,c
+SELECT GREATEST(set_col, NULL) AS col1,
+GREATEST(NULL, set_col) AS col2,
+GREATEST(set_col, set_col) AS col3,
+GREATEST(set_col, enum_col) AS col4
+FROM t UNION SELECT 1, 2, 3, 4;
+col1	col2	col3	col4
+1	2	3	4
+NULL	NULL	a,b	d
+NULL	NULL	b,c	e
+SELECT LEAST(enum_col, NULL) AS col1,
+LEAST(NULL, enum_col) AS col2,
+LEAST(enum_col, enum_col) AS col3,
+LEAST(enum_col, set_col) AS col4
+FROM t UNION SELECT 1, 2, 3, 4;
+col1	col2	col3	col4
+1	2	3	4
+NULL	NULL	d	a,b
+NULL	NULL	e	b,c
+SELECT GREATEST(enum_col, NULL) AS col1,
+GREATEST(NULL, enum_col) AS col2,
+GREATEST(enum_col, enum_col) AS col3,
+GREATEST(enum_col, set_col) AS col4
+FROM t UNION SELECT 1, 2, 3, 4;
+col1	col2	col3	col4
+1	2	3	4
+NULL	NULL	d	d
+NULL	NULL	e	e
+DROP TABLE t;
+# Bug#34646522: Literal value with different character set from derived
+#               table causes error
+CREATE TABLE t
+(a VARCHAR(10) CHARACTER SET ascii,
+b VARCHAR(10) CHARACTER SET latin1,
+c VARCHAR(10) CHARACTER SET latin2,
+d VARCHAR(10) CHARACTER SET utf16
+);
+INSERT INTO t VALUES('a', 'a', 'a', 'a');
+SELECT GREATEST(_utf8mb4 'a', a) FROM t;
+GREATEST(_utf8mb4 'a', a)
+a
+SELECT GREATEST(dt.a, t.a) FROM t, (SELECT _utf8mb4 'a') AS dt(a);
+GREATEST(dt.a, t.a)
+a
+SELECT GREATEST(_utf8mb4 'Â±', a) FROM t;
+ERROR HY000: Cannot convert string '\xC3\x82\xC2\xB1' from utf8mb4 to ascii
+SELECT GREATEST(dt.a, t.a) FROM t, (SELECT _utf8mb4 'Â±') AS dt(a);
+ERROR HY000: Cannot convert string '\xC3\x82\xC2\xB1' from utf8mb4 to ascii
+SELECT GREATEST(_utf8mb4 'a', b) FROM t;
+GREATEST(_utf8mb4 'a', b)
+a
+SELECT GREATEST(dt.a, t.b) FROM t, (SELECT _utf8mb4 'a') AS dt(a);
+GREATEST(dt.a, t.b)
+a
+SELECT GREATEST(_utf8mb4 'Â±', b) FROM t;
+GREATEST(_utf8mb4 'Â±', b)
+Â±
+SELECT GREATEST(dt.a, t.b) FROM t, (SELECT _utf8mb4 'Â±') AS dt(a);
+GREATEST(dt.a, t.b)
+Â±
+SELECT GREATEST(_utf8mb4 'a', c) FROM t;
+GREATEST(_utf8mb4 'a', c)
+a
+SELECT GREATEST(dt.a, t.c) FROM t, (SELECT _utf8mb4 'a') AS dt(a);
+GREATEST(dt.a, t.c)
+a
+SELECT GREATEST(_utf8mb4 'Â±', c) FROM t;
+ERROR HY000: Cannot convert string '\xC3\x82\xC2\xB1' from utf8mb4 to latin2
+SELECT GREATEST(dt.a, t.c) FROM t, (SELECT _utf8mb4 'Â±') AS dt(a);
+ERROR HY000: Cannot convert string '\xC3\x82\xC2\xB1' from utf8mb4 to latin2
+SELECT GREATEST(_utf8mb4 'a', d) FROM t;
+GREATEST(_utf8mb4 'a', d)
+a
+SELECT GREATEST(dt.a, t.d) FROM t, (SELECT _utf8mb4 'a') AS dt(a);
+GREATEST(dt.a, t.d)
+a
+SELECT GREATEST(_latin1 'a', a) FROM t;
+GREATEST(_latin1 'a', a)
+a
+SELECT GREATEST(dt.a, t.a) FROM t, (SELECT _latin1 'a') AS dt(a);
+GREATEST(dt.a, t.a)
+a
+SELECT GREATEST(_latin1 'Ã¥', a) FROM t;
+ERROR HY000: Cannot convert string '\xC3\x83\xC2\xA5' from latin1 to ascii
+SELECT GREATEST(dt.a, t.a) FROM t, (SELECT _latin1 'Ã¥') AS dt(a);
+ERROR HY000: Cannot convert string '\xC3\x83\xC2\xA5' from latin1 to ascii
+SELECT GREATEST(_latin1 'a', c) FROM t;
+GREATEST(_latin1 'a', c)
+a
+SELECT GREATEST(dt.a, t.c) FROM t, (SELECT _latin1 'a') AS dt(a);
+GREATEST(dt.a, t.c)
+a
+SELECT GREATEST(_latin1 'Ã¥', c) FROM t;
+ERROR HY000: Cannot convert string '\xC3\x83\xC2\xA5' from latin1 to latin2
+SELECT GREATEST(dt.a, t.c) FROM t, (SELECT _latin1 'Ã¥') AS dt(a);
+ERROR HY000: Cannot convert string '\xC3\x83\xC2\xA5' from latin1 to latin2
+DROP TABLE t;
+#
+# Bug#37083848: virtual longlong Item_func_min_max::int_op():
+# Assertion `!unsigned_flag || !arg_val.is_negative()' failed
+#
+CREATE TABLE t1 (
+id INT UNSIGNED NOT NULL
+);
+INSERT INTO t1 VALUES(1);
+SELECT id FROM t1 WHERE LEAST(id, id) AND -1 = id;
+id
+DROP TABLE t1;
+#
+# Bug#38482019: Assertion 'false' failed sql/item_func.cc
+#
+CREATE TABLE t1(t TIME, d DATE, y YEAR);
+INSERT INTO t1 VALUES(TIME'12:02:12', DATE'2024-09-03', 2025);
+SET TIMESTAMP = UNIX_TIMESTAMP('2025-01-01 00:00:00');
+SELECT FROM_UNIXTIME(GREATEST(d, t, y)) FROM t1;
+FROM_UNIXTIME(GREATEST(d, t, y))
+1970-08-23 12:01:41.000000
+SET TIMESTAMP = DEFAULT;
+DROP TABLE t1;

@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,7 +25,7 @@
 
 #include "sql/conn_handler/connection_handler_manager.h"
 
-#include <assert.h>
+#include <cassert>
 #include <ctime>
 #include <new>
 
@@ -36,6 +37,7 @@
 #include "mysql/components/services/bits/psi_bits.h"
 #include "mysql/components/services/bits/psi_cond_bits.h"
 #include "mysql/components/services/bits/psi_mutex_bits.h"
+#include "mysql/components/services/log_builtins.h"
 #include "mysql/service_thd_wait.h"
 #include "mysqld_error.h"                              // ER_*
 #include "sql/conn_handler/channel_info.h"             // Channel_info
@@ -56,6 +58,8 @@ struct Connection_handler_functions;
 uint Connection_handler_manager::connection_count = 0;
 ulong Connection_handler_manager::max_used_connections = 0;
 ulong Connection_handler_manager::max_used_connections_time = 0;
+std::atomic_ulong Connection_handler_manager::incoming_connection_count = 0;
+
 THD_event_functions *Connection_handler_manager::event_functions = nullptr;
 THD_event_functions *Connection_handler_manager::saved_event_functions =
     nullptr;
@@ -115,7 +119,7 @@ bool Connection_handler_manager::valid_connection_count() {
 }
 
 bool Connection_handler_manager::check_and_incr_conn_count(
-    bool is_admin_connection) {
+    bool is_admin_connection, bool internal_session) {
   bool connection_accepted = true;
   mysql_mutex_lock(&LOCK_connection_count);
   /*
@@ -131,7 +135,7 @@ bool Connection_handler_manager::check_and_incr_conn_count(
     m_connection_errors_max_connection++;
   } else {
     ++connection_count;
-
+    if (!internal_session) ++incoming_connection_count;
     if (connection_count > max_used_connections) {
       max_used_connections = connection_count;
       max_used_connections_time = time(nullptr);
@@ -221,9 +225,14 @@ bool Connection_handler_manager::init() {
 void Connection_handler_manager::wait_till_no_connection() {
   mysql_mutex_lock(&LOCK_connection_count);
   while (connection_count > 0) {
+    LogErr(INFORMATION_LEVEL, ER_WAITING_FOR_NO_CONNECTIONS, connection_count);
     mysql_cond_wait(&COND_connection_count, &LOCK_connection_count);
   }
   mysql_mutex_unlock(&LOCK_connection_count);
+}
+
+void Connection_handler_manager::post_daemonize_init() {
+  m_connection_handler->post_daemonize_init();
 }
 
 void Connection_handler_manager::destroy_instance() {
@@ -270,7 +279,7 @@ bool Connection_handler_manager::unload_connection_handler() {
 void Connection_handler_manager::process_new_connection(
     Channel_info *channel_info) {
   if (connection_events_loop_aborted() ||
-      !check_and_incr_conn_count(channel_info->is_admin_connection())) {
+      !check_and_incr_conn_count(channel_info->is_admin_connection(), false)) {
     channel_info->send_error_and_close_channel(ER_CON_COUNT_ERROR, 0, true);
     sql_print_warning("%s", ER_DEFAULT(ER_CON_COUNT_ERROR));
     delete channel_info;
@@ -306,8 +315,7 @@ int my_connection_handler_set(Connection_handler_functions *chf,
   assert(chf != nullptr && tef != nullptr);
   if (chf == nullptr || tef == nullptr) return 1;
 
-  Plugin_connection_handler *conn_handler =
-      new (std::nothrow) Plugin_connection_handler(chf);
+  auto *conn_handler = new (std::nothrow) Plugin_connection_handler(chf);
   if (conn_handler == nullptr) return 1;
 
   Connection_handler_manager::get_instance()->load_connection_handler(

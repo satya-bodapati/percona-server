@@ -1,15 +1,16 @@
-/* Copyright (c) 2008, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -222,10 +223,8 @@ void table_events_waits_common::clear_object_columns() {
 
 int table_events_waits_common::make_table_object_columns(
     PFS_events_waits *wait) {
-  uint safe_index;
-  PFS_table_share *safe_table_share;
-
-  safe_table_share = sanitize_table_share(wait->m_weak_table_share);
+  PFS_table_share *safe_table_share =
+      sanitize_table_share(wait->m_weak_table_share);
   if (unlikely(safe_table_share == nullptr)) {
     return 1;
   }
@@ -252,7 +251,7 @@ int table_events_waits_common::make_table_object_columns(
            m_row.m_object_name_length);
 
     /* INDEX NAME */
-    safe_index = wait->m_index;
+    const uint safe_index = wait->m_index;
     const uint safe_key_count =
         sanitize_index_count(safe_table_share->m_key_count);
     if (safe_index < safe_key_count) {
@@ -338,13 +337,12 @@ int table_events_waits_common::make_socket_object_columns(
     uint port;
     char port_str[128];
     char ip_str[INET6_ADDRSTRLEN + 1];
-    uint ip_len = 0;
     port_str[0] = ':';
 
     /* Get the IP address and port number */
-    ip_len = pfs_get_socket_address(ip_str, sizeof(ip_str), &port,
-                                    &safe_socket->m_sock_addr,
-                                    safe_socket->m_addr_len);
+    const uint ip_len = pfs_get_socket_address(ip_str, sizeof(ip_str), &port,
+                                               &safe_socket->m_sock_addr,
+                                               safe_socket->m_addr_len);
 
     /* Convert port number to a string (length includes ':') */
     const size_t port_len =
@@ -385,10 +383,10 @@ int table_events_waits_common::make_metadata_lock_object_columns(
 
   if (safe_metadata_lock->get_version() == wait->m_weak_version) {
     // TODO: remove code duplication with PFS_column_row::make_row()
-    static_assert(MDL_key::NAMESPACE_END == 19,
+    static_assert(MDL_key::NAMESPACE_END == 20,
                   "Adjust performance schema when changing enum_mdl_namespace");
 
-    MDL_key *mdl = &safe_metadata_lock->m_mdl_key;
+    const MDL_key *mdl = &safe_metadata_lock->m_mdl_key;
 
     switch (mdl->mdl_namespace()) {
       case MDL_key::GLOBAL:
@@ -429,6 +427,13 @@ int table_events_waits_common::make_metadata_lock_object_columns(
       case MDL_key::PROCEDURE:
         m_row.m_object_type = "PROCEDURE";
         m_row.m_object_type_length = 9;
+        set_schema_name(&m_row.m_object_schema, mdl);
+        m_row.m_object_name_length = mdl->name_length();
+        m_row.m_index_name_length = 0;
+        break;
+      case MDL_key::LIBRARY:
+        m_row.m_object_type = "LIBRARY";
+        m_row.m_object_type_length = 7;
         set_schema_name(&m_row.m_object_schema, mdl);
         m_row.m_object_name_length = mdl->name_length();
         m_row.m_index_name_length = 0;
@@ -567,7 +572,7 @@ int table_events_waits_common::make_row(PFS_events_waits *wait) {
   PFS_instr_class *safe_class;
   ulonglong timer_end;
   /* wait normalizer for most rows. */
-  time_normalizer *normalizer = m_normalizer;
+  const time_normalizer *normalizer = m_normalizer;
 
   /*
     Design choice:
@@ -687,7 +692,7 @@ int table_events_waits_common::make_row(PFS_events_waits *wait) {
   Different similar operations (CLOSE vs STREAMCLOSE) are displayed
   with the same name 'close'.
 */
-static const LEX_CSTRING operation_names_map[] = {
+static constexpr LEX_CSTRING operation_names_map[] = {
     /* Mutex operations */
     {STRING_WITH_LEN("lock")},
     {STRING_WITH_LEN("try_lock")},
@@ -923,7 +928,7 @@ PFS_engine_table *table_events_waits_current::create(PFS_engine_table_share *) {
 }
 
 table_events_waits_current::table_events_waits_current()
-    : table_events_waits_common(&m_share, &m_pos), m_pos() {}
+    : table_events_waits_common(&m_share, &m_pos), m_opened_index(nullptr) {}
 
 void table_events_waits_current::reset_position() {
   m_pos.reset();
@@ -939,19 +944,13 @@ PFS_events_waits *table_events_waits_current::get_wait(PFS_thread *pfs_thread,
     We do not show nested events for now,
     this will be revised with TABLE I/O
   */
-  // #define ONLY_SHOW_ONE_WAIT
 
-#ifdef ONLY_SHOW_ONE_WAIT
-  if (index_2 >= 1) {
-    return NULL;
-  }
-#else
   /* m_events_waits_stack[0] is a dummy record */
-  PFS_events_waits *top_wait =
+  const PFS_events_waits *top_wait =
       &pfs_thread->m_events_waits_stack[WAIT_STACK_BOTTOM];
   wait = &pfs_thread->m_events_waits_stack[m_pos.m_index_2 + WAIT_STACK_BOTTOM];
 
-  PFS_events_waits *safe_current = pfs_thread->m_events_waits_current;
+  const PFS_events_waits *safe_current = pfs_thread->m_events_waits_current;
 
   if (safe_current == top_wait) {
     /* Display the last top level wait, when completed */
@@ -964,7 +963,6 @@ PFS_events_waits *table_events_waits_current::get_wait(PFS_thread *pfs_thread,
       return nullptr;
     }
   }
-#endif
 
   if (wait->m_wait_class == NO_WAIT_CLASS) {
     /*
@@ -998,15 +996,12 @@ int table_events_waits_current::rnd_next() {
 }
 
 int table_events_waits_current::rnd_pos(const void *pos) {
-  PFS_thread *pfs_thread;
-  PFS_events_waits *wait;
-
   set_position(pos);
 
-  pfs_thread = global_thread_container.get(m_pos.m_index_1);
+  PFS_thread *pfs_thread = global_thread_container.get(m_pos.m_index_1);
   if (pfs_thread != nullptr) {
     assert(m_pos.m_index_2 < WAIT_STACK_LOGICAL_SIZE);
-    wait = get_wait(pfs_thread, m_pos.m_index_2);
+    PFS_events_waits *wait = get_wait(pfs_thread, m_pos.m_index_2);
     if (wait != nullptr) {
       return make_row(pfs_thread, wait);
     }
@@ -1085,7 +1080,7 @@ PFS_engine_table *table_events_waits_history::create(PFS_engine_table_share *) {
 }
 
 table_events_waits_history::table_events_waits_history()
-    : table_events_waits_common(&m_share, &m_pos), m_pos(), m_next_pos() {}
+    : table_events_waits_common(&m_share, &m_pos), m_opened_index(nullptr) {}
 
 void table_events_waits_history::reset_position() {
   m_pos.reset();
@@ -1140,17 +1135,14 @@ int table_events_waits_history::rnd_next() {
 }
 
 int table_events_waits_history::rnd_pos(const void *pos) {
-  PFS_thread *pfs_thread;
-  PFS_events_waits *wait;
-
   assert(events_waits_history_per_thread != 0);
   set_position(pos);
 
-  pfs_thread = global_thread_container.get(m_pos.m_index_1);
+  PFS_thread *pfs_thread = global_thread_container.get(m_pos.m_index_1);
   if (pfs_thread != nullptr) {
     assert(m_pos.m_index_2 < events_waits_history_per_thread);
 
-    wait = get_wait(pfs_thread, m_pos.m_index_2);
+    PFS_events_waits *wait = get_wait(pfs_thread, m_pos.m_index_2);
     if (wait != nullptr) {
       return make_row(pfs_thread, wait);
     }

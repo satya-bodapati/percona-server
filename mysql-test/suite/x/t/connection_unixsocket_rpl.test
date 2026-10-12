@@ -10,7 +10,7 @@
 #######################################################################
 
 --source include/not_windows.inc
---source include/master-slave.inc
+--source include/rpl/init_source_replica.inc
 --source include/count_sessions.inc
 --source ../include/have_performance_schema_threads.inc
 
@@ -18,11 +18,12 @@
 # Use master connection
 --connection master
 
+--let $xplugin_disable_ssl_for_x_at_client_side=1
 --source include/xplugin_preamble.inc
 call mtr.add_suppression("Error parsing message of type 12: args");
 call mtr.add_suppression("Error handling message: args");
 
-CREATE USER user_localhost@localhost IDENTIFIED WITH 'mysql_native_password' BY '';
+CREATE USER user_localhost@localhost IDENTIFIED WITH 'caching_sha2_password' BY '';
 GRANT ALL ON *.* TO user_localhost@localhost;
 
 ## Test starts here
@@ -235,7 +236,7 @@ EOF
 --exec $MYSQLXTEST --socket=$MASTER_X_MYSOCK -u user_localhost -h localhost  --password='' --file=$MYSQL_TMP_DIR/mysqlx-in.tmp 2>&1
 --remove_file $MYSQL_TMP_DIR/mysqlx-in.tmp
 
---source include/sync_slave_sql_with_master.inc
+--source include/rpl/sync_to_replica.inc
 #-- connection slave
 --echo # Connection:slave - Row with value 2 is expected on slave.
 USE xplugintest;
@@ -253,6 +254,6 @@ DROP DATABASE IF EXISTS xplugintest;
 DROP USER IF EXISTS user_localhost@localhost;
 
 --source include/wait_until_count_sessions.inc
---source include/sync_slave_sql_with_master.inc
---source include/rpl_end.inc
+--source include/rpl/sync_to_replica.inc
+--source include/rpl/deinit.inc
 

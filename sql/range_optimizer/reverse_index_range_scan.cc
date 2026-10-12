@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -33,17 +34,17 @@
 
 ReverseIndexRangeScanIterator::ReverseIndexRangeScanIterator(
     THD *thd, TABLE *table, ha_rows *examined_rows, double expected_rows,
-    int index, MEM_ROOT *return_mem_root, uint mrr_flags,
+    uint index, MEM_ROOT *return_mem_root, uint mrr_flags,
     Bounds_checked_array<QUICK_RANGE *> ranges, bool using_extended_key_parts)
     : TableRowIterator(thd, table),
-      m_index(index),
-      m_expected_rows(expected_rows),
-      m_examined_rows(examined_rows),
-      mem_root(return_mem_root),
-      m_mrr_flags(mrr_flags),
-      ranges(ranges),
-      last_range(nullptr),
-      m_using_extended_key_parts(using_extended_key_parts) {
+      m_index{index},
+      m_expected_rows{expected_rows},
+      m_examined_rows{examined_rows},
+      mem_root{return_mem_root},
+      m_mrr_flags{mrr_flags},
+      ranges{ranges},
+      last_range{nullptr},
+      m_using_extended_key_parts{using_extended_key_parts} {
   /*
     Use default MRR implementation for reverse scans. No table engine
     currently can do an MRR scan with output in reverse index order.
@@ -59,15 +60,16 @@ ReverseIndexRangeScanIterator::ReverseIndexRangeScanIterator(
   }
 
   key_part_info = table->key_info[m_index].key_part;
+  m_multi_valued_index = table->key_info[m_index].flags & HA_MULTI_VALUED_KEY;
 }
 
 ReverseIndexRangeScanIterator::~ReverseIndexRangeScanIterator() {
-  if (table()->key_info[m_index].flags & HA_MULTI_VALUED_KEY && table()->file) {
+  if (m_multi_valued_index && table()->file) {
     table()->file->ha_extra(HA_EXTRA_DISABLE_UNIQUE_RECORD_FILTER);
   }
 }
 
-bool ReverseIndexRangeScanIterator::Init() {
+bool ReverseIndexRangeScanIterator::DoInit() {
   current_range_idx = ranges.size();
   empty_record(table());
 
@@ -119,7 +121,7 @@ bool ReverseIndexRangeScanIterator::Init() {
   return false;
 }
 
-int ReverseIndexRangeScanIterator::Read() {
+int ReverseIndexRangeScanIterator::DoRead() {
   DBUG_TRACE;
 
   /* The max key is handled as follows:
@@ -285,7 +287,8 @@ int ReverseIndexRangeScanIterator::cmp_prev(QUICK_RANGE *range_arg) {
   int cmp;
   if (range_arg->flag & NO_MIN_RANGE) return 0; /* key can't be to small */
 
-  cmp = key_cmp(key_part_info, range_arg->min_key, range_arg->min_length);
+  cmp = key_cmp(key_part_info, range_arg->min_key, range_arg->min_length,
+                /*is_reverse_multi_valued_index_scan*/ m_multi_valued_index);
   if (cmp > 0 || (cmp == 0 && !(range_arg->flag & NEAR_MIN))) return 0;
   return 1;  // outside of range
 }

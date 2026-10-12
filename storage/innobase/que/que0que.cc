@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -377,7 +378,7 @@ void que_graph_free_recursive(que_node_t *node) /*!< in: query graph node */
   }
 
   DBUG_PRINT("que_graph_free_recursive",
-             ("node: %p, type: %lu", node, que_node_get_type(node)));
+             ("node: %p, type: " ULINTPF, node, que_node_get_type(node)));
 
   switch (que_node_get_type(node)) {
     case QUE_NODE_FORK:
@@ -1001,12 +1002,15 @@ loop:
   ut_a(thr_get_trx(thr)->error_state == DB_SUCCESS);
 
   que_run_threads_low(thr);
+  IF_DEBUG(if (thr->graph->sym_tab) { DEBUG_SYNC_C("after_low_with_lock"); });
 
   switch (thr->state) {
     case QUE_THR_RUNNING:
       /* There probably was a lock wait, but it already ended
       before we came here: continue running thr */
 
+      ut_ad(thr_get_trx(thr)->error_state == DB_LOCK_WAIT);
+      thr_get_trx(thr)->error_state = DB_SUCCESS;
       goto loop;
 
     case QUE_THR_LOCK_WAIT:

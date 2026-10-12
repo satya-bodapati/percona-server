@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -82,13 +83,6 @@ enum enum_binlog_row_value_options {
 enum enum_binlog_row_metadata {
   BINLOG_ROW_METADATA_MINIMAL = 0,
   BINLOG_ROW_METADATA_FULL = 1
-};
-
-// Values for transaction_write_set_extraction sysvar
-enum enum_transaction_write_set_hashing_algorithm {
-  HASH_ALGORITHM_OFF = 0,
-  HASH_ALGORITHM_MURMUR32 = 1,
-  HASH_ALGORITHM_XXHASH64 = 2
 };
 
 // Values for session_track_gtids sysvar
@@ -176,7 +170,9 @@ inline constexpr sql_mode_t MODE_PAD_CHAR_TO_FULL_LENGTH = 1ULL << 31;
 */
 inline constexpr sql_mode_t MODE_TIME_TRUNCATE_FRACTIONAL = 1ULL << 32;
 
-inline constexpr sql_mode_t MODE_LAST = 1ULL << 33;
+inline constexpr sql_mode_t MODE_INTERPRET_UTF8_AS_UTF8MB4 = 1ULL << 33;
+
+inline constexpr sql_mode_t MODE_LAST = 1ULL << 34;
 
 inline constexpr sql_mode_t MODE_ALLOWED_MASK =
     (MODE_REAL_AS_FLOAT | MODE_PIPES_AS_CONCAT | MODE_ANSI_QUOTES |
@@ -186,7 +182,8 @@ inline constexpr sql_mode_t MODE_ALLOWED_MASK =
      MODE_STRICT_TRANS_TABLES | MODE_STRICT_ALL_TABLES | MODE_NO_ZERO_IN_DATE |
      MODE_NO_ZERO_DATE | MODE_INVALID_DATES | MODE_ERROR_FOR_DIVISION_BY_ZERO |
      MODE_TRADITIONAL | MODE_HIGH_NOT_PRECEDENCE | MODE_NO_ENGINE_SUBSTITUTION |
-     MODE_PAD_CHAR_TO_FULL_LENGTH | MODE_TIME_TRUNCATE_FRACTIONAL);
+     MODE_PAD_CHAR_TO_FULL_LENGTH | MODE_TIME_TRUNCATE_FRACTIONAL |
+     MODE_INTERPRET_UTF8_AS_UTF8MB4);
 
 /*
   We can safely ignore and reset these obsolete mode bits while replicating:
@@ -212,8 +209,7 @@ inline constexpr sql_mode_t MODE_ALLOWED_MASK =
   updated (to store more bytes on disk).
 
   NOTE: When adding new SQL_MODE types, make sure to also add them to
-  the scripts used for creating the MySQL system tables
-  in scripts/mysql_system_tables.sql and scripts/mysql_system_tables_fix.sql
+  sql_mode_names[] in sys_vars.cc
 */
 
 /** Page fragmentation statistics */
@@ -467,8 +463,6 @@ struct System_variables {
   uint binlog_trx_compression_level_zstd;
   ulonglong binlog_row_value_options;
   bool sql_log_bin;
-  // see enum_transaction_write_set_hashing_algorithm
-  ulong transaction_write_set_extraction;
   ulong completion_type;
   ulong transaction_isolation;
   ulong updatable_views_with_limit;
@@ -491,7 +485,6 @@ struct System_variables {
   */
   bool transaction_read_only;
   bool low_priority_updates;
-  bool new_mode;
   bool keep_files_on_create;
 
   bool old_alter_table;
@@ -499,6 +492,8 @@ struct System_variables {
 
   plugin_ref table_plugin;
   plugin_ref temp_table_plugin;
+  char *external_table_storage_engine;
+  char *external_table_secondary_storage_engine;
 
   /* Only charset part of these variables is sensible */
   const CHARSET_INFO *character_set_filesystem;
@@ -578,13 +573,6 @@ struct System_variables {
   */
   bool show_create_table_verbosity;
 
-  /**
-    Compatibility option to mark the pre MySQL-5.6.4 temporals columns using
-    the old format using comments for SHOW CREATE TABLE and in I_S.COLUMNS
-    'COLUMN_TYPE' field.
-  */
-  bool show_old_temporals;
-
   bool ft_query_extra_word_chars;
 
   // Used for replication delay and lag monitoring
@@ -597,6 +585,10 @@ struct System_variables {
 
   /** Used for controlling preparation of queries against secondary engine. */
   ulong use_secondary_engine;
+
+  /** Used to determine if statistics from secondary engine can be used
+      by the hypergraph optimizer. */
+  bool enable_secondary_engine_statistics;
 
   /**
     Used for controlling which statements to execute in a secondary
@@ -713,12 +705,35 @@ struct System_variables {
    */
   Explain_format_type explain_format;
 
+  /**
+    Used to specify the JSON format version used by EXPLAIN FORMAT=JSON with
+    the old (non-hypergraph) join optimizer.
+    @sa Sys_explain_json_format_version
+   */
+  uint explain_json_format_version;
+
   /// Max size of set operations hash buffer size.
   ulonglong set_operations_buffer_size;
 #ifndef NDEBUG
   char *debug_set_operations_secondary_overflow_at;
 #endif
+
+  /**
+    Restrict foreign keys on non-unique or partial keys.
+    @sa Sys_restrict_fk_on_non_standard_key
+  */
+  bool restrict_fk_on_non_standard_key;
+
+  /**
+    Activate child table trigger execution during SQL foreign key cascade.
+    @sa Sys_enable_cascade_triggers
+  */
+  bool enable_cascade_triggers;
 };
+
+static_assert(std::is_trivially_copyable<System_variables>::value);
+static_assert(std::is_trivial<System_variables>::value);
+static_assert(std::is_standard_layout<System_variables>::value);
 
 /**
   Per thread status variables.
@@ -730,6 +745,7 @@ struct System_status_var {
   /* IMPORTANT! See first_system_status_var definition below. */
   ulonglong created_tmp_disk_tables;
   ulonglong created_tmp_tables;
+  ulonglong count_hit_tmp_table_size;
   ulonglong ha_commit_count;
   ulonglong ha_delete_count;
   ulonglong ha_read_first_count;

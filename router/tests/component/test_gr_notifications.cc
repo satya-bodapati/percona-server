@@ -1,16 +1,17 @@
 /*
-Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -33,7 +34,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #endif
 
 #include <gmock/gmock.h>
-#include <protobuf_lite/mysqlx_notice.pb.h>
+#include <protobuf/mysqlx_notice.pb.h>
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
 #include <rapidjson/filereadstream.h>
@@ -159,6 +160,10 @@ class GrNotificationsTest : public RouterComponentTest {
       node.PushBack(JsonValue(static_cast<int>(gr_node)), allocator);
       node.PushBack(JsonValue("ONLINE", strlen("ONLINE"), allocator),
                     allocator);
+      const std::string member_role = i == 0 ? "PRIMARY" : "SECONDARY";
+      node.PushBack(
+          JsonValue(member_role.c_str(), member_role.length(), allocator),
+          allocator);
       gr_nodes_->PushBack(node, allocator);
     }
 
@@ -224,6 +229,7 @@ class GrNotificationsTest : public RouterComponentTest {
   void send_globals(const uint16_t http_port) {
     JsonAllocator allocator;
     JsonValue json_doc(rapidjson::kObjectType);
+    json_doc.AddMember("gr_node_host", "127.0.0.1", allocator);
     if (gr_id_) {
       json_doc.AddMember("gr_id", *gr_id_, allocator);
     }
@@ -370,11 +376,13 @@ TEST_P(GrNotificationsParamTest, GrNotification) {
 
   SCOPED_TRACE(
       "// Launch 2 server mocks that will act as our metadata servers");
-  const auto trace_file = get_data_dir().join(test_params.tracefile).str();
   for (unsigned i = 0; i < kClusterNodesCount; ++i) {
-    cluster_nodes.push_back(&ProcessManager::launch_mysql_server_mock(
-        trace_file, cluster_nodes_ports[i], EXIT_SUCCESS, false,
-        cluster_http_ports[i], cluster_nodes_xports[i]));
+    cluster_nodes.push_back(
+        &mock_server_spawner().spawn(mock_server_cmdline(test_params.tracefile)
+                                         .port(cluster_nodes_ports[i])
+                                         .http_port(cluster_http_ports[i])
+                                         .x_port(cluster_nodes_xports[i])
+                                         .args()));
 
     SCOPED_TRACE("// Make our metadata server return 2 metadata servers");
     set_mock_metadata(cluster_http_ports[i], kGroupId, cluster_nodes_ports,
@@ -447,17 +455,7 @@ INSTANTIATE_TEST_SUITE_P(
               "abcdefg",
               {0}}}),
 
-        // 1) the same thing with old metadata schema
-        GrNotificationsTestParams(
-            "metadata_dynamic_nodes.js", 500ms, {1, 1},
-            {{100ms,
-              Mysqlx::Notice::Frame::GROUP_REPLICATION_STATE_CHANGED,
-              true,
-              Mysqlx::Notice::
-                  GroupReplicationStateChanged_Type_MEMBERSHIP_VIEW_CHANGE,
-              "abcdefg",
-              {0}}}),
-        // 2) 3 notifications with the same view id, 2 mdc updates expected
+        // 1) 3 notifications with the same view id, 2 mdc updates expected
         GrNotificationsTestParams(
             "metadata_dynamic_nodes_v2_gr.js", 500ms, {2, 2},
             {{100ms,
@@ -475,25 +473,7 @@ INSTANTIATE_TEST_SUITE_P(
               "abcdefg",
               {0}}}),
 
-        // 3) the same thing with old metadata schema
-        GrNotificationsTestParams(
-            "metadata_dynamic_nodes.js", 500ms, {2, 2},
-            {{100ms,
-              Mysqlx::Notice::Frame::GROUP_REPLICATION_STATE_CHANGED,
-              true,
-              Mysqlx::Notice::
-                  GroupReplicationStateChanged_Type_MEMBERSHIP_VIEW_CHANGE,
-              "abcdefg",
-              {0}},
-             {2000ms,
-              Mysqlx::Notice::Frame::GROUP_REPLICATION_STATE_CHANGED,
-              true,
-              Mysqlx::Notice::
-                  GroupReplicationStateChanged_Type_MEMBERSHIP_QUORUM_LOSS,
-              "abcdefg",
-              {0}}}),
-
-        // 4) 3 notifications; 2 have different view id, we expect metadata
+        // 2) 3 notifications; 2 have different view id, we expect metadata
         // refresh 3 times
         GrNotificationsTestParams(
             "metadata_dynamic_nodes_v2_gr.js", 1000ms, {3, 3},
@@ -519,32 +499,7 @@ INSTANTIATE_TEST_SUITE_P(
               "hijklmn",
               {0}}}),
 
-        // 5) the same thing with old metadata schema
-        GrNotificationsTestParams(
-            "metadata_dynamic_nodes.js", 1000ms, {3, 3},
-            {{1500ms,
-              Mysqlx::Notice::Frame::GROUP_REPLICATION_STATE_CHANGED,
-              true,
-              Mysqlx::Notice::
-                  GroupReplicationStateChanged_Type_MEMBERSHIP_VIEW_CHANGE,
-              "abcdefg",
-              {0}},
-             {1000ms,
-              Mysqlx::Notice::Frame::GROUP_REPLICATION_STATE_CHANGED,
-              true,
-              Mysqlx::Notice::
-                  GroupReplicationStateChanged_Type_MEMBER_STATE_CHANGE,
-              "abcdefg",
-              {0}},
-             {3000ms,
-              Mysqlx::Notice::Frame::GROUP_REPLICATION_STATE_CHANGED,
-              true,
-              Mysqlx::Notice::
-                  GroupReplicationStateChanged_Type_MEMBERSHIP_QUORUM_LOSS,
-              "hijklmn",
-              {0}}}),
-
-        // 6) 2 notifications on both nodes with the same view id, there should
+        // 3) 2 notifications on both nodes with the same view id, there should
         // be at least 1 notification, there can be 2 if the second node
         // triggers the notification once we are already handling the
         // notification from the first one
@@ -558,18 +513,7 @@ INSTANTIATE_TEST_SUITE_P(
               "abcdefg",
               {0, 1}}}),
 
-        // 7) the same thing with old metadata schema
-        GrNotificationsTestParams(
-            "metadata_dynamic_nodes.js", 1500ms, {1, 2},
-            {{100ms,
-              Mysqlx::Notice::Frame::GROUP_REPLICATION_STATE_CHANGED,
-              true,
-              Mysqlx::Notice::
-                  GroupReplicationStateChanged_Type_MEMBERSHIP_VIEW_CHANGE,
-              "abcdefg",
-              {0, 1}}}),
-
-        // 8) 2 notifications on both nodes with different view ids
+        // 4) 2 notifications on both nodes with different view ids
         GrNotificationsTestParams(
             "metadata_dynamic_nodes_v2_gr.js", 700ms, {2, 2},
             {{100ms,
@@ -585,27 +529,7 @@ INSTANTIATE_TEST_SUITE_P(
               Mysqlx::Notice::
                   GroupReplicationStateChanged_Type_MEMBER_ROLE_CHANGE,
               "hijklmn",
-              {0}}}),
-
-        // 9) the same thing with old metadata schema
-        GrNotificationsTestParams(
-            "metadata_dynamic_nodes.js", 700ms, {2, 2},
-            {{100ms,
-              Mysqlx::Notice::Frame::GROUP_REPLICATION_STATE_CHANGED,
-              true,
-              Mysqlx::Notice::
-                  GroupReplicationStateChanged_Type_MEMBERSHIP_VIEW_CHANGE,
-              "abcdefg",
-              {0}},
-             {1500ms,
-              Mysqlx::Notice::Frame::GROUP_REPLICATION_STATE_CHANGED,
-              true,
-              Mysqlx::Notice::
-                  GroupReplicationStateChanged_Type_MEMBER_ROLE_CHANGE,
-              "hijklmn",
-              {0}}})
-
-            )
+              {0}}}))
 
 );
 
@@ -636,11 +560,12 @@ TEST_P(GrNotificationNoXPortTest, GrNotificationNoXPort) {
 
   SCOPED_TRACE(
       "// Launch 2 server mocks that will act as our metadata servers");
-  const auto trace_file = get_data_dir().join(tracefile).str();
   for (unsigned i = 0; i < CLUSTER_NODES; ++i) {
-    cluster_nodes.push_back(&ProcessManager::launch_mysql_server_mock(
-        trace_file, cluster_nodes_ports[i], EXIT_SUCCESS, false,
-        cluster_http_ports[i]));
+    cluster_nodes.push_back(
+        &mock_server_spawner().spawn(mock_server_cmdline(tracefile)
+                                         .port(cluster_nodes_ports[i])
+                                         .http_port(cluster_http_ports[i])
+                                         .args()));
 
     SCOPED_TRACE("// Make our metadata server return 2 metadata servers");
     set_mock_metadata(cluster_http_ports[i], kGroupId, cluster_nodes_ports,
@@ -694,8 +619,7 @@ TEST_P(GrNotificationNoXPortTest, GrNotificationNoXPort) {
 }
 
 INSTANTIATE_TEST_SUITE_P(GrNotificationNoXPort, GrNotificationNoXPortTest,
-                         ::testing::Values("metadata_dynamic_nodes_v2_gr.js",
-                                           "metadata_dynamic_nodes.js"));
+                         ::testing::Values("metadata_dynamic_nodes_v2_gr.js"));
 
 class GrNotificationMysqlxWaitTimeoutUnsupportedTest
     : public GrNotificationsTest,
@@ -717,11 +641,11 @@ TEST_P(GrNotificationMysqlxWaitTimeoutUnsupportedTest,
   uint16_t cluster_http_port = port_pool_.get_next_available();
 
   SCOPED_TRACE("// Launch 1 server mock that will act as our cluster node");
-  const auto trace_file = get_data_dir().join(tracefile).str();
-  std::vector<uint16_t> classic_ports, x_ports;
-  ProcessManager::launch_mysql_server_mock(trace_file, cluster_classic_port,
-                                           EXIT_SUCCESS, false,
-                                           cluster_http_port, cluster_x_port);
+  mock_server_spawner().spawn(mock_server_cmdline(tracefile)
+                                  .port(cluster_classic_port)
+                                  .http_port(cluster_http_port)
+                                  .x_port(cluster_x_port)
+                                  .args());
 
   SCOPED_TRACE("// Make our metadata server return 1 cluster node");
   set_mock_metadata(cluster_http_port, kGroupId, {cluster_classic_port},
@@ -763,25 +687,16 @@ TEST_P(GrNotificationMysqlxWaitTimeoutUnsupportedTest,
   int md_queries_count = wait_for_md_queries(2, cluster_http_port);
   ASSERT_GT(md_queries_count, 1);
 
-  // there should be no WARNINGs nor ERRORs in the log file
+  // there should be no ERRORs in the log file
   const std::string log_content = router.get_logfile_content();
 
-  if (GetParam() == "metadata_dynamic_nodes.js") {
-    // there will be warning about deprecated metadata for MD 1.x
-    EXPECT_THAT(log_content,
-                ::testing::Not(::testing::HasSubstr(" metadata_cache ERROR ")));
-  } else {
-    EXPECT_THAT(log_content,
-                ::testing::Not(::testing::AnyOf(
-                    ::testing::HasSubstr(" metadata_cache ERROR "),
-                    ::testing::HasSubstr(" metadata_cache WARNING "))));
-  }
+  EXPECT_THAT(log_content,
+              ::testing::Not(::testing::HasSubstr(" metadata_cache ERROR ")));
 }
 
 INSTANTIATE_TEST_SUITE_P(GrNotificationMysqlxWaitTimeoutUnsupported,
                          GrNotificationMysqlxWaitTimeoutUnsupportedTest,
-                         ::testing::Values("metadata_dynamic_nodes_v2_gr.js",
-                                           "metadata_dynamic_nodes.js"));
+                         ::testing::Values("metadata_dynamic_nodes_v2_gr.js"));
 
 class GrNotificationNoticesUnsupportedTest
     : public GrNotificationsTest,
@@ -802,11 +717,11 @@ TEST_P(GrNotificationNoticesUnsupportedTest, GrNotificationNoticesUnsupported) {
   uint16_t cluster_http_port = port_pool_.get_next_available();
 
   SCOPED_TRACE("// Launch 1 server mock that will act as our cluster node");
-  const auto trace_file = get_data_dir().join(tracefile).str();
-  std::vector<uint16_t> classic_ports, x_ports;
-  ProcessManager::launch_mysql_server_mock(trace_file, cluster_classic_port,
-                                           EXIT_SUCCESS, false,
-                                           cluster_http_port, cluster_x_port);
+  mock_server_spawner().spawn(mock_server_cmdline(tracefile)
+                                  .port(cluster_classic_port)
+                                  .http_port(cluster_http_port)
+                                  .x_port(cluster_x_port)
+                                  .args());
 
   SCOPED_TRACE("// Make our metadata server return 1 metadata server");
   // instrumentate the mock to treat the GR notifications as unsupported
@@ -849,8 +764,7 @@ TEST_P(GrNotificationNoticesUnsupportedTest, GrNotificationNoticesUnsupported) {
 
 INSTANTIATE_TEST_SUITE_P(GrNotificationNoticesUnsupported,
                          GrNotificationNoticesUnsupportedTest,
-                         ::testing::Values("metadata_dynamic_nodes_v2_gr.js",
-                                           "metadata_dynamic_nodes.js"));
+                         ::testing::Values("metadata_dynamic_nodes_v2_gr.js"));
 
 class GrNotificationXPortConnectionFailureTest
     : public GrNotificationsTest,
@@ -878,11 +792,13 @@ TEST_P(GrNotificationXPortConnectionFailureTest,
 
   SCOPED_TRACE(
       "// Launch 2 server mocks that will act as our metadata servers");
-  const auto trace_file = get_data_dir().join(tracefile).str();
   for (unsigned i = 0; i < CLUSTER_NODES; ++i) {
-    cluster_nodes.push_back(&ProcessManager::launch_mysql_server_mock(
-        trace_file, cluster_nodes_ports[i], EXIT_SUCCESS, false,
-        cluster_http_ports[i], cluster_nodes_xports[i]));
+    cluster_nodes.push_back(
+        &mock_server_spawner().spawn(mock_server_cmdline(tracefile)
+                                         .port(cluster_nodes_ports[i])
+                                         .http_port(cluster_http_ports[i])
+                                         .x_port(cluster_nodes_xports[i])
+                                         .args()));
 
     SCOPED_TRACE("// Make our metadata server return 2 metadata servers");
     set_mock_metadata(cluster_http_ports[i], kGroupId, cluster_nodes_ports,
@@ -917,8 +833,7 @@ TEST_P(GrNotificationXPortConnectionFailureTest,
 
 INSTANTIATE_TEST_SUITE_P(GrNotificationXPortConnectionFailure,
                          GrNotificationXPortConnectionFailureTest,
-                         ::testing::Values("metadata_dynamic_nodes_v2_gr.js",
-                                           "metadata_dynamic_nodes.js"));
+                         ::testing::Values("metadata_dynamic_nodes_v2_gr.js"));
 
 struct ConfErrorTestParams {
   std::string use_gr_notifications_option_value;
@@ -1017,15 +932,16 @@ TEST_F(GrNotificationsTest, GrNotificationInconsistentMetadata) {
 
   SCOPED_TRACE(
       "// Launch 2 server mocks that will act as our metadata servers");
-  const auto trace_file =
-      get_data_dir().join("metadata_dynamic_nodes_v2_gr_incons_md.js").str();
   for (unsigned i = 0; i < kClusterNodesCount; ++i) {
-    cluster_nodes.push_back(&ProcessManager::launch_mysql_server_mock(
-        trace_file, nodes_ports[i], EXIT_SUCCESS, false, http_ports[i],
-        nodes_xports[i]));
+    cluster_nodes.push_back(&mock_server_spawner().spawn(
+        mock_server_cmdline("metadata_dynamic_nodes_v2_gr_incons_md.js")
+            .port(nodes_ports[i])
+            .http_port(http_ports[i])
+            .x_port(nodes_xports[i])
+            .args()));
 
     set_mock_metadata(http_ports[i], "uuid", nodes_ports, nodes_xports,
-                      /*sent=*/false, nodes_ports);
+                      /*send=*/false, nodes_ports);
 
     SCOPED_TRACE(
         "// Schedule the GR notification to be sent (on first node only)");
@@ -1066,9 +982,14 @@ TEST_F(GrNotificationsTest, GrNotificationInconsistentMetadata) {
   nodes_ports.push_back(port_pool_.get_next_available());
   nodes_xports.push_back(port_pool_.get_next_available());
   http_ports.push_back(port_pool_.get_next_available());
-  cluster_nodes.push_back(&ProcessManager::launch_mysql_server_mock(
-      trace_file, nodes_ports[2], EXIT_SUCCESS, false, http_ports[2],
-      nodes_xports[2]));
+
+  cluster_nodes.push_back(&mock_server_spawner().spawn(
+      mock_server_cmdline("metadata_dynamic_nodes_v2_gr_incons_md.js")
+          .port(nodes_ports[2])
+          .http_port(http_ports[2])
+          .x_port(nodes_xports[2])
+          .args()));
+
   ASSERT_NO_FATAL_FAILURE(
       check_port_ready(*cluster_nodes[2], nodes_ports[2], 5s));
   ASSERT_TRUE(
@@ -1164,11 +1085,13 @@ TEST_F(GrNotificationsTest, AddNode) {
   }
 
   SCOPED_TRACE("// Launch server mocks that will act as our metadata servers");
-  const auto trace_file = get_data_dir().join(tracefile).str();
   for (unsigned i = 0; i < kInitialClusterNodesCount; ++i) {
-    cluster_nodes.push_back(&ProcessManager::launch_mysql_server_mock(
-        trace_file, cluster_nodes_ports[i], EXIT_SUCCESS, false,
-        cluster_http_ports[i], cluster_nodes_xports[i]));
+    cluster_nodes.push_back(
+        &mock_server_spawner().spawn(mock_server_cmdline(tracefile)
+                                         .port(cluster_nodes_ports[i])
+                                         .http_port(cluster_http_ports[i])
+                                         .x_port(cluster_nodes_xports[i])
+                                         .args()));
 
     SCOPED_TRACE("// Make our metadata server return 2 metadata servers");
     set_mock_metadata(cluster_http_ports[i], kGroupId, cluster_nodes_ports,
@@ -1203,10 +1126,13 @@ TEST_F(GrNotificationsTest, AddNode) {
   cluster_http_ports.push_back(port_pool_.get_next_available());
 
   const unsigned kCurrentClusterNodesCount = 3;
-  cluster_nodes.push_back(&ProcessManager::launch_mysql_server_mock(
-      trace_file, cluster_nodes_ports[kCurrentClusterNodesCount - 1],
-      EXIT_SUCCESS, false, cluster_http_ports[kCurrentClusterNodesCount - 1],
-      cluster_nodes_xports[kCurrentClusterNodesCount - 1]));
+
+  cluster_nodes.push_back(&mock_server_spawner().spawn(
+      mock_server_cmdline(tracefile)
+          .port(cluster_nodes_ports[kCurrentClusterNodesCount - 1])
+          .http_port(cluster_http_ports[kCurrentClusterNodesCount - 1])
+          .x_port(cluster_nodes_xports[kCurrentClusterNodesCount - 1])
+          .args()));
 
   // let all nodes know about a new node in the Cluster
   for (unsigned i = 0; i < kCurrentClusterNodesCount; ++i) {
@@ -1267,11 +1193,13 @@ TEST_F(GrNotificationsTest, RemoveNode) {
   }
 
   SCOPED_TRACE("// Launch server mocks that will act as our metadata servers");
-  const auto trace_file = get_data_dir().join(tracefile).str();
   for (unsigned i = 0; i < kInitialClusterNodesCount; ++i) {
-    cluster_nodes.push_back(&ProcessManager::launch_mysql_server_mock(
-        trace_file, cluster_nodes_ports[i], EXIT_SUCCESS, false,
-        cluster_http_ports[i], cluster_nodes_xports[i]));
+    cluster_nodes.push_back(
+        &mock_server_spawner().spawn(mock_server_cmdline(tracefile)
+                                         .port(cluster_nodes_ports[i])
+                                         .http_port(cluster_http_ports[i])
+                                         .x_port(cluster_nodes_xports[i])
+                                         .args()));
 
     SCOPED_TRACE("// Make our metadata server return 3 metadata servers");
     set_mock_metadata(cluster_http_ports[i], kGroupId, cluster_nodes_ports,

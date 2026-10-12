@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -104,7 +105,9 @@ PFS_engine_table *table_error_log::create(PFS_engine_table_share *) {
 }
 
 // dest
-table_error_log::table_error_log() : cursor_by_error_log(&m_share) {}
+table_error_log::table_error_log() : cursor_by_error_log(&m_share) {
+  m_message[0] = '\0';
+}
 
 /// Match function / comparator for the key on the LOGGED column
 bool PFS_key_error_log_logged::match(const log_sink_pfs_event *row) {
@@ -140,18 +143,16 @@ bool PFS_index_error_log_by_thread_id::match(log_sink_pfs_event *row) {
 /// Match function / comparator for the key on the PRIO column
 bool PFS_key_error_log_prio::match(const log_sink_pfs_event *row) {
   const auto record_value = (enum_prio)(row->m_prio + 1);
-  int cmp = 0;
+  int cmp;
 
   if (m_is_null) {
     cmp = 1;
+  } else if (record_value < m_prio) {
+    cmp = -1;
+  } else if (record_value > m_prio) {
+    cmp = +1;
   } else {
-    if (record_value < m_prio) {
-      cmp = -1;
-    } else if (record_value > m_prio) {
-      cmp = +1;
-    } else {
-      cmp = 0;
-    }
+    cmp = 0;
   }
 
   switch (m_find_flag) {

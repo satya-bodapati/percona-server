@@ -4,12 +4,6 @@ struct COM_INIT_DB_DATA {
   const char *db_name;
   unsigned long length;
 };
-struct COM_REFRESH_DATA {
-  unsigned char options;
-};
-struct COM_KILL_DATA {
-  unsigned long id;
-};
 struct COM_SET_OPTION_DATA {
   unsigned int opt_command;
 };
@@ -63,8 +57,6 @@ struct COM_FIELD_LIST_DATA {
 };
 union COM_DATA {
   COM_INIT_DB_DATA com_init_db;
-  COM_REFRESH_DATA com_refresh;
-  COM_KILL_DATA com_kill;
   COM_SET_OPTION_DATA com_set_option;
   COM_STMT_EXECUTE_DATA com_stmt_execute;
   COM_STMT_FETCH_DATA com_stmt_fetch;
@@ -115,7 +107,6 @@ typedef uint64_t uint64;
 typedef intptr_t intptr;
 typedef ulonglong my_off_t;
 typedef int myf;
-#include "my_macros.h"
 typedef enum {
   TRUNCATE = 0,
   HALF_EVEN,
@@ -125,7 +116,9 @@ typedef enum {
 } decimal_round_mode;
 typedef int32 decimal_digit_t;
 struct decimal_t {
-  int intg, frac, len;
+  int intg;
+  int frac;
+  int len;
   bool sign;
   decimal_digit_t *buf;
 };

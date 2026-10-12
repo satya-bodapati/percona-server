@@ -1,15 +1,16 @@
-# Copyright (c) 2008, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -31,15 +32,15 @@ INCLUDE(ndb_add_executable)
 MSVC_CPPCHECK_DISABLE()
 DISABLE_MISSING_PROFILE_WARNING()
 
-IF(NOT WITHOUT_SERVER)
-  IF(WIN32)
-    SET(DEFAULT_TLS_SEARCH_PATH "$HOMEPATH/ndb-tls")
-  ELSE()
-    SET(DEFAULT_TLS_SEARCH_PATH "$HOME/ndb-tls")
-  ENDIF()
-  SET(WITH_NDB_TLS_SEARCH_PATH ${DEFAULT_TLS_SEARCH_PATH}
-      CACHE STRING "Search path for TLS keys and certificates")
+IF(WIN32)
+  SET(DEFAULT_TLS_SEARCH_PATH "$HOMEPATH/ndb-tls")
+ELSE()
+  SET(DEFAULT_TLS_SEARCH_PATH "$HOME/ndb-tls")
+ENDIF()
+SET(WITH_NDB_TLS_SEARCH_PATH ${DEFAULT_TLS_SEARCH_PATH}
+    CACHE STRING "Search path for TLS keys and certificates")
 
+IF(NOT WITHOUT_SERVER)
   #
   # Add the ndbcluster plugin
   #
@@ -114,6 +115,10 @@ IF(NOT WITHOUT_SERVER)
     plugin/ndb_index_stat_sample_table.cc
     plugin/ndb_applier.cc
     plugin/ndb_replica.cc
+    plugin/ndb_binlog_index_rows.cc
+    plugin/ndb_rpl_filter.cc
+    plugin/ndb_replica_status_table.cc
+    plugin/ndb_binlog_purger.cc
   )
 
   # Include directories used when building ha_ndbcluster
@@ -123,8 +128,11 @@ IF(NOT WITHOUT_SERVER)
   # unless it is explicitly disabled on the command line.
   MYSQL_ADD_PLUGIN(ndbcluster ${NDBCLUSTER_SOURCES} STORAGE_ENGINE
     DEFAULT STATIC_ONLY
-    LINK_LIBRARIES ndbclient_static extra::rapidjson)
-
+    LINK_LIBRARIES
+    ndbclient_static
+    extra::rapidjson
+    extra::unordered_dense
+    )
   SET_PROPERTY(SOURCE plugin/ha_ndbcluster.cc
                PROPERTY COMPILE_DEFINITIONS
                NDB_TLS_SEARCH_PATH="${WITH_NDB_TLS_SEARCH_PATH}")
@@ -143,6 +151,8 @@ IF(NOT WITHOUT_SERVER)
 
   NDB_ADD_TEST("ndb_bitmap-t" "plugin/ndb_bitmap.cc" LIBS ndbgeneral)
   NDB_ADD_TEST("ndb_blobs_buffer-t" "plugin/ndb_blobs_buffer.cc" LIBS ndbgeneral)
+  NDB_ADD_TEST("ndb_binlog_index_rows-t" "plugin/ndb_binlog_index_rows.cc" LIBS ndbgeneral)
+  NDB_ADD_TEST("ndb_string_utils-t" "plugin/ndb_string_utils.cc" LIBS ndbgeneral)
 ELSEIF(NOT WITH_NDB)
   IF(WITH_NDBCLUSTER_STORAGE_ENGINE)
     MESSAGE(WARNING "Skips building ndbcluster plugin, WITHOUT_SERVER=ON "
@@ -167,6 +177,16 @@ FOREACH(warning
     STRING_APPEND(CMAKE_C_FLAGS " ${HAS_WARN_FLAG}")
   ENDIF()
 ENDFOREACH()
+
+# GCC 16's -O2 analysis emits many false-positive -Wuninitialized /
+# -Wmaybe-uninitialized warnings in NDB, where signal data filled by
+# transporter/network code (e.g. NdbApiSignal::theRealData) is read through
+# CAST_CONSTPTR-style reinterpret casts the optimizer cannot follow. Suppress
+# both warnings for the NDB tree on GCC 16+ to keep -Werror builds working.
+IF(MY_COMPILER_IS_GNU AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 16)
+  STRING_APPEND(CMAKE_C_FLAGS   " -Wno-uninitialized -Wno-maybe-uninitialized")
+  STRING_APPEND(CMAKE_CXX_FLAGS " -Wno-uninitialized -Wno-maybe-uninitialized")
+ENDIF()
 
 INCLUDE(${CMAKE_CURRENT_SOURCE_DIR}/ndb_configure.cmake)
 
@@ -318,22 +338,6 @@ ENDIF()
 IF(WITH_NDB_JAVA)
   ADD_SUBDIRECTORY(clusterj)
 ENDIF()
-
-SET(WITH_NDB_NODEJS_DEFAULT ON)
-
-# Check if the default for WITH_NDB_NODEJS should be overriden
-# by environment variable
-IF(DEFINED ENV{WITH_NDB_NODEJS_DEFAULT})
-  SET(WITH_NDB_NODEJS_DEFAULT $ENV{WITH_NDB_NODEJS_DEFAULT})
-  MESSAGE(STATUS
-    "Default value for WITH_NDB_NODEJS set to ${WITH_NDB_NODEJS_DEFAULT}")
-ENDIF(DEFINED ENV{WITH_NDB_NODEJS_DEFAULT})
-
-OPTION(WITH_NDB_NODEJS
-  "Include NDB Cluster node.js components" ${WITH_NDB_NODEJS_DEFAULT})
-IF(WITH_NDB_NODEJS)
-  ADD_SUBDIRECTORY(nodejs)
-ENDIF(WITH_NDB_NODEJS)
 
 OPTION(WITH_NDBAPI_EXAMPLES
   "Build the NdbApi example programs" ${WITH_NDBAPI_EXAMPLES_DEFAULT})

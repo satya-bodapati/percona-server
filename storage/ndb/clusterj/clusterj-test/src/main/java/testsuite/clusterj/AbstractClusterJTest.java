@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2009, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2009, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -115,13 +116,6 @@ public abstract class AbstractClusterJTest extends TestCase {
      */
     private Collection<Object> tearDownInstances = new LinkedList<Object>();
 
-    /**
-     *
-     * Indicates an exception thrown in method <code>tearDown</code>.
-     * At the end of method <code>tearDown</code> this field is nullified.
-     * TODO support this feature
-     */
-//    private Throwable tearDownThrowable;
     private String NL = "\n";
 
     protected boolean debug;
@@ -152,6 +146,12 @@ public abstract class AbstractClusterJTest extends TestCase {
         }
     }
 
+    protected SessionFactory getSessionFactory(Properties customProperties) {
+        var result = ClusterJHelper.getSessionFactory(customProperties);
+        existingSessionFactories.add(result);
+        return result;
+    }
+
     /** Close any open session factories.
      * Tests can call this function to close any open session factories,
      * to prevent them from causing any interference with their testing.
@@ -180,6 +180,13 @@ public abstract class AbstractClusterJTest extends TestCase {
         }
         session = sessionFactory.getSession();
         tx = session.currentTransaction();
+    }
+
+    protected void closeSession() {
+        if (session != null && !session.isClosed()) {
+            session.close();
+            session = null;
+        }
     }
 
     protected void dumpSystemProperties() {
@@ -572,7 +579,7 @@ public abstract class AbstractClusterJTest extends TestCase {
 
     @Override
     protected final void setUp() throws Exception {
-System.out.println(this.getClass().getName());
+        System.out.println(this.getClass().getName());
         localSetUp();
     }
 
@@ -734,5 +741,12 @@ System.out.println(this.getClass().getName());
             }
         }
     }
+
+  protected void sleep(int msec) {
+      try {
+          Thread.sleep(msec);
+      } catch(InterruptedException e) {
+      }
+  }
 
 }

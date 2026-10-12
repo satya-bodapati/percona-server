@@ -1,15 +1,16 @@
-/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -45,7 +46,7 @@ typedef Prealloced_array<Slave_worker *, 4> Slave_worker_array;
 
 enum enum_mts_parallel_type {
   /* Parallel slave based on Database name */
-  MTS_PARALLEL_TYPE_DB_NAME = 0,
+  /* MTS_PARALLEL_TYPE_DB_NAME = 0, */ /* UNUSED, REMOVED */
   /* Parallel slave based on group information from Binlog group commit */
   MTS_PARALLEL_TYPE_LOGICAL_CLOCK = 1
 };
@@ -83,6 +84,10 @@ class Mts_submode {
   virtual int wait_for_workers_to_finish(Relay_log_info *rli,
                                          Slave_worker *ignore = nullptr) = 0;
 
+  /// @brief indicates the start of new file, which may e.g. update internal
+  /// counters in the submode
+  virtual void indicate_start_of_new_file() {}
+
   /**
     Sets additional context before the event is set to execute.
    */
@@ -92,33 +97,6 @@ class Mts_submode {
   }
 
   virtual ~Mts_submode() = default;
-};
-
-/**
-  DB partitioned submode
-  For significance of each method check definition of Mts_submode
-*/
-class Mts_submode_database : public Mts_submode {
- public:
-  Mts_submode_database() { type = MTS_PARALLEL_TYPE_DB_NAME; }
-  int schedule_next_event(Relay_log_info *rli, Log_event *ev) override;
-  void attach_temp_tables(THD *thd, const Relay_log_info *rli,
-                          Query_log_event *ev) override;
-  void detach_temp_tables(THD *thd, const Relay_log_info *rli,
-                          Query_log_event *ev) override;
-  Slave_worker *get_least_occupied_worker(Relay_log_info *,
-                                          Slave_worker_array *ws,
-                                          Log_event *) override;
-  ~Mts_submode_database() override = default;
-  int wait_for_workers_to_finish(Relay_log_info *rli,
-                                 Slave_worker *ignore = nullptr) override;
-  bool set_multi_threaded_applier_context(const Relay_log_info &rli,
-                                          Log_event &ev) override;
-
- private:
-  bool unfold_transaction_payload_event(
-      mysql::binlog::event::Format_description_event &fde,
-      Transaction_payload_log_event &tple, std::vector<Log_event *> &events);
 };
 
 /**
@@ -172,10 +150,12 @@ class Mts_submode_logical_clock : public Mts_submode {
                                           Slave_worker_array *ws,
                                           Log_event *ev) override;
   /* Sets the force new group variable */
-  inline void start_new_group() {
-    force_new_group = true;
-    first_event = true;
-  }
+  inline void start_new_group() { force_new_group = true; }
+
+  /// @brief Sets a flag to indicate that we are starting a new binlog file,
+  /// therefore we need to skip the check for logical clock to not compare
+  /// against sequence_number from previous event (previous file)
+  void indicate_start_of_new_file() override { first_event = true; }
   /**
     Withdraw the delegated_job increased by the group.
   */

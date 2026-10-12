@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,7 +23,7 @@
 
 #include "sql/dd/properties.h"
 
-#include <assert.h>
+#include <cassert>
 #include <limits>
 
 #include "my_sys.h"  // strmake_root
@@ -56,8 +57,8 @@ bool Properties::from_str(const String_type &number, T *value) {
     return true;
 
   // If the target type is less than 8 bytes, check boundaries.
-  int64 trg_min = static_cast<int64>(std::numeric_limits<T>::min());
-  int64 trg_max = static_cast<int64>(std::numeric_limits<T>::max());
+  auto trg_min = static_cast<int64>(std::numeric_limits<T>::min());
+  auto trg_max = static_cast<int64>(std::numeric_limits<T>::max());
   if (sizeof(T) < 8 && (tmp < trg_min || tmp > trg_max)) return true;
 
   // Finally, cast to target type.

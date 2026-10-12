@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -96,6 +97,7 @@
 #include "sql/auth/auth_common.h"  // SUPER_ACL
 #include "sql/dd/types/event.h"
 #include "sql/dd/types/function.h"
+#include "sql/dd/types/library.h"
 #include "sql/dd/types/procedure.h"
 #include "sql/dd/types/resource_group.h"
 #include "sql/debug_sync.h"
@@ -872,6 +874,9 @@ bool lock_object_name(THD *thd, MDL_key::enum_mdl_namespace mdl_type,
     case MDL_key::PROCEDURE:
       dd::Procedure::create_mdl_key(db, name, &mdl_key);
       break;
+    case MDL_key::LIBRARY:
+      dd::Library::create_mdl_key(db, name, &mdl_key);
+      break;
     case MDL_key::EVENT:
       dd::Event::create_mdl_key(db, name, &mdl_key);
       break;
@@ -944,8 +949,6 @@ static void print_lock_error(int error, const char *table) {
     } break;
   }
 }
-
-std::atomic<int32> Global_read_lock::m_atomic_active_requests;
 
 /****************************************************************************
   Handling of global read locks
@@ -1066,12 +1069,8 @@ bool Global_read_lock::lock_global_read_lock(THD *thd) {
     MDL_REQUEST_INIT(&mdl_request, MDL_key::GLOBAL, "", "", MDL_SHARED,
                      MDL_EXPLICIT);
 
-    /* Increment static variable first to signal innodb memcached server
-       to release mdl locks held by it */
-    Global_read_lock::m_atomic_active_requests++;
     if (thd->mdl_context.acquire_lock(&mdl_request,
                                       thd->variables.lock_wait_timeout)) {
-      Global_read_lock::m_atomic_active_requests--;
       return true;
     }
 
@@ -1109,7 +1108,6 @@ void Global_read_lock::unlock_global_read_lock(THD *thd) {
     m_mdl_blocks_commits_lock = nullptr;
   }
   thd->mdl_context.release_lock(m_mdl_global_shared_lock);
-  Global_read_lock::m_atomic_active_requests--;
   m_mdl_global_shared_lock = nullptr;
   m_state = GRL_NONE;
 }

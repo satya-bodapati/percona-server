@@ -1,18 +1,19 @@
 #ifndef JSON_DOM_INCLUDED
 #define JSON_DOM_INCLUDED
 
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,27 +26,27 @@
 
 #include <assert.h>
 #include <stddef.h>
-#include <functional>
 #include <iterator>
 #include <map>
 #include <memory>  // unique_ptr
 #include <new>
 #include <string>
+#include <string_view>
 #include <type_traits>  // is_base_of
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "field_types.h"  // enum_field_types
-#include "my_compiler.h"
-
+#include "my_byteorder.h"
 #include "my_inttypes.h"
-#include "my_time.h"  // my_time_flags_t
-#include "mysql/mysql_lex_string.h"
+#include "my_time.h"                 // my_time_flags_t
 #include "mysql_time.h"              // MYSQL_TIME
 #include "prealloced_array.h"        // Prealloced_array
 #include "sql-common/json_binary.h"  // json_binary::Value
-#include "sql-common/my_decimal.h"   // my_decimal
-#include "sql/malloc_allocator.h"    // Malloc_allocator
+#include "sql-common/json_error_handler.h"
+#include "sql-common/my_decimal.h"  // my_decimal
+#include "sql/malloc_allocator.h"   // Malloc_allocator
 
 class Field_json;
 class Json_array;
@@ -55,8 +56,8 @@ class Json_object;
 class Json_path;
 class Json_seekable_path;
 class Json_wrapper;
+class Json_wrapper_hasher;
 class String;
-class THD;
 
 struct CHARSET_INFO;
 
@@ -66,6 +67,7 @@ typedef Prealloced_array<Json_dom *, 16> Json_dom_vector;
 using Json_dom_ptr = std::unique_ptr<Json_dom>;
 using Json_array_ptr = std::unique_ptr<Json_array>;
 using Json_object_ptr = std::unique_ptr<Json_object>;
+using ha_checksum = std::uint32_t;
 
 /**
   @file
@@ -137,7 +139,7 @@ enum class enum_json_type {
   @return a pointer to the allocated object
 */
 template <typename T, typename... Args>
-inline std::unique_ptr<T> create_dom_ptr(Args &&... args) {
+inline std::unique_ptr<T> create_dom_ptr(Args &&...args) {
   return std::unique_ptr<T>(new (std::nothrow) T(std::forward<Args>(args)...));
 }
 
@@ -161,7 +163,10 @@ inline std::unique_ptr<T> create_dom_ptr(Args &&... args) {
            Json_double
          Json_boolean
          Json_null
-         Json_datetime
+         Json_temporal
+           Json_time
+           Json_date
+           Json_datetime
          Json_opaque
        Json_container (abstract)
          Json_object
@@ -270,9 +275,6 @@ class Json_dom {
 
     @param[in]  text   the JSON text
     @param[in]  length the length of the text
-    @param[out] errmsg any syntax error message (will be ignored if it is NULL)
-    @param[out] offset the position in the parsed string a syntax error was
-                       found (will be ignored if it is NULL)
     @param[in] error_handler Pointer to a function that should handle
                              reporting of parsing error.
     @param[in] depth_handler   Pointer to a function that should handle error
@@ -289,7 +291,6 @@ class Json_dom {
     Construct a DOM object based on a binary JSON value. The ownership
     of the returned object is henceforth with the caller.
 
-    @param thd  current session
     @param v    the binary value to parse
     @return a DOM representation of the binary value, or NULL on error
   */
@@ -348,15 +349,14 @@ class Json_container : public Json_dom {
   for speed of look-up. See usage in Json_object_map.
 */
 struct Json_key_comparator {
-  bool operator()(const std::string &key1, const std::string &key2) const;
-  bool operator()(const MYSQL_LEX_CSTRING &key1, const std::string &key2) const;
-  bool operator()(const std::string &key1, const MYSQL_LEX_CSTRING &key2) const;
   // is_transparent must be defined in order to make std::map::find() accept
   // keys that are of a different type than the key_type of the map. In
   // particular, this is needed to make it possible to call find() with
-  // MYSQL_LEX_CSTRING arguments and not only std::string arguments. It only has
-  // to be defined, it doesn't matter which type it is set to.
+  // a std::string_view argument or anything implicitly convertible to
+  // std::string_view.
   using is_transparent = void;
+
+  bool operator()(std::string_view key1, std::string_view key2) const;
 };
 
 /**
@@ -392,7 +392,7 @@ class Json_object final : public Json_container {
     @retval false on success
     @retval true on failure
   */
-  bool add_clone(const std::string &key, const Json_dom *value) {
+  bool add_clone(std::string_view key, const Json_dom *value) {
     return value == nullptr || add_alias(key, value->clone());
   }
 
@@ -404,7 +404,7 @@ class Json_object final : public Json_container {
     object and the value will be deallocated by the object so only add
     values that can be deallocated safely (no stack variables please!)
 
-    New code should prefer #add_alias(const std::string&, Json_dom_ptr)
+    New code should prefer #add_alias(std::string_view, Json_dom_ptr)
     to this function, because that makes the transfer of ownership
     more explicit. This function might be removed in the future.
 
@@ -413,7 +413,7 @@ class Json_object final : public Json_container {
     @retval false on success
     @retval true on failure
   */
-  bool add_alias(const std::string &key, Json_dom *value) {
+  bool add_alias(std::string_view key, Json_dom *value) {
     return add_alias(key, Json_dom_ptr(value));
   }
 
@@ -427,7 +427,7 @@ class Json_object final : public Json_container {
     @param[in] value  the value to add
     @return false on success, true on failure
   */
-  bool add_alias(const std::string &key, Json_dom_ptr value);
+  bool add_alias(std::string_view key, Json_dom_ptr value);
 
   /**
     Transfer all of the key/value pairs in the other object into this
@@ -448,8 +448,7 @@ class Json_object final : public Json_container {
     @param[in]  key the key of the element whose value we want
     @return the value associated with the key, or NULL if the key is not found
   */
-  Json_dom *get(const std::string &key) const;
-  Json_dom *get(const MYSQL_LEX_CSTRING &key) const;
+  Json_dom *get(std::string_view key) const;
 
   /**
     Remove the child element addressed by key. The removed child is deleted.
@@ -458,7 +457,7 @@ class Json_object final : public Json_container {
     @retval true if an element was removed
     @retval false if there was no element with that key
   */
-  bool remove(const std::string &key);
+  bool remove(std::string_view key);
 
   /**
     @return The number of elements in the JSON object.
@@ -707,7 +706,7 @@ class Json_string final : public Json_scalar {
     @param args any arguments accepted by std::string's constructors
   */
   template <typename... Args>
-  explicit Json_string(Args &&... args)
+  explicit Json_string(Args &&...args)
       : Json_scalar(), m_str(std::forward<Args>(args)...) {}
 
   enum_json_type json_type() const override { return enum_json_type::J_STRING; }
@@ -925,49 +924,153 @@ class Json_null final : public Json_scalar {
 };
 
 /**
-  Represents a MySQL date/time value (DATE, TIME, DATETIME or
-  TIMESTAMP) - an extension to the ECMA set of JSON scalar types, types
-  J_DATE, J_TIME, J_DATETIME and J_TIMESTAMP respectively. The method
-  field_type identifies which of the four it is.
+  Represents a MySQL temporal value (DATE, TIME, DATETIME or TIMESTAMP) -
+  an extension to the ECMA set of JSON scalar types, types J_DATE, J_TIME,
+  J_DATETIME and J_TIMESTAMP respectively. The method field_type identifies
+  which of the four it is. This is an abstract class with three child classes:
+  Json_datetime, Json_time and Json_date.
 */
-class Json_datetime final : public Json_scalar {
- private:
-  MYSQL_TIME m_t;                 //!< holds the date/time value
-  enum_field_types m_field_type;  //!< identifies which type of date/time
+class Json_temporal : public Json_scalar {
+ public:
+  Json_temporal() : Json_scalar() {}
 
+  /**
+    @returns One of MYSQL_TYPE_TIME, MYSQL_TYPE_DATE, MYSQL_TYPE_DATETIME
+             or MYSQL_TYPE_TIMESTAMP.
+  */
+  virtual enum_field_types field_type() const = 0;
+
+  /// Datetimes are packed in eight bytes.
+  static const size_t PACKED_SIZE = 8;
+};
+
+/// MySQL TIME value
+class Json_time final : public Json_temporal {
  public:
   /**
-    Constructs a object to hold a MySQL date/time value.
+    Constructs an object to hold a MySQL time value.
 
-    @param[in] t   the time/value
-    @param[in] ft  the field type: must be one of MYSQL_TYPE_TIME,
-                   MYSQL_TYPE_DATE, MYSQL_TYPE_DATETIME or
+    @param time   the time value
+  */
+  explicit Json_time(const Time_val time) : Json_temporal(), m_time(time) {}
+
+  enum_json_type json_type() const override { return enum_json_type::J_TIME; }
+
+  Json_dom_ptr clone() const override;
+
+  /// @returns the time value.
+  Time_val value() const { return m_time; }
+
+  /// @returns kind of temporal value this object holds: MYSQL_TYPE_TIME
+  enum_field_types field_type() const override { return MYSQL_TYPE_TIME; }
+
+  /**
+    Convert the TIME value to the packed format used for storage.
+    @param dest the destination buffer to write the packed time value to
+    (must at least have size PACKED_SIZE)
+  */
+  void to_packed(char *dest) const;
+
+  /**
+    Convert a packed time back to a time value.
+    @param from the buffer to read from (must have at least PACKED_SIZE bytes)
+    @param to   the time field to write the value to
+  */
+  static void from_packed(const char *from, Time_val *to);
+
+#ifdef MYSQL_SERVER
+  /**
+    Convert a packed time value to key string for indexing by SE
+    @param from the buffer to read from
+    @param to   the destination buffer
+    @param dec  value's decimals
+  */
+  static void from_packed_to_key(const char *from, uchar *to, uint8 dec);
+#endif
+
+ private:
+  /// Holds the time value
+  Time_val m_time;
+};
+
+/// MySQL DATE value
+class Json_date final : public Json_temporal {
+ public:
+  /**
+    Constructs an object to hold a MySQL date value.
+
+    @param date   the date value
+  */
+  explicit Json_date(const Date_val date) : Json_temporal(), m_date(date) {}
+
+  enum_json_type json_type() const override { return enum_json_type::J_DATE; }
+
+  Json_dom_ptr clone() const override;
+
+  /// @returns the date value.
+  const Date_val value() const { return m_date; }
+
+  /// @returns kind of temporal value this object holds: MYSQL_TYPE_DATE
+  enum_field_types field_type() const override { return MYSQL_TYPE_DATE; }
+
+  /**
+    Convert the DATE value to the packed format used for storage.
+    @param dest the destination buffer to write the packed date value to
+    (must at least have size PACKED_SIZE)
+  */
+  void to_packed(char *dest) const;
+
+  /**
+    Convert a packed date back to a date value.
+    @param from the buffer to read from (must have at least PACKED_SIZE bytes)
+    @param to   the date field to write the value to
+  */
+  static void from_packed(const char *from, Date_val *to);
+
+#ifdef MYSQL_SERVER
+  /**
+    Convert a packed date value to key string for indexing by SE
+    @param from the buffer to read from
+    @param to   the destination buffer
+  */
+  static void from_packed_to_key(const char *from, uchar *to);
+#endif
+ private:
+  /// Holds the date value
+  Date_val m_date;
+};
+
+/**
+  MySQL temporal value that represents a DATETIME or TIMESTAMP value.
+*/
+class Json_datetime final : public Json_temporal {
+ public:
+  /**
+    Constructs an object to hold a MySQL datetime value.
+
+    @param[in] t   the datetime value
+    @param[in] ft  field type: either MYSQL_TYPE_DATETIME or
                    MYSQL_TYPE_TIMESTAMP.
   */
-  Json_datetime(const MYSQL_TIME &t, enum_field_types ft)
-      : Json_scalar(), m_t(t), m_field_type(ft) {}
+  Json_datetime(const Datetime_val &t, enum_field_types ft)
+      : Json_temporal(), m_t(t), m_field_type(ft) {
+    assert(ft != MYSQL_TYPE_TIME && ft != MYSQL_TYPE_DATE);
+  }
 
   enum_json_type json_type() const override;
 
   Json_dom_ptr clone() const override;
 
   /**
-    Return a pointer the date/time value. Ownership is _not_ transferred.
+    @returns a pointer to the date/time value. Ownership is _not_ transferred.
     To identify which time time the value represents, use @c field_type.
-    @return the pointer
   */
-  const MYSQL_TIME *value() const { return &m_t; }
+  const Datetime_val *value() const { return &m_t; }
+
+  enum_field_types field_type() const override { return m_field_type; }
 
   /**
-    Return what kind of date/time value this object holds.
-    @return One of MYSQL_TYPE_TIME, MYSQL_TYPE_DATE, MYSQL_TYPE_DATETIME
-            or MYSQL_TYPE_TIMESTAMP.
-  */
-  enum_field_types field_type() const { return m_field_type; }
-
-  /**
-    Convert the datetime to the packed format used when storing
-    datetime values.
+    Convert the datetime to the packed format used for storage.
     @param dest the destination buffer to write the packed datetime to
     (must at least have size PACKED_SIZE)
   */
@@ -994,8 +1097,9 @@ class Json_datetime final : public Json_scalar {
                                  uchar *to, uint8 dec);
 #endif
 
-  /** Datetimes are packed in eight bytes. */
-  static const size_t PACKED_SIZE = 8;
+ private:
+  Datetime_val m_t;               //!< holds the date/time value
+  enum_field_types m_field_type;  //!< identifies which type of date/time
 };
 
 /**
@@ -1024,7 +1128,7 @@ class Json_opaque final : public Json_scalar {
     @see Class documentation
   */
   template <typename... Args>
-  explicit Json_opaque(enum_field_types mytype, Args &&... args)
+  explicit Json_opaque(enum_field_types mytype, Args &&...args)
       : Json_scalar(), m_mytype(mytype), m_val(std::forward<Args>(args)...) {}
 
   enum_json_type json_type() const override { return enum_json_type::J_OPAQUE; }
@@ -1142,15 +1246,11 @@ bool double_quote(const char *cptr, size_t length, String *buf);
 */
 Json_dom_ptr merge_doms(Json_dom_ptr left, Json_dom_ptr right);
 
-/**
-  How Json_wrapper would handle coercion error
-*/
-
-enum enum_coercion_error {
-  CE_WARNING,  // Throw a warning, default
-  CE_ERROR,    // Throw an error
-  CE_IGNORE    // Let the caller handle the error
-};
+constexpr uchar JSON_KEY_NULL = '\x00';
+constexpr uchar JSON_KEY_OBJECT = '\x05';
+constexpr uchar JSON_KEY_ARRAY = '\x06';
+constexpr uchar JSON_KEY_FALSE = '\x07';
+constexpr uchar JSON_KEY_TRUE = '\x08';
 
 /**
   Abstraction for accessing JSON values irrespective of whether they
@@ -1192,6 +1292,8 @@ class Json_wrapper {
     datetime (may or may not be the same as buffer)
   */
   const char *get_datetime_packed(char *buffer) const;
+  const char *get_time_packed(char *buffer) const;
+  const char *get_date_packed(char *buffer) const;
 
   /**
     Create an empty wrapper. Cf #empty().
@@ -1323,23 +1425,14 @@ class Json_wrapper {
   /**
     Get the wrapped contents in binary value form.
 
+    @param error_handler a handler that is invoked if an error occurs
     @param[in,out] str  a string that will be filled with the binary value
-    @param json_depth_handler handler which will be called for JSON documents
-                              exceeding the maximum allowed depth
-    @param json_key_handler  handler which will be called for JSON documents
-                             having keys too large
-    @param json_value_handler handler which will be called for JSON documents
-                              having values too large
-    @param invalid_json_handler handler which will be called for invalid
-                                JSON documents
 
     @retval false on success
     @retval true  on error
   */
-  bool to_binary(String *str, const JsonErrorHandler &json_depth_handler,
-                 const JsonErrorHandler &json_key_handler,
-                 const JsonErrorHandler &json_value_handler,
-                 const JsonErrorHandler &invalid_json_handler) const;
+  bool to_binary(const JsonSerializationErrorHandler &error_handler,
+                 String *str) const;
 
   /**
     Check if the wrapped JSON document is a binary value (a
@@ -1410,7 +1503,7 @@ class Json_wrapper {
 
   /**
     Return the MYSQL type of the opaque value, see #type(). Valid for
-    J_OPAQUE.  Calling this method if the type is not J_OPAQUE will give
+    J_OPAQUE. Calling this method if the type is not J_OPAQUE will give
     undefined results.
 
     @return the type
@@ -1436,7 +1529,7 @@ class Json_wrapper {
     @return The member value. If there is no member with the specified
     name, a value with type Json_dom::J_ERROR is returned.
   */
-  Json_wrapper lookup(const MYSQL_LEX_CSTRING &key) const;
+  Json_wrapper lookup(std::string_view key) const;
 
   /**
     Get a pointer to the data of a JSON string or JSON opaque value.
@@ -1497,13 +1590,29 @@ class Json_wrapper {
   ulonglong get_uint() const;
 
   /**
-    Get the value of a JSON date/time value.  Valid for J_TIME,
-    J_DATETIME, J_DATE and J_TIMESTAMP.  Calling this method if the type
-    is not one of those will give undefined results.
+    Get the value of a JSON date/time value.  Valid for J_DATETIME
+    and J_TIMESTAMP. Calling this method if the type is not one of those
+    will give undefined results.
 
     @param[out] t  the date/time value
   */
   void get_datetime(MYSQL_TIME *t) const;
+
+  /**
+    Get the value of a JSON time value. Valid for J_TIME.
+    Calling this method if the type is not J_TIME will give undefined results.
+
+    @param[out] time  the time value
+  */
+  void get_time(Time_val *time) const;
+
+  /**
+    Get the value of a JSON date value. Valid for J_DATE.
+    Calling this method if the type is not J_DATE will give undefined results.
+
+    @param[out] date  the date value
+  */
+  void get_date(Date_val *date) const;
 
   /**
     Get a boolean value (a JSON true or false literal).
@@ -1603,84 +1712,94 @@ class Json_wrapper {
   /**
     Extract an int (signed or unsigned) from the JSON if possible
     coercing if need be.
-    @param[in]  msgnam to use in error message if conversion failed
-    @param[in]  cr_error Whether to raise an error or warning on
-                         data truncation
+
+    @param[in]  error_handler function to be called on conversion errors
     @param[out] err    true <=> error occur during coercion
     @param[out] unsigned_flag Whether the value read from JSON data is
                               unsigned
 
     @returns json value coerced to int
   */
-  longlong coerce_int(const char *msgnam, enum_coercion_error cr_error,
-                      bool *err, bool *unsigned_flag) const;
+  longlong coerce_int(const JsonCoercionHandler &error_handler, bool *err,
+                      bool *unsigned_flag) const;
 
-  /// Shorthand for coerce_int(msgnam, CE_WARNING, nullptr, nullptr).
-  longlong coerce_int(const char *msgnam) const {
-    return coerce_int(msgnam, CE_WARNING, nullptr, nullptr);
+  /// Shorthand for coerce_int(error_handler, nullptr, nullptr).
+  longlong coerce_int(const JsonCoercionHandler &error_handler) const {
+    return coerce_int(error_handler, nullptr, nullptr);
   }
 
   /**
     Extract a real from the JSON if possible, coercing if need be.
 
-    @param[in]  msgnam to use in error message if conversion failed
-    @param[in]  cr_error Whether to raise an error or warning on
-                         data truncation
+    @param[in]  error_handler function to be called on conversion errors
     @param[out] err    true <=> error occur during coercion
     @returns json value coerced to real
   */
-  double coerce_real(const char *msgnam, enum_coercion_error cr_error,
-                     bool *err) const;
+  double coerce_real(const JsonCoercionHandler &error_handler, bool *err) const;
 
-  /// Shorthand for coerce_real(msgnam, CE_WARNING, nullptr).
-  double coerce_real(const char *msgnam) const {
-    return coerce_real(msgnam, CE_WARNING, nullptr);
+  /// Shorthand for coerce_real(error_handler, nullptr).
+  double coerce_real(const JsonCoercionHandler &error_handler) const {
+    return coerce_real(error_handler, nullptr);
   }
 
   /**
     Extract a decimal from the JSON if possible, coercing if need be.
 
-    @param[in,out] decimal_value a value buffer
-    @param[in]  msgnam to use in error message if conversion failed
-    @param[in]  cr_error Whether to raise an error or warning on
-                         data truncation
-    @param[out] err    true <=> error occur during coercion
+    @param[in]     error_handler  function to be called on conversion errors
+    @param[in,out] decimal_value  a value buffer
+    @param[out]    err            true <=> error occur during coercion
     @returns json value coerced to decimal
   */
-  my_decimal *coerce_decimal(my_decimal *decimal_value, const char *msgnam,
-                             enum_coercion_error cr_error, bool *err) const;
+  my_decimal *coerce_decimal(const JsonCoercionHandler &error_handler,
+                             my_decimal *decimal_value, bool *err) const;
 
-  /// Shorthand for coerce_decimal(decimal_value, msgnam, CE_WARNING, nullptr).
-  my_decimal *coerce_decimal(my_decimal *decimal_value, const char *msgnam) {
-    return coerce_decimal(decimal_value, msgnam, CE_WARNING, nullptr);
+  /// Shorthand for coerce_decimal(error_handler, decimal_value, nullptr).
+  my_decimal *coerce_decimal(const JsonCoercionHandler &error_handler,
+                             my_decimal *decimal_value) const {
+    return coerce_decimal(error_handler, decimal_value, nullptr);
   }
 
   /**
     Extract a date from the JSON if possible, coercing if need be.
 
-    @param[in,out] ltime a value buffer
-    @param msgnam to use in error message if conversion failed
-    @param[in]  cr_error Whether to raise an error or warning on
-                         data truncation
-    @param[in] date_flags_arg Flags to use for string -> date conversion
+    @param[in]  error_handler function to be called on conversion errors
+    @param[in]  deprecation_checker function to be called to check for
+                                    deprecated datetime format in ltime
+    @param[in,out] date a value buffer
+    @param[in] flags Flags to use for string -> date conversion
     @returns json value coerced to date
    */
-  bool coerce_date(MYSQL_TIME *ltime, const char *msgnam,
-                   enum_coercion_error cr_error = CE_WARNING,
-                   my_time_flags_t date_flags_arg = 0) const;
+  bool coerce_date(const JsonCoercionHandler &error_handler,
+                   const JsonCoercionDeprecatedHandler &deprecation_checker,
+                   Date_val *date, my_time_flags_t flags = 0) const;
 
   /**
     Extract a time value from the JSON if possible, coercing if need be.
 
-    @param[in,out] ltime a value buffer
-    @param msgnam  to use in error message if conversion failed
-    @param[in]  cr_error Whether to raise an error or warning on
-                         data truncation
+    @param[in]  error_handler function to be called on conversion errors
+    @param[in]  deprecation_checker function to be called to check for
+                                    deprecated datetime format in ltime
+    @param[in,out] time a value buffer
 
     @returns json value coerced to time
   */
-  bool coerce_time(MYSQL_TIME *ltime, const char *msgnam,
-                   enum_coercion_error cr_error = CE_WARNING) const;
+  bool coerce_time(const JsonCoercionHandler &error_handler,
+                   const JsonCoercionDeprecatedHandler &deprecation_checker,
+                   Time_val *time) const;
+
+  /**
+    Extract a datetime from the JSON if possible, coercing if need be.
+
+    @param[in]  error_handler function to be called on conversion errors
+    @param[in]  deprecation_checker function to be called to check for
+                                    deprecated datetime format in ltime
+    @param[in,out] dt a value buffer
+    @param[in] flags Flags to use for string -> date conversion
+    @returns json value coerced to date
+   */
+  bool coerce_datetime(const JsonCoercionHandler &error_handler,
+                       const JsonCoercionDeprecatedHandler &deprecation_checker,
+                       Datetime_val *dt, my_time_flags_t flags = 0) const;
 
   /**
     Make a sort key that can be used by filesort to order JSON values.
@@ -1715,15 +1834,20 @@ class Json_wrapper {
   */
   ulonglong make_hash_key(ulonglong hash_val) const;
 
+  void make_hash_key_common(Json_wrapper_hasher &hash_key) const;
+
   /**
     Calculate the amount of unused space inside a JSON binary value.
 
+    @param[in] error_handler the handler that is invoked if an error occurs
     @param[out] space  the amount of unused space, or zero if this is a DOM
     @return false on success
     @return true if the JSON binary value was invalid
   */
-  bool get_free_space(size_t *space) const;
+  bool get_free_space(const JsonSerializationErrorHandler &error_handler,
+                      size_t *space) const;
 
+#ifdef MYSQL_SERVER
   /**
     Attempt a binary partial update by replacing the value at @a path with @a
     new_value. On successful completion, the updated document will be available
@@ -1778,7 +1902,8 @@ class Json_wrapper {
   */
   bool binary_remove(const Field_json *field, const Json_seekable_path &path,
                      String *result, bool *found_path);
-#ifdef MYSQL_SERVER
+#endif  // ifdef MYSQL_SERVER
+
   /**
     Sort contents. Applicable to JSON arrays only.
   */
@@ -1788,7 +1913,6 @@ class Json_wrapper {
     sorted.
   */
   void remove_duplicates(const CHARSET_INFO *cs = nullptr);
-#endif
 };
 
 /**
@@ -1798,7 +1922,7 @@ class Json_wrapper {
 class Json_wrapper_object_iterator {
  public:
   // Type aliases required by ForwardIterator.
-  using value_type = std::pair<MYSQL_LEX_CSTRING, Json_wrapper>;
+  using value_type = std::pair<std::string_view, Json_wrapper>;
   using reference = const value_type &;
   using pointer = const value_type *;
   using difference_type = ptrdiff_t;
@@ -1918,6 +2042,8 @@ class Json_scalar_holder {
     Json_double m_double;
     Json_boolean m_boolean;
     Json_null m_null;
+    Json_time m_time;
+    Json_date m_date;
     Json_datetime m_datetime;
     Json_opaque m_opaque;
     /// Constructor which initializes the union to hold a Json_null value.
@@ -1949,7 +2075,7 @@ class Json_scalar_holder {
     @param args the arguments to T's constructor
   */
   template <typename T, typename... Args>
-  void emplace(Args &&... args) {
+  void emplace(Args &&...args) {
     static_assert(std::is_base_of<Json_scalar, T>::value, "Not a Json_scalar");
     static_assert(sizeof(T) <= sizeof(m_buffer), "Buffer is too small");
     m_scalar_ptr = &m_buffer.m_null;
@@ -1957,5 +2083,25 @@ class Json_scalar_holder {
     ::new (m_scalar_ptr) T(std::forward<Args>(args)...);
   }
 };
+
+/**
+  Check if one Json_wrapper contains all the elements of another
+  Json_wrapper.
+
+  @param[in]  doc_wrapper   the containing document
+  @param[in]  containee_wr  the possibly contained document
+  @param[out] result        true if doc_wrapper contains containee_wr,
+                            false otherwise
+  @retval false on success
+  @retval true on failure
+*/
+bool json_wrapper_contains(const Json_wrapper &doc_wrapper,
+                           const Json_wrapper &containee_wr, bool *result);
+
+/// Returns the name of the type of the JSON document contained in "doc".
+std::string_view json_type_name(const Json_wrapper &doc);
+
+/// The maximum length of the type name returned from JSON_TYPE.
+extern const size_t kMaxJsonTypeNameLength;
 
 #endif /* JSON_DOM_INCLUDED */

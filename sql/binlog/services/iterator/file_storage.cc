@@ -1,15 +1,16 @@
-/* Copyright (c) 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -88,11 +89,11 @@ class Binlog_iterator_ctx {
   File_reader *m_reader{nullptr};
   /// @brief  This is a reference to the current format description event.
   Format_description_event m_current_fde{BINLOG_VERSION, server_version};
-  /// @brief The local sid map
-  Sid_map m_local_sid_map{nullptr};
+  /// @brief The local tsid map
+  Tsid_map m_local_tsid_map{nullptr};
   /// @brief  This is the set of gtids that are to be excluded while using this
   /// iterator.
-  Gtid_set m_excluded_gtid_set{&m_local_sid_map};
+  Gtid_set m_excluded_gtid_set{&m_local_tsid_map};
   /// @brief  This is a reference to the buffer used to store events read.
   unsigned char *m_buffer{nullptr};
   /// @brief  This a the capacity of the buffer used to store events read.
@@ -102,7 +103,7 @@ class Binlog_iterator_ctx {
   bool m_is_valid{false};
   /// @brief The log file information to lock files from being purged,
   ///        i.e., the log one is reading from.
-  LOG_INFO m_linfo{};
+  Log_info m_linfo{};
 
   /// @brief Get the next file to open object
   ///
@@ -248,14 +249,15 @@ class Binlog_iterator_ctx {
     DBUG_TRACE;
     auto event_type = static_cast<Log_event_type>(buffer[EVENT_TYPE_OFFSET]);
     switch (event_type) {
-      case mysql::binlog::event::GTID_LOG_EVENT: {
+      case mysql::binlog::event::GTID_LOG_EVENT:
+      case mysql::binlog::event::GTID_TAGGED_LOG_EVENT: {
         Gtid_log_event gtid_ev(reinterpret_cast<const char *>(buffer),
                                &m_current_fde);
         if (!gtid_ev.is_valid())
           return std::make_tuple<bool, bool, uint64_t>(true, false, 0);
         Gtid gtid{};
-        const auto *const sid = gtid_ev.get_sid();
-        gtid.sidno = m_local_sid_map.sid_to_sidno(*sid);
+        const auto &tsid = gtid_ev.get_tsid();
+        gtid.sidno = m_local_tsid_map.tsid_to_sidno(tsid);
         if (gtid.sidno == 0)
           return std::make_tuple<bool, bool, uint64_t>(
               false, false, static_cast<uint64_t>(gtid_ev.transaction_length));
@@ -361,12 +363,15 @@ class Binlog_iterator_ctx {
         // have we read a gtid? if so, we need to check if we skip the
         // transaction
         switch (static_cast<Log_event_type>(buffer[EVENT_TYPE_OFFSET])) {
-          case mysql::binlog::event::GTID_LOG_EVENT: {
+          case mysql::binlog::event::GTID_LOG_EVENT:
+          case mysql::binlog::event::GTID_TAGGED_LOG_EVENT: {
             // seek to the beginning of the log event and deserialize the GTID
             // event
             unsigned int bytes_read{0};
             unsigned char gtid_buffer_stack
-                [mysql::binlog::event::Gtid_event::MAX_EVENT_LENGTH];
+                [mysql::binlog::event::Gtid_event::get_max_event_length()];
+            memset(gtid_buffer_stack, 0,
+                   mysql::binlog::event::Gtid_event::get_max_event_length());
             unsigned char *gtid_buffer = gtid_buffer_stack;
 
             // swap buffer in the context
@@ -374,7 +379,7 @@ class Binlog_iterator_ctx {
             auto saved_buffer_capacity = get_buffer_capacity();
             set_buffer(gtid_buffer);
             set_buffer_capacity(
-                mysql::binlog::event::Gtid_event::MAX_EVENT_LENGTH);
+                mysql::binlog::event::Gtid_event::get_max_event_length());
             auto swap_and_free_buffer_guard{create_scope_guard([&]() {
               set_buffer(saved_buffer);
               set_buffer_capacity(saved_buffer_capacity);
@@ -479,7 +484,7 @@ static Previous_gtids_log_event *find_previous_gtids_event(
 static bool has_purged_needed_gtids_already(const Gtid_set &excluded) {
   DBUG_TRACE;
   const auto *purged = gtid_state->get_lost_gtids();
-  Checkable_rwlock::Guard guard(*purged->get_sid_map()->get_sid_lock(),
+  Checkable_rwlock::Guard guard(*purged->get_tsid_map()->get_tsid_lock(),
                                 Checkable_rwlock::enum_lock_type::WRITE_LOCK);
   return !purged->is_subset(&excluded);
 }
@@ -518,8 +523,8 @@ static bool find_files(std::list<std::string> &files_in_index,
     // binary log file sequence. In that case, we continue the iteration.
     if (prev_gtids_ev == nullptr) continue;
 
-    Sid_map local_sid_map{nullptr};
-    Gtid_set previous{&local_sid_map};
+    Tsid_map local_tsid_map{nullptr};
+    Gtid_set previous{&local_tsid_map};
     prev_gtids_ev->add_to_set(&previous);
     delete prev_gtids_ev;
 
@@ -548,8 +553,8 @@ DEFINE_METHOD(Binlog_iterator_service_init_status, FileStorage::init,
   if (files_in_index.empty() || error != LOG_INFO_EOF)
     return kBinlogIteratorInitErrorUnspecified;
   // initialize the excluded gtid set
-  Sid_map local_sid_map{nullptr};
-  Gtid_set excluded{&local_sid_map};
+  Tsid_map local_tsid_map{nullptr};
+  Gtid_set excluded{&local_tsid_map};
   if (excluded.add_gtid_text(excluded_gtids_as_string) != RETURN_STATUS_OK)
     return kBinlogIteratorInitErrorUnspecified;
 
@@ -639,7 +644,7 @@ DEFINE_METHOD(Binlog_iterator_service_get_status, FileStorage::get,
 
   // update the file cursor (and get the event size, which we can disregard
   // here)
-  auto cursor_update_ret = std::get<0>(ctx.update_cursor());
+  auto [cursor_update_ret, event_size] = ctx.update_cursor();
   if (cursor_update_ret != kBinlogIteratorGetOk) return cursor_update_ret;
 
   // read the event

@@ -1,18 +1,19 @@
 #ifndef JSON_BINARY_INCLUDED
 #define JSON_BINARY_INCLUDED
 
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -143,8 +144,8 @@
 #include <stddef.h>
 #include <cassert>
 #include <cstdint>
-#include <functional>
 #include <string>
+#include <string_view>
 
 /*
   This file is part of our public interface for the 'json_binary' library.
@@ -171,26 +172,56 @@ class String;
 
 namespace json_binary {
 
+inline constexpr char JSONB_TYPE_SMALL_OBJECT = 0x0;
+inline constexpr char JSONB_TYPE_LARGE_OBJECT = 0x1;
+inline constexpr char JSONB_TYPE_SMALL_ARRAY = 0x2;
+inline constexpr char JSONB_TYPE_LARGE_ARRAY = 0x3;
+inline constexpr char JSONB_TYPE_LITERAL = 0x4;
+inline constexpr char JSONB_TYPE_INT16 = 0x5;
+inline constexpr char JSONB_TYPE_UINT16 = 0x6;
+inline constexpr char JSONB_TYPE_INT32 = 0x7;
+inline constexpr char JSONB_TYPE_UINT32 = 0x8;
+inline constexpr char JSONB_TYPE_INT64 = 0x9;
+inline constexpr char JSONB_TYPE_UINT64 = 0xA;
+inline constexpr char JSONB_TYPE_DOUBLE = 0xB;
+inline constexpr char JSONB_TYPE_STRING = 0xC;
+inline constexpr char JSONB_TYPE_OPAQUE = 0xF;
+
+inline constexpr char JSONB_NULL_LITERAL = 0x0;
+inline constexpr char JSONB_TRUE_LITERAL = 0x1;
+inline constexpr char JSONB_FALSE_LITERAL = 0x2;
+
+void write_offset_or_size(char *dest, size_t offset_or_size, bool large);
+
+bool append_offset_or_size(String *dest, size_t offset_or_size, bool large);
+
+bool append_int16(String *dest, int16_t value);
+
+bool attempt_inline_value(const Json_dom *value, String *dest, size_t pos,
+                          bool large);
+
+uint32_t read_offset_or_size(const char *data, bool large);
+
+bool inlined_type(uint8_t type, bool large);
+
+uint8_t offset_size(bool large);
+uint8_t key_entry_size(bool large);
+uint8_t value_entry_size(bool large);
+
 /**
   Serialize the JSON document represented by dom to binary format in
   the destination string, replacing any content already in the
   destination string.
 
   @param[in]     dom   the input DOM tree
+  @param error_handler a handler that is invoked if an error occurs
   @param[in,out] dest  the destination string
-  @param json_depth_handler handler which will be called for JSON documents
-                            exceeding the maximum allowed depth
-  @param json_key_handler  handler which will be called for JSON documents
-                           having keys too large
-  @param json_value_handler handler which will be called for JSON documents
-                            having values too large
   @retval false on success
   @retval true if an error occurred
       */
-bool serialize(const Json_dom *dom, String *dest,
-               const JsonErrorHandler &json_depth_handler,
-               const JsonErrorHandler &json_key_handler,
-               const JsonErrorHandler &json_value_handler);
+bool serialize(const Json_dom *dom,
+               const JsonSerializationErrorHandler &error_handler,
+               String *dest);
 
 /**
   Class used for reading JSON values that are stored in the binary
@@ -251,6 +282,22 @@ class Value {
     return m_length;
   }
 
+  /**
+    Get the length in bytes of the STRING or OPAQUE value represented by
+    this instance.
+  */
+  EXPORT_JSON_FUNCTION
+  uint32_t get_container_length() const {
+    assert(m_type == ARRAY || m_type == OBJECT);
+    return m_length;
+  }
+
+  EXPORT_JSON_FUNCTION
+  const char *get_container_data() const {
+    assert(m_type == ARRAY || m_type == OBJECT);
+    return m_data;
+  }
+
   /** Get the value of an INT. */
   EXPORT_JSON_FUNCTION
   int64_t get_int64() const {
@@ -299,30 +346,21 @@ class Value {
   Value key(size_t pos) const;
 
   EXPORT_JSON_FUNCTION
-  Value lookup(const char *key, size_t length) const;
+  Value lookup(std::string_view key) const;
 
   EXPORT_JSON_FUNCTION
-  Value lookup(const std::string &key) const {
-    return lookup(key.c_str(), key.length());
-  }
-
-  EXPORT_JSON_FUNCTION
-  size_t lookup_index(const char *key, size_t length) const;
-
-  EXPORT_JSON_FUNCTION
-  size_t lookup_index(const std::string &key) const {
-    return lookup_index(key.c_str(), key.length());
-  }
+  size_t lookup_index(std::string_view key) const;
 
   EXPORT_JSON_FUNCTION
   bool is_backed_by(const String *str) const;
 
   EXPORT_JSON_FUNCTION
-  bool raw_binary(String *buf, const JsonErrorHandler &json_depth_handler,
-                  const JsonErrorHandler &json_key_handler,
-                  const JsonErrorHandler &json_value_handler) const;
+  bool raw_binary(const JsonSerializationErrorHandler &error_handler,
+                  String *buf) const;
+  EXPORT_JSON_FUNCTION
+  bool get_free_space(const JsonSerializationErrorHandler &error_handler,
+                      size_t *space) const;
 #ifdef MYSQL_SERVER
-  bool get_free_space(const THD *thd, size_t *space) const;
   bool update_in_shadow(const Field_json *field, size_t pos,
                         Json_wrapper *new_value, size_t data_offset,
                         size_t data_length, const char *original,
@@ -439,6 +477,12 @@ class Value {
   int eq(const Value &val) const;
 #endif
 
+  EXPORT_JSON_FUNCTION
+  size_t key_entry_offset(size_t pos) const;
+
+  EXPORT_JSON_FUNCTION
+  size_t value_entry_offset(size_t pos) const;
+
  private:
   /*
     Instances use only one of m_data, m_int_value and m_double_value,
@@ -486,8 +530,6 @@ class Value {
   */
   bool m_large;
 
-  size_t key_entry_offset(size_t pos) const;
-  size_t value_entry_offset(size_t pos) const;
   bool first_value_offset(size_t *offset) const;
   bool element_offsets(size_t pos, size_t *start, size_t *end,
                        bool *inlined) const;

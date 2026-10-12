@@ -3,6 +3,8 @@
 --source include/have_binlog_format_mixed_or_row.inc
 --source include/force_myisam_default.inc
 --source include/have_myisam.inc
+# This test doesn't support GTID
+--source include/rpl/set_gtid_mode_off.inc
 
 #
 # Bug#13270 INSERT,UPDATE,etc that calls func with side-effect does not binlog
@@ -37,10 +39,12 @@ insert into t2 values (bug23333(),1);
 # the binlog_limit is used to hide the differences between the mixed
 # and row logging formats after BUG#53259
 let $binlog_limit= 2, 4;
---source include/show_binlog_events.inc
+--source include/rpl/deprecated/show_binlog_events.inc
 select count(*),@a from t1 /* must be 1,1 */;
 
 # clean-up
 
 drop table t1,t2;
 drop function if exists bug23333;
+# Restore the default for gtid_mode which is ON
+--source include/rpl/set_gtid_mode_on.inc

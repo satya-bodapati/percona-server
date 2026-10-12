@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,8 +24,7 @@
 #include "sql/dd/impl/bootstrap/bootstrap_ctx.h"  // dd::DD_bootstrap_ctx
 #include "sql/dd/impl/tables/dd_properties.h"     // dd::tables::DD_properties
 
-namespace dd {
-namespace bootstrap {
+namespace dd::bootstrap {
 
 DD_bootstrap_ctx &DD_bootstrap_ctx::instance() {
   static DD_bootstrap_ctx s_instance;
@@ -45,5 +45,4 @@ bool DD_bootstrap_ctx::is_above_minor_downgrade_threshold(THD *thd) const {
           exists && dd::DD_VERSION >= minor_downgrade_threshold);
 }
 
-}  // namespace bootstrap
-}  // namespace dd
+}  // namespace dd::bootstrap

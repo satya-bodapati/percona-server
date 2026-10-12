@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2019, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -36,7 +37,7 @@ MY_COMPILER_DIAGNOSTIC_PUSH()
 // Suppress warning C4251 'type' : class 'type1' needs to have dll-interface
 // to be used by clients of class 'type2'
 MY_COMPILER_MSVC_DIAGNOSTIC_IGNORE(4251)
-#include "plugin/x/generated/protobuf/mysqlx.pb.h"
+#include "protobuf/mysqlx.pb.h"
 MY_COMPILER_DIAGNOSTIC_POP()
 #include "plugin/x/protocol/plugin/file_output.h"
 
@@ -78,7 +79,7 @@ class Encoder_file_output : public File_output {
       return;
 
     write_to_context(context, "");
-    write_to_context(context, "struct ", message->name(), " {");
+    write_to_context(context, "struct ", std::string(message->name()), " {");
 
     if (message->options().HasExtension(Mysqlx::server_message_id)) {
       const auto server_id_numeric = static_cast<int>(
@@ -96,7 +97,8 @@ class Encoder_file_output : public File_output {
       bool is_reserved = false;
       const auto field = message->field(i);
       const auto field_tag = std::to_string(field->number());
-      const auto field_name = get_cpp_field_name(field->name(), &is_reserved);
+      const auto field_name =
+          get_cpp_field_name(std::string(field->name()), &is_reserved);
 
       if (is_reserved) {
         write_to_context(context,
@@ -128,7 +130,7 @@ class Encoder_file_output : public File_output {
 
       // Check if we there is a message containing Server message ID
       if (0 == m_used_message_ids.count(enum_value->number())) {
-        std::string value = "  " + enum_value->name() + " = " +
+        std::string value = "  " + std::string(enum_value->name()) + " = " +
                             std::to_string(enum_value->number());
 
         values.push_back(value);

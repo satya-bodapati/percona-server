@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -41,36 +42,36 @@ TEST_F(KeyringCommonJsonWriter_test, JsonWriterTest) {
   Json_writer json_writer;
   Json_data_extension json_data_extension;
   {
-    Metadata metadata("key1", "foo@bar");
-    Data data("abcdefghijklmnop", "AES");
+    Metadata const metadata("key1", "foo@bar");
+    Data const data("abcdefghijklmnop", "AES");
     ASSERT_FALSE(json_writer.add_element(metadata, data, json_data_extension));
   }
   {
-    Metadata metadata("key1", "bar@foo");
-    Data data("qrstuvwx", "RSA");
+    Metadata const metadata("key1", "bar@foo");
+    Data const data("qrstuvwx", "RSA");
     ASSERT_FALSE(json_writer.add_element(metadata, data, json_data_extension));
   }
   {
-    Metadata metadata("master_key", "");
-    Data data("yzabcdefghijklmn", "AES");
+    Metadata const metadata("master_key", "");
+    Data const data("yzabcdefghijklmn", "AES");
     ASSERT_FALSE(json_writer.add_element(metadata, data, json_data_extension));
   }
 
-  Json_reader json_reader(json_writer.to_string());
+  Json_reader const json_reader(json_writer.to_string());
   ASSERT_TRUE(json_reader.valid());
 
   Json_writer json_writer_2(json_writer.to_string());
   ASSERT_TRUE(json_writer_2.valid());
   ASSERT_TRUE(json_writer_2.num_elements() == 3);
   {
-    Metadata metadata("key1", "bar@foo");
+    Metadata const metadata("key1", "bar@foo");
     ASSERT_FALSE(json_writer_2.remove_element(metadata, json_data_extension));
     ASSERT_TRUE(json_writer_2.remove_element(metadata, json_data_extension));
   }
   ASSERT_TRUE(json_writer_2.num_elements() == 2);
   {
-    Metadata metadata("key1", "bar@foo");
-    Data data("qrstuvwx", "RSA");
+    Metadata const metadata("key1", "bar@foo");
+    Data const data("qrstuvwx", "RSA");
     ASSERT_FALSE(
         json_writer_2.add_element(metadata, data, json_data_extension));
     ASSERT_FALSE(
@@ -80,7 +81,7 @@ TEST_F(KeyringCommonJsonWriter_test, JsonWriterTest) {
     ASSERT_TRUE(json_writer_2.num_elements() == 2);
   }
 
-  Json_reader json_reader_2(json_writer_2.to_string());
+  Json_reader const json_reader_2(json_writer_2.to_string());
   ASSERT_TRUE(json_reader_2.valid());
 }
 

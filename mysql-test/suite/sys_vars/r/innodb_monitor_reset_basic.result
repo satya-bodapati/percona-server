@@ -1,3 +1,4 @@
+include/rpl/set_gtid_mode_off.inc
 set global innodb_monitor_disable = All;
 select name, status from information_schema.innodb_metrics;
 name	status
@@ -106,6 +107,8 @@ buffer_LRU_search_scanned_per_call	disabled
 buffer_LRU_unzip_search_scanned	disabled
 buffer_LRU_unzip_search_num_scan	disabled
 buffer_LRU_unzip_search_scanned_per_call	disabled
+buffer_LRU_single_page_flush_count	disabled
+buffer_LRU_flush_await_count	disabled
 buffer_page_read_index_leaf	disabled
 buffer_page_read_index_non_leaf	disabled
 buffer_page_read_index_ibuf_leaf	disabled
@@ -696,3 +699,4 @@ set global innodb_monitor_reset =0xe9;
 ERROR 42000: Variable 'innodb_monitor_reset' can't be set to the value of '\xE9'
 set global innodb_monitor_disable =0xed;
 ERROR 42000: Variable 'innodb_monitor_disable' can't be set to the value of '\xED'
+include/rpl/set_gtid_mode_on.inc

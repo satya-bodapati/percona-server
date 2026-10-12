@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1997, 2023, Oracle and/or its affiliates.
+Copyright (c) 1997, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -650,9 +651,9 @@ static void row_vers_build_clust_v_col(dtuple_t *row, dict_index_t *clust_index,
 
       col = reinterpret_cast<const dict_v_col_t *>(ind_field->col);
 
-      innobase_get_computed_value(row, col, clust_index, &local_heap, heap,
-                                  nullptr, current_thd, nullptr, nullptr,
-                                  nullptr, nullptr, &prebuilt->blob_heap);
+      innobase_get_computed_value(&prebuilt->blob_heap, row, col,
+                                  clust_index->table, &local_heap, heap,
+                                  current_thd, nullptr);
     }
   }
 
@@ -976,17 +977,17 @@ static const dtuple_t *row_vers_build_cur_vrow(
  the alphabetical ordering; exactly in this case we return true.
  @return true if earlier version should have */
 bool row_vers_old_has_index_entry(
-    bool also_curr,         /*!< in: true if also rec is included in the
-                           versions to search; otherwise only versions
-                           prior to it are searched */
-    const rec_t *rec,       /*!< in: record in the clustered index; the
-                            caller must have a latch on the page */
-    mtr_t *mtr,             /*!< in: mtr holding the latch on rec; it will
-                            also hold the latch on purge_view */
-    dict_index_t *index,    /*!< in: the secondary index */
-    const dtuple_t *ientry, /*!< in: the secondary index entry */
-    roll_ptr_t roll_ptr,    /*!< in: roll_ptr for the purge record */
-    trx_id_t trx_id,        /*!< in: transaction ID on the purging record */
+    bool also_curr,           /*!< in: true if also rec is included in the
+                             versions to search; otherwise only versions
+                             prior to it are searched */
+    const rec_t *rec,         /*!< in: record in the clustered index; the
+                              caller must have a latch on the page */
+    mtr_t *mtr,               /*!< in: mtr holding the latch on rec; it will
+                              also hold the latch on purge_view */
+    dict_index_t *index,      /*!< in: the secondary index */
+    const dtuple_t *ientry,   /*!< in: the secondary index entry */
+    roll_ptr_t roll_ptr,      /*!< in: roll_ptr for the purge record */
+    trx_id_t trx_id,          /*!< in: transaction ID on the purging record */
     row_prebuilt_t *prebuilt) /*!< in: compress_heap must be taken from here */
 {
   const rec_t *version;
@@ -1137,9 +1138,9 @@ bool row_vers_old_has_index_entry(
     deleted, but the previous version of it might not. We will
     need to get the virtual column data from undo record
     associated with current cluster index */
-    cur_vrow =
-        row_vers_build_cur_vrow(also_curr, rec, clust_index, &clust_offsets,
-                                index, roll_ptr, trx_id, heap, v_heap, mtr, prebuilt);
+    cur_vrow = row_vers_build_cur_vrow(also_curr, rec, clust_index,
+                                       &clust_offsets, index, roll_ptr, trx_id,
+                                       heap, v_heap, mtr, prebuilt);
   }
 
   version = rec;

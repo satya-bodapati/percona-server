@@ -1,9 +1,17 @@
 /*
- * Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2019, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
  * published by the Free Software Foundation; version 2 of the License.
+ *
+ * This program is designed to work with certain software (including
+ * but not limited to OpenSSL) that is licensed under separate terms,
+ * as designated in a particular file or component or in included license
+ * documentation.  The authors of MySQL hereby grant you an additional
+ * permission to link the program and your derivative works with the
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -132,11 +140,13 @@ class Translate_array_validator
   explicit Translate_array_validator(const Map &allowed_values)
       : m_allowed_values(update_string_if_case_insensitive(allowed_values)) {}
 
-  virtual bool valid_array_value(const Array_of_enums &values) { return true; }
-  virtual void visit_translate(const Array_of_enums &values) = 0;
+  virtual bool valid_array_value(const Array_of_enums & /*values*/) {
+    return true;
+  }
+  virtual void visit_translate(const Array_of_enums & /*values*/) = 0;
   virtual void visit_translate_with_source(
       const Array_of_enums &enum_values,
-      const Array_of_strings &string_values) {
+      const Array_of_strings & /*string_values*/) {
     visit_translate(enum_values);
   }
   virtual bool ignore_unkown_text_values() const { return false; }
@@ -151,7 +161,7 @@ class Translate_array_validator
     if (0 == values.size() && !ignore_empty_array()) return false;
 
     for (const auto &value : values) {
-      Translate_to_type enum_value;
+      Translate_to_type enum_value{};
       if (!valid_convert_value(value, &enum_value)) {
         DBUG_LOG("debug", "invalid value: \"" << value << "\"");
         if (!ignore_unkown_text_values()) return false;

@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -237,10 +238,18 @@ struct first_page_t : public basic_page_t {
       /* Not there in cached blocks.  Add the loaded block to cache. */
       buf_block_t *block = nullptr;
       result = fut_get_ptr(space, page_size, addr, RW_S_LATCH, m_mtr, &block);
+#ifdef UNIV_DEBUG
+      const page_type_t type = block->get_page_type();
+      ut_ad(type == FIL_PAGE_TYPE_LOB_FIRST || type == FIL_PAGE_TYPE_LOB_INDEX);
+#endif /* UNIV_DEBUG */
       cache.insert(std::make_pair(addr.page, block));
     } else {
       buf_block_t *block = iter->second;
+#ifdef UNIV_DEBUG
+      const page_type_t type = block->get_page_type();
+      ut_ad(type == FIL_PAGE_TYPE_LOB_FIRST || type == FIL_PAGE_TYPE_LOB_INDEX);
       ut_ad(block->page.id.page_no() == addr.page);
+#endif /* UNIV_DEBUG */
       result = buf_block_get_frame(block) + addr.boffset;
     }
     return (result);

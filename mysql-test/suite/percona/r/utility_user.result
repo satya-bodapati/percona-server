@@ -3,9 +3,9 @@ call mtr.add_suppression("Wrong password");
 SELECT user FROM mysql.user WHERE user LIKE 'frank';
 user
 CREATE USER 'frank'@'localhost' IDENTIFIED BY 'password';
-ERROR HY000: Operation CREATE USER failed for 'frank'@'localhost'
+ERROR HY000: Operation CREATE USER failed for 'frank'@'localhost' (Cannot create utility user)
 CREATE USER 'frank'@'%' IDENTIFIED BY 'password';
-ERROR HY000: Operation CREATE USER failed for 'frank'@'%'
+ERROR HY000: Operation CREATE USER failed for 'frank'@'%' (Cannot create utility user)
 SET PASSWORD FOR 'frank'@'localhost' = '';
 ERROR 42000: Can't find any matching row in the user table
 SET PASSWORD FOR 'frank'@'%' = '';
@@ -32,9 +32,9 @@ ERROR HY000: Can't revoke all privileges for one or more of the requested users
 REVOKE ALL PRIVILEGES, GRANT OPTION FROM 'frank'@'%';
 ERROR 42000: There is no such grant defined for user 'frank' on host '%'
 DROP USER 'frank'@'localhost';
-ERROR HY000: Operation DROP USER failed for 'frank'@'localhost'
+ERROR HY000: Operation DROP USER failed for 'frank'@'localhost' (Cannot drop utility user)
 DROP USER 'frank'@'%';
-ERROR HY000: Operation DROP USER failed for 'frank'@'%'
+ERROR HY000: Operation DROP USER failed for 'frank'@'%' (Cannot drop utility user)
 CREATE USER 'mysqltest_1'@'localhost';
 SELECT user FROM mysql.user WHERE user LIKE 'frank';
 user
@@ -92,7 +92,7 @@ SELECT * FROM mysql.proxies_priv;
 Host	User	Proxied_host	Proxied_user	With_grant	Grantor	Timestamp
 xx	root			1		xx
 xx	root	%	frank	0	root@localhost	xx
-ERROR 28000: Access denied for user 'plug'@'localhost' (using password: YES)
+ERROR HY000: Access denied for user 'plug'@'localhost', missing proxy privilege.
 DROP USER plug;
 #
 # 5.6 tests
@@ -101,7 +101,7 @@ DROP USER plug;
 # Interaction with ALTER USER
 #
 ALTER USER 'frank'@'localhost' PASSWORD EXPIRE;
-ERROR HY000: Operation ALTER USER failed for 'frank'@'localhost'
+ERROR HY000: Operation ALTER USER failed for 'frank'@'localhost' (Cannot alter utility user)
 #
 # 5.7 tests
 #
@@ -126,20 +126,14 @@ SET @@global.offline_mode = @global_saved_tmp;
 # Interaction with SHOW CREATE USER
 #
 SHOW CREATE USER 'frank'@'localhost';
-ERROR HY000: Operation SHOW CREATE USER failed for 'frank'@'localhost'
+ERROR HY000: Operation SHOW CREATE USER failed for 'frank'@'localhost' (User account does not exist)
 # restart
-SHOW GLOBAL STATUS LIKE "Connections";
-Variable_name	Value
-Connections	8
 SHOW GLOBAL STATUS LIKE "Threads%";
 Variable_name	Value
 Threads_cached	0
 Threads_connected	1
 Threads_created	1
 Threads_running	2
-SHOW GLOBAL STATUS LIKE "Connections";
-Variable_name	Value
-Connections	9
 SHOW GLOBAL STATUS LIKE "Threads%";
 Variable_name	Value
 Threads_cached	0
@@ -166,8 +160,7 @@ COUNT(DISTINCT PROCESSLIST_ID)
 SELECT COUNT(*) FROM performance_schema.threads where type='FOREGROUND';
 COUNT(*)
 3
-KILL 9;
-ERROR HY000: You are not owner of thread 9
+ERROR HY000: You are not owner of thread <ID>
 REVOKE PROXY ON 'frank'@'%' FROM 'root'@'localhost';
 CREATE ROLE r1;
 GRANT r1 TO frank@'%';
@@ -181,17 +174,17 @@ ALTER USER 'u1'@'%' IDENTIFIED BY 'newpass';
 # restart:--utility-user-dynamic-privileges=sYstem_USEr
 ALTER USER 'u1'@'%' IDENTIFIED BY 'newpass2';
 DROP USER u1;
-# restart:<hidden args>
+# restart
 FOUND /Utility user 'frank'@'%' in use with dynamic privileges 'SYSTEM_USER,PRIVILEGE_1,PRIVILEGE2,PRIVILEGE4'./ in my_restart.err
-# restart:<hidden args>
+# restart
 FOUND /Utility user 'frank'@'%' in use with dynamic privileges 'SYSTEM_USER,PRIVILEGE_2'./ in my_restart.err
-# restart:<hidden args>
+# restart
 FOUND /Utility user 'frank'@'%' in use with dynamic privileges 'SYSTEM_USER,PRIVILEGE_3'./ in my_restart.err
-# restart:<hidden args>
+# restart
 FOUND /Wrong format of --utility-user-dynamic-privileges parameter value: SYSTEM_USER,PRIVILEGE_1,/ in my_restart.err
-# restart:<hidden args>
+# restart
 FOUND /Wrong format of --utility-user-dynamic-privileges parameter value: ,SYSTEM_USER,PRIVILEGE_1/ in my_restart.err
-# restart:<hidden args>
+# restart
 FOUND /Wrong format of --utility-user-dynamic-privileges parameter value: SYSTEM_USER;PRIVILEGE_1/ in my_restart.err
 # restart
 DROP ROLE r1;

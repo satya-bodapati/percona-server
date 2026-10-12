@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -62,6 +63,41 @@ class Common_interface {
   */
 
   virtual enum_gcs_error finalize() = 0;
+};
+
+/**
+   This is the interface for the timestamp provider for entries that end up in
+   the Debugger log. The GCS will add timestamps to the log entries according to
+   the representation returned by the member functions below.
+ */
+class Clock_timestamp_interface : public Common_interface {
+ public:
+  Clock_timestamp_interface() = default;
+  ~Clock_timestamp_interface() override = default;
+  // non-copyable
+  Clock_timestamp_interface(const Clock_timestamp_interface &other) = delete;
+  Clock_timestamp_interface &operator=(const Clock_timestamp_interface &other) =
+      delete;
+  // non-movable
+  Clock_timestamp_interface(Clock_timestamp_interface &&other) = delete;
+  Clock_timestamp_interface &operator=(Clock_timestamp_interface &&other) =
+      delete;
+
+  /**
+    Get the timestamp as c string object.
+
+    @param[in] buffer the buffer to store the timestamp into
+    @param[in,out] size as an input contains the size of the buffer, as output
+    contains the number of bytes written to the buffer.
+   */
+  virtual void get_timestamp_as_c_string(char *buffer, size_t *size) = 0;
+
+  /**
+    Get the timestamp as std::string.
+
+    @param str the string to store the timestamp into.
+   */
+  virtual void get_timestamp_as_string(std::string &str) = 0;
 };
 
 /**
@@ -258,7 +294,7 @@ static const char *const gcs_xcom_debug_strings[] = {
 #endif
 
 /**
-  @class Gcs_debug_manager
+  @class Gcs_debug_options
 
   This class sets up and configures the debugging infrastructure, storing the
   debugger to be used by the application as a singleton.

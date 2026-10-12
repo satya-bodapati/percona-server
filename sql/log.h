@@ -1,15 +1,16 @@
-/* Copyright (c) 2005, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2005, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -37,6 +38,7 @@
 #ifndef LOG_H
 #define LOG_H
 
+#include <mysql/components/common/iso8601_tzmode.h>
 #include <mysql/components/services/log_shared.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -259,12 +261,15 @@ static const uint LOG_FILE = 2;
 static const uint LOG_TABLE = 4;
 
 class Log_to_file_event_handler;
+class Log_to_telemetry_event_handler;
 
 /** Class which manages slow and general log event handlers. */
 class Query_logger {
   /**
-     Currently we have only 2 kinds of logging functions: old-fashioned
+     Currently we have 2 main kinds of logging functions: old-fashioned
      file logs and csv logging routines.
+     Additional open telemetry log export is completely independent of
+     these and does not depend on their configuration.
   */
   static const uint MAX_LOG_HANDLERS_NUM = 2;
 
@@ -278,6 +283,7 @@ class Query_logger {
   /** Available log handlers. */
   Log_to_csv_event_handler table_log_handler;
   Log_to_file_event_handler *file_log_handler;
+  Log_to_telemetry_event_handler *telemetry_log_handler;
 
   /** NULL-terminated arrays of log handlers. */
   Log_event_handler *slow_log_handler_list[MAX_LOG_HANDLERS_NUM + 1];
@@ -833,8 +839,9 @@ bool init_error_log();
 
   @param filename        Name of error log file
   @param get_lock        Should we acquire LOCK_error_log?
+  @param log_type        Error log, diagnostic log or both.
 */
-bool open_error_log(const char *filename, bool get_lock);
+bool open_error_log(const char *filename, bool get_lock, uint log_type);
 
 /**
   Free any error log resources.
@@ -1426,29 +1433,19 @@ enum loglevel log_prio_from_label(const char *label);
 int log_line_submit(log_line *ll);
 
 /**
-  Whether to generate a UTC timestamp, or one following system-time.
-  These values are not arbitrary; they must correspond to the range
-  and meaning of opt_log_timestamps.
+  Set/reset one or more log line flags.
+
+  Example to set the flag:
+    log_line_set_flag(ll, LOG_LINE_EMIT_TELEMETRY, LOG_LINE_EMIT_TELEMETRY);
+  to reset the flag:
+    log_line_set_flag(ll, LOG_LINE_EMIT_TELEMETRY, 0);
+
+  @param           ll                  log line structure
+  @param           mask                mask that defines flags to be changed
+  @param           value               value to set to selected flags
 */
-enum enum_iso8601_tzmode {
-  iso8601_sysvar_logtimestamps = -1, /**< use value of opt_log_timestamps */
-  iso8601_utc = 0,                   /**< create UTC timestamp */
-  iso8601_system_time = 1            /**< use system time */
-};
-
-/**
-  Make and return an ISO 8601 / RFC 3339 compliant timestamp.
-  Accepts the log_timestamps global variable in its third parameter.
-
-  @param buf       A buffer of at least iso8601_size bytes to store
-                   the timestamp in. The timestamp will be \0 terminated.
-  @param utime     Microseconds since the epoch
-  @param mode      if 0, use UTC; if 1, use local time
-
-  @retval          length of timestamp (excluding \0)
-*/
-int make_iso8601_timestamp(char *buf, ulonglong utime,
-                           enum enum_iso8601_tzmode mode);
+void log_line_set_flag(log_line *ll, log_line_flags_mask mask,
+                       log_line_flags_mask value);
 
 /**
   Parse a ISO8601 timestamp and return the number of microseconds
@@ -1602,7 +1599,9 @@ int log_builtins_exit();
 
   @param         buffer       buffer containing serialized error message
   @param         length       number of bytes in buffer
+  @param         log_type     type of log, e.g. error or diagnostic log
 */
-void log_write_errstream(const char *buffer, size_t length);
+void log_write_errstream(const char *buffer, size_t length,
+                         enum enum_log_type log_type);
 
 #endif /* LOG_H */

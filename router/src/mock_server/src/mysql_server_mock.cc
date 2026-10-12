@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,11 +25,9 @@
 
 #include "mysql_server_mock.h"
 
-#include <chrono>
+#include <functional>
 #include <iostream>  // cout
 #include <memory>    // shared_ptr
-#include <mutex>
-#include <stdexcept>  // runtime_error
 #include <string>
 #include <system_error>
 #include <utility>  // move
@@ -36,25 +35,28 @@
 #include "classic_mock_session.h"
 #include "duktape_statement_reader.h"
 #include "mock_session.h"
-#include "mysql/harness/logging/logging.h"
-#include "mysql/harness/net_ts/buffer.h"
+#include "mysql/harness/destination.h"
+#include "mysql/harness/destination_acceptor.h"
+#include "mysql/harness/destination_endpoint.h"
+#include "mysql/harness/destination_socket.h"
+#include "mysql/harness/logging/logger.h"
 #include "mysql/harness/net_ts/impl/resolver.h"
 #include "mysql/harness/net_ts/impl/socket_constants.h"
 #include "mysql/harness/net_ts/internet.h"  // net::ip::tcp
 #include "mysql/harness/net_ts/io_context.h"
+#include "mysql/harness/net_ts/local.h"  // local::stream_protocol
 #include "mysql/harness/net_ts/socket.h"
 #include "mysql/harness/stdx/expected.h"
 #include "mysql/harness/stdx/monitor.h"
 #include "mysql/harness/tls_server_context.h"
+#include "mysql/harness/utility/string.h"
 #include "mysqlrouter/classic_protocol_message.h"
+#include "mysqlrouter/mock_server_component.h"
 #include "mysqlrouter/utils.h"  // to_string
-#include "router/src/mock_server/src/statement_reader.h"
 #include "scope_guard.h"
+#include "statement_reader.h"
 #include "x_mock_session.h"
 
-IMPORT_LOG_FUNCTIONS()
-
-using namespace std::chrono_literals;
 using namespace std::string_literals;
 
 namespace server_mock {
@@ -62,12 +64,11 @@ namespace server_mock {
 MySQLServerMock::MySQLServerMock(net::io_context &io_ctx,
                                  std::string expected_queries_file,
                                  std::vector<std::string> module_prefixes,
-                                 std::string bind_address, unsigned bind_port,
+                                 mysql_harness::Destination bind_destination,
                                  std::string protocol_name, bool debug_mode,
                                  TlsServerContext &&tls_server_ctx,
                                  mysql_ssl_mode ssl_mode)
-    : bind_address_(std::move(bind_address)),
-      bind_port_{bind_port},
+    : bind_destination_(std::move(bind_destination)),
       debug_mode_{debug_mode},
       io_ctx_{io_ctx},
       expected_queries_file_{std::move(expected_queries_file)},
@@ -84,15 +85,39 @@ MySQLServerMock::MySQLServerMock(net::io_context &io_ctx,
 void MySQLServerMock::close_all_connections() {
   client_sessions_([](auto &socks) {
     for (auto &conn : socks) {
-      conn->cancel();
+      conn->terminate();
     }
   });
 }
 
+namespace {
+stdx::expected<mysql_harness::DestinationEndpoint, std::error_code>
+make_destination_endpoint(net::io_context &io_ctx,
+                          mysql_harness::Destination dest) {
+  if (dest.is_tcp()) {
+    auto tcp_dest = dest.as_tcp();
+    net::ip::tcp::resolver resolver(io_ctx);
+
+    auto resolve_res =
+        resolver.resolve(tcp_dest.hostname(), std::to_string(tcp_dest.port()),
+                         net::ip::resolver_base::passive);
+    if (!resolve_res) return stdx::unexpected(resolve_res.error());
+
+    for (const auto &ainfo : resolve_res.value()) {
+      return mysql_harness::DestinationEndpoint(ainfo.endpoint());
+    }
+
+    return stdx::unexpected(
+        make_error_code(std::errc::no_such_file_or_directory));
+  }
+
+  return mysql_harness::DestinationEndpoint{
+      mysql_harness::DestinationEndpoint::LocalType{dest.as_local().path()}};
+}
+}  // namespace
+
 class Acceptor {
  public:
-  using protocol_type = net::ip::tcp;
-
   Acceptor(net::io_context &io_ctx, std::string protocol_name,
            WaitableMonitor<std::list<std::unique_ptr<MySQLServerMockSession>>>
                &client_sessions,
@@ -105,51 +130,57 @@ class Acceptor {
         tls_server_ctx_{tls_server_ctx},
         with_tls_{with_tls} {}
 
-  ~Acceptor() { stop(); }
+  ~Acceptor() {
+    stop();
 
-  stdx::expected<void, std::error_code> init(std::string address,
-                                             uint16_t port) {
-    net::ip::tcp::resolver resolver(io_ctx_);
-
-    auto resolve_res = resolver.resolve(address, std::to_string(port));
-    if (!resolve_res) return resolve_res.get_unexpected();
-
-    for (auto ainfo : resolve_res.value()) {
-      net::ip::tcp::acceptor sock(io_ctx_);
-
-      auto res = sock.open(ainfo.endpoint().protocol());
-      if (!res) return res.get_unexpected();
-
-      res = sock.set_option(net::socket_base::reuse_address{true});
-      if (!res) return res.get_unexpected();
-
-      res = sock.bind(ainfo.endpoint());
-      if (!res) return res.get_unexpected();
-
-      res = sock.listen(256);
-      if (!res) return res.get_unexpected();
-
-      sock_ = std::move(sock);
-
-      return {};
-    }
-
-    return stdx::make_unexpected(
-        make_error_code(std::errc::no_such_file_or_directory));
+    if (at_destruct_) at_destruct_();
   }
 
-  void accepted(protocol_type::socket client_sock) {
+  stdx::expected<void, std::error_code> init(
+      const mysql_harness::Destination &dest) {
+    mysql_harness::DestinationAcceptor sock(io_ctx_);
+
+    auto ep_res = make_destination_endpoint(io_ctx_, dest);
+    if (!ep_res) return stdx::unexpected(ep_res.error());
+    const auto &ep = *ep_res;
+
+    auto res = sock.open(ep);
+    if (!res) return stdx::unexpected(res.error());
+
+    res = sock.native_non_blocking(true);
+    if (!res) return stdx::unexpected(res.error());
+
+    if (ep.is_tcp()) {
+      res = sock.set_option(net::socket_base::reuse_address{true});
+      if (!res) return stdx::unexpected(res.error());
+    }
+
+    res = sock.bind(ep);
+    if (!res) return stdx::unexpected(res.error());
+
+    res = sock.listen(256);
+    if (!res) return stdx::unexpected(res.error());
+
+    if (ep.is_local()) {
+      at_destruct_ = [path = ep.as_local().path()]() { unlink(path.c_str()); };
+    }
+
+    sock_ = std::move(sock);
+
+    return {};
+  }
+
+  void accepted(mysql_harness::DestinationSocket client_sock) {
     auto reader = reader_maker_();
 
     auto session_it = client_sessions_([&](auto &socks) {
       if (protocol_name_ == "classic") {
         socks.emplace_back(std::make_unique<MySQLServerMockSessionClassic>(
-            MySQLClassicProtocol{std::move(client_sock), client_ep_,
-                                 tls_server_ctx_},
+            std::move(client_sock), client_ep_, tls_server_ctx_,
             std::move(reader), false, with_tls_));
       } else {
         socks.emplace_back(std::make_unique<MySQLServerMockSessionX>(
-            MySQLXProtocol{std::move(client_sock), client_ep_, tls_server_ctx_},
+            std::move(client_sock), client_ep_, tls_server_ctx_,
             std::move(reader), false, with_tls_));
       }
       return std::prev(socks.end());
@@ -184,28 +215,32 @@ class Acceptor {
 
     work_([](auto &work) { ++work; });
 
-    sock_.async_accept(client_ep_, [this](std::error_code ec,
-                                          protocol_type::socket client_sock) {
-      Scope_guard guard([&]() {
-        work_.serialize_with_cv([](auto &work, auto &cv) {
-          // leaving acceptor.
-          //
-          // Notify the stop() which may wait for the work to become zero.
-          --work;
-          cv.notify_one();
+    sock_.async_accept(
+        client_ep_, [this](std::error_code ec,
+                           mysql_harness::DestinationSocket client_sock) {
+          Scope_guard guard([&]() {
+            work_.serialize_with_cv([](auto &work, auto &cv) {
+              // leaving acceptor.
+              //
+              // Notify the stop() which may wait for the work to become zero.
+              --work;
+              cv.notify_one();
+            });
+          });
+
+          if (ec) {
+            return;
+          }
+
+          if (client_sock.is_tcp()) {
+            client_sock.set_option(net::ip::tcp::no_delay{true});
+          }
+
+          logger_.info(
+              [this]() { return "accepted from " + client_ep_.str(); });
+
+          this->accepted(std::move(client_sock));
         });
-      });
-
-      if (ec) {
-        return;
-      }
-
-      client_sock.set_option(net::ip::tcp::no_delay{true});
-
-      log_info("accepted from %s", mysqlrouter::to_string(client_ep_).c_str());
-
-      this->accepted(std::move(client_sock));
-    });
   }
 
   /**
@@ -251,14 +286,14 @@ class Acceptor {
   }
 
   net::io_context &io_ctx_;
-  protocol_type::acceptor sock_{io_ctx_};
+  mysql_harness::DestinationAcceptor sock_{io_ctx_};
 
   DuktapeStatementReaderFactory reader_maker_;
 
   std::string protocol_name_;
   WaitableMonitor<std::list<std::unique_ptr<MySQLServerMockSession>>>
       &client_sessions_;
-  protocol_type::endpoint client_ep_;
+  mysql_harness::DestinationEndpoint client_ep_;
 
   TlsServerContext &tls_server_ctx_;
 
@@ -270,9 +305,15 @@ class Acceptor {
   //
   // tracks if async_accept is currently waiting.
   WaitableMonitor<int> work_{0};
+
+  mysql_harness::logging::DomainLogger logger_;
+
+  std::function<void()> at_destruct_;
 };
 
 void MySQLServerMock::run(mysql_harness::PluginFuncEnv *env) {
+  const auto &dest = bind_destination_;
+
   Acceptor acceptor{
       io_ctx_,
       protocol_name_,
@@ -281,7 +322,10 @@ void MySQLServerMock::run(mysql_harness::PluginFuncEnv *env) {
           expected_queries_file_,
           module_prefixes_,
           // expose session data as json-encoded string
-          {{"port", [this]() { return std::to_string(bind_port_); }},
+          {{"port",
+            [&]() {
+              return std::to_string(dest.is_tcp() ? dest.as_tcp().port() : 0);
+            }},
            {"ssl_cipher", []() { return "\"\""s; }},
            {"mysqlx_ssl_cipher", []() { return "\"\""s; }},
            {"ssl_session_cache_hits",
@@ -292,17 +336,19 @@ void MySQLServerMock::run(mysql_harness::PluginFuncEnv *env) {
       tls_server_ctx_,
       ssl_mode_ != SSL_MODE_DISABLED};
 
-  auto res = acceptor.init(bind_address_, bind_port_);
+  auto res = acceptor.init(dest);
   if (!res) {
-    throw std::system_error(res.error(), "binding to " + bind_address_ + ":" +
-                                             std::to_string(bind_port_) +
-                                             " failed");
+    throw std::system_error(res.error(),
+                            "binding to " + dest.str() + " failed");
   }
 
   mysql_harness::on_service_ready(env);
 
-  log_info("Starting to handle %s connections on port: %d",
-           protocol_name_.c_str(), bind_port_);
+  mysql_harness::logging::DomainLogger().info([this, dest]() {
+    return mysql_harness::utility::string_format(
+        "Starting to handle %s connections on %s",  //
+        protocol_name_.c_str(), dest.str().c_str());
+  });
 
   acceptor.async_run();
 

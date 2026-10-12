@@ -1,15 +1,16 @@
-/* Copyright (c) 2003, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2003, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -34,9 +35,12 @@
   the cache.
 */
 
-#include <string.h>
 #include <sys/types.h>
+#include <cstring>
+#include <memory>
 #include <string>
+#include <unordered_map>
+#include <utility>
 
 #include "keycache.h"
 #include "map_helpers.h"
@@ -45,7 +49,6 @@
 #include "my_sys.h"
 #include "mysql/psi/mysql_rwlock.h"
 #include "mysql/service_mysql_alloc.h"
-#include "mysql/strings/m_ctype.h"
 #include "mysys/mysys_priv.h"
 #include "template_utils.h"
 
@@ -171,7 +174,7 @@ static bool safe_hash_set(SAFE_HASH *hash, const uchar *key, uint length,
   bool error = false;
   DBUG_TRACE;
   DBUG_PRINT("enter", ("key: %.*s  data: %p", length, key, data));
-  string key_str(pointer_cast<const char *>(key), length);
+  string const key_str(pointer_cast<const char *>(key), length);
 
   mysql_rwlock_wrlock(&hash->lock);
   entry = find_or_nullptr(hash->hash, key_str);
@@ -260,11 +263,11 @@ static void safe_hash_change(SAFE_HASH *hash, uchar *old_data,
 /* Variable to store all key cache objects */
 static SAFE_HASH key_cache_hash;
 
-bool multi_keycache_init(void) {
+bool multi_keycache_init() {
   return safe_hash_init(&key_cache_hash, (uchar *)dflt_key_cache);
 }
 
-void multi_keycache_free(void) { safe_hash_free(&key_cache_hash); }
+void multi_keycache_free() { safe_hash_free(&key_cache_hash); }
 
 /*
   Get a key cache to be used for a specific table.

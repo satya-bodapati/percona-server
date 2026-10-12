@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -38,10 +39,13 @@ Created 2020-11-01 by Sunny Bains. */
 #include "ddl0impl-merge.h"
 #include "ddl0impl-rtree.h"
 #include "lob0lob.h"
+#include "mach0data.h"
 #include "os0thread-create.h"
 #include "row0ext.h"
 #include "row0vers.h"
 #include "ut0stage.h"
+#include "vec0aux.h"
+#include "vec0hnsw.h"
 
 namespace ddl {
 
@@ -178,14 +182,14 @@ struct File_cursor : public Load_cursor {
   @param[in] builder            The index build driver.
   @param[in] file               File to read from.
   @param[in] buffer_size        IO buffer size to use for reads.
-  @param[in] size               Size of the file in bytes.
+  @param[in] range              Offsets of the chunk to read from the file
   @param[in,out] stage          PFS observability. */
   File_cursor(Builder *builder, const Unique_os_file_descriptor &file,
-              size_t buffer_size, os_offset_t size, Alter_stage *stage,
+              size_t buffer_size, const Range &range, Alter_stage *stage,
               const Write_offsets &write_offsets) noexcept;
 
   /** Destructor. */
-  ~File_cursor() override = default;
+  ~File_cursor() override;
 
   /** Open the cursor.
   @return DB_SUCCESS or error code. */
@@ -224,6 +228,9 @@ struct File_cursor : public Load_cursor {
   /** PFS monitoring. */
   Alter_stage *m_stage{};
 
+  /** Number of rows that were fetched but not yet reported to the PFS. */
+  uint64_t m_processed_rows_to_report{};
+
   friend struct Merge_cursor;
 };
 
@@ -233,9 +240,11 @@ bool Load_cursor::duplicates_detected() const noexcept {
 
 dberr_t File_reader::get_tuple(Builder *builder, mem_heap_t *heap,
                                dtuple_t *&dtuple) noexcept {
-  dtuple = row_rec_to_index_entry_low(m_mrec, m_index, &m_offsets[0], heap);
+  dtuple =
+      row_rec_to_index_entry_low(m_mrec, m_index, &m_field_offsets[0], heap);
   if (!builder->is_fts_index()) {
-    return builder->dtuple_copy_blobs(dtuple, &m_offsets[0], m_mrec, heap);
+    return builder->dtuple_copy_blobs(dtuple, &m_field_offsets[0], m_mrec,
+                                      heap);
   } else {
     return DB_SUCCESS;
   }
@@ -243,14 +252,20 @@ dberr_t File_reader::get_tuple(Builder *builder, mem_heap_t *heap,
 
 File_cursor::File_cursor(Builder *builder,
                          const Unique_os_file_descriptor &file,
-                         size_t buffer_size, os_offset_t size,
+                         size_t buffer_size, const Range &range,
                          Alter_stage *stage,
                          const Write_offsets &write_offsets) noexcept
     : Load_cursor(builder, nullptr),
-      m_reader(file, builder->index(), buffer_size, size,
+      m_reader(file, builder->index(), buffer_size, range,
                builder->get_space_id(), write_offsets),
       m_stage(stage) {
   ut_a(m_reader.m_file.is_open());
+}
+
+File_cursor::~File_cursor() {
+  if (m_processed_rows_to_report > 0) {
+    m_stage->inc_progress_if_needed(m_processed_rows_to_report, true);
+  }
 }
 
 dberr_t File_cursor::open() noexcept {
@@ -263,7 +278,8 @@ dberr_t File_cursor::fetch() noexcept {
   m_tuple_heap.clear();
 
   if (m_stage != nullptr) {
-    m_stage->inc(1);
+    m_processed_rows_to_report++;
+    m_stage->inc_progress_if_needed(m_processed_rows_to_report);
   }
 
   return m_builder->get_error();
@@ -291,7 +307,7 @@ dberr_t File_cursor::fetch(const mrec_t *&mrec, ulint *&offsets) noexcept {
   }
 
   mrec = m_reader.m_mrec;
-  offsets = &m_reader.m_offsets[0];
+  offsets = &m_reader.m_field_offsets[0];
 
   return DB_SUCCESS;
 }
@@ -299,7 +315,7 @@ dberr_t File_cursor::fetch(const mrec_t *&mrec, ulint *&offsets) noexcept {
 dberr_t File_cursor::next() noexcept {
   auto err = m_reader.next();
 
-  if (unlikely(err != DB_END_OF_INDEX)) {
+  if (likely(err != DB_END_OF_INDEX)) {
     m_err = err;
   }
 
@@ -337,25 +353,24 @@ bool Merge_cursor::Compare::operator()(const File_cursor *lhs,
 
   ut_a(l.m_index == r.m_index);
 
-  auto cmp = cmp_rec_rec_simple(r.m_mrec, l.m_mrec, &r.m_offsets[0],
-                                &l.m_offsets[0], r.m_index,
+  auto cmp = cmp_rec_rec_simple(r.m_mrec, l.m_mrec, &r.m_field_offsets[0],
+                                &l.m_field_offsets[0], r.m_index,
                                 m_dup != nullptr ? m_dup->m_table : nullptr);
 
   /* Check for duplicates. */
   if (unlikely(cmp == 0 && m_dup != nullptr)) {
-    m_dup->report(l.m_mrec, &l.m_offsets[0]);
+    m_dup->report(l.m_mrec, &l.m_field_offsets[0]);
   }
 
   return cmp < 0;
 }
 
-dberr_t Merge_cursor::add_file(const ddl::file_t &file,
-                               size_t buffer_size) noexcept {
+dberr_t Merge_cursor::add_file(const ddl::file_t &file, size_t buffer_size,
+                               const Range &range) noexcept {
   ut_a(file.m_file.is_open());
-
   auto cursor = ut::new_withkey<File_cursor>(
       ut::make_psi_memory_key(mem_key_ddl), m_builder, file.m_file, buffer_size,
-      file.m_size, m_stage, file.m_write_offsets);
+      range, m_stage, file.m_write_offsets);
 
   if (cursor == nullptr) {
     m_err = DB_OUT_OF_MEMORY;
@@ -367,16 +382,9 @@ dberr_t Merge_cursor::add_file(const ddl::file_t &file,
   return DB_SUCCESS;
 }
 
-dberr_t Merge_cursor::add_file(const ddl::file_t &file, size_t buffer_size,
-                               os_offset_t offset) noexcept {
-  auto err = add_file(file, buffer_size);
-
-  if (err != DB_SUCCESS) {
-    return err;
-  } else {
-    m_cursors.back()->m_reader.set_offset(offset);
-    return DB_SUCCESS;
-  }
+dberr_t Merge_cursor::add_file(const ddl::file_t &file,
+                               size_t buffer_size) noexcept {
+  return add_file(file, buffer_size, Range{0, file.m_size});
 }
 
 void Merge_cursor::clear_eof() noexcept {
@@ -388,7 +396,7 @@ void Merge_cursor::clear_eof() noexcept {
 
   for (auto cursor : m_cursors) {
     ut_a(cursor->m_err == DB_END_OF_INDEX);
-    if (!cursor->m_reader.eof()) {
+    if (!cursor->m_reader.end_of_range()) {
       cursor->m_err = DB_SUCCESS;
       m_pq.push(cursor);
     }
@@ -620,6 +628,11 @@ Builder::~Builder() noexcept {
     ut::delete_(m_btr_load);
     m_btr_load = nullptr;
   }
+
+  /* Normally released by vec_build(); still set if the build errored out
+  before reaching VEC_BUILD. */
+  vec_build_free(m_vec);
+  m_vec = nullptr;
 }
 
 dberr_t Builder::check_state_of_online_build_log() noexcept {
@@ -651,11 +664,19 @@ dberr_t Builder::init(Cursor &cursor, size_t n_threads) noexcept {
 
   auto buffer_size = m_ctx.scan_buffer_size(n_threads);
   auto create_thread_ctx = [&](size_t id, dict_index_t *index) -> dberr_t {
-    auto key_buffer = ut::new_withkey<Key_sort_buffer>(
-        ut::make_psi_memory_key(mem_key_ddl), index, buffer_size.first);
+    /* A vector index is never sorted or merged - ADD goes straight to
+    VEC_BUILD - so it needs neither a key buffer nor the file buffers
+    below. Key_sort_buffer would be built over an index with no key
+    fields in any case. */
+    Key_sort_buffer *key_buffer = nullptr;
 
-    if (key_buffer == nullptr) {
-      return DB_OUT_OF_MEMORY;
+    if (!is_vector_index()) {
+      key_buffer = ut::new_withkey<Key_sort_buffer>(
+          ut::make_psi_memory_key(mem_key_ddl), index, buffer_size.first);
+
+      if (key_buffer == nullptr) {
+        return DB_OUT_OF_MEMORY;
+      }
     }
 
     auto thread_ctx = ut::new_withkey<Thread_ctx>(
@@ -667,6 +688,10 @@ dberr_t Builder::init(Cursor &cursor, size_t n_threads) noexcept {
     }
 
     m_thread_ctxs.push_back(thread_ctx);
+
+    if (is_vector_index()) {
+      return DB_SUCCESS;
+    }
 
     thread_ctx->m_aligned_buffer =
         ut::make_unique_aligned<byte[]>(ut::make_psi_memory_key(mem_key_ddl),
@@ -705,6 +730,37 @@ dberr_t Builder::init(Cursor &cursor, size_t n_threads) noexcept {
 
     return DB_SUCCESS;
   };
+
+  if (is_vector_index()) {
+    /* TODO: scaffolding. percona_vector.index_build_parallel greps
+    this to prove the build really got a parallel scan, because nothing
+    else reports it. Replace with a status variable or a counter in
+    Parallel_reader when there is one, and drop this.
+
+    It is the thread count the scan was GIVEN, which follows from
+    innodb_parallel_read_threads, the free thread pool and the tree's
+    shape. How many of them actually take a range is a race on the
+    reader's shared queue and is deliberately not reported. */
+    ut_d(ib::info() << "vec build scan threads: " << n_threads);
+
+    /* M and ef_construction live only in the index definition the ALTER
+    is producing, so the build resolves them from m_ctx.m_table. */
+    dberr_t vec_err = DB_SUCCESS;
+    m_vec = vec_build_start(m_index, m_ctx.m_table, &vec_err);
+
+    if (m_vec == nullptr) {
+      /* vec_build_start distinguishes the configured ceiling
+      (DB_VEC_MEMORY_LIMIT) from its own KEY not being where it should be
+      (DB_ERROR, logged) - report whichever it found rather than always
+      claiming the index ran out of memory. Either way the ALTER fails: a
+      partially built graph is never left behind, because the builder's
+      cleanup frees it and the aux table is dropped with the statement. */
+      ut_ad(vec_err != DB_SUCCESS);
+      set_error(vec_err);
+      set_next_state();
+      return get_error();
+    }
+  }
 
   if (is_fts_index()) {
     auto &fts = m_ctx.m_fts;
@@ -750,10 +806,10 @@ dberr_t Builder::init(Cursor &cursor, size_t n_threads) noexcept {
     }
   }
 
-  if (cursor.m_row_heap.get() == nullptr) {
+  if (cursor.m_row_heap.is_null()) {
     cursor.m_row_heap.create(sizeof(mrec_buf_t), UT_LOCATION_HERE);
 
-    if (cursor.m_row_heap.get() == nullptr) {
+    if (cursor.m_row_heap.is_null()) {
       set_error(DB_OUT_OF_MEMORY);
       set_next_state();
       return get_error();
@@ -803,7 +859,6 @@ dberr_t Builder::get_virtual_column(Copy_ctx &ctx, const dict_field_t *ifield,
                                     size_t &mv_rows_added) noexcept {
   const auto n_added = mv_rows_added;
   auto v_col = reinterpret_cast<const dict_v_col_t *>(col);
-  const auto clust_index = m_ctx.m_new_table->first_index();
   auto key_buffer = m_thread_ctxs[ctx.m_thread_id]->m_key_buffer;
   mem_heap_t **compress_heap = &m_thread_ctxs[ctx.m_thread_id]->m_compress_heap;
 
@@ -815,12 +870,12 @@ dberr_t Builder::get_virtual_column(Copy_ctx &ctx, const dict_field_t *ifield,
     src_field = dtuple_get_nth_v_field(ctx.m_row.m_ptr, v_col->v_pos);
 
     if (ctx.m_n_mv_rows_to_add == 0) {
-      auto p = m_v_heap.get();
+      auto p = m_v_heap.is_null() ? nullptr : m_v_heap.get();
 
       src_field = innobase_get_computed_value(
-          ctx.m_row.m_ptr, v_col, clust_index, &p, key_buffer->heap(), ifield,
-          m_ctx.thd(), ctx.m_my_table, m_ctx.m_old_table, nullptr, nullptr,
-          compress_heap);
+          compress_heap, ctx.m_row.m_ptr, v_col, m_ctx.m_new_table, &p,
+          key_buffer->heap(), m_ctx.thd(), ctx.m_my_table, ifield,
+          m_ctx.m_old_table);
 
       m_v_heap.reset(p);
 
@@ -847,11 +902,11 @@ dberr_t Builder::get_virtual_column(Copy_ctx &ctx, const dict_field_t *ifield,
       src_field->len = mv->data_len[n_added];
     }
   } else {
-    auto p = m_v_heap.get();
+    auto p = m_v_heap.is_null() ? nullptr : m_v_heap.get();
 
     src_field = innobase_get_computed_value(
-        ctx.m_row.m_ptr, v_col, clust_index, &p, nullptr, ifield, m_ctx.thd(),
-        ctx.m_my_table, m_ctx.m_old_table, nullptr, nullptr, compress_heap);
+        compress_heap, ctx.m_row.m_ptr, v_col, m_ctx.m_new_table, &p, nullptr,
+        m_ctx.thd(), ctx.m_my_table, ifield, m_ctx.m_old_table);
 
     m_v_heap.reset(p);
 
@@ -864,18 +919,19 @@ dberr_t Builder::get_virtual_column(Copy_ctx &ctx, const dict_field_t *ifield,
   return DB_SUCCESS;
 }
 
-dberr_t Builder::copy_fts_column(Copy_ctx &ctx, dfield_t *field) noexcept {
+dberr_t Builder::enqueue_parsing(const dtuple_t &row,
+                                 const size_t field_no) noexcept {
   doc_id_t doc_id;
   auto &fts = m_ctx.m_fts;
+  const auto *field = dtuple_get_nth_field(&row, field_no);
 
   if (!fts.m_doc_id->is_generated()) {
     /* Fetch Doc ID if it already exists in the row, and not supplied by
     the caller. Even if the value column is nullptr, we still need to
     get the Doc ID to maintain the correct max Doc ID. */
-    doc_id = fts.m_doc_id->fetch(ctx.m_row.m_ptr);
+    doc_id = fts.m_doc_id->fetch(&row);
 
     if (unlikely(doc_id == 0)) {
-      ctx.m_n_rows_added = 0;
       ib::warn(ER_IB_MSG_964) << "FTS Doc ID is zero. Record skipped";
       return DB_FAIL;
     }
@@ -883,44 +939,43 @@ dberr_t Builder::copy_fts_column(Copy_ctx &ctx, dfield_t *field) noexcept {
     doc_id = fts.m_doc_id->current();
   }
 
-  ut_a(doc_id <= 4294967295u);
-
   if (unlikely(!dfield_is_null(field))) {
     auto ptr = ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY,
                                   sizeof(FTS::Doc_item) + field->len);
     auto doc_item = static_cast<FTS::Doc_item *>(ptr);
-    auto value = static_cast<byte *>(ptr) + sizeof(*doc_item);
+    doc_item->m_field = *field;
+    doc_item->m_field.data = static_cast<byte *>(ptr) + sizeof(*doc_item);
 
-    memcpy(value, field->data, field->len);
-
-    field->data = value;
-
-    doc_item->m_field = field;
+    memcpy(doc_item->m_field.data, field->data, field->len);
     doc_item->m_doc_id = doc_id;
 
     fts.m_ptr->enqueue(doc_item);
   }
-
-  ctx.m_n_rows_added = 1;
 
   return DB_SUCCESS;
 }
 
 dberr_t Builder::copy_columns(Copy_ctx &ctx, size_t &mv_rows_added,
                               doc_id_t &write_doc_id) noexcept {
+  ut_a(!is_fts_index());
   auto &fts = m_ctx.m_fts;
   auto key_buffer = m_thread_ctxs[ctx.m_thread_id]->m_key_buffer;
-  auto &fields = key_buffer->m_dtuples[key_buffer->size()];
 
+  dfield_t *fields;
   const dict_field_t *ifield = m_index->get_field(0);
   auto field = fields = key_buffer->alloc(ctx.m_n_fields);
+  key_buffer->m_dtuples.push_back(fields);
   const auto page_size = dict_table_page_size(m_ctx.m_old_table);
 
   for (size_t i = 0; i < ctx.m_n_fields; ++i, ++field, ++ifield) {
     const auto col = ifield->col;
     const auto col_no = dict_col_get_no(col);
 
-    /* Process the Doc ID column. */
+    /* percona_vec_aux_id is copied like any other column. A rebuild that
+    introduces it (the table's first vector index) has already labelled the
+    row in ddl::Row::build; one that keeps it carries the existing labels
+    through untouched, which is what keeps base-to-aux linkage intact -
+    exactly like FTS_DOC_ID via Fetch_sequence. */
     if (likely(fts.m_doc_id == nullptr || !fts.m_doc_id->is_generated() ||
                col_no != m_index->table->fts->doc_col || col->is_virtual())) {
       dfield_t *src_field;
@@ -930,6 +985,7 @@ dberr_t Builder::copy_columns(Copy_ctx &ctx, size_t &mv_rows_added,
         auto err =
             get_virtual_column(ctx, ifield, col, src_field, mv_rows_added);
         if (err != DB_SUCCESS) {
+          key_buffer->pop_unfinished_tuple();
           return err;
         }
       } else {
@@ -938,18 +994,9 @@ dberr_t Builder::copy_columns(Copy_ctx &ctx, size_t &mv_rows_added,
 
       dfield_copy(field, src_field);
 
-      /* Tokenize and process data for FTS */
-      if (unlikely(is_fts_index())) {
-        auto err = copy_fts_column(ctx, field);
-        if (err != DB_SUCCESS) {
-          return err;
-        }
-        continue;
-      }
-
       if (field->len != UNIV_SQL_NULL && col->mtype == DATA_MYSQL &&
           col->len != field->len) {
-        if (m_conv_heap.get() != nullptr) {
+        if (!m_conv_heap.is_null()) {
           convert(m_ctx.m_old_table->first_index(), src_field, field, col->len,
                   page_size,
                   IF_DEBUG(dict_table_is_sdi(m_ctx.m_old_table->id), )
@@ -957,6 +1004,7 @@ dberr_t Builder::copy_columns(Copy_ctx &ctx, size_t &mv_rows_added,
         } else if (!dict_table_is_comp(m_index->table)) {
           /* Heap is created when new table is not compact. */
           ib::info(ER_IB_DDL_CONVERT_HEAP_NOT_FOUND);
+          key_buffer->pop_unfinished_tuple();
 
           DBUG_EXECUTE_IF("ddl_convert_charset_without_heap_fail",
                           { return DB_ERROR; });
@@ -1058,10 +1106,6 @@ dberr_t Builder::copy_row(Copy_ctx &ctx, size_t &mv_rows_added) noexcept {
 
   ut_a(ctx.m_n_rows_added == 0);
 
-  if (unlikely(key_buffer->full())) {
-    return DB_OVERFLOW;
-  }
-
   // clang-format off
   DBUG_EXECUTE_IF(
       "ddl_buf_add_two",
@@ -1076,10 +1120,6 @@ dberr_t Builder::copy_row(Copy_ctx &ctx, size_t &mv_rows_added) noexcept {
   doc_id_t write_doc_id{};
 
   for (;;) {
-    if (unlikely(key_buffer->full())) {
-      return ctx.m_n_rows_added == 0 ? DB_OVERFLOW : DB_SUCCESS;
-    }
-
     // clang-format off
     DBUG_EXECUTE_IF(
         "ddl_add_multi_value",
@@ -1100,14 +1140,13 @@ dberr_t Builder::copy_row(Copy_ctx &ctx, size_t &mv_rows_added) noexcept {
 
     auto err = copy_columns(ctx, mv_rows_added, write_doc_id);
 
+    ut_ad(ctx.m_n_rows_added == 0 || is_multi_value_index);
+
     if (unlikely(err != DB_SUCCESS)) {
       return err;
     }
 
-    /* If this is an FTS index, we already populated the sort buffer. */
-    if (unlikely(is_fts_index())) {
-      return DB_SUCCESS;
-    }
+    ut_a(!is_fts_index());
 
 #ifdef UNIV_DEBUG
     {
@@ -1133,13 +1172,13 @@ dberr_t Builder::copy_row(Copy_ctx &ctx, size_t &mv_rows_added) noexcept {
     format. There is an assert ut_ad(size < UNIV_PAGE_SIZE) in
     rec_offs_data_size(). It may hit the assert before attempting to
     insert the row. */
-    if (unlikely(m_conv_heap.get() != nullptr &&
-                 ctx.m_data_size > UNIV_PAGE_SIZE)) {
+    if (unlikely(!m_conv_heap.is_null() && ctx.m_data_size > UNIV_PAGE_SIZE)) {
       ctx.m_n_rows_added = 0;
       return DB_TOO_BIG_RECORD;
     }
 
     if (unlikely(!key_buffer->will_fit(ctx.m_data_size))) {
+      key_buffer->pop_unfinished_tuple();
       if (!is_multi_value_index) {
         ctx.m_n_rows_added = 0;
       }
@@ -1152,7 +1191,7 @@ dberr_t Builder::copy_row(Copy_ctx &ctx, size_t &mv_rows_added) noexcept {
     ctx.m_n_fields = 0;
     ++ctx.m_n_rows_added;
 
-    if (m_conv_heap.get() != nullptr) {
+    if (!m_conv_heap.is_null()) {
       mem_heap_empty(m_conv_heap.get());
     }
 
@@ -1235,7 +1274,9 @@ dberr_t Builder::key_buffer_sort(size_t thread_id) noexcept {
     key_buffer->sort(&dup);
 
     if (dup.m_n_dup > 0) {
-      set_error(DB_DUPLICATE_KEY);
+      if (set_error(DB_DUPLICATE_KEY)) {
+        dup.report();
+      }
       return get_error();
     }
   } else {
@@ -1243,6 +1284,23 @@ dberr_t Builder::key_buffer_sort(size_t thread_id) noexcept {
   }
 
   return DB_SUCCESS;
+}
+
+dberr_t Builder::handle_error(dberr_t err) noexcept {
+  set_error(err);
+
+  if (m_btr_load != nullptr) {
+    /* page_loaders[0] has increased buf_fix_count through release(). This is
+    decremented by calling latch(). Similar release() calls for page_loaders at
+    non-zero levels are handled in finish() */
+    m_btr_load->latch();
+    err = m_btr_load->finish(err);
+
+    ut::delete_(m_btr_load);
+    m_btr_load = nullptr;
+  }
+
+  return get_error();
 }
 
 dberr_t Builder::insert_direct(Cursor &cursor, size_t thread_id) noexcept {
@@ -1257,13 +1315,30 @@ dberr_t Builder::insert_direct(Cursor &cursor, size_t thread_id) noexcept {
   {
     auto err = m_ctx.check_state_of_online_build_log();
 
+    DBUG_EXECUTE_IF("builder_insert_direct_trigger_error", {
+      static int count = 0;
+      ++count;
+      if (count > 1) {
+        err = DB_ONLINE_LOG_TOO_BIG;
+        m_ctx.m_trx->error_key_num = SERVER_CLUSTER_INDEX_ID;
+      }
+    });
+
     if (err != DB_SUCCESS) {
-      set_error(err);
-      err = m_btr_load->finish(err);
-      ut::delete_(m_btr_load);
-      m_btr_load = nullptr;
-      return get_error();
+      return handle_error(err);
     }
+  }
+
+  DBUG_EXECUTE_IF("builder_insert_direct_no_builder",
+                  { static_cast<void>(handle_error(DB_ERROR)); });
+
+  if (m_btr_load == nullptr) {
+    auto ind = index();
+    ib::error(ER_IB_MSG_DDL_FAIL_NO_BUILDER, static_cast<unsigned>(get_state()),
+              static_cast<unsigned>(get_error()), id(), ind->name(),
+              ind->space_id(), static_cast<unsigned>(ind->page),
+              ctx().old_table()->name.m_name, ctx().new_table()->name.m_name);
+    return DB_ERROR;
   }
 
   m_btr_load->latch();
@@ -1345,8 +1420,40 @@ dberr_t Builder::batch_add_row(Row &row, size_t thread_id) noexcept {
   return DB_SUCCESS;
 }
 
+dberr_t Builder::enqueue_parsing(const dtuple_t &row) noexcept {
+  ut_a(is_fts_index());
+  const auto n_fields = dict_index_get_n_fields(m_index);
+  /* Building FTS index requires parsing the indexed columns which is done by
+  dedicated threads, so all we have to do here is to enqueue the work for them.
+  Crucially we don't use key_buffer for anything here - the enqueued job will
+  contain an independent copy of the field, owned by parsers. */
+  ut_a(!m_index->is_multi_value());
+  const auto &fts = m_ctx.m_fts;
+  for (size_t i = 0; i < n_fields; ++i) {
+    const auto col = m_index->get_field(i)->col;
+    const auto col_no = dict_col_get_no(col);
+    /* This assert is mainly to prove that we don't need the logic for calling
+    fts_add_doc_id which we see in the non-FTS case. This is because the FTS
+    index is never defined over the doc_id column itself - it is defined over
+    text column(s) and merely "points to" the doc_id. */
+    ut_a(!(fts.m_doc_id != nullptr && fts.m_doc_id->is_generated() &&
+           col_no == m_index->table->fts->doc_col && !col->is_virtual()));
+    /* Current implementation assumes FTS index can't be defined on top of
+    virtual columns, which simplifies this code a lot, as it doesn't have to
+    compute the field value, and can simply copy it as is. */
+    ut_a(!col->is_virtual());
+    const auto err = enqueue_parsing(row, col_no);
+    if (err != DB_SUCCESS) {
+      return err;
+    }
+  }
+  ut_a(!is_skip_file_sort());
+  return fts.m_ptr->check_for_errors();
+}
+
 dberr_t Builder::add_to_key_buffer(Copy_ctx &ctx,
                                    size_t &mv_rows_added) noexcept {
+  ut_a(!is_fts_index());
   const size_t old_mv_rows_added = mv_rows_added;
   auto err = copy_row(ctx, mv_rows_added);
   auto thread_ctx = m_thread_ctxs[ctx.m_thread_id];
@@ -1375,23 +1482,12 @@ dberr_t Builder::add_to_key_buffer(Copy_ctx &ctx,
     return DB_SUCCESS;
   }
 
-  /* If we are creating FTS index, a single row can generate multiple
-  records for a tokenized word. */
+  // Multi-value indexes can have many records corresponding to one row.
   thread_ctx->m_n_recs += ctx.m_n_rows_added;
 
   if (unlikely(err != DB_SUCCESS)) {
     ut_a(err == DB_TOO_BIG_RECORD || err == DB_COMPUTE_VALUE_FAILED);
     return err;
-  }
-
-  if (unlikely(is_fts_index())) {
-    auto &fts = m_ctx.m_fts;
-
-    err = fts.m_ptr->check_for_errors();
-
-    if (unlikely(err != DB_SUCCESS)) {
-      return err;
-    }
   }
 
   if (is_skip_file_sort()) {
@@ -1401,10 +1497,15 @@ dberr_t Builder::add_to_key_buffer(Copy_ctx &ctx,
     ut_ad(m_id == 0);
     ut_ad(key_buffer->is_clustered());
 
-    /* Detect duplicates by comparing the current record with previous record.*/
+    /* Detect duplicates by comparing the current record with previous record.
+    The current record will be used to report duplicates. m_prev_fields cannot
+    be used for it, because contrary to current record it contains only unique
+    fields. Which is fine for key comparison, but not enough for reporting. */
     if (m_prev_fields != nullptr &&
-        Key_sort_buffer::compare(m_prev_fields, fields, &m_clust_dup) == 0) {
-      set_error(DB_DUPLICATE_KEY);
+        Key_sort_buffer::compare(fields, m_prev_fields, &m_clust_dup) == 0) {
+      if (set_error(DB_DUPLICATE_KEY)) {
+        m_clust_dup.report();
+      }
       return get_error();
     }
 
@@ -1425,6 +1526,14 @@ dberr_t Builder::bulk_add_row(Cursor &cursor, Row &row, size_t thread_id,
   size_t mv_rows_added{};
   auto thread_ctx = m_thread_ctxs[thread_id];
   auto key_buffer = thread_ctx->m_key_buffer;
+  ut_a(key_buffer->is_fts() == is_fts_index());
+  if (is_fts_index()) {
+    ut_a(mv_rows_added == 0);
+    if (!cursor.eof()) {
+      return enqueue_parsing(*row.m_ptr);
+    }
+    return DB_END_OF_INDEX;
+  }
 
   do {
     dberr_t err{DB_SUCCESS};
@@ -1437,14 +1546,10 @@ dberr_t Builder::bulk_add_row(Cursor &cursor, Row &row, size_t thread_id,
         return err;
       }
       /* Need to make room, flush the current key buffer to disk and retry. */
+      ut_a(!key_buffer->empty());
     } else if (unlikely(thread_ctx->m_n_recs == 0 && key_buffer->empty())) {
       /* Table is empty. */
       return DB_END_OF_INDEX;
-    }
-
-    if (unlikely(is_fts_index() &&
-                 (cursor.eof() || !m_ctx.m_fts.m_doc_id->is_generated()))) {
-      return DB_SUCCESS;
     }
 
     ut_ad(m_ctx.m_old_table == m_ctx.m_new_table
@@ -1454,6 +1559,12 @@ dberr_t Builder::bulk_add_row(Cursor &cursor, Row &row, size_t thread_id,
     if (!key_buffer->empty()) {
       ut_a(err == DB_SUCCESS || err == DB_OVERFLOW);
       err = key_buffer_sort(thread_id);
+
+      if (DBUG_EVALUATE_IF("builder_bulk_add_row_trigger_error_1",
+                           (m_btr_load && m_btr_load->get_n_recs() != 0),
+                           false)) {
+        err = DB_DUPLICATE_KEY;
+      }
 
       if (err != DB_SUCCESS) {
         set_error(err);
@@ -1465,6 +1576,11 @@ dberr_t Builder::bulk_add_row(Cursor &cursor, Row &row, size_t thread_id,
           /* Copy the row data and release any latches held by the parallel
           scan thread. Required for the log_free_check() during mtr.commit(). */
           err = cursor.copy_row(thread_id, row);
+
+          if (DBUG_EVALUATE_IF("builder_bulk_add_row_trigger_error_2", true,
+                               false)) {
+            err = DB_INVALID_NULL;
+          }
 
           if (err != DB_SUCCESS) {
             set_error(err);
@@ -1484,6 +1600,7 @@ dberr_t Builder::bulk_add_row(Cursor &cursor, Row &row, size_t thread_id,
         key_buffer->clear();
 
         if (err != DB_SUCCESS) {
+          /* @insert_direct cleans up m_btr_load in case of error */
           ut_a(m_btr_load == nullptr);
           set_error(err);
           return get_error();
@@ -1500,43 +1617,38 @@ dberr_t Builder::bulk_add_row(Cursor &cursor, Row &row, size_t thread_id,
       }
     }
 
-    /* Fulltext index read threads should not write to the temporary file
-    directly, @see copy_fts_column(). */
-    if (unlikely(key_buffer->is_fts())) {
-      return DB_SUCCESS;
-    }
-
     IF_ENABLED("ddl_tmpfile_fail", set_error(DB_OUT_OF_MEMORY);
                return get_error();)
 
     IF_ENABLED("ddl_ins_spatial_fail", set_error(DB_FAIL); return get_error();)
 
-    if (!thread_ctx->m_file.m_file.is_open()) {
-      if (!create_file(thread_ctx->m_file)) {
-        set_error(DB_IO_ERROR);
-        return get_error();
-      }
+    if (DBUG_EVALUATE_IF("builder_bulk_add_row_trigger_error_3", true, false) ||
+        (!thread_ctx->m_file.m_file.is_open() &&
+         !create_file(thread_ctx->m_file))) {
+      set_error(DB_IO_ERROR);
+      return get_error();
     }
 
     IF_ENABLED("ddl_write_failure", set_error(DB_TEMP_FILE_WRITE_FAIL);
                return get_error();)
 
-    auto persistor = [&](IO_buffer io_buffer, os_offset_t &n) -> dberr_t {
+    auto persistor = [&](IO_buffer io_buffer) -> dberr_t {
       auto &file = thread_ctx->m_file;
 
       ut_a(!(file.m_size % IO_BLOCK_SIZE));
 
-      if (n == 0) {
-        n = ut_uint64_align_down(io_buffer.second, IO_BLOCK_SIZE);
-      } else {
-        ut_a(n == io_buffer.second);
-        n = ut_uint64_align_up(io_buffer.second, IO_BLOCK_SIZE);
-      }
-      ut_a(n >= IO_BLOCK_SIZE);
+      os_offset_t n = io_buffer.second;
+      ut_a(n != 0);
+      ut_a(n % IO_BLOCK_SIZE == 0);
 
       auto crypt_buffer = thread_ctx->m_io_buffer_crypt;
       auto err = ddl::pwrite(file.m_file.get(), io_buffer.first, n, file.m_size,
                              crypt_buffer.first, get_space_id());
+
+      if (DBUG_EVALUATE_IF("builder_bulk_add_row_trigger_error_4", true,
+                           false)) {
+        err = DB_IO_ERROR;
+      }
 
       if (err != DB_SUCCESS) {
         set_error(DB_TEMP_FILE_WRITE_FAIL);
@@ -1574,14 +1686,36 @@ dberr_t Builder::add_row(Cursor &cursor, Row &row, size_t thread_id,
                          Latch_release &&latch_release) noexcept {
   auto err = m_ctx.check_state_of_online_build_log();
 
+  DBUG_EXECUTE_IF("builder_add_row_trigger_error", {
+    err = DB_ONLINE_LOG_TOO_BIG;
+    m_ctx.m_trx->error_key_num = SERVER_CLUSTER_INDEX_ID;
+  });
+
   if (err != DB_SUCCESS) {
-    set_error(err);
+    err = handle_error(err);
   } else if (is_spatial_index()) {
     if (!cursor.eof()) {
       err = batch_add_row(row, thread_id);
     }
+  } else if (is_vector_index()) {
+    /* The row goes into the in-memory graph and nowhere else: the build
+    persistor writes nothing, so this takes no latches and calls no row
+    API, which is what lets it run inside the scan's callback. The aux
+    table is written once, from a walk of the finished graph, in
+    VEC_BUILD. */
+    if (!cursor.eof()) {
+      err = vec_build_add_row(m_vec, m_ctx.m_new_table,
+                              m_ctx.m_old_table->first_index(), row.m_ptr);
+      if (err != DB_SUCCESS) {
+        err = handle_error(err);
+      }
+    }
   } else {
     err = bulk_add_row(cursor, row, thread_id, std::move(latch_release));
+    if (unlikely(err != DB_OVERFLOW && err != DB_SUCCESS &&
+                 err != DB_END_OF_INDEX)) {
+      err = handle_error(err);
+    }
     clear_virtual_heap();
   }
 
@@ -1674,10 +1808,11 @@ dberr_t Builder::dtuple_copy_blobs(dtuple_t *dtuple, ulint *offsets,
   return DB_SUCCESS;
 }
 
-dberr_t Builder::check_duplicates(Thread_ctxs &dupcheck, Dup *dup) noexcept {
+dberr_t Builder::check_duplicates(Thread_ctxs &dupcheck) noexcept {
   Merge_cursor cursor(this, nullptr, m_local_stage);
   const auto buffer_size = m_ctx.scan_buffer_size(m_thread_ctxs.size());
 
+  Dup dup = {m_index, m_ctx.m_table, m_ctx.m_col_map, 0};
   size_t n_files_to_check{};
 
   for (auto thread_ctx : dupcheck) {
@@ -1703,7 +1838,7 @@ dberr_t Builder::check_duplicates(Thread_ctxs &dupcheck, Dup *dup) noexcept {
 
   /* For secondary indexes we have to compare all the columns for the index,
   this includes the cluster index primary key columns too. */
-  Compare_key compare_key(m_index, dup, !m_sort_index->is_clustered());
+  Compare_key compare_key(m_index, &dup, !m_sort_index->is_clustered());
 
   const auto n_compare = dict_index_get_n_unique_in_tree(m_index);
 
@@ -1718,6 +1853,9 @@ dberr_t Builder::check_duplicates(Thread_ctxs &dupcheck, Dup *dup) noexcept {
         return DB_CORRUPTION;
       }
       if (cmp == 0) {
+        if (set_error(DB_DUPLICATE_KEY)) {
+          dup.report();
+        }
         return DB_DUPLICATE_KEY;
       }
     }
@@ -1826,7 +1964,6 @@ dberr_t Builder::create_merge_sort_tasks() noexcept {
 
   Thread_ctxs dupcheck{};
   size_t n_runs_to_merge{};
-  Dup dup = {m_index, m_ctx.m_table, m_ctx.m_col_map, 0};
 
   for (auto thread_ctx : m_thread_ctxs) {
     ut_a(thread_ctx->m_file.m_n_recs == 0);
@@ -1863,7 +2000,7 @@ dberr_t Builder::create_merge_sort_tasks() noexcept {
            (n_single == 0 && n_multiple + n_empty == dupcheck.size()));
     }
 #endif /* UNIV_DEBUG */
-    auto err = check_duplicates(dupcheck, &dup);
+    auto err = check_duplicates(dupcheck);
 
     if (err != DB_SUCCESS) {
       return err;
@@ -1912,6 +2049,31 @@ void Builder::write_redo(const dict_index_t *index) noexcept {
   }
 
   mtr.commit();
+}
+
+dberr_t Builder::vec_build() noexcept {
+  ut_ad(is_vector_index());
+  ut_ad(m_vec != nullptr);
+
+  /* The aux rows ride the ALTER's own transaction, so a failure here
+  rolls them back with the rest of the statement. */
+  /* The statement's observer, borrowed: ddl::Context flushes it once every
+  builder is done, exactly as ddl::FTS does for its aux tables. */
+  auto err =
+      vec_build_write_aux(m_vec, m_ctx.m_trx, m_ctx.m_new_table,
+                          m_ctx.m_trx->mysql_thd, m_ctx.flush_observer());
+
+  vec_build_free(m_vec);
+  m_vec = nullptr;
+
+  if (err != DB_SUCCESS) {
+    set_error(err);
+    set_next_state();
+    return get_error();
+  }
+
+  set_state(State::FINISH);
+  return DB_SUCCESS;
 }
 
 dberr_t Builder::fts_sort_and_build() noexcept {
@@ -2091,7 +2253,9 @@ void Builder::set_next_state() noexcept {
       break;
 
     case State::ADD:
-      if (is_fts_index()) {
+      if (is_vector_index()) {
+        set_state(State::VEC_BUILD);
+      } else if (is_fts_index()) {
         set_state(State::FTS_SORT_AND_BUILD);
       } else if (!is_skip_file_sort()) {
         set_state(State::SETUP_SORT);
@@ -2114,6 +2278,10 @@ void Builder::set_next_state() noexcept {
       break;
 
     case State::FTS_SORT_AND_BUILD:
+      set_state(State::FINISH);
+      break;
+
+    case State::VEC_BUILD:
       set_state(State::FINISH);
       break;
 
@@ -2148,6 +2316,11 @@ dberr_t Loader::Task::operator()() noexcept {
     case Builder::State::FTS_SORT_AND_BUILD:
       ut_a(m_builder->is_fts_index());
       err = m_builder->fts_sort_and_build();
+      break;
+
+    case Builder::State::VEC_BUILD:
+      ut_ad(m_builder->is_vector_index());
+      err = m_builder->vec_build();
       break;
 
     case Builder::State::FINISH:

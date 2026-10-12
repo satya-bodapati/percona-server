@@ -146,11 +146,7 @@ ENDIF()
 
 INCLUDE(compiler_features)
 ROCKSDB_SET_BUILD_ARCHITECTURE()  # sets "-march=" using ROCKSDB_BUILD_ARCH or ROCKSDB_DISABLE_MARCH_NATIVE
-ROCKSDB_SET_DEFINTIONS()          # sets HAVE_URING, HAVE_MEMKIND, HAVE_ALIGNED_NEW
-
-IF (HAVE_URING AND ROCKSDB_USE_IO_URING)
-  SET(rocksdb_static_libs ${rocksdb_static_libs} ${URING_LIBRARY})
-ENDIF()
+ROCKSDB_SET_DEFINTIONS()          # sets HAVE_MEMKIND, HAVE_ALIGNED_NEW
 
 IF (HAVE_MEMKIND AND ROCKSDB_USE_MEMKIND)
   SET(rocksdb_static_libs ${rocksdb_static_libs} ${MEMKIND_LIBRARY})
@@ -176,11 +172,17 @@ IF(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   remove_compile_flags(-Wdeprecated -Winconsistent-missing-destructor-override -Wnon-virtual-dtor)
   ADD_CXX_COMPILE_FLAGS_TO_FILES(-Wno-shadow-field FILES ha_rocksdb.cc rocksdb/memtable/hash_skiplist_rep.cc)
   ADD_CXX_COMPILE_FLAGS_TO_FILES(-Wno-conditional-uninitialized FILES ha_rocksdb.cc rdb_datadic.cc rocksdb/db/db_impl/db_impl.cc rocksdb/db/write_thread.cc rocksdb/env/env_posix.cc rocksdb/env/fs_posix.cc)
+  ADD_CXX_COMPILE_FLAGS_TO_FILES(-Wno-nontrivial-memcall FILES rocksdb/port/mmap.cc)
 ENDIF()
 
 # Suppress warnings for clang-9 or older
 IF(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 10)
   ADD_CXX_COMPILE_FLAGS_TO_FILES(-Wno-range-loop-analysis FILES rocksdb/db/db_impl/db_impl_compaction_flush.cc)
+ENDIF()
+
+# Suppress warnings for clang-21 or newer
+IF(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS 21)
+  ADD_CXX_COMPILE_FLAGS_TO_FILES(-Wno-missing-format-attribute FILES rocksdb/env/file_system.cc rocksdb/env/env.cc rocksdb/env/mock_env.cc rocksdb/logging/auto_roll_logger.cc rocksdb/util/stderr_logger.cc rocksdb/logging/log_buffer.cc)
 ENDIF()
 
 # Suppress warnings for clang-15 or newer
@@ -225,11 +227,31 @@ IF(CMAKE_COMPILER_IS_GNUCXX AND NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12)
     append_cflags_if_supported(-Wno-maybe-uninitialized -Wno-uninitialized)
   ENDIF()
   ADD_CXX_COMPILE_FLAGS_TO_FILES(-Wno-maybe-uninitialized FILES rocksdb/db/blob/blob_file_reader.cc)
+  ADD_CXX_COMPILE_FLAGS_TO_FILES(-Wno-restrict FILES rocksdb/table/iterator.cc rocksdb/table/unique_id.cc)
+ENDIF()
+
+# Suppress -Wdeprecated-declarations for files that use APIs deprecated in
+# C++23 (e.g. std::aligned_storage). libstdc++ has emitted these deprecations
+# in C++23 mode since gcc-13.
+IF(CMAKE_COMPILER_IS_GNUCXX AND NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13)
+  ADD_CXX_COMPILE_FLAGS_TO_FILES(-Wno-deprecated-declarations FILES rocksdb/db/memtable.cc rocksdb/db/write_batch.cc rocksdb/util/random.cc)
 ENDIF()
 
 # Suppress warnings for gcc ASan build
 IF(CMAKE_COMPILER_IS_GNUCXX AND WITH_ASAN)
   ADD_CXX_COMPILE_FLAGS_TO_FILES(-Wno-error=maybe-uninitialized FILES rocksdb/util/bloom.cc)
+ENDIF()
+
+# GCC 16 -O2 emits false-positive -Wmaybe-uninitialized warnings on:
+#  - autovector::front() inlined into LevelCompactionBuilder::SetupInitialFiles()
+#    (the optimizer cannot see that !expired_files.empty() implies buf_[0]
+#    was written),
+#  - PSI inlining inside myrocks::Rdb_cond_var / Rdb_mutex constructors in
+#    rdb_mutex_wrapper.cc (same pattern as the plugin/x suppression).
+IF(CMAKE_COMPILER_IS_GNUCXX AND NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
+  ADD_CXX_COMPILE_FLAGS_TO_FILES(-Wno-maybe-uninitialized
+    FILES rocksdb/db/compaction/compaction_picker_level.cc
+          rdb_mutex_wrapper.cc)
 ENDIF()
 
 
@@ -278,6 +300,17 @@ ENDIF()
 
 IF(HAVE_EXTERNAL_ROCKSDB)
   SET(rocksdb_static_libs ${rocksdb_static_libs} "${ROCKSDB_LIB_PATH}/${ROCKSDB_LIB_NAME}")
+ENDIF()
+
+SET(WITH_LIBURING "OFF" CACHE STRING "By default don't use bundled liburing.")
+IF (WITH_LIBURING)
+  FIND_LIBRARY(URING_LIBRARY
+    NAMES liburing${PIC_EXT}.a uring
+    HINTS ${WITH_LIBURING}/lib)
+  SET(rocksdb_static_libs ${rocksdb_static_libs}
+    ${URING_LIBRARY})
+  ADD_DEFINITIONS(-DROCKSDB_USE_IO_URING=1)
+  ADD_DEFINITIONS(-DROCKSDB_IOURING_PRESENT)
 ENDIF()
 
 SET(rocksdb_static_libs ${rocksdb_static_libs} ext::zlib ext::zstd ext::lz4 extra::rapidjson "-ldl")

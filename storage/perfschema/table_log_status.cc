@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -116,7 +117,7 @@ struct st_register_hton_arg {
 };
 
 static bool iter_storage_engines_register(THD *, plugin_ref plugin, void *arg) {
-  auto *vargs = (st_register_hton_arg *)arg;
+  const auto *vargs = (st_register_hton_arg *)arg;
   auto *hton = plugin_data<handlerton *>(plugin);
   bool result = false;
 
@@ -186,7 +187,7 @@ int table_log_status::make_row() {
       res = Log_resource_factory::get_wrapper(mi, &json_replication_array);
       error = DBUG_EVALUATE_IF("log_status_oom_mi", 1, !res);
       if (error) {
-        char errfmt[] =
+        constexpr const char errfmt[] =
             "failed to allocate memory to collect "
             "information from replication channel '%s'";
         char errbuf[sizeof(errfmt) + CHANNEL_NAME_LENGTH];
@@ -226,8 +227,8 @@ int table_log_status::make_row() {
   */
   {
     Log_resource *res;
-    res = Log_resource_factory::get_wrapper(gtid_state, &mysql_bin_log,
-                                            &json_local);
+    res = Log_resource_factory::get_wrapper(gtid_state, &json_local,
+                                            &mysql_bin_log);
     error = DBUG_EVALUATE_IF("log_status_oom_gtid", 1, !res);
     if (error) {
       my_error(ER_UNABLE_TO_COLLECT_LOG_STATUS, MYF(0), "LOCAL",
@@ -272,9 +273,9 @@ int table_log_status::make_row() {
         DBUG_EVALUATE_IF("log_status_oom_collecting", 1, (*it)->collect_info());
     if (error) {
       my_error(ER_UNABLE_TO_COLLECT_LOG_STATUS, MYF(0),
-               (*it)->get_json() == &json_storage_engines
-                   ? "STORAGE_ENGINES"
-                   : (*it)->get_json() == &json_local ? "LOCAL" : "REPLICATION",
+               (*it)->get_json() == &json_storage_engines ? "STORAGE_ENGINES"
+               : (*it)->get_json() == &json_local         ? "LOCAL"
+                                                          : "REPLICATION",
                "failed to allocate memory to collect information");
       goto err_unlock;
     }
@@ -289,7 +290,7 @@ err_unlock:
 end:
   /* Delete all wrappers */
   while (!resources.empty()) {
-    Log_resource *wrapper = resources.back();
+    const Log_resource *wrapper = resources.back();
     resources.pop_back();
     delete wrapper;
   }

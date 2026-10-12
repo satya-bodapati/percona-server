@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -40,27 +41,27 @@
 #include <google/protobuf/wire_format_lite.h>
 
 #ifdef USE_MYSQLX_FULL_PROTO
-#include "plugin/x/generated/protobuf/mysqlx.pb.h"
-#include "plugin/x/generated/protobuf/mysqlx_connection.pb.h"
-#include "plugin/x/generated/protobuf/mysqlx_crud.pb.h"
-#include "plugin/x/generated/protobuf/mysqlx_cursor.pb.h"
-#include "plugin/x/generated/protobuf/mysqlx_expect.pb.h"
-#include "plugin/x/generated/protobuf/mysqlx_notice.pb.h"
-#include "plugin/x/generated/protobuf/mysqlx_prepare.pb.h"
-#include "plugin/x/generated/protobuf/mysqlx_resultset.pb.h"
-#include "plugin/x/generated/protobuf/mysqlx_session.pb.h"
-#include "plugin/x/generated/protobuf/mysqlx_sql.pb.h"
+#include "protobuf/mysqlx.pb.h"
+#include "protobuf/mysqlx_connection.pb.h"
+#include "protobuf/mysqlx_crud.pb.h"
+#include "protobuf/mysqlx_cursor.pb.h"
+#include "protobuf/mysqlx_expect.pb.h"
+#include "protobuf/mysqlx_notice.pb.h"
+#include "protobuf/mysqlx_prepare.pb.h"
+#include "protobuf/mysqlx_resultset.pb.h"
+#include "protobuf/mysqlx_session.pb.h"
+#include "protobuf/mysqlx_sql.pb.h"
 #else
-#include "plugin/x/generated/protobuf_lite/mysqlx.pb.h"
-#include "plugin/x/generated/protobuf_lite/mysqlx_connection.pb.h"
-#include "plugin/x/generated/protobuf_lite/mysqlx_crud.pb.h"
-#include "plugin/x/generated/protobuf_lite/mysqlx_cursor.pb.h"
-#include "plugin/x/generated/protobuf_lite/mysqlx_expect.pb.h"
-#include "plugin/x/generated/protobuf_lite/mysqlx_notice.pb.h"
-#include "plugin/x/generated/protobuf_lite/mysqlx_prepare.pb.h"
-#include "plugin/x/generated/protobuf_lite/mysqlx_resultset.pb.h"
-#include "plugin/x/generated/protobuf_lite/mysqlx_session.pb.h"
-#include "plugin/x/generated/protobuf_lite/mysqlx_sql.pb.h"
+#include "protobuf_lite/mysqlx.pb.h"
+#include "protobuf_lite/mysqlx_connection.pb.h"
+#include "protobuf_lite/mysqlx_crud.pb.h"
+#include "protobuf_lite/mysqlx_cursor.pb.h"
+#include "protobuf_lite/mysqlx_expect.pb.h"
+#include "protobuf_lite/mysqlx_notice.pb.h"
+#include "protobuf_lite/mysqlx_prepare.pb.h"
+#include "protobuf_lite/mysqlx_resultset.pb.h"
+#include "protobuf_lite/mysqlx_session.pb.h"
+#include "protobuf_lite/mysqlx_sql.pb.h"
 #endif  // USE_MYSQLX_FULL_PROTO
 
 #ifdef WIN32

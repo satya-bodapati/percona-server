@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,7 +25,7 @@
 #include <stdint.h>
 #endif
 #include <rpc/rpc.h>
-#include <stdlib.h>
+#include <cstdlib>
 
 #include "xcom/bitset.h"
 #include "xcom/xcom_profile.h"
@@ -46,7 +47,7 @@ node_set bit_set_to_node_set(bit_set *set, u_int n) {
   alloc_node_set(&new_set, n);
   {
     u_int i;
-    IFDBG(D_NONE, FN; STRLIT("bit_set_to_node_set "); dbg_bitset(set, n););
+    XCOM_IFDBG(D_NONE, FN; STRLIT("bit_set_to_node_set "); dbg_bitset(set, n););
     for (i = 0; i < n; i++) {
       new_set.node_set_val[i] = BIT_ISSET(i, set);
     }
@@ -67,7 +68,11 @@ node_set *realloc_node_set(node_set *set, u_int n) {
   bool_t *old_p = set->node_set_val;
   u_int i;
 
-  set->node_set_val = (int *)realloc(old_p, n * sizeof(bool_t));
+  // If the realloc size value is zero, we will store the
+  // old pointer, in order for it to be free'd by
+  // free_node_set
+  set->node_set_val =
+      n == 0 ? old_p : (int *)realloc(old_p, n * sizeof(bool_t));
   set->node_set_len = n;
   for (i = old_n; i < n; i++) {
     set->node_set_val[i] = 0;
@@ -157,7 +162,7 @@ node_set *reset_node_set(node_set *set) {
 
 #ifdef XCOM_STANDALONE
 /**
-   Debug a node set with G_MESSAGE.
+   Debug a node set with G_INFO.
  */
 void _g_dbg_node_set(node_set set, const char *name [[maybe_unused]]) {
   u_int n = 2 * set.node_set_len + 1;

@@ -1,18 +1,19 @@
 #ifndef SQL_JSON_PATH_INCLUDED
 #define SQL_JSON_PATH_INCLUDED
 
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -34,19 +35,17 @@
 #include <assert.h>
 #include <stddef.h>
 #include <algorithm>
-#include <functional>
 #include <new>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "my_alloc.h"  // MEM_ROOT
-                       // assert
-#include "my_inttypes.h"
-#include "my_sys.h"
+#include "mysql/psi/psi_memory.h"
 #include "prealloced_array.h"  // Prealloced_array
-#include "sql-common/json_error_handler.h"
 
 class String;
+class Json_wrapper;
 
 /** The type of a Json_path_leg. */
 enum enum_json_path_leg_type {
@@ -219,14 +218,9 @@ class Json_path_leg final {
     Construct an object member path leg.
 
     @param member_name  the name of the object member
-    @param length the length of the member name
   */
-  Json_path_leg(const char *member_name, size_t length)
-      : m_leg_type(jpl_member), m_member_name(member_name, length) {}
-
-  /** Construct an object member path leg. */
-  Json_path_leg(const std::string &member_name)
-      : Json_path_leg(member_name.c_str(), member_name.length()) {}
+  explicit Json_path_leg(std::string_view member_name)
+      : m_leg_type(jpl_member), m_member_name(member_name) {}
 
   /** Get the type of the path leg. */
   enum_json_path_leg_type get_type() const { return m_leg_type; }
@@ -476,13 +470,10 @@ class Json_path_clone final : public Json_seekable_path {
    @param[in] path_expression The string form of the path expression.
    @param[out] path The Json_path object to be initialized.
    @param[out] bad_index If null is returned, the parsing failed around here.
-   @param[in] depth_handler Pointer to a function that should handle error
-                            occurred when depth is exceeded.
    @return false on success, true on error
 */
 bool parse_path(size_t path_length, const char *path_expression,
-                Json_path *path, size_t *bad_index,
-                const JsonErrorHandler &depth_handler);
+                Json_path *path, size_t *bad_index);
 
 /**
   A helper function that uses the above one as workhorse. Entry point for
@@ -500,4 +491,26 @@ bool parse_path(size_t path_length, const char *path_expression,
 */
 bool parse_path(const String &path_value, bool forbid_wildcards,
                 Json_path *json_path);
+
+/**
+  Clone a source path to a target path, stripping out legs which are made
+  redundant by the auto-wrapping rule from the WL#7909 spec and further
+  extended in the WL#9831 spec:
+
+  "If an array cell path leg or an array range path leg is evaluated against a
+  non-array value, the result of the evaluation is the same as if the non-array
+  value had been wrapped in a single-element array."
+
+  @see Json_path_leg::is_autowrap
+
+  @param[in]      source_path The original path.
+  @param[in,out]  target_path The clone to be filled in.
+  @param[in]      doc The document to seek through.
+  @param[in]      key Instrumented memory key
+  @returns True if an error occurred. False otherwise.
+*/
+bool clone_without_autowrapping(const Json_path *source_path,
+                                Json_path_clone *target_path, Json_wrapper *doc,
+                                PSI_memory_key key);
+
 #endif /* SQL_JSON_PATH_INCLUDED */

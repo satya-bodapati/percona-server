@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -174,8 +175,6 @@ struct Index_lookup {
   }
 };
 
-struct CACHE_FIELD;
-class QEP_operation;
 class Filesort;
 class Semijoin_mat_exec;
 
@@ -228,7 +227,12 @@ enum join_type {
     the results into one. The merge can be used to
     produce unions and intersections
   */
-  JT_INDEX_MERGE
+  JT_INDEX_MERGE,
+  /**
+    Approximate ANN over an HNSW vector index: rows are produced in
+    ascending distance order from a constant query vector.
+  */
+  JT_VECTOR
 };
 
 /// Holds members common to JOIN_TAB and QEP_TAB.
@@ -254,6 +258,8 @@ class QEP_shared {
         prefix_tables_map(0),
         added_tables_map(0),
         m_ft_func(nullptr),
+        m_vec(nullptr),
+        m_vec_limit(0),
         m_skip_records_in_range(false) {}
 
   /*
@@ -310,6 +316,10 @@ class QEP_shared {
   table_map added_tables() const { return added_tables_map; }
   Item_func_match *ft_func() const { return m_ft_func; }
   void set_ft_func(Item_func_match *f) { m_ft_func = f; }
+  Item *vec() const { return m_vec; }
+  void set_vec(Item *v) { m_vec = v; }
+  ha_rows vec_limit() const { return m_vec_limit; }
+  void set_vec_limit(ha_rows limit) { m_vec_limit = limit; }
 
   // More elaborate functions:
 
@@ -420,7 +430,7 @@ class QEP_shared {
   /**
     Whether the condition in m_condition is evaluated in front of a sort,
     so that it does not need to be evaluated again (unless it is outer to
-    an inner join; see the relevant comments in SortingIterator::Init().
+    an inner join; see the relevant comments in SortingIterator::DoInit().
 
     Note that m_condition remains non-nullptr in this case, for purposes
     of the (non-tree) EXPLAIN and for filesort to build up its read maps.
@@ -465,6 +475,11 @@ class QEP_shared {
 
   /** FT function */
   Item_func_match *m_ft_func;
+
+  /** JT_VECTOR: the constant query-vector expression */
+  Item *m_vec;
+  /** JT_VECTOR: ANN batch size (the query's LIMIT) */
+  ha_rows m_vec_limit;
 
   /**
     Set if index dive can be skipped for this query.
@@ -539,6 +554,10 @@ class QEP_shared_owner {
   table_map added_tables() const { return m_qs->added_tables(); }
   Item_func_match *ft_func() const { return m_qs->ft_func(); }
   void set_ft_func(Item_func_match *f) { return m_qs->set_ft_func(f); }
+  Item *vec() const { return m_qs->vec(); }
+  void set_vec(Item *v) { return m_qs->set_vec(v); }
+  ha_rows vec_limit() const { return m_qs->vec_limit(); }
+  void set_vec_limit(ha_rows limit) { m_qs->set_vec_limit(limit); }
   void set_prefix_tables(table_map prefix_tables, table_map prev_tables) {
     return m_qs->set_prefix_tables(prefix_tables, prev_tables);
   }

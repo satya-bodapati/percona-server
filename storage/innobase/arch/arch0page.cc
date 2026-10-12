@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -231,9 +232,8 @@ int Arch_Group::mark_active() {
 
   ut_ad(m_active_file.m_file == OS_FILE_CLOSED);
 
-  m_active_file =
-      os_file_create(innodb_arch_file_key, m_active_file_name, option,
-                     OS_FILE_NORMAL, OS_CLONE_LOG_FILE, false, &success);
+  m_active_file = os_file_create(innodb_arch_file_key, m_active_file_name,
+                                 option, OS_CLONE_LOG_FILE, false, &success);
 
   int err = (success ? 0 : ER_CANT_OPEN_FILE);
 
@@ -267,9 +267,8 @@ int Arch_Group::mark_durable() {
 
   ut_ad(m_durable_file.m_file == OS_FILE_CLOSED);
 
-  m_durable_file =
-      os_file_create(innodb_arch_file_key, m_durable_file_name, option,
-                     OS_FILE_NORMAL, OS_CLONE_LOG_FILE, false, &success);
+  m_durable_file = os_file_create(innodb_arch_file_key, m_durable_file_name,
+                                  option, OS_CLONE_LOG_FILE, false, &success);
 
   int err = (success ? 0 : ER_CANT_OPEN_FILE);
 
@@ -439,7 +438,10 @@ bool Arch_File_Ctx::find_reset_point(lsn_t check_lsn, Arch_Point &reset_point) {
 
   if (reset_point_it == reset_start_point.end() ||
       reset_point_it->lsn != check_lsn) {
-    ut_ad(reset_point_it != reset_start_point.begin());
+    /* This scenario can happen only for corrupted page-tracking data. */
+    if (reset_point_it == reset_start_point.begin()) {
+      return (false);
+    }
     --reset_point_it;
   }
 
@@ -600,8 +602,8 @@ bool Arch_File_Ctx::validate_stop_point_in_file(Arch_Group *group,
   byte buf[ARCH_PAGE_BLK_SIZE];
 
   /* Read the entire reset block. */
-  dberr_t err =
-      os_file_read(request, m_path_name, file, buf, offset, ARCH_PAGE_BLK_SIZE);
+  dberr_t err = os_file_read_no_error_handling(
+      request, m_path_name, file, buf, offset, ARCH_PAGE_BLK_SIZE, nullptr);
 
   if (err != DB_SUCCESS) {
     return (false);
@@ -629,8 +631,8 @@ bool Arch_File_Ctx::validate_reset_block_in_file(pfs_os_file_t file,
   byte buf[ARCH_PAGE_BLK_SIZE];
 
   /* Read the entire reset block. */
-  dberr_t err =
-      os_file_read(request, m_path_name, file, buf, 0, ARCH_PAGE_BLK_SIZE);
+  dberr_t err = os_file_read_no_error_handling(request, m_path_name, file, buf,
+                                               0, ARCH_PAGE_BLK_SIZE, nullptr);
 
   if (err != DB_SUCCESS) {
     return (false);
@@ -750,7 +752,7 @@ bool Arch_File_Ctx::validate(Arch_Group *group, uint file_index,
   pfs_os_file_t file;
 
   file = os_file_create(innodb_arch_file_key, file_name, OS_FILE_OPEN,
-                        OS_FILE_NORMAL, OS_CLONE_LOG_FILE, true, &success);
+                        OS_CLONE_LOG_FILE, true, &success);
 
   if (!success) {
     return (false);
@@ -1227,26 +1229,27 @@ uint64_t Arch_Block::get_file_offset(uint64_t block_num, Arch_Blk_Type type) {
   return offset;
 }
 
-bool Arch_Block::is_zeroes(const byte *block) {
-  for (ulint i = 0; i < ARCH_PAGE_BLK_SIZE; i++) {
-    if (block[i] != 0) {
-      return (false);
-    }
-  }
-  return (true);
-}
-
 bool Arch_Block::validate(byte *block) {
   auto data_length = Arch_Block::get_data_len(block);
+
+  /* data_length is read from the (possibly corrupted) block header. Bound it
+  before computing the checksum, otherwise ut_crc32() would read past the end
+  of the block. This runs on untrusted doublewrite buffer content during
+  recovery, so treat an out-of-range length as an invalid block. */
+  if (data_length > ARCH_PAGE_BLK_SIZE - ARCH_PAGE_BLK_HEADER_LENGTH) {
+    ib::warn(ER_IB_ERR_PAGE_ARCH_INVALID_DOUBLE_WRITE_BUF)
+        << Arch_Block::get_block_number(block);
+    return (false);
+  }
+
   auto block_checksum = Arch_Block::get_checksum(block);
   auto checksum = ut_crc32(block + ARCH_PAGE_BLK_HEADER_LENGTH, data_length);
 
   if (checksum != block_checksum) {
     ib::warn(ER_IB_ERR_PAGE_ARCH_INVALID_DOUBLE_WRITE_BUF)
         << Arch_Block::get_block_number(block);
-    ut_d(ut_error);
-    ut_o(return (false));
-  } else if (Arch_Block::is_zeroes(block)) {
+    return (false);
+  } else if (ut::is_zeros(block, ARCH_PAGE_BLK_SIZE)) {
     return (false);
   }
 
@@ -1728,7 +1731,7 @@ void Arch_Page_Sys::track_page(buf_page_t *bpage, lsn_t track_lsn,
       m_state = ARCH_STATE_ABORT;
       arch_oper_mutex_exit();
       ut_d(ut_error);
-      ut_o(return );
+      ut_o(return);
     }
 
     cur_blk = m_data.get_block(&m_write_pos, ARCH_DATA_BLOCK);
@@ -1908,14 +1911,29 @@ int Arch_Page_Sys::get_pages(MYSQL_THD thd, Page_Track_Callback cbk_func,
       auto data_len = Arch_Block::get_data_len(header_buf);
       bytes_left = data_len + ARCH_PAGE_BLK_HEADER_LENGTH;
 
-      ut_ad(bytes_left <= ARCH_PAGE_BLK_SIZE);
-      ut_ad(block_stop_lsn != LSN_MAX);
+      if (bytes_left > ARCH_PAGE_BLK_SIZE || block_stop_lsn == LSN_MAX) {
+        err = ER_PAGE_TRACKING_RANGE_NOT_TRACKED;
+        break;
+      }
+
+      if (cur_pos.m_offset > bytes_left) {
+        ib::error(ER_IB_MSG_17)
+            << "Page archiver: reset point references block "
+            << cur_pos.m_block_num << " with an out-of-range offset "
+            << cur_pos.m_offset << " (block holds " << bytes_left
+            << " bytes); the page-tracking data is corrupted.";
+        err = ER_PAGE_TRACKING_RANGE_NOT_TRACKED;
+        break;
+      }
 
       bytes_left -= cur_pos.m_offset;
 
       if (data_len == 0 || cur_pos.m_block_num == last_pos.m_block_num ||
           block_stop_lsn > stop_id) {
-        ut_ad(block_stop_lsn >= stop_id);
+        if (block_stop_lsn < stop_id) {
+          err = ER_PAGE_TRACKING_RANGE_NOT_TRACKED;
+          break;
+        }
         stop_id = block_stop_lsn;
         last_block = true;
       }
@@ -2208,7 +2226,8 @@ void Arch_Page_Sys::track_initial_pages() {
 
       /* Check if we could finish traversing flush list
       earlier. Order of pages in flush list became relaxed,
-      but the distortion is limited by the flush_order_lag.
+      but the distortion is limited by
+      the buf_flush_list_added->order_lag().
 
       You can think about this in following way: pages
       start to travel to flush list when they have the
@@ -2220,13 +2239,13 @@ void Arch_Page_Sys::track_initial_pages() {
       if there is other page, which started much much
       earlier its travel and still haven't finished.
       The "much much" part is defined by the maximum
-      allowed lag - log_buffer_flush_order_lag(). */
+      allowed lag - buf_flush_list_added->order_lag(). */
       if (bpage->get_oldest_lsn() >
-          buf_pool->max_lsn_io + log_buffer_flush_order_lag(*log_sys)) {
-        /* All pages with oldest_modification
-        smaller than bpage->oldest_modification
-        minus the flush_order_lag have already
-        been traversed. So there is no page which:
+          buf_pool->max_lsn_io + buf_flush_list_added->order_lag()) {
+        /* All pages with oldest_modification smaller
+        than bpage->oldest_modification minus
+        the buf_flush_list_added->order_lag() have
+        already been traversed. So there is no page which:
                 - we haven't traversed
                 - and has oldest_modification
                   smaller than buf_pool->max_lsn_io. */
@@ -2933,7 +2952,7 @@ int Arch_Group::read_from_file(Arch_Page_Pos *read_pos, uint read_len,
   /* Open file in read only mode. */
   pfs_os_file_t file =
       os_file_create(innodb_arch_file_key, file_name, OS_FILE_OPEN,
-                     OS_FILE_NORMAL, OS_CLONE_LOG_FILE, true, &success);
+                     OS_CLONE_LOG_FILE, true, &success);
 
   if (!success) {
     my_error(ER_CANT_OPEN_FILE, MYF(0), file_name, errno,
@@ -2948,8 +2967,8 @@ int Arch_Group::read_from_file(Arch_Page_Pos *read_pos, uint read_len,
   request.disable_compression();
   request.clear_encrypted();
 
-  auto db_err =
-      os_file_read(request, file_name, file, read_buff, offset, read_len);
+  auto db_err = os_file_read_no_error_handling(
+      request, file_name, file, read_buff, offset, read_len, nullptr);
 
   os_file_close(file);
 
@@ -3066,7 +3085,9 @@ int Arch_Page_Sys::fetch_group_within_lsn_range(lsn_t &start_id, lsn_t &stop_id,
   auto latest_stop_lsn = m_latest_stop_lsn;
   arch_oper_mutex_exit();
 
-  ut_ad(latest_stop_lsn != LSN_MAX);
+  if (latest_stop_lsn == LSN_MAX) {
+    return (ER_PAGE_TRACKING_RANGE_NOT_TRACKED);
+  }
 
   if (start_id == 0 || stop_id == 0) {
     if (m_current_group == nullptr || !m_current_group->is_active()) {
@@ -3075,7 +3096,9 @@ int Arch_Page_Sys::fetch_group_within_lsn_range(lsn_t &start_id, lsn_t &stop_id,
 
     *group = m_current_group;
 
-    ut_ad(m_last_lsn != LSN_MAX);
+    if (m_last_lsn == LSN_MAX) {
+      return (ER_PAGE_TRACKING_RANGE_NOT_TRACKED);
+    }
 
     start_id = (start_id == 0) ? m_last_lsn : start_id;
     stop_id = (stop_id == 0) ? latest_stop_lsn : stop_id;

@@ -789,7 +789,8 @@ SELECT DISTINCT REF_ID FROM t1 WHERE ID= (SELECT DISTINCT REF_ID FROM t1 WHERE I
 DROP TABLE t1;
 
 #
-# uninterruptable update
+# uninterruptable update (now that ER_SUBQUERY_NO_1_ROW is no longer ignoreable,
+# this test case has lost its significance).
 #
 create table t1 (a int, b int);
 create table t2 (a int, b int);
@@ -797,6 +798,7 @@ create table t2 (a int, b int);
 insert into t1 values (1,0), (2,0), (3,0);
 insert into t2 values (1,1), (2,1), (3,1), (2,2);
 
+--error ER_SUBQUERY_NO_1_ROW
 update ignore t1 set b=(select b from t2 where t1.a=t2.a);
 select * from t1;
 
@@ -1137,7 +1139,7 @@ drop table t1,t2;
 #
 create table t1 (a int);
 insert into t1 values (1);
-explain select benchmark(1000, (select a from t1 where a=sha(rand())));
+explain select benchmark(1000, (select a from t1 where a=sha2(rand(),256)));
 drop table t1;
 
 
@@ -1166,37 +1168,113 @@ SELECT id, ( SELECT COUNT(t.id) FROM t2 AS t WHERE t.id = t1.id ) AS c FROM t1 L
 DROP TABLE t1,t2;
 
 #
-# ALL/ANY test
+# ALL/ANY test, with negation
 #
 CREATE TABLE t1 ( a int, b int );
 INSERT INTO t1 VALUES (1,1),(2,2),(3,3);
-SELECT a FROM t1 WHERE a > ANY ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a < ANY ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a = ANY ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a >= ANY ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a <= ANY ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a <> ANY ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a > ALL ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a < ALL ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a = ALL ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a >= ALL ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a <= ALL ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a <> ALL ( SELECT a FROM t1 WHERE b = 2 );
+
+SELECT a FROM t1 WHERE a > ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a > ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a > ANY (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a < ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a < ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a < ANY (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a = ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a = ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a = ANY (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a >= ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a >= ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a >= ANY (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a <= ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a <= ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a <= ANY (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a <> ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a <> ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a <> ANY (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a > ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a > ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a > ALL (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a < ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a < ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a < ALL (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a = ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a = ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a = ALL (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a >= ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a >= ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a >= ALL (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a <= ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a <= ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a <= ALL (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a <> ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a <> ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a <> ALL (SELECT a FROM t1 WHERE b = 2);
+
 # with index
+
 ALTER TABLE t1 ADD INDEX (a);
-SELECT a FROM t1 WHERE a > ANY ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a < ANY ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a = ANY ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a >= ANY ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a <= ANY ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a <> ANY ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a > ALL ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a < ALL ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a = ALL ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a >= ALL ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a <= ALL ( SELECT a FROM t1 WHERE b = 2 );
-SELECT a FROM t1 WHERE a <> ALL ( SELECT a FROM t1 WHERE b = 2 );
+
+SELECT a FROM t1 WHERE a > ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a > ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a > ANY (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a < ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a < ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a < ANY (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a = ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a = ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a = ANY (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a >= ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a >= ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a >= ANY (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a <= ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a <= ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a <= ANY (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a <> ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a <> ANY (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a <> ANY (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a > ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a > ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a > ALL (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a < ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a < ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a < ALL (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a = ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a = ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a = ALL (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a >= ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a >= ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a >= ALL (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a <= ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a <= ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a <= ALL (SELECT a FROM t1 WHERE b = 2);
+
+SELECT a FROM t1 WHERE a <> ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT a <> ALL (SELECT a FROM t1 WHERE b = 2);
+SELECT a FROM t1 WHERE NOT NOT a <> ALL (SELECT a FROM t1 WHERE b = 2);
+
 # having clause test
+
 SELECT a FROM t1 WHERE a > ANY (SELECT a FROM t1 HAVING a = 2);
 SELECT a FROM t1 WHERE a < ANY (SELECT a FROM t1 HAVING a = 2);
 SELECT a FROM t1 WHERE a = ANY (SELECT a FROM t1 HAVING a = 2);
@@ -2036,6 +2114,7 @@ SELECT a FROM t1 ORDER BY (SELECT c FROM t2 WHERE b > 1), a;
 
 --sorted_result
 SELECT b, MAX(c) FROM t2 GROUP BY b, (SELECT c FROM t2 WHERE b > 2);
+--skip_if_hypergraph   # Prunes away the subquery item, leaving no error.
 --error ER_SUBQUERY_NO_1_ROW
 SELECT b, MAX(c) FROM t2 GROUP BY b, (SELECT c FROM t2 WHERE b > 1);
 
@@ -2148,6 +2227,7 @@ CREATE TABLE t3 ( c3 integer );
 INSERT INTO t3 VALUES ( 7 );
 INSERT INTO t3 VALUES ( 8 );
 
+--sorted_result
 SELECT c1,c2 FROM t1 LEFT JOIN t2 ON c1 = c2
   WHERE EXISTS (SELECT c3 FROM t3 WHERE c2 IS NULL );
 
@@ -3158,32 +3238,32 @@ SET sql_mode = default;
 # Bug#33794 "MySQL crashes executing specific query on specific dump"
 #
 CREATE TABLE t4 (
-  f7 varchar(32) collate utf8_bin NOT NULL default '',
-  f10 varchar(32) collate utf8_bin default NULL,
+  f7 varchar(32) COLLATE utf8mb3_bin NOT NULL default '',
+  f10 varchar(32) COLLATE utf8mb3_bin default NULL,
   PRIMARY KEY  (f7)
 );
 INSERT INTO t4 VALUES(1,1), (2,null);
 
 CREATE TABLE t2 (
-  f4 varchar(32) collate utf8_bin NOT NULL default '',
-  f2 varchar(50) collate utf8_bin default NULL,
-  f3 varchar(10) collate utf8_bin default NULL,
+  f4 varchar(32) COLLATE utf8mb3_bin NOT NULL default '',
+  f2 varchar(50) COLLATE utf8mb3_bin default NULL,
+  f3 varchar(10) COLLATE utf8mb3_bin default NULL,
   PRIMARY KEY  (f4),
   UNIQUE KEY uk1 (f2)
 );
 INSERT INTO t2 VALUES(1,1,null), (2,2,null);
 
 CREATE TABLE t1 (
-  f8 varchar(32) collate utf8_bin NOT NULL default '',
-  f1 varchar(10) collate utf8_bin default NULL,
-  f9 varchar(32) collate utf8_bin default NULL,
+  f8 varchar(32) COLLATE utf8mb3_bin NOT NULL default '',
+  f1 varchar(10) COLLATE utf8mb3_bin default NULL,
+  f9 varchar(32) COLLATE utf8mb3_bin default NULL,
   PRIMARY KEY  (f8)
 );
 INSERT INTO t1 VALUES (1,'P',1), (2,'P',1), (3,'R',2);
 
 CREATE TABLE t3 (
-  f6 varchar(32) collate utf8_bin NOT NULL default '',
-  f5 varchar(50) collate utf8_bin default NULL,
+  f6 varchar(32) COLLATE utf8mb3_bin NOT NULL default '',
+  f5 varchar(50) COLLATE utf8mb3_bin default NULL,
   PRIMARY KEY (f6)
 );
 INSERT INTO t3 VALUES (1,null), (2,null);
@@ -3400,8 +3480,10 @@ show status like '%Handler_read_rnd_next';
 delete from t2;
 insert into t2 values (NULL, 0),(NULL, 0), (NULL, 0), (NULL, 0);
 
-flush status;
+# ANALYZE TABLE makes handler calls when e.g. updating histograms,
+# so we FLUSH STATUS after calling ANALYZE TABLE.
 ANALYZE TABLE t1, t2;
+FLUSH STATUS;
 select oref, a, a in (select a from t1 where oref=t2.oref) Z from t2;
 --skip_if_hypergraph  # Depends on the query plan.
 show status like '%Handler_read%';
@@ -4389,7 +4471,7 @@ DROP TABLE t1;
 #
 CREATE TABLE t1 (s1 CHAR(1));
 INSERT INTO t1 VALUES ('a');
-SELECT * FROM t1 WHERE _utf8'a' = ANY (SELECT s1 FROM t1);
+SELECT * FROM t1 WHERE _utf8mb3'a' = ANY (SELECT s1 FROM t1);
 DROP TABLE t1;
 
 #
@@ -6739,7 +6821,7 @@ DROP TABLE t1, t2, t3;
 --echo #
 --echo # Bug#22090717 WRONG RESULT FOR SELECT NULL IN (<SUBQUERY>)
 --echo #
-CREATE TABLE t1(a MEDIUMTEXT CHARSET UTF8) ENGINE=INNODB;
+CREATE TABLE t1(a MEDIUMTEXT CHARSET utf8mb3) ENGINE=INNODB;
 INSERT INTO t1 VALUES(0x6F76786E7875);
 SELECT NULL IN (SELECT 1 FROM t1);
 SELECT (NULL AND 1) IN (SELECT 1 FROM t1);

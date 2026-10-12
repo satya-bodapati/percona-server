@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -32,14 +33,25 @@
   the file descriptor.
 */
 
-#include <sys/types.h>
-#include <new>
+#include "my_config.h"
 
-#include "my_compiler.h"
+#include <assert.h>  // for assert
+#include <limits.h>  // for INT_MAX
+#include <signal.h>  // for sigemptyset
+#ifdef HAVE_SYS_SOCKET_H
+#include <sys/socket.h>  // for sockaddr_storage
+#endif
+#include <sys/types.h>
+
+#include <atomic>  // for atomic_flag
+#include <new>
+#include <optional>  // for optional
+#include <utility>   // for move
+
 #include "my_dbug.h"
 #include "my_inttypes.h"
-#include "my_io.h"
 #include "my_psi_config.h"
+#include "my_sys.h"
 #include "mysql/psi/mysql_memory.h"
 #include "mysql/psi/mysql_socket.h"
 #include "mysql/psi/psi_memory.h"  // IWYU pragma: keep
@@ -218,7 +230,8 @@ Vio &Vio::operator=(Vio &&vio) {
 
 static bool vio_init(Vio *vio, enum enum_vio_type type, my_socket sd,
                      uint flags) {
-  DBUG_PRINT("enter vio_init", ("type: %d sd: %d  flags: %d", type, sd, flags));
+  DBUG_PRINT("enter vio_init",
+             ("type: %d sd: " MY_SOCKET_FMT " flags: %d", type, sd, flags));
 
   mysql_socket_setfd(&vio->mysql_socket, sd);
 
@@ -402,7 +415,7 @@ bool vio_reset(Vio *vio, enum enum_vio_type type, my_socket sd,
       Close socket only when it is not equal to the new one.
     */
     if (sd != mysql_socket_getfd(vio->mysql_socket)) {
-      if (vio->inactive == false) vio->vioshutdown(vio, SHUT_RDWR);
+      if (!vio->inactive) vio->vioshutdown(vio, SHUT_RDWR);
     }
 #ifdef HAVE_KQUEUE
     else {
@@ -435,9 +448,9 @@ Vio *internal_vio_create(uint flags) {
 Vio *mysql_socket_vio_new(MYSQL_SOCKET mysql_socket, enum_vio_type type,
                           uint flags) {
   Vio *vio;
-  my_socket sd = mysql_socket_getfd(mysql_socket);
+  my_socket const sd = mysql_socket_getfd(mysql_socket);
   DBUG_TRACE;
-  DBUG_PRINT("enter", ("sd: %d", sd));
+  DBUG_PRINT("enter", ("sd: " MY_SOCKET_FMT, sd));
 
   if ((vio = internal_vio_create(flags))) {
     if (vio_init(vio, type, sd, flags)) {
@@ -455,7 +468,7 @@ Vio *vio_new(my_socket sd, enum enum_vio_type type, uint flags) {
   Vio *vio;
   MYSQL_SOCKET mysql_socket = MYSQL_INVALID_SOCKET;
   DBUG_TRACE;
-  DBUG_PRINT("enter", ("sd: %d", sd));
+  DBUG_PRINT("enter", ("sd: " MY_SOCKET_FMT, sd));
 
   mysql_socket_setfd(&mysql_socket, sd);
   vio = mysql_socket_vio_new(mysql_socket, type, flags);
@@ -555,7 +568,7 @@ int vio_timeout(Vio *vio, uint which, int timeout_sec) {
 
 void internal_vio_delete(Vio *vio) {
   if (!vio) return; /* It must be safe to delete null pointers. */
-  if (vio->inactive == false) vio->vioshutdown(vio, SHUT_RDWR);
+  if (!vio->inactive) vio->vioshutdown(vio, SHUT_RDWR);
   vio->~Vio();
   my_free(vio);
 }

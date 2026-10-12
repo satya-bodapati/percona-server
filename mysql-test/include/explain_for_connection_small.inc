@@ -4,6 +4,8 @@
   --source include/have_debug_sync.inc
   --source include/not_windows.inc
   --source include/have_grep.inc
+  # This test doesn't support GTID
+  --source include/rpl/set_gtid_mode_off.inc
 
   --disable_query_log
   --disable_result_log
@@ -81,7 +83,7 @@
 
 
 
-  CREATE TABLE t1 ( ID int(10) unsigned NOT NULL AUTO_INCREMENT, col1 int(10) unsigned DEFAULT NULL, key1 int(10) unsigned NOT NULL DEFAULT '0', key2 int(10) unsigned DEFAULT NULL, text1 text, text2 text, col2 smallint(6) DEFAULT '100', col3 enum('headers','bodyandsubject') NOT NULL DEFAULT 'bodyandsubject', col4 tinyint(3) unsigned NOT NULL DEFAULT '0', PRIMARY KEY (ID), KEY (key1), KEY (key2) ) AUTO_INCREMENT=6 DEFAULT CHARSET=utf8 ;
+  CREATE TABLE t1 ( ID int(10) unsigned NOT NULL AUTO_INCREMENT, col1 int(10) unsigned DEFAULT NULL, key1 int(10) unsigned NOT NULL DEFAULT '0', key2 int(10) unsigned DEFAULT NULL, text1 text, text2 text, col2 smallint(6) DEFAULT '100', col3 enum('headers','bodyandsubject') NOT NULL DEFAULT 'bodyandsubject', col4 tinyint(3) unsigned NOT NULL DEFAULT '0', PRIMARY KEY (ID), KEY (key1), KEY (key2) ) AUTO_INCREMENT=6 DEFAULT CHARSET=utf8mb3 ;
   INSERT INTO t1 VALUES (1,NULL,1130,NULL,'Hello',NULL,100,'bodyandsubject',0), (2,NULL,1130,NULL,'bye',NULL,100,'bodyandsubject',0), (3,NULL,1130,NULL,'red',NULL,100,'bodyandsubject',0), (4,NULL,1130,NULL,'yellow',NULL,100,'bodyandsubject',0), (5,NULL,1130,NULL,'blue',NULL,100,'bodyandsubject',0) ;
   let $point=   before_reset_query_plan;let $query=  SELECT * FROM t1 WHERE key1=1130 AND col1 IS NULL ORDER BY text1 ;
   --source include/explain_for_connection.inc
@@ -106,7 +108,7 @@
   INSERT INTO t2 SELECT a, 'MySQL', 'MySQL' FROM ten ;
   CREATE TABLE t3 ( pk INTEGER NOT NULL, c1 VARCHAR(10) NOT NULL, PRIMARY KEY (pk) ) charset latin1;
   INSERT INTO t3 SELECT a, 'MySQL' FROM ten ;
-  CREATE TABLE t4 ( pk int(11) NOT NULL, c1_key varchar(10) CHARACTER SET utf8 NOT NULL, c2 varchar(10) NOT NULL, c3 varchar(10) NOT NULL, PRIMARY KEY (pk), KEY k1 (c1_key) ) charset latin1;
+  CREATE TABLE t4 ( pk int(11) NOT NULL, c1_key varchar(10) CHARACTER SET utf8mb3 NOT NULL, c2 varchar(10) NOT NULL, c3 varchar(10) NOT NULL, PRIMARY KEY (pk), KEY k1 (c1_key) ) charset latin1;
   CREATE TABLE t5 ( pk INTEGER NOT NULL, c1 VARCHAR(10) NOT NULL, PRIMARY KEY (pk) ) charset latin1;
   INSERT INTO t5 SELECT a, 'MySQL' FROM ten ;
   let $point=   after_join_optimize;let $query=  SELECT STRAIGHT_JOIN * FROM (t1 LEFT JOIN  (t2 LEFT JOIN (t3 LEFT OUTER JOIN t4 ON t3.c1 <= t4.c1_key) ON t2.c1 = t4.c3)  ON t1.c1 = t4.c2) RIGHT OUTER JOIN t5 ON t2.c2 <= t5.c1 WHERE t1.i1 = 1 ;
@@ -474,7 +476,7 @@ zimqeplevleqdhepkhcfrahcpjjvhkkwblfenfpetwejamgeefplsksusqvazujabvkfek'),
 ANALYZE TABLE f1;
 
 CREATE TABLE a2 (
-  col_varchar_10_utf8_key varchar(10) CHARACTER SET utf8 DEFAULT NULL,
+  col_varchar_10_utf8_key varchar(10) CHARACTER SET utf8mb3 DEFAULT NULL,
   KEY col_varchar_10_utf8_key (col_varchar_10_utf8_key)
 ) ENGINE=MyISAM DEFAULT CHARSET=latin1;
 
@@ -569,4 +571,5 @@ let $query=SELECT DISTINCT alias2.pk AS field1, alias2.pk AS field2, alias2.pk A
 --enable_warnings
 drop table t1;
 drop table t2;
-
+# Restore the default for gtid_mode which is ON
+--source include/rpl/set_gtid_mode_on.inc

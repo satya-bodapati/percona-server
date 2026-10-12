@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -235,7 +236,7 @@ void Protocol_encoder::log_protobuf(const unsigned id,
   log_protobuf(id, direction_name, msg);
 }
 
-void Protocol_encoder::log_protobuf(const unsigned id,
+void Protocol_encoder::log_protobuf(const unsigned id [[maybe_unused]],
                                     const char *direction_name [[maybe_unused]],
                                     const Message *message [[maybe_unused]]) {
 #ifdef USE_MYSQLX_FULL_PROTO
@@ -256,7 +257,7 @@ void Protocol_encoder::log_protobuf(const unsigned id,
   }
 #else
   log_debug("%u: %s, Type: %s", id, direction_name,
-            message->GetTypeName().c_str());
+            std::string(message->GetTypeName()).c_str());
 #endif
 }
 
@@ -295,7 +296,7 @@ std::string message_type_to_string(const uint8_t type_id) {
 }
 
 // for message sent as raw buffer only logging its type tag now
-void Protocol_encoder::log_protobuf(const unsigned id,
+void Protocol_encoder::log_protobuf(const unsigned id [[maybe_unused]],
                                     uint8_t type [[maybe_unused]]) {
   log_debug("%u: SEND RAW- Type: %s", id, message_type_to_string(type).c_str());
 }

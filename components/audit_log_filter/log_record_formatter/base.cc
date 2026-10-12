@@ -28,6 +28,8 @@
 #include <mysql/components/services/defs/event_tracking_stored_program_defs.h>
 #include <mysql/components/services/defs/event_tracking_table_access_defs.h>
 
+#include <boost/date_time/c_time.hpp>
+
 #include <cassert>
 #include <iomanip>
 #include <iostream>
@@ -41,8 +43,6 @@ const std::string_view kAuditEventNameConnection{"Connection"};
 const std::string_view kAuditEventNameAuthorization{"Authorization"};
 const std::string_view kAuditEventNameTableAccess{"Table Access"};
 const std::string_view kAuditEventNameGlobalVariable{"Global Variable"};
-const std::string_view kAuditEventNameServerStartup{"Server Startup"};
-const std::string_view kAuditEventNameServerShutdown{"Server Shutdown"};
 const std::string_view kAuditEventNameCommand{"Command"};
 const std::string_view kAuditEventNameQuery{"Query"};
 const std::string_view kAuditEventNameStoredProgram{"Stored Program"};
@@ -57,7 +57,7 @@ const std::string_view kAuditEventNameGeneralResult{"Result"};
 const std::string_view kAuditEventNameGeneralStatus{"Status"};
 
 const std::string_view kAuditEventNameConnect{"Connect"};
-const std::string_view kAuditEventNameDisconnect{"Disconnect"};
+const std::string_view kAuditEventNameDisconnect{"Quit"};
 const std::string_view kAuditEventNameChangeUser{"Change user"};
 const std::string_view kAuditEventNamePreAuth{"Pre Authenticate"};
 
@@ -76,9 +76,6 @@ const std::string_view kAuditEventNameAccessDelete{"TableDelete"};
 const std::string_view kAuditEventNameGlobalVariableGet{"Variable Get"};
 const std::string_view kAuditEventNameGlobalVariableSet{"Variable Set"};
 
-const std::string_view kAuditNameShutdownReasonShutdown{"Shutdown"};
-const std::string_view kAuditNameShutdownReasonAbort{"Abort"};
-
 const std::string_view kAuditEventNameCommandStart{"Command Start"};
 const std::string_view kAuditEventNameCommandEnd{"Command End"};
 
@@ -95,20 +92,13 @@ const std::string_view kAuditEventNameAuthCredentialChange{
 const std::string_view kAuditEventNameAuthAuthidRename{"Auth Authid Rename"};
 const std::string_view kAuditEventNameAuthAuthidDrop{"Auth Authid Drop"};
 
-const std::string_view kAuditEventNameServerStartupStartup{"Startup"};
-
-const std::string_view kAuditEventNameServerShutdownShutdown{"Shutdown"};
-
 const std::string_view kAuditEventNameStoredProgramExecute{"Execute"};
 
 const std::string_view kAuditEventNameMessageInternal{"Internal"};
 const std::string_view kAuditEventNameMessageUser{"User"};
 
-const std::string_view kAuditEventNameParseRewriteNone{"No Rewrite"};
-const std::string_view kAuditEventNameParseRewriteQueryRewritten{
-    "Query Rewritten"};
-const std::string_view kAuditEventNameParseRewritePreparedStatement{
-    "Prepared Statement"};
+const std::string_view kAuditEventNameParsePreparse{"Preparse"};
+const std::string_view kAuditEventNameParsePostparse{"Postparse"};
 
 const std::string_view kAuditEventNameAuditStart{"Audit"};
 const std::string_view kAuditEventNameAuditStop{"NoAudit"};
@@ -120,7 +110,8 @@ const std::string_view kAuditNameUnknown{"unknown"};
 std::string LogRecordFormatterBase::make_record_id(
     const std::chrono::system_clock::time_point time_point) const noexcept {
   std::stringstream id;
-  id << SysVars::get_next_record_id() << "_" << make_timestamp(time_point);
+  id << (SysVars::get_next_record_id() + 1) << "_"
+     << make_timestamp(time_point);
 
   return id.str();
 }
@@ -130,20 +121,28 @@ uint64_t LogRecordFormatterBase::make_record_id() const noexcept {
 }
 
 std::string LogRecordFormatterBase::make_escaped_string(
-    const std::string &in) const noexcept {
+    const char *in) const noexcept {
   std::string out;
-  const auto &escape_rules = get_escape_rules();
+  if (in != nullptr) {
+    const auto &escape_rules = get_escape_rules();
 
-  for (const char &c : in) {
-    const auto it = escape_rules.find(c);
-    if (it == escape_rules.end()) {
-      out.append(&c, 1);
-    } else {
-      out.append(it->second);
+    for (const char *ptr = in; *ptr != '\0'; ++ptr) {
+      const auto it = escape_rules.find(*ptr);
+      if (it == escape_rules.end()) {
+        out.append(ptr, 1);
+      } else {
+        out.append(it->second);
+      }
     }
   }
 
   return out;
+}
+
+std::string LogRecordFormatterBase::make_escaped_string(
+    const std::string &in) const noexcept {
+  const mysql_cstring_with_length wrapper{in.data(), in.size()};
+  return make_escaped_string(&wrapper);
 }
 
 std::string LogRecordFormatterBase::make_escaped_string(
@@ -153,10 +152,11 @@ std::string LogRecordFormatterBase::make_escaped_string(
   if (in != nullptr && in->str != nullptr && in->length != 0) {
     const auto &escape_rules = get_escape_rules();
 
-    for (size_t i = 0; i < in->length; ++i) {
-      const auto it = escape_rules.find(in->str[i]);
+    for (const char *ptr = in->str, *en = in->str + in->length; ptr < en;
+         ++ptr) {
+      const auto it = escape_rules.find(*ptr);
       if (it == escape_rules.end()) {
-        out.append(&in->str[i], 1);
+        out.append(ptr, 1);
       } else {
         out.append(it->second);
       }
@@ -179,10 +179,6 @@ std::string_view LogRecordFormatterBase::event_class_to_string(
       return kAuditEventNameTableAccess;
     case audit_event_class_t::AUDIT_GLOBAL_VARIABLE_CLASS:
       return kAuditEventNameGlobalVariable;
-    case audit_event_class_t::AUDIT_SERVER_STARTUP_CLASS:
-      return kAuditEventNameServerStartup;
-    case audit_event_class_t::AUDIT_SERVER_SHUTDOWN_CLASS:
-      return kAuditEventNameServerShutdown;
     case audit_event_class_t::AUDIT_COMMAND_CLASS:
       return kAuditEventNameCommand;
     case audit_event_class_t::AUDIT_QUERY_CLASS:
@@ -339,30 +335,6 @@ std::string_view LogRecordFormatterBase::event_subclass_to_string(
 }
 
 std::string_view LogRecordFormatterBase::event_subclass_to_string(
-    const mysql_event_tracking_startup_data *event) const noexcept {
-  switch (event->event_subclass) {
-    case EVENT_TRACKING_STARTUP_STARTUP:
-      return kAuditEventNameServerStartupStartup;
-    default:
-      assert(false);
-  }
-
-  return kAuditNameUnknown;
-}
-
-std::string_view LogRecordFormatterBase::event_subclass_to_string(
-    const mysql_event_tracking_shutdown_data *event) const noexcept {
-  switch (event->event_subclass) {
-    case EVENT_TRACKING_SHUTDOWN_SHUTDOWN:
-      return kAuditEventNameServerShutdownShutdown;
-    default:
-      assert(false);
-  }
-
-  return kAuditNameUnknown;
-}
-
-std::string_view LogRecordFormatterBase::event_subclass_to_string(
     const mysql_event_tracking_stored_program_data *event) const noexcept {
   switch (event->event_subclass) {
     case EVENT_TRACKING_STORED_PROGRAM_EXECUTE:
@@ -391,12 +363,10 @@ std::string_view LogRecordFormatterBase::event_subclass_to_string(
 std::string_view LogRecordFormatterBase::event_subclass_to_string(
     const mysql_event_tracking_parse_data *event) const noexcept {
   switch (event->event_subclass) {
-    case EVENT_TRACKING_PARSE_REWRITE_NONE:
-      return kAuditEventNameParseRewriteNone;
-    case EVENT_TRACKING_PARSE_REWRITE_QUERY_REWRITTEN:
-      return kAuditEventNameParseRewriteQueryRewritten;
-    case EVENT_TRACKING_PARSE_REWRITE_IS_PREPARED_STATEMENT:
-      return kAuditEventNameParseRewritePreparedStatement;
+    case EVENT_TRACKING_PARSE_PREPARSE:
+      return kAuditEventNameParsePreparse;
+    case EVENT_TRACKING_PARSE_POSTPARSE:
+      return kAuditEventNameParsePostparse;
     default:
       assert(false);
   }
@@ -419,20 +389,6 @@ std::string_view LogRecordFormatterBase::connection_type_name_to_string(
       return kAuditConnectionTypeNameSsl;
     case 5:
       return kAuditConnectionTypeNameShared;
-    default:
-      assert(false);
-  }
-
-  return kAuditNameUnknown;
-}
-
-std::string_view LogRecordFormatterBase::shutdown_reason_to_string(
-    mysql_event_tracking_shutdown_reason_t reason) const noexcept {
-  switch (reason) {
-    case EVENT_TRACKING_SHUTDOWN_REASON_SHUTDOWN:
-      return kAuditNameShutdownReasonShutdown;
-    case EVENT_TRACKING_SHUTDOWN_REASON_ABORT:
-      return kAuditNameShutdownReasonAbort;
     default:
       assert(false);
   }
@@ -480,10 +436,16 @@ const EscapeRulesContainer &LogRecordFormatterBaseXml::get_escape_rules()
 std::string LogRecordFormatterBaseXml::make_timestamp(
     const std::chrono::system_clock::time_point time_point) const noexcept {
   std::time_t t = std::chrono::system_clock::to_time_t(time_point);
-  std::stringstream timestamp;
-  timestamp << std::put_time(std::localtime(&t), "%FT%T");
+  std::tm tm;
+  static constexpr std::size_t max_buffer_size{32};
+  std::string result(max_buffer_size, '\0');
 
-  return timestamp.str();
+  boost::date_time::c_time::localtime(&t, &tm);
+  const std::size_t len =
+      std::strftime(result.data(), result.size(), "%FT%T", &tm);
+  result.resize(len);
+
+  return result;
 }
 
 }  // namespace audit_log_filter::log_record_formatter

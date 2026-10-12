@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,7 +30,7 @@
 
 namespace gcs_xcom_utils_unittest {
 TEST(GcsXComUtils, BuildXcomMemberIdSmokeTest) {
-  std::string peer_nodes_str("127.0.0.1:12345,127.0.0.1:12346");
+  std::string const peer_nodes_str("127.0.0.1:12345,127.0.0.1:12346");
   std::vector<std::string> processed_peers;
   Gcs_xcom_utils::process_peer_nodes(&peer_nodes_str, processed_peers);
 
@@ -39,7 +40,7 @@ TEST(GcsXComUtils, BuildXcomMemberIdSmokeTest) {
 }
 
 TEST(GcsXComUtils, BuildXcomMemberIdSpacesAtBegin) {
-  std::string peer_nodes_str("    127.0.0.1:12345,127.0.0.1:12346");
+  std::string const peer_nodes_str("    127.0.0.1:12345,127.0.0.1:12346");
   std::vector<std::string> processed_peers;
   Gcs_xcom_utils::process_peer_nodes(&peer_nodes_str, processed_peers);
 
@@ -49,7 +50,7 @@ TEST(GcsXComUtils, BuildXcomMemberIdSpacesAtBegin) {
 }
 
 TEST(GcsXComUtils, BuildXcomMemberIdSpacesAtBeginAndEnd) {
-  std::string peer_nodes_str("    127.0.0.1:12345,127.0.0.1:12346      ");
+  std::string const peer_nodes_str("    127.0.0.1:12345,127.0.0.1:12346      ");
   std::vector<std::string> processed_peers;
   Gcs_xcom_utils::process_peer_nodes(&peer_nodes_str, processed_peers);
 
@@ -59,7 +60,8 @@ TEST(GcsXComUtils, BuildXcomMemberIdSpacesAtBeginAndEnd) {
 }
 
 TEST(GcsXComUtils, BuildXcomMemberIdSpacesSpacesEverywhere) {
-  std::string peer_nodes_str(" 127.0.  0.1:12   345,    127.0   .0.1:12346   ");
+  std::string const peer_nodes_str(
+      " 127.0.  0.1:12   345,    127.0   .0.1:12346   ");
   std::vector<std::string> processed_peers;
   Gcs_xcom_utils::process_peer_nodes(&peer_nodes_str, processed_peers);
 
@@ -78,7 +80,7 @@ TEST(GcsXcomProxyImpl, XcomClientSendDataBiggerThanUINT32) {
     is bigger than uint32.
   */
   test_logger.clear_event();
-  bool successful = xcom_proxy.xcom_client_send_data(1ULL << 32, nullptr);
+  bool const successful = xcom_proxy.xcom_client_send_data(1ULL << 32, nullptr);
 
   ASSERT_EQ(successful, false);
 

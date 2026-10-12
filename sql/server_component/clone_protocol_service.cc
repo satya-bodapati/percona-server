@@ -1,15 +1,16 @@
-/*  Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/*  Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License, version 2.0,
     as published by the Free Software Foundation.
 
-    This program is also distributed with certain software (including
+    This program is designed to work with certain software (including
     but not limited to OpenSSL) that is licensed under separate terms,
     as designated in a particular file or component or in included license
     documentation.  The authors of MySQL hereby grant you an additional
     permission to link the program and your derivative works with the
-    separately licensed software that they have included with MySQL.
+    separately licensed software that they have either included with
+    the program or referenced in the documentation.
 
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -244,44 +245,6 @@ DEFINE_METHOD(int, mysql_clone_get_configs,
   return (err);
 }
 
-/**
- Says whether a character is a digit or a dot.
- @param c character
- @return true if c is a digit or a dot, otherwise false
- */
-inline bool is_digit_or_dot(char c) { return std::isdigit(c) || c == '.'; }
-
-/**
- Compares versions, ignoring suffixes, i.e. 8.0.25 should be the same
- as 8.0.25-debug, but 8.0.25 isn't the same as 8.0.251.
- @param ver1 version1 string
- @param ver2 version2 string
- @return true if versions match (ignoring suffixes), false otherwise
- */
-inline bool compare_prefix_version(std::string ver1, std::string ver2) {
-  size_t i;
-  /* we iterate  over both versions */
-  for (i = 0; i < ver1.size() && i < ver2.size(); i++) {
-    if (!is_digit_or_dot(ver1[i])) {
-      /*  If in one version we have something else than digit or dot,
-      we check what's in other version - if we also have a suffix or still
-      a version. */
-      return !is_digit_or_dot(ver2[i]);
-    }
-    /* We still compare version, and have a difference */
-    if (ver1[i] != ver2[i]) return false;
-  }
-  if (i < ver1.size()) {
-    /* we finished iterate over ver2, but still have some digits in ver1 */
-    return !std::isdigit(ver1[i]);
-  }
-  if (i < ver2.size()) {
-    /* we finished iterate over ver1, but still have some digits in ver2 */
-    return !std::isdigit(ver2[i]);
-  }
-  return true;
-}
-
 DEFINE_METHOD(int, mysql_clone_validate_configs,
               (THD * thd, Mysql_Clone_Key_Values &configs)) {
   int last_error = 0;
@@ -312,12 +275,8 @@ DEFINE_METHOD(int, mysql_clone_validate_configs,
     if (config_name.compare("version_compile_os") == 0) {
       critical_error = ER_CLONE_OS;
     } else if (config_name.compare("version") == 0) {
-      /* we want to allow to add some suffix to the version and still match
-      i.e. 8.0.25 should be the same as 8.0.25-debug */
-      if (compare_prefix_version(config_val, donor_val)) {
-        continue;
-      }
-      critical_error = ER_CLONE_DONOR_VERSION;
+      /* Handled in mysql_clone_validate_version */
+      continue;
     } else if (config_name.compare("version_compile_machine") == 0) {
       critical_error = ER_CLONE_PLATFORM;
     }
@@ -335,6 +294,17 @@ DEFINE_METHOD(int, mysql_clone_validate_configs,
     /* Continue and check for all other configuration mismatch. */
   }
   return last_error;
+}
+
+DEFINE_METHOD(int, mysql_clone_validate_version,
+              (const std::string &recipient, const std::string &donor,
+               const bool is_recipient_lts, const bool is_donor_lts)) {
+  if (!are_versions_clone_compatible(recipient, donor, is_recipient_lts,
+                                     is_donor_lts)) {
+    my_error(ER_CLONE_DONOR_VERSION, MYF(0), donor.c_str(), recipient.c_str());
+    return ER_CLONE_DONOR_VERSION;
+  }
+  return 0;
 }
 
 DEFINE_METHOD(MYSQL *, mysql_clone_connect,

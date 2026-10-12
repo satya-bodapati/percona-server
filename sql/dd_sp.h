@@ -1,17 +1,18 @@
 #ifndef DD_SP_INCLUDED
 #define DD_SP_INCLUDED
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -32,12 +33,13 @@ struct st_sp_chistics;
   Method to prepare sp_chistics object using the dd::Routine object read
   from the Data Dictionary.
 
+  @param[in]  thd         Thread object.
   @param[in]  routine     Routine object read from the Data Dictionary.
   @param[out] sp_chistics st_sp_chistics type's object to be prepared from the
                           routine param.
 */
 
-void prepare_sp_chistics_from_dd_routine(const dd::Routine *routine,
+void prepare_sp_chistics_from_dd_routine(THD *thd, const dd::Routine *routine,
                                          st_sp_chistics *sp_chistics);
 
 /**

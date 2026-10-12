@@ -1,15 +1,16 @@
-/* Copyright (c) 2012, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,76 +27,45 @@
 #include "xcom/network/include/network_provider.h"
 #include "xcom/network/network_provider_manager.h"
 
+#ifdef WIN32
+// In OpenSSL before 1.1.0, we need this first.
+#include <winsock2.h>
+#endif  // WIN32
+
+#ifndef _WIN32
+#include <poll.h>
+#endif
+
 #ifndef XCOM_WITHOUT_OPENSSL
-#include <assert.h>
-#include <stdlib.h>
+#include <cassert>
+#include <cstdlib>
 
 #include <openssl/dh.h>
 #include <openssl/opensslv.h>
 #include <openssl/x509v3.h>
 
 #include <my_openssl_fips.h>
+#include <tls_ciphers.h>
 
 #ifndef XCOM_STANDALONE
 #include "my_compiler.h"
 #endif
 
-#include "openssl/engine.h"
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#include <openssl/engine.h>
+#endif /* OPENSSL_VERSION_NUMBER < 0x10100000L */
 
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 #include <openssl/evp.h>
 #include <openssl/provider.h>
 #endif
 
+#include "xcom/retry.h"
 #include "xcom/task_debug.h"
 #include "xcom/x_platform.h"
 
 #define TLS_VERSION_OPTION_SIZE 256
 #define SSL_CIPHER_LIST_SIZE 4096
-
-static const char *tls_ciphers_list =
-    "ECDHE-ECDSA-AES128-GCM-SHA256:"
-    "ECDHE-ECDSA-AES256-GCM-SHA384:"
-    "ECDHE-RSA-AES128-GCM-SHA256:"
-    "ECDHE-RSA-AES256-GCM-SHA384:"
-    "ECDHE-ECDSA-AES128-SHA256:"
-    "ECDHE-RSA-AES128-SHA256:"
-    "ECDHE-ECDSA-AES256-SHA384:"
-    "ECDHE-RSA-AES256-SHA384:"
-    "DHE-RSA-AES128-GCM-SHA256:"
-    "DHE-DSS-AES128-GCM-SHA256:"
-    "DHE-RSA-AES128-SHA256:"
-    "DHE-DSS-AES128-SHA256:"
-    "DHE-DSS-AES256-GCM-SHA384:"
-    "DHE-RSA-AES256-SHA256:"
-    "DHE-DSS-AES256-SHA256:"
-    "ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES128-SHA:"
-    "ECDHE-RSA-AES256-SHA:ECDHE-ECDSA-AES256-SHA:"
-    "DHE-DSS-AES128-SHA:DHE-RSA-AES128-SHA:"
-    "TLS_DHE_DSS_WITH_AES_256_CBC_SHA:DHE-RSA-AES256-SHA:"
-    "AES128-GCM-SHA256:DH-DSS-AES128-GCM-SHA256:"
-    "ECDH-ECDSA-AES128-GCM-SHA256:AES256-GCM-SHA384:"
-    "DH-DSS-AES256-GCM-SHA384:ECDH-ECDSA-AES256-GCM-SHA384:"
-    "AES128-SHA256:DH-DSS-AES128-SHA256:ECDH-ECDSA-AES128-SHA256:AES256-SHA256:"
-    "DH-DSS-AES256-SHA256:ECDH-ECDSA-AES256-SHA384:AES128-SHA:"
-    "DH-DSS-AES128-SHA:ECDH-ECDSA-AES128-SHA:AES256-SHA:"
-    "DH-DSS-AES256-SHA:ECDH-ECDSA-AES256-SHA:DHE-RSA-AES256-GCM-SHA384:"
-    "DH-RSA-AES128-GCM-SHA256:ECDH-RSA-AES128-GCM-SHA256:DH-RSA-AES256-GCM-"
-    "SHA384:"
-    "ECDH-RSA-AES256-GCM-SHA384:DH-RSA-AES128-SHA256:"
-    "ECDH-RSA-AES128-SHA256:DH-RSA-AES256-SHA256:"
-    "ECDH-RSA-AES256-SHA384:ECDHE-RSA-AES128-SHA:"
-    "ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES256-SHA:"
-    "ECDHE-ECDSA-AES256-SHA:DHE-DSS-AES128-SHA:DHE-RSA-AES128-SHA:"
-    "TLS_DHE_DSS_WITH_AES_256_CBC_SHA:DHE-RSA-AES256-SHA:"
-    "AES128-SHA:DH-DSS-AES128-SHA:ECDH-ECDSA-AES128-SHA:AES256-SHA:"
-    "DH-DSS-AES256-SHA:ECDH-ECDSA-AES256-SHA:DH-RSA-AES128-SHA:"
-    "ECDH-RSA-AES128-SHA:DH-RSA-AES256-SHA:ECDH-RSA-AES256-SHA:DES-CBC3-SHA";
-static const char *tls_cipher_blocked =
-    "!aNULL:!eNULL:!EXPORT:!LOW:!MD5:!DES:!RC2:!RC4:!PSK:"
-    "!DHE-DSS-DES-CBC3-SHA:!DHE-RSA-DES-CBC3-SHA:"
-    "!ECDH-RSA-DES-CBC3-SHA:!ECDH-ECDSA-DES-CBC3-SHA:"
-    "!ECDHE-RSA-DES-CBC3-SHA:!ECDHE-ECDSA-DES-CBC3-SHA:";
 
 #if OPENSSL_VERSION_NUMBER < 0x30000000L
 /*
@@ -235,9 +205,10 @@ static int configure_ssl_algorithms(SSL_CTX *ssl_ctx, const char *cipher,
                                     const char *tls_version,
                                     const char *tls_ciphersuites
                                     [[maybe_unused]]) {
+  bool tls_valid_ciphersuite = false;
   long ssl_ctx_options =
       SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1;
-  char cipher_list[SSL_CIPHER_LIST_SIZE] = {0};
+  char tls12_cipher_list[SSL_CIPHER_LIST_SIZE] = {0};
   long ssl_ctx_flags = -1;
 #ifdef HAVE_TLSv13
   int tlsv1_3_enabled = 0;
@@ -269,8 +240,11 @@ static int configure_ssl_algorithms(SSL_CTX *ssl_ctx, const char *cipher,
   if (tlsv1_3_enabled) {
     /* Set OpenSSL TLS v1.3 ciphersuites.
        If the ciphersuites are unspecified, i.e. tls_ciphersuites == NULL, then
-       we use whatever OpenSSL uses by default. Note that an empty list is
+       we use the default list of v1.3 ciphers. Note that an empty list is
        permissible; it disallows all ciphersuites. */
+    if (tls_ciphersuites == nullptr) {
+      tls_ciphersuites = default_tls13_ciphers;
+    }
     if (tls_ciphersuites != nullptr) {
       /*
         Note: if TLSv1.3 is enabled but TLSv1.3 ciphersuite list is empty
@@ -284,6 +258,7 @@ static int configure_ssl_algorithms(SSL_CTX *ssl_ctx, const char *cipher,
             "is not empty");
         return 1;
       }
+      tls_valid_ciphersuite = true;
     }
   } else {
     /* Disable OpenSSL TLS v1.3 ciphersuites. */
@@ -299,14 +274,24 @@ static int configure_ssl_algorithms(SSL_CTX *ssl_ctx, const char *cipher,
     SSL_CTX_set_cipher_list will return 0 if none of the provided
     ciphers could be selected
   */
-  strncat(cipher_list, tls_cipher_blocked, SSL_CIPHER_LIST_SIZE - 1);
+  strncat(tls12_cipher_list, blocked_tls12_ciphers, SSL_CIPHER_LIST_SIZE - 1);
   if (cipher && strlen(cipher) != 0)
-    strncat(cipher_list, cipher, SSL_CIPHER_LIST_SIZE - 1);
-  else
-    strncat(cipher_list, tls_ciphers_list, SSL_CIPHER_LIST_SIZE - 1);
+    strncat(tls12_cipher_list, cipher, SSL_CIPHER_LIST_SIZE - 1);
+  else {
+    strncat(tls12_cipher_list, default_tls12_ciphers, SSL_CIPHER_LIST_SIZE - 1);
+    SSL *ssl =
+        SSL_new(ssl_ctx);  // temporary object just to check client/server
+    if (!SSL_is_server(ssl)) {
+      strcat(tls12_cipher_list, ":");
+      strncat(tls12_cipher_list, additional_client_ciphers,
+              SSL_CIPHER_LIST_SIZE - 1);
+    }
+    SSL_free(ssl);
+  }
 
-  if (SSL_CTX_set_cipher_list(ssl_ctx, cipher_list) == 0) {
-    G_ERROR("Failed to set the list of chipers.");
+  if (SSL_CTX_set_cipher_list(ssl_ctx, tls12_cipher_list) == 0 &&
+      !tls_valid_ciphersuite) {
+    G_ERROR("Failed to set the list of ciphers.");
     return 1;
   }
 
@@ -464,7 +449,7 @@ static int init_ssl(const char *key_file, const char *cert_file,
   return 0;
 
 error:
-  G_MESSAGE("Error initializing SSL");
+  G_INFO("Error initializing SSL");
   return 1;
 }
 
@@ -548,7 +533,7 @@ error:
 
 void Xcom_network_provider_ssl_library::xcom_cleanup_ssl() {
 #if OPENSSL_VERSION_NUMBER < 0x10100000L
-  ERR_remove_thread_state(0);
+  ERR_remove_thread_state(nullptr);
 #endif /* OPENSSL_VERSION_NUMBER < 0x10100000L */
 }
 
@@ -568,7 +553,9 @@ void Xcom_network_provider_ssl_library::xcom_destroy_ssl() {
   }
 
 #if defined(WITH_SSL_STANDALONE)
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
   ENGINE_cleanup();
+#endif /* OPENSSL_VERSION_NUMBER < 0x10100000L */
   EVP_cleanup();
   CRYPTO_cleanup_all_ex_data();
   ERR_free_strings();
@@ -584,7 +571,7 @@ int Xcom_network_provider_ssl_library::ssl_verify_server_cert(
   X509 *server_cert = nullptr;
   int ret_validation = 1;
 
-#if !(OPENSSL_VERSION_NUMBER >= 0x10002000L || defined(HAVE_WOLFSSL))
+#if !(OPENSSL_VERSION_NUMBER >= 0x10002000L)
   int cn_loc = -1;
   char *cn = NULL;
   ASN1_STRING *cn_asn1 = NULL;
@@ -622,7 +609,7 @@ int Xcom_network_provider_ssl_library::ssl_verify_server_cert(
   /* Use OpenSSL certificate matching functions instead of our own if we
      have OpenSSL. The X509_check_* functions return 1 on success.
   */
-#if OPENSSL_VERSION_NUMBER >= 0x10002000L || defined(HAVE_WOLFSSL)
+#if OPENSSL_VERSION_NUMBER >= 0x10002000L
   if ((X509_check_host(server_cert, server_hostname, strlen(server_hostname), 0,
                        nullptr) != 1) &&
       (X509_check_ip_asc(server_cert, server_hostname, 0) != 1)) {
@@ -693,3 +680,75 @@ error:
 #else
 int avoid_compile_warning = 1;
 #endif
+
+std::pair<SSL *, int> Xcom_network_provider_ssl_library::timed_connect_ssl_msec(
+    int fd, SSL_CTX *outgoing_ctx, const std::string &hostname, int timeout) {
+  result ret;
+  int return_value_error = 0;
+
+  /* Set non-blocking */
+  if (unblock_fd(fd) < 0) {
+    return std::make_pair(nullptr, 1);
+  }
+
+  SSL *ssl_fd = SSL_new(outgoing_ctx);
+  G_DEBUG("Trying to connect using SSL.")
+
+  SSL_set_fd(ssl_fd, fd);
+  ERR_clear_error();
+  ret.val = SSL_connect(ssl_fd);
+  ret.funerr = to_ssl_err(SSL_get_error(ssl_fd, ret.val));
+
+  // Start the timer for the global timeout verification
+  auto start = std::chrono::steady_clock::now();
+
+  // Lambda function to verify the timeout.
+  auto has_timed_out = [&]() {
+    auto end = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+               .count() > timeout;
+  };
+
+  bool poll_error = false;
+  while (ret.val != SSL_SUCCESS && can_retry(ret.funerr) && !has_timed_out()) {
+    if (poll_error =
+            Xcom_network_provider_library::poll_for_timed_connects(fd, timeout);
+        poll_error) {
+      break;
+    }
+
+    SET_OS_ERR(0);
+    ERR_clear_error();
+    ret.val = SSL_connect(ssl_fd);
+    ret.funerr = to_ssl_err(SSL_get_error(ssl_fd, ret.val));
+  }
+
+  if (ret.val != SSL_SUCCESS || poll_error) {
+    if (!can_retry(ret.funerr)) {  // Do not emit an error, if it is a WANT_READ
+                                   // or a WANT_WRITE, because it is not an
+                                   // actionable item
+      G_INFO("Error connecting using SSL %d %d", ret.funerr,
+             SSL_get_error(ssl_fd, ret.val));
+    }
+    task_dump_err(ret.funerr);
+
+    return_value_error = 1;
+  } else if (ssl_verify_server_cert(ssl_fd, hostname.c_str())) {
+    G_INFO("Error validating certificate and peer from %s.", hostname.c_str());
+    task_dump_err(ret.funerr);
+
+    return_value_error = 1;
+  }
+
+  /* Set blocking */
+  SET_OS_ERR(0);
+  if (block_fd(fd) < 0) {
+    G_ERROR(
+        "Unable to set socket back to blocking state. "
+        "(socket=%d, error=%d).",
+        fd, GET_OS_ERR);
+    return_value_error = 1;
+  }
+
+  return std::make_pair(ssl_fd, return_value_error);
+}

@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -28,8 +29,7 @@
 #include <string>
 #include "pfs_string.h"
 
-namespace keyring_common {
-namespace data {
+namespace keyring_common::data {
 
 /** Data types */
 using Type = pfs_string;
@@ -64,6 +64,10 @@ struct Sensitive_data {
   std::size_t size() const { return data.size(); }
   std::size_t length() const { return data.size(); }
 
+  void mask() {
+    data.replace(0, data.size(), data.size(), '*');
+  }
+
   pfs_string decode() const {
     auto ret = data;
     const auto key =
@@ -96,9 +100,9 @@ struct Sensitive_data {
 
 class Data {
  public:
-  Data(const Sensitive_data data, Type type);
+  Data(const Sensitive_data &data, Type type);
   Data();
-  Data(Type type);
+  explicit Data(Type type);
   Data(const Data &src);
   Data(Data &&src) noexcept;
   Data &operator=(const Data &src);
@@ -106,7 +110,7 @@ class Data {
 
   virtual ~Data();
 
-  virtual const Data get_data() const;
+  virtual Data get_data() const;
 
   Sensitive_data data() const;
 
@@ -132,7 +136,6 @@ class Data {
   bool valid_{false};
 };
 
-}  // namespace data
-}  // namespace keyring_common
+}  // namespace keyring_common::data
 
 #endif  // !DATA_INCLUDED

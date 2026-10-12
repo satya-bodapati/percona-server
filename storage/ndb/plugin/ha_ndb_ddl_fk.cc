@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -1406,8 +1407,14 @@ int ha_ndbcluster::create_fks(THD *thd, Ndb *ndb, const char *dbname,
     }
 
     if (!parent_primary_key && parent_index == nullptr) {
-      my_error(ER_FK_NO_INDEX_PARENT, MYF(0), fk->name.str ? fk->name.str : "",
-               parent_tab.get_table()->getName());
+      if (thd->variables.restrict_fk_on_non_standard_key)
+        my_error(ER_FK_NO_UNIQUE_INDEX_PARENT, MYF(0),
+                 fk->name.str ? fk->name.str : "",
+                 parent_tab.get_table()->getName());
+      else
+        my_error(ER_FK_NO_INDEX_PARENT, MYF(0),
+                 fk->name.str ? fk->name.str : "",
+                 parent_tab.get_table()->getName());
       return err_default;
     }
 
@@ -1607,8 +1614,12 @@ int ha_ndbcluster::copy_fk_for_offline_alter(THD *thd, Ndb *ndb,
         const NDBINDEX *idx =
             find_matching_index(dict, dsttab.get_table(), cols, parent_primary);
         if (!parent_primary && idx == nullptr) {
-          my_error(ER_FK_NO_INDEX_PARENT, MYF(0), fk.getName(),
-                   dsttab.get_table()->getName());
+          if (thd->variables.restrict_fk_on_non_standard_key)
+            my_error(ER_FK_NO_UNIQUE_INDEX_PARENT, MYF(0), fk.getName(),
+                     dsttab.get_table()->getName());
+          else
+            my_error(ER_FK_NO_INDEX_PARENT, MYF(0), fk.getName(),
+                     dsttab.get_table()->getName());
           return HA_ERR_CANNOT_ADD_FOREIGN;
         }
         fk.setParent(*dsttab.get_table(), idx, cols);
@@ -1693,7 +1704,12 @@ int ha_ndbcluster::inplace__drop_fks(THD *thd, Ndb *ndb, const char *dbname,
   }
 
   for (const Alter_drop *drop_item : thd->lex->alter_info->drop_list) {
-    if (drop_item->type != Alter_drop::FOREIGN_KEY) continue;
+    DBUG_PRINT("info", ("drop_item: name=%s type=%u", drop_item->name,
+                        drop_item->type));
+    const bool skip =
+        drop_item->type != Alter_drop::FOREIGN_KEY &&   // drop fk
+        drop_item->type != Alter_drop::ANY_CONSTRAINT;  // drop constraint
+    if (skip) continue;
 
     bool found = false;
     for (unsigned i = 0; i < obj_list.count; i++) {
@@ -1859,7 +1875,12 @@ int ha_ndbcluster::recreate_fk_for_truncate(THD *thd, Ndb *ndb,
 
       if (!parent_primary_key && parent_index == nullptr) {
         assert(false);
-        my_error(ER_FK_NO_INDEX_PARENT, MYF(0), fk.getName(), table->getName());
+        if (thd->variables.restrict_fk_on_non_standard_key)
+          my_error(ER_FK_NO_UNIQUE_INDEX_PARENT, MYF(0), fk.getName(),
+                   table->getName());
+        else
+          my_error(ER_FK_NO_INDEX_PARENT, MYF(0), fk.getName(),
+                   table->getName());
         return err_default;
       }
 
@@ -1939,17 +1960,21 @@ bool ha_ndbcluster::has_fk_dependency(
         DBUG_PRINT("error", ("Could not find the listed fk '%s'", e.name));
         continue;
       }
-      for (unsigned j = 0; j < fk.getParentColumnCount(); j++) {
-        const NdbDictionary::Column *col =
-            m_table->getColumn(fk.getParentColumnNo(j));
-        DBUG_PRINT("col", ("[%u] %s", i, col->getName()));
-        if (col == column) return true;
+      if (fk.isParentTable(m_table)) {
+        for (unsigned j = 0; j < fk.getParentColumnCount(); j++) {
+          const NdbDictionary::Column *col =
+              m_table->getColumn(fk.getParentColumnNo(j));
+          DBUG_PRINT("col", ("[%u] %s", j, col->getName()));
+          if (col == column) return true;
+        }
       }
-      for (unsigned j = 0; j < fk.getChildColumnCount(); j++) {
-        const NdbDictionary::Column *col =
-            m_table->getColumn(fk.getChildColumnNo(j));
-        DBUG_PRINT("col", ("[%u] %s", i, col->getName()));
-        if (col == column) return true;
+      if (fk.isChildTable(m_table)) {
+        for (unsigned j = 0; j < fk.getChildColumnCount(); j++) {
+          const NdbDictionary::Column *col =
+              m_table->getColumn(fk.getChildColumnNo(j));
+          DBUG_PRINT("col", ("[%u] %s", j, col->getName()));
+          if (col == column) return true;
+        }
       }
     }
   }

@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -51,7 +52,7 @@ PSI_thread *thd_get_psi(THD *) { return nullptr; }  // dummy
 
 class Keyring_encryption_test_setup {
  public:
-  Keyring_encryption_test_setup(char *progname) {
+  explicit Keyring_encryption_test_setup(char *progname) {
     MY_INIT(progname);
     init_components_subsystem();
   }
@@ -64,13 +65,13 @@ class Keyring_encryption_test_setup {
 
 int main(int argc, char **argv) {
   /* Initialization */
-  Keyring_encryption_test_setup keyring_encryption_test_setup(argv[0]);
+  Keyring_encryption_test_setup const keyring_encryption_test_setup(argv[0]);
   DBUG_TRACE;
   DBUG_PROCESS(argv[0]);
-  int exit_status = EXIT_FAILURE;
+  constexpr int exit_status = EXIT_FAILURE;
 
   int exit_code;
-  if (process_options(&argc, &argv, exit_code) == false) {
+  if (!process_options(&argc, &argv, exit_code)) {
     std::cerr << "Error processing options" << std::endl;
     return exit_status;
   }

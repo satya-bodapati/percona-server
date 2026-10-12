@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2001, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2001, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -35,24 +36,44 @@
 
 #include "my_config.h"
 
-#include <errno.h>
+#ifdef HAVE_ARPA_INET_H
+#include <arpa/inet.h>  // for htonl
+#endif
+#include <assert.h>  // for assert
+#ifdef HAVE_NETINET_IN_H
+#include <netinet/in.h>  // for sockaddr_in
+#endif
+#include <openssl/evp.h>
+#include <openssl/ssl.h>  // for SSL_pending
+#include <signal.h>       // for pthread_...
+#include <string.h>       // for memcpy
+#ifdef HAVE_SYS_SOCKET_H
+#include <sys/socket.h>  // for AF_INET
+#endif
 #include <fcntl.h>
 #include <sys/types.h>
-#include <time.h>
+
 #ifndef _WIN32
 #include <netdb.h>
 #endif
-#include <stdio.h>
-#include <stdlib.h>
 
 #include <algorithm>
+#include <atomic>  // for atomic_flag
+#include <cerrno>
+#include <cstdio>  // IWYU pragma: keep snprintf
+#include <cstdlib>
+#include <ctime>
+#include <optional>  // for optional
 
 #include "m_string.h"
-#include "my_compiler.h"
 #include "my_dbug.h"
 #include "my_inttypes.h"
 #include "my_io.h"
 #include "my_macros.h"
+#include "my_sys.h"
+#include "mysql/my_loglevel.h"
+#include "mysql/psi/mysql_socket.h"
+#include "mysql/psi/psi_socket.h"
 #include "mysql/service_mysql_alloc.h"
 #include "mysys_err.h"
 #include "template_utils.h"
@@ -73,7 +94,7 @@
 #include <sys/ioctl.h>
 #endif
 
-#include "mysql/psi/mysql_socket.h"
+struct timespec;
 
 /* Network io wait callbacks  for threadpool */
 static void (*before_io_wait)(void) = nullptr;
@@ -177,7 +198,7 @@ size_t vio_read(Vio *vio, uchar *buf, size_t size) {
 
   while ((ret = mysql_socket_recv(vio->mysql_socket, (SOCKBUF_T *)buf, size,
                                   flags)) == -1) {
-    int error = socket_errno;
+    int const error = socket_errno;
 
     /* Error encountered that is unrelated to blocking; percolate it up. */
 #if SOCKET_EAGAIN == SOCKET_EWOULDBLOCK
@@ -211,7 +232,7 @@ size_t vio_read_buff(Vio *vio, uchar *buf, size_t size) {
   size_t rc;
 #define VIO_UNBUFFERED_READ_MIN_SIZE 2048
   DBUG_TRACE;
-  DBUG_PRINT("enter", ("sd: %d  buf: %p  size: %u",
+  DBUG_PRINT("enter", ("sd: " MY_SOCKET_FMT "  buf: %p  size: %u",
                        mysql_socket_getfd(vio->mysql_socket), buf, (uint)size));
 
   if (vio->read_pos < vio->read_end) {
@@ -252,7 +273,7 @@ size_t vio_write(Vio *vio, const uchar *buf, size_t size) {
   while ((ret = mysql_socket_send(vio->mysql_socket,
                                   pointer_cast<const SOCKBUF_T *>(buf), size,
                                   flags)) == -1) {
-    int error = socket_errno;
+    int const error = socket_errno;
 
     /* The operation would block? */
 #if SOCKET_EAGAIN == SOCKET_EWOULDBLOCK
@@ -424,7 +445,7 @@ int vio_socket_timeout(Vio *vio, uint which [[maybe_unused]], bool old_mode) {
 #endif
   {
     /* Deduce what should be the new blocking mode of the socket. */
-    bool new_mode = vio->write_timeout < 0 && vio->read_timeout < 0;
+    bool const new_mode = vio->write_timeout < 0 && vio->read_timeout < 0;
 
     /* If necessary, update the blocking mode. */
     if (new_mode != old_mode) ret = vio_set_blocking(vio, new_mode);
@@ -469,7 +490,7 @@ int vio_keepalive(Vio *vio, bool set_keep_alive) {
   uint opt = 0;
   DBUG_TRACE;
   DBUG_PRINT("enter",
-             ("sd: %d  set_keep_alive: %d",
+             ("sd: " MY_SOCKET_FMT "  set_keep_alive: %d",
               mysql_socket_getfd(vio->mysql_socket), (int)set_keep_alive));
   if (vio->type != VIO_TYPE_NAMEDPIPE) {
     if (set_keep_alive) opt = 1;
@@ -537,7 +558,7 @@ int vio_shutdown(Vio *vio, int how) {
     assert(vio->thread_id.has_value());
     if (vio->thread_id.value() != 0 && vio->poll_shutdown_flag.test_and_set()) {
       // Send signal to wake up from poll.
-      int en = pthread_kill(vio->thread_id.value(), SIGALRM);
+      int const en = pthread_kill(vio->thread_id.value(), SIGALRM);
       if (en == 0)
         vio_wait_until_woken(vio);
       else {
@@ -663,7 +684,7 @@ static void vio_get_normalized_ip(const struct sockaddr *src, size_t src_length,
     case AF_INET6: {
       const auto *src_addr6 = (const struct sockaddr_in6 *)src;
       const struct in6_addr *src_ip6 = &(src_addr6->sin6_addr);
-      const uint32 *src_ip6_int32 =
+      const auto *src_ip6_int32 =
           pointer_cast<const uint32 *>(src_ip6->s6_addr);
 
       if (IN6_IS_ADDR_V4MAPPED(src_ip6) || IN6_IS_ADDR_V4COMPAT(src_ip6)) {
@@ -1066,7 +1087,7 @@ bool vio_peer_addr(Vio *vio, char *ip_buffer, uint16 *port,
 */
 // WL#4896: Not covered
 static bool socket_peek_read(Vio *vio, uint *bytes) {
-  my_socket sd = mysql_socket_getfd(vio->mysql_socket);
+  my_socket const sd = mysql_socket_getfd(vio->mysql_socket);
 #if defined(_WIN32)
   u_long len;
   if (ioctlsocket(sd, FIONREAD, &len)) return true;
@@ -1134,7 +1155,7 @@ int vio_io_wait(Vio *vio, enum enum_vio_io_event event, int timeout) {
   short revents = 0;
 #endif
   struct pollfd pfd;
-  my_socket sd = mysql_socket_getfd(vio->mysql_socket);
+  my_socket const sd = mysql_socket_getfd(vio->mysql_socket);
   MYSQL_SOCKET_WAIT_VARIABLES(locker, state) /* no ';' */
   DBUG_TRACE;
 
@@ -1440,7 +1461,7 @@ bool vio_socket_connect(Vio *vio, struct sockaddr *addr, socklen_t len,
       (vio_io_wait(vio, VIO_IO_EVENT_CONNECT, timeout) == 1)) {
     int error;
     IF_WIN(int, socklen_t) optlen = sizeof(error);
-    IF_WIN(char, void) *optval = (IF_WIN(char, void) *)&error;
+    auto *optval = (IF_WIN(char, void) *)&error;
 
     /*
       At this point, we know that something happened on the socket.

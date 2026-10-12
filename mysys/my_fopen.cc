@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -29,18 +30,17 @@
   @file mysys/my_fopen.cc
 */
 
-#include <errno.h>
 #include <fcntl.h>
-#include <stdio.h>
-#include <sys/types.h>
+#include <cassert>
+#include <cerrno>
+#include <cstdio>
+#include <string>
 
 #include "my_dbug.h"
 #include "my_inttypes.h"
 #include "my_io.h"
 #include "my_sys.h"
 #include "my_thread_local.h"
-#include "mysql/psi/mysql_mutex.h"
-#include "mysql/service_mysql_alloc.h"
 #include "mysys/mysys_priv.h"
 #include "mysys_err.h"
 
@@ -186,7 +186,7 @@ int my_fclose(FILE *stream, myf MyFlags) {
 
   int err = -1;
 #ifndef _WIN32
-  err = mysys_priv::RetryOnEintr([&]() { return fclose(stream); }, -1);
+  err = fclose(stream);
 #else
   err = my_win_fclose(stream);
 #endif

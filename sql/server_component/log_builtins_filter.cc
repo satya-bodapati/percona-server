@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -91,6 +92,10 @@
 
 static bool filter_inited = false;
 static ulong filter_rule_uuid = 0;
+// The number of built-in rules in the log_filter_builtin_rules ruleset. This
+// counter should be incremented for each built-in rule we add in
+// log_builtins_filter_set_defaults().
+static uint32 builtin_count = 0;
 
 log_filter_ruleset *log_filter_builtin_rules = nullptr;
 log_filter_tag rule_tag_builtin = {"log_filter_builtin", nullptr};
@@ -288,11 +293,12 @@ static void log_builtins_filter_ruleset_free(log_filter_ruleset **ruleset) {
 }
 
 /**
-  Defaults for when the configuration engine isn't loaded;
-  aim for 5.7 compatibility.
+  Defaults for when the configuration engine isn't loaded; aim for 5.7
+  compatibility.
 */
 static void log_builtins_filter_set_defaults(log_filter_ruleset *ruleset) {
   log_filter_rule *r;
+  builtin_count = 0;
 
   assert(ruleset != nullptr);
 
@@ -307,6 +313,7 @@ static void log_builtins_filter_set_defaults(log_filter_ruleset *ruleset) {
   r->verb = LOG_FILTER_RETURN;
 
   ruleset->count++;
+  builtin_count++;
 
   // sys_var: log_error_verbosity
   r = log_builtins_filter_rule_init(ruleset);
@@ -317,6 +324,7 @@ static void log_builtins_filter_set_defaults(log_filter_ruleset *ruleset) {
   r->verb = LOG_FILTER_DROP;
 
   ruleset->count++;
+  builtin_count++;
 
   // example: remove all source-line log items
   // these are not desirable by default, only while debugging.
@@ -327,6 +335,33 @@ static void log_builtins_filter_set_defaults(log_filter_ruleset *ruleset) {
   // aux optional
 
   ruleset->count++;
+  builtin_count++;
+
+  // Log throttle lambda: Emit <err_code> max <per_minute> times per minute.
+  auto throttle_per_minute = [&](const int err_code, const int per_minute) {
+    log_filter_rule *tr = log_builtins_filter_rule_init(ruleset);
+    tr->verb = LOG_FILTER_THROTTLE;
+    tr->cond = LOG_FILTER_COND_EQ;
+    log_item_set(&tr->match, LOG_ITEM_SQL_ERRCODE)->data_integer = err_code;
+    log_item_set(&tr->aux, LOG_ITEM_GEN_INTEGER)->data_integer = per_minute;
+    ruleset->count++;
+    builtin_count++;
+  };
+
+  // Throttle background histogram update errors: Once per minute.
+  throttle_per_minute(ER_BACKGROUND_HISTOGRAM_UPDATE, 1);
+
+  // Throttle thread pool errors: Ten times every minute.
+  throttle_per_minute(ER_THREAD_POOL_ALLOC_FAILED, 10);
+  throttle_per_minute(ER_THREAD_POOL_SOCKETPAIR_FAILED, 10);
+  throttle_per_minute(ER_THREAD_POOL_LOW_LEVEL_INIT_FAILED, 10);
+  throttle_per_minute(ER_THREAD_POOL_LOW_LEVEL_ARM_FAILED, 10);
+  throttle_per_minute(ER_THREAD_POOL_LOW_LEVEL_ARM_FAILED_WITH_ERRNO, 10);
+  throttle_per_minute(ER_THREAD_POOL_CREATE_THREAD_FAILED, 10);
+  throttle_per_minute(ER_THREAD_POOL_LOW_LEVEL_INIT_ALLOC_FAILED, 10);
+  throttle_per_minute(ER_THREAD_POOL_CREATE_EPOLL_FAILED, 10);
+  throttle_per_minute(ER_THREAD_POOL_EPOLL_WAIT_ERROR, 10);
+  throttle_per_minute(ER_THREAD_POOL_POLL_WAIT_ERROR, 10);
 }
 
 /**
@@ -371,8 +406,8 @@ int log_builtins_filter_init() {
     filter_inited = true;
 
     return 0;
-  } else
-    return -2;
+  }
+  return -2;
 }
 
 /**
@@ -403,8 +438,9 @@ static log_filter_apply log_filter_try_apply(log_line *ll, int ln,
 
     case LOG_FILTER_THROTTLE: {
       const ulonglong now = my_micro_time();
-      const ulong rate = (ulong)(
-          (r->aux.data.data_integer < 0) ? 0 : r->aux.data.data_integer);
+      const auto rate =
+          (ulong)((r->aux.data.data_integer < 0) ? 0
+                                                 : r->aux.data.data_integer);
       ulong suppressed = 0;
       ulong matches;
 
@@ -541,11 +577,9 @@ static log_filter_match log_filter_try_match(log_item *li,
     return (ri->cond == LOG_FILTER_COND_ABSENT) ? LOG_FILTER_MATCH_SUCCESS
                                                 : LOG_FILTER_MATCH_UNSATISFIED;
 
-  else if (ri->cond == LOG_FILTER_COND_PRESENT)
-    return LOG_FILTER_MATCH_SUCCESS;
+  if (ri->cond == LOG_FILTER_COND_PRESENT) return LOG_FILTER_MATCH_SUCCESS;
 
-  else if (ri->cond == LOG_FILTER_COND_ABSENT)
-    return LOG_FILTER_MATCH_UNSATISFIED;
+  if (ri->cond == LOG_FILTER_COND_ABSENT) return LOG_FILTER_MATCH_UNSATISFIED;
 
   // item class on left hand side / right hand side
   rc = log_item_string_class(ri->match.item_class);
@@ -709,8 +743,8 @@ int log_builtins_filter_run(log_filter_ruleset *ruleset, log_line *ll) {
       if (r->verb == LOG_FILTER_CHAIN_AND)  // AND -- test next condition
         continue;                           // proceed with next cond
 
-      else if (r->verb == LOG_FILTER_CHAIN_OR)  // OR -- one match is enough
-      {  // skip any other conditions in OR
+      if (r->verb == LOG_FILTER_CHAIN_OR)  // OR -- one match is enough
+      {                                    // skip any other conditions in OR
         while (ruleset->rule[rn].verb == LOG_FILTER_CHAIN_OR) rn++;
         r = &ruleset->rule[rn];
       }
@@ -913,7 +947,7 @@ int log_builtins_filter_parse_suppression_list(char *list, bool update) {
     end = start;
 
     // find first non-token character (i.e. first character after token)
-    while ((*end != '\0') && !(isspace(*end) || (*end == ','))) end++;
+    while ((*end != '\0') && !isspace(*end) && (*end != ',')) end++;
 
     // no token found, end loop
     if ((len = (end - start)) == 0) {
@@ -942,9 +976,9 @@ int log_builtins_filter_parse_suppression_list(char *list, bool update) {
     else
       errcode = mysql_symbol_to_errno(symbol);
 
-    if (!(((errcode >= EE_ERROR_FIRST) && (errcode <= EE_ERROR_LAST)) ||
-          ((errcode >= ER_SERVER_RANGE_START) &&
-           (mysql_errno_to_builtin(errcode) >= 0))))
+    if (((errcode < EE_ERROR_FIRST) || (errcode > EE_ERROR_LAST)) &&
+        ((errcode < ER_SERVER_RANGE_START) ||
+         (mysql_errno_to_builtin(errcode) < 0)))
       goto fail;
 
     if (update) {
@@ -969,15 +1003,15 @@ int log_builtins_filter_parse_suppression_list(char *list, bool update) {
     }
 
     /*
-      During check-phase, make sure the requested number of error-codes
-      (and therefore, the requested number of DROP rules) will fit into
-      the built-in rule-set.  Reserve one rule for --log-error-verbosity
-      and one for our "ERROR and SYSTEM always pass" shortcut.
-      Without this check, we'd still catch the (attempted) overflow during
-      assignment, but if we do it during the check phase, we protect the
+      During check-phase, make sure the requested number of error-codes (and
+      therefore, the requested number of DROP rules) will fit into the built-in
+      rule-set. Without this check, we'd still catch the (attempted) overflow
+      during assignment, but if we do it during the check phase, we protect the
       integrity of both the current rule-set and the variable's value.
     */
-    else if (++list_len >= (log_filter_builtin_rules->alloc - 2))
+    else if (uint32_t const max_user_rules_in_list =
+                 log_filter_builtin_rules->alloc - builtin_count;
+             ++list_len > max_user_rules_in_list)
       goto fail;
 
     start = end;

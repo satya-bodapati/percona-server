@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2001, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2001, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,10 +27,11 @@
 
 #include <mysql_version.h>
 #include <mysqld_error.h>
-#include <stdlib.h>
+#include <cstdlib>
 
-#include "caching_sha2_passwordopt-vars.h"
-#include "client/client_priv.h"
+#include "client/include/caching_sha2_passwordopt-vars.h"
+#include "client/include/client_priv.h"
+#include "client/include/sslopt-vars.h"
 #include "compression.h"
 #include "my_alloc.h"
 #include "my_dbug.h"
@@ -40,7 +42,6 @@
 #include "mysql/strings/m_ctype.h"
 #include "nulls.h"
 #include "print_version.h"
-#include "sslopt-vars.h"
 #include "typelib.h"
 #include "welcome_copyright_notice.h" /* ORACLE_WELCOME_COPYRIGHT_NOTICE */
 
@@ -80,7 +81,7 @@ static char *shared_memory_base_name = nullptr;
 static uint opt_protocol = 0;
 static char *opt_bind_addr = nullptr;
 
-#include "multi_factor_passwordopt-vars.h"
+#include "client/include/multi_factor_passwordopt-vars.h"
 
 static struct my_option my_long_options[] = {
     {"all-databases", 'A',
@@ -185,7 +186,7 @@ static struct my_option my_long_options[] = {
      nullptr, 0, nullptr},
     {"optimize", 'o', "Optimize table.", nullptr, nullptr, nullptr, GET_NO_ARG,
      NO_ARG, 0, 0, 0, nullptr, 0, nullptr},
-#include "multi_factor_passwordopt-longopts.h"
+#include "client/include/multi_factor_passwordopt-longopts.h"
 #ifdef _WIN32
     {"pipe", 'W', "Use named pipes to connect to server.", nullptr, nullptr,
      nullptr, GET_NO_ARG, NO_ARG, 0, 0, 0, nullptr, 0, nullptr},
@@ -230,8 +231,8 @@ static struct my_option my_long_options[] = {
     {"socket", 'S', "The socket file to use for connection.",
      &opt_mysql_unix_port, &opt_mysql_unix_port, nullptr, GET_STR, REQUIRED_ARG,
      0, 0, 0, nullptr, 0, nullptr},
-#include "caching_sha2_passwordopt-longopts.h"
-#include "sslopt-longopts.h"
+#include "client/include/caching_sha2_passwordopt-longopts.h"
+#include "client/include/sslopt-longopts.h"
 
     {"tables", OPT_TABLES, "Overrides option --databases (-B).", nullptr,
      nullptr, nullptr, GET_NO_ARG, NO_ARG, 0, 0, 0, nullptr, 0, nullptr},
@@ -263,7 +264,7 @@ static struct my_option my_long_options[] = {
 
 static const char *load_default_groups[] = {"mysqlcheck", "client", nullptr};
 
-static void usage(void);
+static void usage();
 static int get_options(int *argc, char ***argv, MEM_ROOT *alloc);
 static int dbConnect(char *host, char *user);
 static void dbDisconnect(char *host);
@@ -272,7 +273,7 @@ static void safe_exit(int error);
 
 static int what_to_do = 0;
 
-static void usage(void) {
+static void usage() {
   print_version();
   puts(ORACLE_WELCOME_COPYRIGHT_NOTICE("2000"));
   puts(
@@ -346,7 +347,7 @@ static bool get_one_option(int optid, const struct my_option *opt,
       DBUG_PUSH(argument ? argument : "d:t:o");
       debug_check_flag = true;
       break;
-#include "sslopt-case.h"
+#include "client/include/sslopt-case.h"
 
     case OPT_TABLES:
       opt_databases = false;
@@ -420,7 +421,7 @@ static int get_options(int *argc, char ***argv, MEM_ROOT *alloc) {
     else
       default_charset = MYSQL_AUTODETECT_CHARSET_NAME;
   }
-  if (strcmp(default_charset, MYSQL_AUTODETECT_CHARSET_NAME) &&
+  if (strcmp(default_charset, MYSQL_AUTODETECT_CHARSET_NAME) != 0 &&
       !get_charset_by_csname(default_charset, MY_CS_PRIMARY, MYF(MY_WME))) {
     printf("Unsupported character set: %s\n", default_charset);
     return 1;
@@ -494,7 +495,6 @@ static int dbConnect(char *host, char *user) {
     DBerror(&mysql_connection, "when trying to connect");
     return 1;
   }
-  mysql_connection.reconnect = true;
   return 0;
 } /* dbConnect */
 
@@ -533,7 +533,7 @@ int main(int argc, char **argv) {
   // Sun Studio does not work with range constructor from char** to string.
   vector<string> conv;
   conv.reserve(argc);
-  for (int i = 0; i < argc; i++) conv.push_back(argv[i]);
+  for (int i = 0; i < argc; i++) conv.emplace_back(argv[i]);
 
   mysql_check(sock, what_to_do, opt_alldbs, opt_check_only_changed,
               opt_extended, opt_databases, opt_fast, opt_medium_check,

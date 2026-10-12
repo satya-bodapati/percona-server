@@ -1,15 +1,16 @@
-/* Copyright (c) 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,9 +22,14 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include "sql/join_optimizer/relational_expression.h"
+
+#include <algorithm>
+#include <cassert>
+#include <sstream>
+
+#include "my_alloc.h"
 #include "sql/item_cmpfunc.h"
-#include "sql/join_optimizer/estimate_selectivity.h"
-#include "sql/sql_array.h"
+#include "template_utils.h"
 
 namespace {
 
@@ -62,7 +68,7 @@ class StringJoiner final {
 
 }  // Anonymous namespace.
 
-void CompanionSet::AddEquijoinCondition(THD *thd, const Item_func_eq &eq) {
+void CompanionSet::AddEquijoinCondition(THD *thd, const Item_eq_base &eq) {
   const auto contains_field = [](const EqualTerm *term, const Field *field) {
     return std::find(term->fields->cbegin(), term->fields->cend(), field) !=
            term->fields->cend();
@@ -201,8 +207,8 @@ CompanionSet *CompanionSetCollection::FindInternal(table_map tables) const {
   CompanionSet *ret = nullptr;
   for (int table_num : BitsSetIn(tables & ~PSEUDO_TABLE_BITS)) {
     if (m_table_num_to_companion_set[table_num] == nullptr) {
-      // This table is not part of a companion set.
-      assert(false);
+      // This table is not part of an equijoin, but a lateral reference (to a
+      // preceding table in the FROM-clause).
       return nullptr;
     }
     if (ret == nullptr) {

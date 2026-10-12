@@ -15,6 +15,7 @@
 
 #include "components/audit_log_filter/audit_keyring.h"
 
+#define ALLOW_COMPONENT_INCLUDE // for plugin.h
 #include "components/audit_log_filter/audit_error_log.h"
 #include "components/audit_log_filter/log_writer/file_handle.h"
 #include "components/audit_log_filter/sys_vars.h"
@@ -189,8 +190,8 @@ bool get_keyring_options(const std::string &options_id,
   });
 
   if (reader_object == nullptr) {
-    LogComponentErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG,
-                    "No data found for key '%s'", options_id.c_str());
+    LogComponentErr(ERROR_LEVEL, ER_AUDIT_KEYRING_KEY_NOT_FOUND,
+                    options_id.c_str());
     return false;
   }
 
@@ -451,8 +452,7 @@ void prune_encryption_options(
     }
 
     if (writer_srv->remove(el.data_id.c_str(), kAuthId)) {
-      LogComponentErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG,
-                      "Failed to remove options with ID: %s",
+      LogComponentErr(ERROR_LEVEL, ER_AUDIT_KEYRING_OPTIONS_REMOVE_FAILURE,
                       el.data_id.c_str());
     }
   }

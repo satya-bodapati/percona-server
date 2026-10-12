@@ -1,15 +1,16 @@
-/* Copyright (c) 2008, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -55,27 +56,25 @@ struct THR_LOCK;
 /** A row of PERFORMANCE_SCHEMA.SOCKET_INSTANCES. */
 struct row_socket_instances {
   /** Column EVENT_NAME. */
-  const char *m_event_name;
+  const char *m_event_name{nullptr};
   /** Length in bytes of @c m_event_name. */
-  uint m_event_name_length;
+  uint m_event_name_length{0};
   /** Column OBJECT_INSTANCE_BEGIN */
-  const void *m_identity;
+  const void *m_identity{nullptr};
   /** Column THREAD_ID */
-  ulonglong m_thread_id;
+  ulonglong m_thread_id{0};
   /** True if thread_is is set */
-  bool m_thread_id_set;
+  bool m_thread_id_set{false};
   /** Column SOCKET_ID */
-  uint m_fd;
+  uint m_fd{0};
   /** Socket ip address, IPV4 or IPV6 */
   char m_ip[INET6_ADDRSTRLEN + 1];
   /** Length in bytes of @c m_ip. */
-  uint m_ip_length;
+  uint m_ip_length{0};
   /** Column PORT */
-  uint m_port;
+  uint m_port{0};
   /** Socket state: ACTIVE or IDLE */
   PSI_socket_state m_state;
-
-  row_socket_instances() { m_thread_id_set = false; }
 };
 
 class PFS_index_socket_instances : public PFS_engine_index {

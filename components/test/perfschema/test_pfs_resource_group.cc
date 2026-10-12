@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,8 +25,8 @@
 #include <mysql/components/service_implementation.h>
 #include <mysql/components/services/pfs_notification.h>
 #include <mysql/components/services/pfs_resource_group.h>
-#include <string.h>
 #include <atomic>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -81,7 +82,7 @@ static int handle = 0;
 static std::ofstream log_outfile;
 static std::string separator("===========================");
 
-void print_log(std::string msg) {
+void print_log(const std::string &msg) {
   log_outfile << msg << std::endl;
   fprintf(stderr, "%s\n", msg.c_str());
   fflush(stderr);
@@ -89,8 +90,8 @@ void print_log(std::string msg) {
 
 void print_event(const Event_info &event, std::string &msg) {
   PSI_thread_attrs thread_attrs = event.m_attrs;
-  event_type type = event.m_type;
-  std::string event_type_name = event_name[type];
+  event_type const type = event.m_type;
+  std::string const event_type_name = event_name[type];
   std::string group, user, host;
 
   if (thread_attrs.m_groupname_length > 0)
@@ -146,7 +147,7 @@ void session_event(const Event_info &event) {
 
   switch (event.m_type) {
     case SESSION_CONNECT: {
-      std::string user_name(attrs.m_username, attrs.m_username_length);
+      std::string const user_name(attrs.m_username, attrs.m_username_length);
 
       /* Test API based on user name */
       auto thread_id = attrs.m_thread_internal_id;
@@ -160,7 +161,7 @@ void session_event(const Event_info &event) {
         thread_id = 9999;
         group_name = "PFS_INVALID_THREAD_ID";
       } else if (user_name == "PFS_TEST_INVALID_GROUP_NAME") {
-        int invalid_size = sizeof(PSI_thread_attrs::m_groupname) + 10;
+        int const invalid_size = sizeof(PSI_thread_attrs::m_groupname) + 10;
         group_name = std::string(invalid_size, 'X');
       } else {
         group_name = "PFS_VALID_GROUP_NAME";
@@ -183,7 +184,7 @@ void session_event(const Event_info &event) {
     }
 
     case SESSION_DISCONNECT: {
-      std::string user_name(attrs.m_username, attrs.m_username_length);
+      std::string const user_name(attrs.m_username, attrs.m_username_length);
       if (user_name == "PFS_DEBUG_MODE") {
         debug_mode = false;
         print_log("DEBUG MODE OFF");
@@ -213,7 +214,7 @@ mysql_service_status_t test_pfs_resource_group_init() {
   callbacks.session_connect = &session_connect_callback;
   callbacks.session_disconnect = &session_disconnect_callback;
 
-  std::string group_name("PFS_CURRENT_THREAD");
+  std::string const group_name("PFS_CURRENT_THREAD");
   std::string msg("set_thread_resource_group(");
 
   handle = mysql_service_pfs_notification_v3->register_notification(&callbacks,

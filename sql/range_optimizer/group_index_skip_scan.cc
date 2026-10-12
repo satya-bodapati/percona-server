@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -139,7 +140,7 @@ GroupIndexSkipScanIterator::~GroupIndexSkipScanIterator() {
     true if error
 */
 
-bool GroupIndexSkipScanIterator::Init() {
+bool GroupIndexSkipScanIterator::DoInit() {
   empty_record(table());
   m_seen_eof = false;
 
@@ -196,7 +197,7 @@ bool GroupIndexSkipScanIterator::Init() {
   Get the next key containing the MIN and/or MAX key for the next group.
 
   SYNOPSIS
-    GroupIndexSkipScanIterator::Read()
+    GroupIndexSkipScanIterator::DoRead()
 
   DESCRIPTION
     The method finds the next subsequent group of records that satisfies the
@@ -216,7 +217,7 @@ bool GroupIndexSkipScanIterator::Init() {
   RETURN
     See RowIterator::Read()
  */
-int GroupIndexSkipScanIterator::Read() {
+int GroupIndexSkipScanIterator::DoRead() {
   if (m_seen_eof) {
     return -1;
   }
@@ -238,7 +239,8 @@ int GroupIndexSkipScanIterator::Read() {
     */
     if (!result) {
       is_last_prefix =
-          key_cmp(index_info->key_part, last_prefix, group_prefix_len);
+          key_cmp(index_info->key_part, last_prefix, group_prefix_len,
+                  /*is_reverse_multi_valued_index_scan=*/false);
       assert(is_last_prefix <= 0);
     } else {
       if (result == HA_ERR_KEY_NOT_FOUND) continue;
@@ -407,7 +409,8 @@ int GroupIndexSkipScanIterator::next_min() {
         For this add a new member 'this->next_group_prefix'.
       */
       if (!result) {
-        if (key_cmp(index_info->key_part, group_prefix, real_prefix_len))
+        if (key_cmp(index_info->key_part, group_prefix, real_prefix_len,
+                    /*is_reverse_multi_valued_index_scan=*/false))
           key_restore(table()->record[0], key_buf, index_info, 0);
       } else if (result == HA_ERR_KEY_NOT_FOUND || result == HA_ERR_END_OF_FILE)
         result = 0; /* There is a result in any case. */
@@ -542,6 +545,7 @@ int GroupIndexSkipScanIterator::get_next_prefix(uint prefix_length,
     if (last_prefix_range != nullptr) {
       /* Read the next record in the same range with prefix after cur_prefix. */
       assert(cur_prefix != nullptr);
+      table()->file->set_end_range(nullptr, handler::RANGE_SCAN_ASC);
       int result = table()->file->ha_index_read_map(
           table()->record[0], cur_prefix, keypart_map, HA_READ_AFTER_KEY);
       if (result || last_prefix_range->max_keypart_map == 0) {
@@ -736,11 +740,10 @@ static ha_rkey_function get_search_mode(QUICK_RANGE *cur_range, bool is_asc,
       if (cur_range->flag & NO_MIN_RANGE)
         return HA_READ_PREFIX_LAST;  // 4
       else
-        return (cur_range->flag & EQ_RANGE)
-                   ? HA_READ_KEY_EXACT  // 5
-                   : (cur_range->flag & NEAR_MIN)
-                         ? HA_READ_BEFORE_KEY            // 6
-                         : HA_READ_PREFIX_LAST_OR_PREV;  // 7
+        return (cur_range->flag & EQ_RANGE) ? HA_READ_KEY_EXACT  // 5
+               : (cur_range->flag & NEAR_MIN)
+                   ? HA_READ_BEFORE_KEY            // 6
+                   : HA_READ_PREFIX_LAST_OR_PREV;  // 7
     }
   }
 
@@ -749,19 +752,17 @@ static ha_rkey_function get_search_mode(QUICK_RANGE *cur_range, bool is_asc,
     if (cur_range->flag & NO_MAX_RANGE)
       return HA_READ_PREFIX_LAST;  // 8
     else
-      return (cur_range->flag & EQ_RANGE)
-                 ? HA_READ_KEY_EXACT  // 9
-                 : (cur_range->flag & NEAR_MAX)
-                       ? HA_READ_BEFORE_KEY            // 10
-                       : HA_READ_PREFIX_LAST_OR_PREV;  // 11
-  } else {  // key parts is descending
+      return (cur_range->flag & EQ_RANGE) ? HA_READ_KEY_EXACT  // 9
+             : (cur_range->flag & NEAR_MAX)
+                 ? HA_READ_BEFORE_KEY            // 10
+                 : HA_READ_PREFIX_LAST_OR_PREV;  // 11
+  } else {                                       // key parts is descending
     if (cur_range->flag & NO_MAX_RANGE)
       return HA_READ_KEY_EXACT;  // 12a
     else
-      return (cur_range->flag & EQ_RANGE)
-                 ? HA_READ_KEY_EXACT                                    // 12b
-                 : (cur_range->flag & NEAR_MAX) ? HA_READ_AFTER_KEY     // 13
-                                                : HA_READ_KEY_OR_NEXT;  // 14
+      return (cur_range->flag & EQ_RANGE)   ? HA_READ_KEY_EXACT     // 12b
+             : (cur_range->flag & NEAR_MAX) ? HA_READ_AFTER_KEY     // 13
+                                            : HA_READ_KEY_OR_NEXT;  // 14
   }
 }
 
@@ -804,7 +805,9 @@ int GroupIndexSkipScanIterator::next_min_in_range() {
     */
     if (it != min_max_ranges->begin() && !(cur_range->flag & NO_MAX_RANGE) &&
         (key_cmp(min_max_arg_part, (const uchar *)cur_range->max_key,
-                 min_max_arg_len) == (min_max_keypart_asc ? 1 : -1)) &&
+                 min_max_arg_len,
+                 /*is_reverse_multi_valued_index_scan=*/false) ==
+         (min_max_keypart_asc ? 1 : -1)) &&
         !result)
       continue;
 
@@ -850,7 +853,8 @@ int GroupIndexSkipScanIterator::next_min_in_range() {
     }
 
     /* Check if record belongs to the current group. */
-    if (key_cmp(index_info->key_part, group_prefix, real_prefix_len)) {
+    if (key_cmp(index_info->key_part, group_prefix, real_prefix_len,
+                /*is_reverse_multi_valued_index_scan=*/false)) {
       result = HA_ERR_KEY_NOT_FOUND;
       continue;
     }
@@ -864,7 +868,8 @@ int GroupIndexSkipScanIterator::next_min_in_range() {
              cur_range->max_length);
       /* Compare the found key with max_key. */
       int cmp_res = key_cmp(index_info->key_part, max_key,
-                            real_prefix_len + min_max_arg_len);
+                            real_prefix_len + min_max_arg_len,
+                            /*is_reverse_multi_valued_index_scan=*/false);
       /*
         The key is outside of the range if:
         the interval is open and the key is equal to the maximum boundary
@@ -931,7 +936,9 @@ int GroupIndexSkipScanIterator::next_max_in_range() {
     */
     if (it != min_max_ranges->end() && !(cur_range->flag & NO_MIN_RANGE) &&
         (key_cmp(min_max_arg_part, (const uchar *)cur_range->min_key,
-                 min_max_arg_len) == (min_max_keypart_asc ? -1 : 1)) &&
+                 min_max_arg_len,
+                 /*is_reverse_multi_valued_index_scan=*/false) ==
+         (min_max_keypart_asc ? -1 : 1)) &&
         !result)
       continue;
 
@@ -965,7 +972,8 @@ int GroupIndexSkipScanIterator::next_max_in_range() {
       return 0; /* No need to perform the checks below for equal keys. */
 
     /* Check if record belongs to the current group. */
-    if (key_cmp(index_info->key_part, group_prefix, real_prefix_len)) {
+    if (key_cmp(index_info->key_part, group_prefix, real_prefix_len,
+                /*is_reverse_multi_valued_index_scan=*/false)) {
       result = HA_ERR_KEY_NOT_FOUND;
       continue;  // Row not found
     }
@@ -979,7 +987,8 @@ int GroupIndexSkipScanIterator::next_max_in_range() {
              cur_range->min_length);
       /* Compare the found key with min_key. */
       int cmp_res = key_cmp(index_info->key_part, min_key,
-                            real_prefix_len + min_max_arg_len);
+                            real_prefix_len + min_max_arg_len,
+                            /*is_reverse_multi_valued_index_scan=*/false);
       /*
         The key is outside of the range if:
         the interval is open and the key is equal to the minimum boundary

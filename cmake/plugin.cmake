@@ -1,15 +1,16 @@
-# Copyright (c) 2009, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2009, 2026, Oracle and/or its affiliates.
 # 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -151,21 +152,16 @@ MACRO(MYSQL_ADD_PLUGIN plugin_arg)
 
     ADD_DEPENDENCIES(${target} GenError ${ARG_DEPENDENCIES})
     IF(COMPRESS_DEBUG_SECTIONS)
-      MY_TARGET_LINK_OPTIONS(${target}
-        "LINKER:--compress-debug-sections=zlib")
+      TARGET_LINK_OPTIONS(${target} PRIVATE
+        LINKER:--compress-debug-sections=zlib)
     ENDIF()
     
     # Update mysqld dependencies
     SET (MYSQLD_STATIC_PLUGIN_LIBS ${MYSQLD_STATIC_PLUGIN_LIBS} 
       ${target} ${ARG_LINK_LIBRARIES} CACHE INTERNAL "" FORCE)
 
-    IF(ARG_MANDATORY)
-      SET(${with_var} ON CACHE INTERNAL
-        "Link ${plugin} statically to the server" FORCE)
-    ELSE()	
-      SET(${with_var} ON CACHE BOOL
-        "Link ${plugin} statically to the server" FORCE)
-    ENDIF()
+    SET(${with_var} ON CACHE BOOL
+      "Link ${plugin} statically to the server" FORCE)
 
     SET(THIS_PLUGIN_REFERENCE " builtin_${target}_plugin,")
     SET(PLUGINS_IN_THIS_SCOPE
@@ -190,11 +186,11 @@ MACRO(MYSQL_ADD_PLUGIN plugin_arg)
       ENDIF()
     ENDIF()
 
-    ADD_VERSION_INFO(${target} MODULE SOURCES)
+    ADD_VERSION_INFO(MODULE SOURCES "")
     ADD_LIBRARY(${target} MODULE ${SOURCES}) 
     IF(COMPRESS_DEBUG_SECTIONS)
-      MY_TARGET_LINK_OPTIONS(${target}
-        "LINKER:--compress-debug-sections=zlib")
+      TARGET_LINK_OPTIONS(${target} PRIVATE
+        LINKER:--compress-debug-sections=zlib)
     ENDIF()
     IF(ARG_SERVER_AND_CLIENT)
       SET_TARGET_PROPERTIES (${target} PROPERTIES
@@ -214,7 +210,7 @@ MACRO(MYSQL_ADD_PLUGIN plugin_arg)
     ENDIF()
 
     IF(ARG_NO_UNDEFINED AND LINK_FLAG_NO_UNDEFINED)
-      MY_TARGET_LINK_OPTIONS(${target} "${LINK_FLAG_NO_UNDEFINED}")
+      TARGET_LINK_OPTIONS(${target} PRIVATE ${LINK_FLAG_NO_UNDEFINED})
     ENDIF()
 
     IF(WIN32_CLANG AND WITH_ASAN)
@@ -253,8 +249,9 @@ MACRO(MYSQL_ADD_PLUGIN plugin_arg)
       LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/plugin_output_directory
       )
 
-    # For APPLE: adjust path dependecy for SSL shared libraries.
+    # For APPLE: adjust path dependecy for SSL/KERBEROS shared libraries.
     SET_PATH_TO_CUSTOM_SSL_FOR_APPLE(${target})
+    SET_PATH_TO_CUSTOM_KERBEROS_FOR_APPLE(${target})
 
     # Install dynamic library
     IF(NOT ARG_SKIP_INSTALL)
@@ -304,7 +301,7 @@ MACRO(MYSQL_ADD_PLUGIN plugin_arg)
   ENDIF()
 
   # Add SYSTEM INCLUDE_DIRECTORIES
-  IF(ARG_SYSTEM_INCLUDE_DIRECTORIES)
+  IF(BUILD_PLUGIN AND ARG_SYSTEM_INCLUDE_DIRECTORIES)
     TARGET_INCLUDE_DIRECTORIES(${target} SYSTEM PRIVATE
       ${ARG_SYSTEM_INCLUDE_DIRECTORIES})
   ENDIF()
@@ -314,7 +311,7 @@ MACRO(MYSQL_ADD_PLUGIN plugin_arg)
   ENDIF()
 
   IF(BUILD_PLUGIN AND WIN32 AND ARG_WIN_DEF_FILE)
-    MY_TARGET_LINK_OPTIONS(${target} "/DEF:${ARG_WIN_DEF_FILE}")
+    TARGET_LINK_OPTIONS(${target} PRIVATE /DEF:${ARG_WIN_DEF_FILE})
   ENDIF()
 
   IF(BUILD_PLUGIN AND ARG_VISIBILITY_HIDDEN AND UNIX)
@@ -326,8 +323,13 @@ MACRO(MYSQL_ADD_PLUGIN plugin_arg)
       DEPENDS ${target})
   ENDIF()
 
+  IF(BUILD_PLUGIN AND ARG_MODULE_ONLY AND APPLE)
+    TARGET_LINK_OPTIONS(${target} PRIVATE LINKER:-no_warn_duplicate_libraries)
+  ENDIF()
+
   IF(BUILD_PLUGIN)
     ADD_DEPENDENCIES(plugin_all ${target})
+    TARGET_COMPILE_FEATURES(${target} PUBLIC cxx_std_20)
   ENDIF()
 
 ENDMACRO(MYSQL_ADD_PLUGIN)

@@ -1,15 +1,16 @@
-/* Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -33,6 +34,7 @@
 
 #include "map_helpers.h"  // mem_root_unordered_map
 #include "my_alloc.h"     // MEM_ROOT
+#include "my_compiler.h"
 
 #include "sql/histograms/histogram.h"
 #include "sql/psi_memory_key.h"
@@ -42,7 +44,7 @@
 
 Table_histograms *Table_histograms::create(PSI_memory_key psi_key) noexcept {
   MEM_ROOT mem_root(psi_key, 512);
-  Table_histograms *table_histograms = new (&mem_root) Table_histograms();
+  auto *table_histograms = new (&mem_root) Table_histograms();
   if (table_histograms == nullptr) return nullptr;
 
   // Move the MEM_ROOT that we used to allocate the object onto the object.
@@ -77,7 +79,7 @@ bool Table_histograms::insert_histogram(
   const histograms::Histogram *histogram_copy = histogram->clone(&m_mem_root);
   if (histogram_copy == nullptr) return true;
   try {
-    bool insertion_happened =
+    bool const insertion_happened =
         m_histograms->insert(std::make_pair(field_index, histogram_copy))
             .second;
     if (!insertion_happened) return true;  // Duplicate key.
@@ -119,7 +121,7 @@ const Table_histograms *Table_histograms_collection::acquire() {
 
 void Table_histograms_collection::release(const Table_histograms *histograms) {
   mysql_mutex_assert_owner(&LOCK_open);
-  size_t idx = histograms->get_index();
+  size_t const idx = histograms->get_index();
   assert(m_table_histograms[idx] == histograms);
   m_table_histograms[idx]->decrement_reference_counter();
   if (m_table_histograms[idx]->reference_count() == 0 &&
@@ -128,6 +130,8 @@ void Table_histograms_collection::release(const Table_histograms *histograms) {
   }
 }
 
+MY_COMPILER_DIAGNOSTIC_PUSH()
+MY_COMPILER_MSVC_DIAGNOSTIC_IGNORE(28020)
 bool Table_histograms_collection::insert(Table_histograms *histograms) {
   size_t i = 0;
   while (m_table_histograms[i] != nullptr) {
@@ -145,6 +149,7 @@ bool Table_histograms_collection::insert(Table_histograms *histograms) {
   m_current_index = i;
   return false;
 }
+MY_COMPILER_DIAGNOSTIC_POP()
 
 size_t Table_histograms_collection::size() const {
   size_t size = 0;

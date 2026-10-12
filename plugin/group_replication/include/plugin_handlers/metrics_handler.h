@@ -1,15 +1,16 @@
-/* Copyright (c) 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -166,7 +167,7 @@ class Metrics_handler {
   /**
     Number of times certification garbage collection did run.
 
-    @return number of transactions.
+    @return number of garbage collect runs.
   */
   uint64_t get_certification_garbage_collector_count() const;
 
@@ -230,6 +231,54 @@ class Metrics_handler {
   void add_garbage_collection_run(const uint64_t begin_timestamp,
                                   const uint64_t end_timestamp);
 
+  /**
+    Number of times flow control did run.
+
+    @return number of transactions throttled.
+  */
+  uint64_t get_flow_control_throttle_count() const;
+
+  /**
+    Total time flow control delayed transactions.
+
+    @return time flow control delayed transactions
+  */
+  uint64_t get_flow_control_throttle_time() const;
+
+  /**
+    Flow control is active.
+
+    @return number of transactions being throttled.
+  */
+  uint64_t get_flow_control_throttle_active() const;
+
+  /**
+    Flow control last timestamp of a transaction being throttled.
+
+    @return microseconds since epoch
+  */
+  uint64_t get_flow_control_throttle_last_throttle_timestamp() const;
+
+  /**
+    Update state of flow control.
+    @see Metrics_handler::get_current_time()
+
+    @param begin_timestamp  time on which the operation began.
+    @param end_timestamp    time on which the operation ended.
+  */
+  void add_flow_control_throttle_stats(const uint64_t begin_timestamp,
+                                       const uint64_t end_timestamp);
+
+  /**
+    Increment number of transactions currently throttled.
+  */
+  void increment_flow_control_throttle();
+
+  /**
+    Decrement number of transactions currently throttled.
+  */
+  void decrement_flow_control_throttle();
+
  private:
   /**
     Account message sent.
@@ -266,6 +315,12 @@ class Metrics_handler {
 
   std::atomic<uint64_t> m_certification_garbage_collector_count{0};
   std::atomic<uint64_t> m_certification_garbage_collector_time_sum{0};
+
+  std::atomic<uint64_t> m_flow_control_count{0};
+  std::atomic<uint64_t> m_flow_control_throttle_active{0};
+  std::atomic<uint64_t> m_flow_control_throttle_time{0};
+  /* Number of microsends since the Epoch*/
+  std::atomic<uint64_t> m_flow_control_throttle_last_throttle_timestamp{0};
 };
 
 #endif /* METRICS_HANDLER_INCLUDED */

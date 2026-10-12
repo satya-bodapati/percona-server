@@ -6,7 +6,6 @@
 #
 optimize table mysql.user;
 insert ignore mysql.user (user,plugin) values ('foo','bar'),('bar','bar'),('baz','bar');
-flush privileges;
 
 --replace_result $MASTER_MYSOCK MASTER_SOCKET $MASTER_MYPORT MASTER_PORT
 --error ER_ACCESS_DENIED_ERROR
@@ -25,12 +24,8 @@ change_user u1;
 
 --error ER_ACCESS_DENIED_ERROR
 change_user u2;
---enable_reconnect
 
 --error ER_ACCESS_DENIED_ERROR
 change_user u2,password;
 
 delete from mysql.user where plugin = 'bar';
-flush privileges;
-
-

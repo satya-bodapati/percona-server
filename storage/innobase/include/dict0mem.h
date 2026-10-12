@@ -1,18 +1,19 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2026, Oracle and/or its affiliates.
 Copyright (c) 2012, Facebook Inc.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -42,6 +43,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #endif /* UNIV_COMPILE_TEST_FUNCS || UNIV_HOTBACKUP */
 #include "btr0types.h"
 #include "data0type.h"
+#include "db0err.h"
 #include "dict0types.h"
 #include "mem0mem.h"
 #include "rem0types.h"
@@ -71,6 +73,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "sql/table.h"
 
 #include <algorithm>
+#include <atomic>
 #include <iterator>
 #include <memory> /* std::unique_ptr */
 #include <set>
@@ -109,9 +112,11 @@ constexpr uint32_t DICT_VIRTUAL = 128;
 constexpr uint32_t DICT_SDI = 256;
 /** Multi-value index */
 constexpr uint32_t DICT_MULTI_VALUE = 512;
+/** Vector index */
+constexpr uint32_t DICT_VECTOR = 1024;
 
 /** number of bits used for SYS_INDEXES.TYPE */
-constexpr uint32_t DICT_IT_BITS = 10;
+constexpr uint32_t DICT_IT_BITS = 11;
 /** @} */
 
 #if 0                         /* not implemented, retained for history */
@@ -260,7 +265,7 @@ ROW_FORMAT=REDUNDANT.  InnoDB engines do not check these flags
 for unknown bits in order to protect backward incompatibility. */
 /** @{ */
 /** Total number of bits in table->flags2. */
-constexpr uint32_t DICT_TF2_BITS = 11;
+constexpr uint32_t DICT_TF2_BITS = 12;
 constexpr uint32_t DICT_TF2_UNUSED_BIT_MASK = ~0U << DICT_TF2_BITS;
 constexpr uint32_t DICT_TF2_BIT_MASK = ~DICT_TF2_UNUSED_BIT_MASK;
 
@@ -284,6 +289,12 @@ constexpr uint32_t DICT_TF2_USE_FILE_PER_TABLE = 16;
 /** Set when we discard/detach the tablespace */
 constexpr uint32_t DICT_TF2_DISCARDED = 32;
 
+/** The table has an auto-added hidden percona_vec_aux_id column (BIGINT
+UNSIGNED NOT NULL). It exists exactly while the table has a vector (HNSW) index:
+the first ADD VECTOR INDEX rebuilds the table to add it, and dropping the last
+one rebuilds the table without it. */
+constexpr uint32_t DICT_TF2_HAS_VEC_AUX_COL = 64;
+
 /** Intrinsic table bit
 Intrinsic table is table created internally by MySQL modules viz. Optimizer,
 FTS, etc.... Intrinsic table has all the properties of the normal table except
@@ -298,6 +309,11 @@ constexpr uint32_t DICT_TF2_AUX = 512;
 
 /** Table is opened by resurrected trx during crash recovery. */
 constexpr uint32_t DICT_TF2_RESURRECT_PREPARED = 1024;
+
+/** Vector auxiliary hidden table bit. Parallels DICT_TF2_AUX (FTS),
+but vector aux tables must remain distinguishable so handlers that
+truly need "FTS only" semantics aren't fooled by a vec aux's flag. */
+constexpr uint32_t DICT_TF2_VEC_AUX = 2048;
 /** @} */
 
 /** Tables could be chained together with Foreign key constraint. When
@@ -315,11 +331,6 @@ such cascading deletes/updates allowed. When exceeded, the delete from
 parent table will fail, and user has to drop excessive foreign constraint
 before proceeds. */
 constexpr uint32_t FK_MAX_CASCADE_DEL = 15;
-
-/** Maximum number of rows version allowed when columns are added/dropped
-INSTANTly. After this limit is reached, any attempt to do ADD/DROP INSTANT
-column will result in error. */
-const uint8_t MAX_ROW_VERSION = 64;
 
 /** Adds a virtual column definition to a table.
 @param[in,out]  table           table
@@ -423,10 +434,10 @@ reasonably unique temporary file name.
 char *dict_mem_create_temporary_tablename(mem_heap_t *heap, const char *dbtab,
                                           table_id_t id);
 
-static inline bool is_valid_row_version(const uint8_t version) {
+static inline bool is_valid_row_version(const row_version_t version) {
   /* NOTE : 0 is also a valid row versions for rows which are inserted after
   upgrading from earlier INSTANT implemenation */
-  if (version <= MAX_ROW_VERSION) {
+  if (std::cmp_less_equal(version, MAX_ROW_VERSION)) {
     return true;
   }
 
@@ -544,10 +555,10 @@ struct dict_col_t {
   uint32_t phy_pos{UINT32_UNDEFINED};
 
   /* Row version in which this column was added INSTANTly to the table */
-  uint8_t version_added{UINT8_UNDEFINED};
+  row_version_t version_added{INVALID_ROW_VERSION};
 
   /* Row version in which this column was dropped INSTANTly from the table */
-  uint8_t version_dropped{UINT8_UNDEFINED};
+  row_version_t version_dropped{INVALID_ROW_VERSION};
 
  public:
   /* If column prefix is there on row. */
@@ -582,19 +593,19 @@ struct dict_col_t {
   void set_phy_pos(uint32_t pos) { phy_pos = pos; }
 
   bool is_instant_added() const {
-    if (version_added != UINT8_UNDEFINED && version_added > 0) {
+    if (version_added != INVALID_ROW_VERSION && version_added > 0) {
       return true;
     }
     return false;
   }
 
-  uint8_t get_version_added() const {
+  row_version_t get_version_added() const {
     ut_ad(is_instant_added());
     return version_added;
   }
 
-  void set_version_added(uint8_t version) {
-    ut_ad(version == UINT8_UNDEFINED || is_valid_row_version(version));
+  void set_version_added(row_version_t version) {
+    ut_ad(version == INVALID_ROW_VERSION || is_valid_row_version(version));
     version_added = version;
   }
 
@@ -611,19 +622,19 @@ struct dict_col_t {
   }
 
   bool is_instant_dropped() const {
-    if (version_dropped != UINT8_UNDEFINED && version_dropped > 0) {
+    if (version_dropped != INVALID_ROW_VERSION && version_dropped > 0) {
       return true;
     }
     return false;
   }
 
-  uint8_t get_version_dropped() const {
+  row_version_t get_version_dropped() const {
     ut_ad(is_instant_dropped());
     return version_dropped;
   }
 
-  void set_version_dropped(uint8_t version) {
-    ut_ad(version == UINT8_UNDEFINED || is_valid_row_version(version));
+  void set_version_dropped(row_version_t version) {
+    ut_ad(version == INVALID_ROW_VERSION || is_valid_row_version(version));
     version_dropped = version;
   }
 
@@ -736,7 +747,7 @@ struct dict_col_t {
   /** Check if column is dropped before the given version.
   @param[in]    version row version
   @return true if the column is dropped before or in the version. */
-  bool is_dropped_in_or_before(uint8_t version) const {
+  bool is_dropped_in_or_before(row_version_t version) const {
     ut_ad(is_valid_row_version(version));
 
     if (!is_instant_dropped()) {
@@ -749,7 +760,7 @@ struct dict_col_t {
   /** Check if column is added after the current version.
   @param[in]    version row version
   @return true if column is added after the current row version. */
-  bool is_added_after(uint8_t version) const {
+  bool is_added_after(row_version_t version) const {
     ut_ad(is_valid_row_version(version));
 
     if (!is_instant_added()) {
@@ -762,7 +773,7 @@ struct dict_col_t {
   /** Check if a column is visible in given version.
   @param[in]      version         row version
   return true if column is visible in version. */
-  bool is_visible_in_version(uint8_t version) const {
+  bool is_visible_in_version(row_version_t version) const {
     ut_ad(is_valid_row_version(version));
     return (!is_added_after(version) && !is_dropped_in_or_before(version));
   }
@@ -774,8 +785,8 @@ struct dict_col_t {
   bool assert_equal(const dtype_t *type) const {
     ut_ad(type);
 
-    ut_ad(mtype == type->mtype);
-    ut_ad(prtype == type->prtype);
+    ut_ad_eq(mtype, type->mtype);
+    ut_ad_eq((prtype | DATA_VIRTUAL), (type->prtype | DATA_VIRTUAL));
     // ut_ad(col->len == type->len);
 #ifndef UNIV_HOTBACKUP
     ut_ad(mbminmaxlen == type->mbminmaxlen);
@@ -1036,6 +1047,31 @@ class last_ops_cur_t {
   uint32_t mtr_records;
 };
 
+/** Data structure storing index statistics for query optimization. */
+struct dict_index_stats_t {
+#ifndef UNIV_HOTBACKUP
+  /** approximate number of different key values for this index, for each
+  n-column prefix where 1 <= n <= dict_get_n_unique(index) (the array is
+  indexed from 0 to n_uniq-1); we periodically calculate new estimates */
+  uint64_t *n_diff_key_vals;
+
+  /** number of pages that were sampled  to calculate each of
+  n_diff_key_vals[], e.g. stat_n_sample_sizes[3] pages were sampled to get
+  the number n_diff_key_vals[3]. */
+  uint64_t *n_sample_sizes;
+
+  /* approximate number of non-null key values for this index, for each column
+  where 1 <= n <= dict_get_n_unique(index) (the array is indexed from 0 to
+  n_uniq-1); This is used when innodb_stats_method is "nulls_ignored". */
+  uint64_t *n_non_null_key_vals;
+
+  /** approximate index size in database pages */
+  ulint index_size;
+#endif /* !UNIV_HOTBACKUP */
+  /** approximate number of leaf pages in the index tree */
+  ulint n_leaf_pages;
+};
+
 /** "GEN_CLUST_INDEX" is the name reserved for InnoDB default
 system clustered index when there is no primary key. */
 const char innobase_index_reserve_name[] = "GEN_CLUST_INDEX";
@@ -1054,6 +1090,8 @@ constexpr uint32_t MAX_KEY_LENGTH_BITS = 12;
 
 /** Data structure for an index.  Most fields will be
 initialized to 0, NULL or false in dict_mem_index_create(). */
+struct Vec_runtime;
+
 struct dict_index_t {
   /** id of the index */
   space_index_t id;
@@ -1196,30 +1234,12 @@ struct dict_index_t {
   /** the log of modifications during online index creation;
   valid when online_status is ONLINE_INDEX_CREATION */
   row_log_t *online_log;
+#endif /* !UNIV_HOTBACKUP */
 
   /*----------------------*/
   /** Statistics for query optimization */
   /** @{ */
-  /** approximate number of different key values for this index, for each
-  n-column prefix where 1 <= n <= dict_get_n_unique(index) (the array is
-  indexed from 0 to n_uniq-1); we periodically calculate new estimates */
-  uint64_t *stat_n_diff_key_vals;
-
-  /** number of pages that were sampled  to calculate each of
-  stat_n_diff_key_vals[], e.g. stat_n_sample_sizes[3] pages were sampled to get
-  the number stat_n_diff_key_vals[3]. */
-  uint64_t *stat_n_sample_sizes;
-
-  /* approximate number of non-null key values for this index, for each column
-  where 1 <= n <= dict_get_n_unique(index) (the array is indexed from 0 to
-  n_uniq-1); This is used when innodb_stats_method is "nulls_ignored". */
-  uint64_t *stat_n_non_null_key_vals;
-
-  /** approximate index size in database pages */
-  ulint stat_index_size;
-#endif /* !UNIV_HOTBACKUP */
-  /** approximate number of leaf pages in the index tree */
-  ulint stat_n_leaf_pages;
+  dict_index_stats_t stats;
   /** @} */
 
   /** cache the last insert position. Currently limited to auto-generated
@@ -1240,6 +1260,26 @@ struct dict_index_t {
 
   /** tracking all R-Tree search cursors */
   rtr_info_track_t *rtr_track;
+
+  /** In-memory state for an open vector index: the HNSW graph, its arena,
+  the persistor, and the parameters read back from the DD. nullptr until
+  something first opens the index, and nullptr for every non-vector index.
+
+  Raw pointer on purpose. This struct is never constructed or destructed -
+  the memory is zeroed and dict_mem_fill_index_struct() stands in for a
+  constructor - so the zeroing gives us a null start for free, and
+  dict_mem_index_free() releases it by hand, as it already does for
+  fields_array. */
+  Vec_runtime *vec;
+
+  /** Why `vec` above is not there, when it is not. vec_runtime_open()
+  records its reason here, because opening the table must not fail for a
+  vector index that cannot be built - and a statement that needs the
+  index has to fail with something better than silence.
+
+  DB_ERROR_UNSET while no open has failed: it is 0, so the zeroing gives
+  that for free too. */
+  dberr_t vec_open_err;
 
   /** id of the transaction that created this index, or 0 if the index existed
   when InnoDB was started up */
@@ -1331,6 +1371,17 @@ struct dict_index_t {
     ut_ad(magic_n == DICT_INDEX_MAGIC_N);
 
     return (type & DICT_MULTI_VALUE);
+  }
+
+  /**
+    Check whether the index is a vector index.
+
+    @return true if the index is a vector index, false otherwise
+  */
+  [[nodiscard]] bool is_vector() const {
+    ut_ad(magic_n == DICT_INDEX_MAGIC_N);
+
+    return (type & DICT_VECTOR);
   }
 
   /** Returns the minimum data size of an index record.
@@ -1444,7 +1495,7 @@ struct dict_index_t {
   void create_nullables(uint32_t current_row_version);
 
   /** Return nullable in a specific row version */
-  uint32_t get_nullable_in_version(uint8_t version) const {
+  uint32_t get_nullable_in_version(row_version_t version) const {
     ut_ad(is_valid_row_version(version));
 
     return nullables[version];
@@ -1538,9 +1589,9 @@ struct dict_index_t {
     return get_field(pos)->get_phy_pos();
   }
 
-  uint16_t get_field_phy_pos(ulint pos, uint8_t version) const {
+  uint16_t get_field_phy_pos(ulint pos, row_version_t version) const {
     uint16_t phy_pos = get_field(pos)->get_phy_pos();
-    if (version == UINT8_UNDEFINED) {
+    if (version == INVALID_ROW_VERSION) {
       return phy_pos;
     }
 
@@ -1644,6 +1695,10 @@ struct dict_index_t {
   /** Get the space id of the tablespace to which this index belongs.
   @return the space id. */
   space_id_t space_id() const { return space; }
+
+  /** Check if it is a full-text search (FTS) index
+  @return true if this is a FTS index, false otherwise. */
+  bool is_fts_index() const { return type & DICT_FTS; }
 };
 
 /** The status of online index creation */
@@ -1710,6 +1765,15 @@ struct dict_foreign_t {
 
   dict_vcol_set *v_cols; /*!< set of virtual columns affected
                          by foreign key constraint. */
+
+  /** Check whether foreign key constraint contains a column with a full
+  index on it. The function is used in the context of cascading DML
+  operations.
+  @retval true  if the column has FTS index on it.
+  @retval false if the FK table has no FTS index or has self referential
+               relationship
+  */
+  bool is_fts_col_affected() const;
 };
 
 std::ostream &operator<<(std::ostream &out, const dict_foreign_t &foreign);
@@ -2109,6 +2173,9 @@ struct dict_table_t {
   reason s_cols is a part of dict_table_t */
   dict_s_col_list *s_cols;
 
+  /** Check if the given column is a stored generated column. */
+  dict_s_col_t *is_stored_gcol(dict_col_t *col) const;
+
   /** Column names packed in a character string
   "name1\0name2\0...nameN\0". Until the string contains n_cols, it will
   be allocated from a temporary heap. The final string will be allocated
@@ -2174,11 +2241,6 @@ struct dict_table_t {
   bool in_dirty_dict_tables_list;
 #endif /* UNIV_DEBUG */
 
-  /** Maximum recursive level we support when loading tables chained
-  together with FK constraints. If exceeds this level, we will stop
-  loading child table into memory along with its parent table. */
-  unsigned fk_max_recusive_level : 8;
-
   /** Count of how many foreign key check operations are currently being
   performed on the table. We cannot drop the table while there are
   foreign key checks running on it. */
@@ -2221,16 +2283,26 @@ struct dict_table_t {
   "dict_table_t::stat_clustered_index_size",
   "dict_table_t::stat_sum_of_other_index_sizes",
   "dict_table_t::stat_modified_counter (*)",
-  "dict_table_t::indexes*::stat_n_diff_key_vals[]",
-  "dict_table_t::indexes*::stat_index_size",
-  "dict_table_t::indexes*::stat_n_leaf_pages".
+  "dict_table_t::indexes*::stats::n_diff_key_vals[]",
+  "dict_table_t::indexes*::stats::index_size",
+  "dict_table_t::indexes*::stats::n_leaf_pages".
   (*) Those are not always protected for
   performance reasons. */
   rw_lock_t *stats_latch;
 
+  /** Creation state of 'stats_compute_mutex'. */
+  std::atomic<os_once::state_t> stats_compute_mutex_created;
+
+  /** Mutex protecting table and index statistics calculation process. */
+  ib_mutex_t *stats_compute_mutex;
+
   /** true if statistics have been calculated the first time after
   database startup or table creation. */
   unsigned stat_initialized : 1;
+
+  /** true if statistics have been updated in the background and not yet
+  collected by the optimizer */
+  std::atomic<bool> stats_updated = false;
 
   /** Timestamp of last recalc of the stats. */
   std::chrono::steady_clock::time_point stats_last_recalc;
@@ -2311,8 +2383,8 @@ detect this and will eventually quit sooner. */
 
   /** The state of the background stats thread wrt this table.
   See BG_STAT_NONE, BG_STAT_IN_PROGRESS and BG_STAT_SHOULD_QUIT.
-  Writes are covered by dict_sys->mutex. Dirty reads are possible. */
-  byte stats_bg_flag;
+  Writes are covered by dict_sys->mutex. It is read without mutex. */
+  std::atomic<int8_t> stats_bg_flag;
 
   /** @} */
 #endif /* !UNIV_HOTBACKUP */
@@ -2371,6 +2443,23 @@ detect this and will eventually quit sooner. */
   modifications to clustered index, such as INSERT/UPDATE. There should
   be no conflict to access it, so no protection is needed. */
   ulint autoinc_field_no;
+
+  /** Counter for the hidden percona_vec_aux_id column (auto-assigned on
+  INSERT). Valid IDs start at 1. Advanced by Vec_label_counter::assign via
+  fetch_add, and persisted through the autoinc-style dynamic-metadata
+  path; see vec_aux_autoinc_persisted below. */
+  std::atomic<uint64_t> vec_aux_autoinc_next_id;
+
+  /** Watermark of vec_aux_autoinc_next_id already redo-logged for
+  dynamic-metadata persistence - the autoinc_persisted analog, but
+  lock-free: advanced only by CAS-max in Vec_label_counter::log, so
+  it never regresses. Assignments at or below it need no new redo. */
+  std::atomic<uint64_t> vec_aux_autoinc_persisted;
+
+  /** Ordinal position of percona_vec_aux_id in cols[]. ULINT_UNDEFINED
+  when the table has no hidden percona_vec_aux_id column. Set by
+  vec_add_aux_id_column. */
+  ulint vec_aux_col;
 
   /** The transaction that currently holds the the AUTOINC lock on this table.
   Protected by lock_sys table shard latch. To "peek" the current value one
@@ -2693,10 +2782,21 @@ detect this and will eventually quit sooner. */
     return (flags2 & DICT_TF2_TEMPORARY);
   }
 
-  /** Determine if this is a FTS AUX table. */
+  /** Determine if this is an InnoDB-owned auxiliary table, FTS or
+  vector. Use the specific predicates @ref is_fts_aux / @ref is_vec_aux
+  when behavior must differ. */
+  bool is_aux() const { return is_fts_aux() || is_vec_aux(); }
+
+  /** Determine if this is specifically an FTS auxiliary table. */
   bool is_fts_aux() const {
     ut_ad(magic_n == DICT_TABLE_MAGIC_N);
     return (flags2 & DICT_TF2_AUX);
+  }
+
+  /** Determine if this is specifically a vector auxiliary table. */
+  bool is_vec_aux() const {
+    ut_ad(magic_n == DICT_TABLE_MAGIC_N);
+    return (flags2 & DICT_TF2_VEC_AUX);
   }
 
   /** Determine whether the table is intrinsic.
@@ -2725,6 +2825,17 @@ detect this and will eventually quit sooner. */
   /** Determine if the table can support instant ADD/DROP COLUMN */
   inline bool support_instant_add_drop() const;
 };
+
+inline dict_s_col_t *dict_table_t::is_stored_gcol(dict_col_t *col) const {
+  if (s_cols != nullptr) {
+    for (auto &stored_gcol : *s_cols) {
+      if (stored_gcol.m_col == col) {
+        return &stored_gcol;
+      }
+    }
+  }
+  return nullptr;
+}
 
 static inline void DICT_TF2_FLAG_SET(dict_table_t *table, uint32_t flag) {
   table->flags2 |= flag;
@@ -2761,9 +2872,20 @@ enum persistent_type_t {
   PM_TABLESPACE_SIZE = 4,
   PM_TABLESPACE_MAX_TRX_ID = 5, */
 
+  /** Persistent metadata type for the hidden vec_idx_id counter of
+  vector-indexed tables. Deliberately far from the dense
+  upstream range: upstream owns this namespace and allocates small
+  values (3..5 are already earmarked above), so a distant byte can
+  never be misparsed as a future upstream type on a crossed-over
+  datadir - only rejected. Only tables carrying vector remnants (which
+  are upstream-incompatible anyway, via the hidden SE column) ever
+  write this entry, and any cleanup rebuild sheds it with the old
+  table_id. */
+  PM_TABLE_VEC_IDX_ID = 200,
+
   /** The biggest type, which should be 1 bigger than the last
   true type */
-  PM_BIGGEST_TYPE = 3
+  PM_BIGGEST_TYPE = 201
 };
 
 typedef std::vector<index_id_t, ut::allocator<index_id_t>> corrupted_ids_t;
@@ -2775,7 +2897,11 @@ class PersistentTableMetadata {
   @param[in]    id      table id
   @param[in]    version table dynamic metadata version */
   PersistentTableMetadata(table_id_t id, uint64_t version)
-      : m_id(id), m_version(version), m_corrupted_ids(), m_autoinc(0) {}
+      : m_id(id),
+        m_version(version),
+        m_corrupted_ids(),
+        m_autoinc(0),
+        m_vec_next_id(0) {}
 
   /** Get the corrupted indexes' IDs
   @return the vector of indexes' IDs */
@@ -2818,6 +2944,23 @@ class PersistentTableMetadata {
   @return the autoinc counter */
   uint64_t get_autoinc() const { return (m_autoinc); }
 
+  /** Set the hidden vec_idx_id counter of the table if it's bigger
+  (the exact analog of set_autoinc_if_bigger;)
+  @param[in]    value   vec_idx_id counter */
+  void set_vec_next_id_if_bigger(uint64_t value) {
+    if (value > m_vec_next_id) {
+      m_vec_next_id = value;
+    }
+  }
+
+  /** Set the hidden vec_idx_id counter of the table
+  @param[in]    value   vec_idx_id counter */
+  void set_vec_next_id(uint64_t value) { m_vec_next_id = value; }
+
+  /** Get the hidden vec_idx_id counter of the table
+  @return the vec_idx_id counter */
+  uint64_t get_vec_next_id() const { return (m_vec_next_id); }
+
  private:
   /** Table ID which this metadata belongs to */
   table_id_t m_id;
@@ -2830,6 +2973,10 @@ class PersistentTableMetadata {
 
   /** Autoinc counter of the table */
   uint64_t m_autoinc;
+
+  /** Hidden vec_idx_id counter of vector-indexed tables;
+  0 when the table never consumed one */
+  uint64_t m_vec_next_id;
 
   /* TODO: We will add update_time, etc. here and APIs accordingly */
 };
@@ -2870,7 +3017,9 @@ class Persister {
                      ulint size, bool *corrupt) const = 0;
 
   /** Aggregate metadata entries into a single metadata instance, considering
-  version numbers
+  version numbers. MetadataRecover::store() also uses it to fold the
+  recovered entry into the buffered one, so an entry with nothing of this
+  kind must leave metadata unchanged.
   @param[in,out] metadata        metadata object to be modified
   @param[in]     new_entry       metadata entry from logs */
   virtual void aggregate(PersistentTableMetadata &metadata,
@@ -2966,6 +3115,41 @@ class AutoIncPersister : public Persister {
                  const PersistentTableMetadata &new_entry) const override;
 };
 
+/** Persister for the hidden vec_idx_id counter of vector-indexed
+tables - the structural twin of AutoIncPersister: the
+counter is a hidden per-table autoinc written into the vec_idx_id
+column, and it must survive restart AND crash so labels are never
+reissued (an id consumed by a NULL-vector row or a rolled-back insert
+exists nowhere the aux-table maximum can see). */
+class VecIdxIdPersister : public Persister {
+ public:
+  /** Write the vec_idx_id counter of a table.
+  @param[in]    metadata        persistent metadata
+  @param[out]   buffer          write buffer
+  @param[in]    size            size of write buffer
+  @return the length of bytes written */
+  ulint write(const PersistentTableMetadata &metadata, byte *buffer,
+              ulint size) const override;
+
+  /** @return 1 type byte + max 11 bytes of much-compressed u64 */
+  inline ulint get_write_size(const PersistentTableMetadata &metadata
+                              [[maybe_unused]]) const override {
+    return (12);
+  }
+
+  /** Read the vec_idx_id counter from buffer into metadata.
+  @param[out]   metadata        metadata where we store the read data
+  @param[in]    buffer          buffer to read
+  @param[in]    size            size of buffer
+  @param[out]   corrupt         true if buffer content is corrupted
+  @return bytes consumed, 0 if the buffer is incomplete */
+  ulint read(PersistentTableMetadata &metadata, const byte *buffer, ulint size,
+             bool *corrupt) const override;
+
+  void aggregate(PersistentTableMetadata &metadata,
+                 const PersistentTableMetadata &new_entry) const override;
+};
+
 /** Container of persisters used in the system. Currently we don't need
 to protect this object since we only initialize it at very beginning and
 destroy it in the end. During the server running, we only get the persisters */
@@ -3003,6 +3187,12 @@ class Persisters {
   @param[out]   buffer          buffer to store the serialized metadata
   @return the length of serialized metadata */
   size_t write(PersistentTableMetadata &metadata, byte *buffer);
+
+  /** Merge new_entry into metadata, each persister by its own rule.
+  @param[in,out]  metadata   entry to fold into
+  @param[in]      new_entry  entry to fold in */
+  void aggregate(PersistentTableMetadata &metadata,
+                 const PersistentTableMetadata &new_entry) const;
 
  private:
   /** A map to store all persisters needed */
@@ -3111,6 +3301,17 @@ inline bool dict_table_autoinc_own(const dict_table_t *table) {
   return (mutex_own(table->autoinc_mutex));
 }
 #endif /* UNIV_DEBUG */
+
+#ifndef UNIV_HOTBACKUP
+/** Data structure storing index statistics. Used as
+temporary state during statistics calculation. The final version of statistics
+for reading by optimizer are stored in dict_index_t::stats. */
+struct dict_index_constructed_stats_t {
+  dict_index_stats_t stats;
+  unsigned type : DICT_IT_BITS;
+  unsigned n_uniq : 10;
+};
+#endif /* !UNIV_HOTBACKUP */
 
 #include "dict0mem.ic"
 

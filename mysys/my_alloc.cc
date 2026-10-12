@@ -1,14 +1,15 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -31,13 +32,15 @@
  * This file follows Google coding style.
  */
 
-#include <stdarg.h>
-#include <string.h>
 #include <sys/types.h>
+#include <algorithm>
+#include <cassert>
+#include <cstdarg>
+#include <cstring>
 #include <iterator>
 
+#include "memory_debugging.h"
 #include "my_alloc.h"
-#include "my_compiler.h"
 #include "my_dbug.h"
 #include "my_inttypes.h"
 #include "my_pointer_arithmetic.h"
@@ -58,7 +61,7 @@ MEM_ROOT::Block *MEM_ROOT::AllocBlock(size_t wanted_length,
                                       size_t minimum_length) {
   DBUG_TRACE;
 
-  size_t length = wanted_length;
+  size_t length = std::max(wanted_length, ALIGN_SIZE(minimum_length));
   if (m_max_capacity != 0) {
     size_t bytes_left;
     if (m_allocated_size > m_max_capacity) {
@@ -66,7 +69,7 @@ MEM_ROOT::Block *MEM_ROOT::AllocBlock(size_t wanted_length,
     } else {
       bytes_left = m_max_capacity - m_allocated_size;
     }
-    if (wanted_length > bytes_left) {
+    if (length > bytes_left) {
       if (m_error_for_capacity_exceeded) {
         my_error(EE_CAPACITY_EXCEEDED, MYF(0),
                  static_cast<ulonglong>(m_max_capacity));
@@ -85,7 +88,7 @@ MEM_ROOT::Block *MEM_ROOT::AllocBlock(size_t wanted_length,
   }
 
   const size_t bytes_to_alloc = length + ALIGN_SIZE(sizeof(Block));
-  Block *new_block = static_cast<Block *>(
+  auto *new_block = static_cast<Block *>(
       my_malloc(m_psi_key, bytes_to_alloc, MYF(MY_WME | ME_FATALERROR)));
   if (new_block == nullptr) {
     if (m_error_handler) (m_error_handler)();
@@ -137,16 +140,15 @@ void *MEM_ROOT::AllocSlow(size_t length) {
     }
 
     return pointer_cast<char *>(new_block) + ALIGN_SIZE(sizeof(*new_block));
-  } else {
-    // The normal case: Throw away the current block, allocate a new block,
-    // and use that to satisfy the new allocation.
-    if (ForceNewBlock(/*minimum_length=*/length)) {
-      return nullptr;
-    }
-    char *new_mem = m_current_free_start;
-    m_current_free_start += length;
-    return new_mem;
   }
+  // The normal case: Throw away the current block, allocate a new block,
+  // and use that to satisfy the new allocation.
+  if (ForceNewBlock(/*minimum_length=*/length)) {
+    return nullptr;
+  }
+  char *new_mem = m_current_free_start;
+  m_current_free_start += length;
+  return new_mem;
 }
 
 bool MEM_ROOT::ForceNewBlock(size_t minimum_length) {

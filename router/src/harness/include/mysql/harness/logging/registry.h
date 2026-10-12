@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -33,7 +34,7 @@
 
 #include <atomic>
 #include <map>
-#include <mutex>
+#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 
@@ -42,6 +43,7 @@ namespace mysql_harness {
 namespace logging {
 
 class Handler;
+class ExternalHandler;
 
 class HARNESS_EXPORT Registry {
  public:
@@ -100,6 +102,18 @@ class HARNESS_EXPORT Registry {
    */
   Logger get_logger_or_default(const std::string &name,
                                const std::string &default_name) const;
+
+  /**
+   * Return logger for particular module.
+   *
+   * if it doesn't exist, get the default logger.
+   *
+   * @param name Logger id (log domain it services)
+   *
+   * @throws std::logic_error if neither logger is registered for given module
+   * name
+   */
+  Logger get_logger_or_default(const std::string &name) const;
 
   /**
    * Update logger for particular module
@@ -189,10 +203,10 @@ class HARNESS_EXPORT Registry {
    * old logger file to dst.
    * @param dst destination filename for old log
    */
-  void flush_all_loggers(const std::string dst = "");
+  void flush_all_loggers(const std::string &dst = "");
 
  private:
-  mutable std::mutex mtx_;
+  mutable std::shared_mutex mtx_;
   std::map<std::string, Logger> loggers_;  // key = log domain
   std::map<std::string, std::shared_ptr<Handler>>
       handlers_;  // key = handler id
@@ -214,6 +228,14 @@ class HARNESS_EXPORT Registry {
  */
 HARNESS_EXPORT
 LogLevel log_level_from_string(std::string name);
+
+/**
+ * Converts LogLevel type to its string name
+ *
+ * @param log_level value to convert
+ */
+HARNESS_EXPORT
+std::string log_level_to_string(LogLevel log_level);
 
 /**
  * Get default log level
@@ -258,6 +280,15 @@ HARNESS_EXPORT
 void set_log_level_for_all_loggers(Registry &registry, LogLevel level);
 
 /**
+ * Set log level for selected handler to specified value
+ *
+ * @param name Name of the registry in the singleton (DIM)
+ * @param level Log level for handler
+ */
+HARNESS_EXPORT
+void set_log_level_for_handler(std::string name, LogLevel level);
+
+/**
  * Set log levels for all handlers to specified value
  *
  * @param registry Registry object, typically managed by DIM
@@ -276,6 +307,9 @@ void set_log_level_for_all_handlers(const Registry &registry, LogLevel level);
  */
 HARNESS_EXPORT
 LogTimestampPrecision log_timestamp_precision_from_string(std::string name);
+
+HARNESS_EXPORT
+std::string log_timestamp_precision_to_string(LogTimestampPrecision tsp);
 
 /**
  * Get default timestamp precision
@@ -324,7 +358,7 @@ void clear_registry(Registry &registry);
  * @param main_app_log_domain Log domain (logger id) to be used as the main
  *                            program logger. This logger must exist, because
  *                            log_*() functions might fail
- * @throws std::logic_error
+ * @throws std::logic_error On error.
  */
 HARNESS_EXPORT
 void create_module_loggers(Registry &registry, const LogLevel level,
@@ -340,7 +374,7 @@ void create_module_loggers(Registry &registry, const LogLevel level,
  * @param log_level The log level of the logger
  * @param logger_name The name under which the logger is registered
  *
- * @throws std::logic_error
+ * @throws std::logic_error if there is an error
  */
 HARNESS_EXPORT
 void create_logger(Registry &registry, const LogLevel level,
@@ -429,6 +463,14 @@ void register_handler(std::string name, std::shared_ptr<Handler> handler);
  */
 HARNESS_EXPORT
 void unregister_handler(std::string name);
+
+/**
+ * Returns true if a given handler is in the registry, false otherwise.
+ *
+ * @param name name of the handler to check.
+ */
+HARNESS_EXPORT
+bool handler_registered(std::string name);
 
 /**
  * Returns pointer to the default logger sink stream.

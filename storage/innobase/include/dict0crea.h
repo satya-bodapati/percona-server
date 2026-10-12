@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -106,37 +107,6 @@ local_fk_set belong to
 @return true if yes, otherwise, false */
 bool dict_foreigns_has_s_base_col(const dict_foreign_set &local_fk_set,
                                   const dict_table_t *table);
-
-static const constexpr auto ZIP_DICT_MAX_NAME_LENGTH = 64;
-/* Max window size (2^15) minus 262 */
-static const constexpr auto ZIP_DICT_MAX_DATA_LENGTH = 32506;
-
-/** Get a single compression dictionary id for the given
-(table id, column pos) pair.
-@param[in]	table_id	table id
-@param[in]	column_pos	column position
-@param[out]	dict_id		dict id
-@param[in,out]	trx		transaction
-@return	error code or DB_SUCCESS */
-MY_NODISCARD
-dberr_t dict_create_get_zip_dict_id_by_reference(table_id_t table_id,
-                                                 ulint column_pos,
-                                                 ulint *dict_id, trx_t *trx);
-
-/** Get compression dictionary info (name and data) for the given id.
-Allocates memory for name and data on success.
-Must be freed with my_free().
-@param[in]	dict_id		dict id
-@param[out]	name		dict name
-@param[out]	name_len	dict name length
-@param[out]	data		dict data
-@param[out]	data_len	dict data length
-@param[in,out]	trx		transaction
-@return	error code or DB_SUCCESS */
-MY_NODISCARD
-dberr_t dict_create_get_zip_dict_info_by_id(ulint dict_id, char **name,
-                                            ulint *name_len, char **data,
-                                            ulint *data_len, trx_t *trx);
 
 /* Table create node structure */
 struct tab_node_t {

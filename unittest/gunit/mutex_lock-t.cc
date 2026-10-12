@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -41,12 +42,12 @@ using FakeMutexLock = Generic_mutex_lock<FakeMutex>;
 
 namespace mutex_lock_unittest {
 TEST(MutexLockTest, DefaultConstruct) {
-  { FakeMutexLock _; }
+  { FakeMutexLock const _; }
 }
 TEST(MutexLockTest, Plain) {
   FakeMutex mm;
   {
-    FakeMutexLock _{&mm, __FILE__, __LINE__};
+    FakeMutexLock const _{&mm, __FILE__, __LINE__};
     EXPECT_EQ(1, mm.times_locked);
     EXPECT_EQ(0, mm.times_unlocked);
   }
@@ -93,13 +94,13 @@ TEST(MutexLockTest, MoveConstruct) {
   FakeMutex mm;
   {
     FakeMutexLock src = FakeMutexLock(nullptr, __FILE__, __LINE__);
-    FakeMutexLock dst{std::move(src)};
+    FakeMutexLock const dst{std::move(src)};
     EXPECT_EQ(0, mm.times_locked);
     EXPECT_EQ(0, mm.times_unlocked);
   }
   {
     FakeMutexLock src = FakeMutexLock(&mm, __FILE__, __LINE__);
-    FakeMutexLock dst{std::move(src)};
+    FakeMutexLock const dst{std::move(src)};
     EXPECT_EQ(1, mm.times_locked);
     EXPECT_EQ(0, mm.times_unlocked);
   }

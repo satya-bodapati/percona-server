@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -205,7 +206,10 @@ size_t Context::merge_io_buffer_size(size_t n_buffers) const noexcept {
   /* We aim to do IO_BLOCK_SIZE writes all the time. */
   ut_a(!(io_size % IO_BLOCK_SIZE));
 
-  return std::max(std::max((ulong)srv_page_size, (ulong)IO_BLOCK_SIZE),
+  /* The buffer must be at least large enough to fit one IO block plus one row.
+     2 * IO_BLOCK_SIZE meets this criterion given limits on key length -
+     see ha_innobase::max_supported_key_length() */
+  return std::max(std::max((ulong)srv_page_size, (ulong)IO_BLOCK_SIZE * 2LU),
                   (ulong)io_size);
 }
 
@@ -232,11 +236,16 @@ bool Context::has_virtual_columns() const noexcept {
   return false;
 }
 
-dberr_t Context::handle_autoinc(const dtuple_t *dtuple) noexcept {
+dberr_t Context::handle_autoinc(const dtuple_t *dtuple,
+                                mem_heap_t *heap) noexcept {
   ut_ad(m_add_autoinc != ULINT_UNDEFINED);
   ut_ad(m_add_autoinc < m_new_table->get_n_user_cols());
 
   const auto dfield = dtuple_get_nth_field(dtuple, m_add_autoinc);
+  /* Perform a deep copy of the field because for spatial indexes,
+  the default tuple allocation is overwritten, as tuples are
+  processed at the end of the page. */
+  dfield_dup(dfield, heap);
 
   if (dfield_is_null(dfield)) {
     return DB_SUCCESS;

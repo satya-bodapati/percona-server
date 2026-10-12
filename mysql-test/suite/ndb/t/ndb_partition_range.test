@@ -3,14 +3,6 @@
 # Simple test for the partition storage engine
 # Focuses on range partitioning tests
 # 
-#-- source include/have_partition.inc
-
---disable_query_log
-# This test uses "partition by range" which is a feature only available
-# when turning on MySQL's system variable "new", this functionality
-# is certainly not new but still only enabled when "new" is on.
-set new=on;
---enable_query_log
 
 #
 # Partition by range, basic
@@ -34,7 +26,8 @@ INSERT into t1 values (6, 1, 1);
 INSERT into t1 values (10, 1, 1);
 INSERT into t1 values (15, 1, 1);
 
---replace_column 16 # 19 # 20 #
+# Mask CREATE_TIME column
+--replace_column 20 #
 --sorted_result
 select * from information_schema.partitions where table_name= 't1';
 

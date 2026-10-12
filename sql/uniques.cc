@@ -1,16 +1,17 @@
-/* Copyright (c) 2001, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2001, 2026, Oracle and/or its affiliates.
    Copyright (c) 2018, Percona and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -928,11 +929,8 @@ bool Unique::get(TABLE *table) {
                                               TEMP_PREFIX, READ_RECORD_BUFFER,
                                               MYF(MY_WME), encrypt_tmp_files)))
     return true;
-  if (reinit_io_cache(outfile, WRITE_CACHE, 0L, 0, 0) != 0) return true;
 
-  [[maybe_unused]]
-  int reinit_res = reinit_io_cache(outfile, WRITE_CACHE, 0L, 0, 0);
-  assert(reinit_res == 0);
+  if (reinit_io_cache(outfile, WRITE_CACHE, 0L, 0, 0) != 0) return true;
 
   Uniq_param uniq_param;
   uniq_param.max_rows = elements;

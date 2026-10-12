@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -104,53 +105,6 @@ typedef int (*mysql_sys_var_check_func)(MYSQL_THD thd, SYS_VAR *var, void *save,
 */
 typedef void (*mysql_sys_var_update_func)(MYSQL_THD thd, SYS_VAR *var,
                                           void *val_ptr, const void *save);
-
-#define COPY_MYSQL_PLUGIN_VAR_HEADER(sys_var_type, type, sys_var_check, \
-                                     sys_var_update)                    \
-  sys_var_type->flags = flags;                                          \
-  sys_var_type->name = var_name;                                        \
-  sys_var_type->comment = comment;                                      \
-  sys_var_type->check = check_func ? check_func : sys_var_check;        \
-  sys_var_type->update = update_func ? update_func : sys_var_update;    \
-  sys_var_type->value = (type *)variable_value;
-
-#define COPY_MYSQL_PLUGIN_VAR_REMAINING(sys_var_type, check_arg_type) \
-  sys_var_type->def_val = check_arg_type->def_val;                    \
-  sys_var_type->min_val = check_arg_type->min_val;                    \
-  sys_var_type->max_val = check_arg_type->max_val;                    \
-  sys_var_type->blk_sz = check_arg_type->blk_sz;
-
-#define SYSVAR_INTEGRAL_TYPE(type) \
-  struct sysvar_##type##_type {    \
-    MYSQL_PLUGIN_VAR_HEADER;       \
-    type *value;                   \
-    type def_val;                  \
-    type min_val;                  \
-    type max_val;                  \
-    type blk_sz;                   \
-  }
-
-#define SYSVAR_ENUM_TYPE(type)  \
-  struct sysvar_##type##_type { \
-    MYSQL_PLUGIN_VAR_HEADER;    \
-    unsigned long *value;       \
-    unsigned long def_val;      \
-    TYPE_LIB *typelib;          \
-  }
-
-#define SYSVAR_BOOL_TYPE(type)  \
-  struct sysvar_##type##_type { \
-    MYSQL_PLUGIN_VAR_HEADER;    \
-    bool *value;                \
-    bool def_val;               \
-  }
-
-#define SYSVAR_STR_TYPE(type)   \
-  struct sysvar_##type##_type { \
-    MYSQL_PLUGIN_VAR_HEADER;    \
-    char **value;               \
-    char *def_val;              \
-  }
 
 /**
   @addtogroup group_components_services_sys_var_service_args Variable
@@ -250,7 +204,8 @@ BEGIN_SERVICE_DEFINITION(component_sys_variable_register)
 
   @warning: Make sure to unregister the system variable when you no longer
   intend to have it or when your component deinitializes. Failure to do so will
-  lead to resource leaks and crashes.
+  lead to resource leaks and crashes. This doesn't apply to @ref
+  PLUGIN_VAR_NOSYSVAR variables! No need to unregister these.
 
   Typical use
   @code
@@ -362,6 +317,9 @@ DECLARE_BOOL_METHOD(register_variable,
   @retval true    failure
   @retval false   success
 */
+#if defined(__cplusplus) && (__cplusplus >= 201402L)
+[[deprecated("Use mysql_service_mysql_system_variable_reader->get() instead.")]]
+#endif
 DECLARE_BOOL_METHOD(get_variable, (const char *component_name, const char *name,
                                    void **val, size_t *out_length_of_val));
 

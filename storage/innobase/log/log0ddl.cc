@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -12,12 +12,13 @@ This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -50,7 +51,9 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ha_innodb.h"
 #include "log0chkp.h"
 #include "log0ddl.h"
+#include "my_sys.h"
 #include "mysql/plugin.h"
+#include "mysqld.h"  //get_server_state
 #include "pars0pars.h"
 #include "que0que.h"
 #include "row0ins.h"
@@ -218,6 +221,11 @@ std::ostream &DDL_Record::print(std::ostream &out) const {
     case Log_Type::FREE_TREE_LOG:
       out << "FREE";
       break;
+
+    case Log_Type::DELETE_SCHEMA_DIRECTORY_LOG:
+      out << "DELETE SCHEMA DIRECTORY";
+      break;
+
     case Log_Type::DELETE_SPACE_LOG:
       out << "DELETE SPACE";
       break;
@@ -855,6 +863,108 @@ inline bool Log_DDL::skip(const dict_table_t *table, THD *thd) {
           thd_is_bootstrap_thread(thd));
 }
 
+dberr_t Log_DDL::write_delete_schema_directory_log(
+    trx_t *trx, const char *schema_directory_path, const bool is_drop_schema) {
+  uint64_t id = next_id();
+  auto thread_id = thd_get_thread_id(trx->mysql_thd);
+
+  trx->ddl_operation = true;
+
+  if (is_drop_schema) {
+    /* Attach to the on-going transaction and insert the log */
+    return insert_delete_schema_directory_log(trx, id, thread_id,
+                                              schema_directory_path);
+  }
+
+  /* Create the new transaction, insert log and commit. */
+  dberr_t err;
+  err = insert_delete_schema_directory_log(nullptr, id, thread_id,
+                                           schema_directory_path);
+  if (err != DB_SUCCESS) {
+    return err;
+  }
+
+  /*
+    Delete the above committed log entry using the main transaction (
+    one thats's used to update the DD).
+
+    It'll be committed as part of the final commmit on SQL Layer.
+  */
+  err = delete_by_id(trx, id, false);
+  ut_ad(err == DB_SUCCESS);
+
+  return err;
+}
+
+dberr_t Log_DDL::insert_delete_schema_directory_log(
+    trx_t *trx, uint64_t id, ulint thread_id,
+    const char *schema_directory_path) {
+  const bool has_dd_trx = (trx != nullptr);
+
+  if (!has_dd_trx) {
+    trx = trx_allocate_for_background();
+    trx_start_internal(trx, UT_LOCATION_HERE);
+    trx->ddl_operation = true;
+  }
+
+  DDL_Record record;
+  record.set_id(id);
+  record.set_thread_id(thread_id);
+  record.set_old_file_path(schema_directory_path);
+  record.set_type(Log_Type::DELETE_SCHEMA_DIRECTORY_LOG);
+
+  dberr_t error;
+  {
+    DDL_Log_Table ddl_log(trx);
+    error = ddl_log.insert(record);
+  }
+
+  if (!has_dd_trx) {
+    trx_commit_for_mysql(trx);
+    trx_free_for_background(trx);
+  }
+
+  if (error == DB_SUCCESS && srv_print_ddl_logs) {
+    ib::info(ER_IB_INSERT_DELETE_SCHEMA_DIRECTORY_DDL_LOG)
+        << "DDL log insert : " << record;
+  }
+
+  return error;
+}
+
+dberr_t Log_DDL::replay_delete_schema_directory_log(
+    const char *schema_directory_path) {
+  if (srv_print_ddl_logs) {
+    ib::info(ER_IB_DELETE_SCHEMA_DIR) << schema_directory_path;
+  }
+
+  const bool send_intermediate_errors =
+      (get_server_state() == SERVER_OPERATING);
+  bool directory_deletion_failed = false;
+  if (!my_rm_dir_w_symlink(schema_directory_path, true,
+                           send_intermediate_errors,
+                           directory_deletion_failed)) {
+    return DB_SUCCESS;
+  }
+
+  if (my_errno() == ENOENT) {
+    /*  This is to handle an edge case where CREATE DATABASE crashes just after
+    inserting the DDL Log (but before creating the directory).
+
+    In any other case than this, non-existence of the directory would've been
+    caught very early in the call-flow. */
+    return DB_SUCCESS;
+  }
+
+  if (directory_deletion_failed) {
+    char errbuf[MYSQL_ERRMSG_SIZE];
+    my_error(ER_DB_DROP_RMDIR, MYF(0), schema_directory_path, errno,
+             my_strerror(errbuf, MYSQL_ERRMSG_SIZE, errno));
+  }
+
+  return DB_ERROR;
+}
+
 dberr_t Log_DDL::write_free_tree_log(trx_t *trx, const dict_index_t *index,
                                      bool is_drop_table) {
   ut_ad(trx == thd_to_trx(current_thd));
@@ -863,7 +973,13 @@ dberr_t Log_DDL::write_free_tree_log(trx_t *trx, const dict_index_t *index,
     return (DB_SUCCESS);
   }
 
-  if (index->type & DICT_FTS) {
+  if ((index->type & DICT_FTS) || index->is_vector()) {
+    /* Vector indexes, like FTS, have no B-tree (page == FIL_NULL).
+    No free-tree log entry needed. Without this skip, DROP TABLE of
+    a vec-indexed table in a shared/general tablespace would hit the
+    ut_ad(index->page != FIL_NULL) assert in insert_free_tree_log,
+    and in release builds write a bogus log entry that trips the
+    matching assert during recovery replay. */
     ut_ad(index->page == FIL_NULL);
     return (DB_SUCCESS);
   }
@@ -1621,6 +1737,10 @@ dberr_t Log_DDL::replay(DDL_Record &record) {
                            record.get_index_id());
       break;
 
+    case Log_Type::DELETE_SCHEMA_DIRECTORY_LOG:
+      err = replay_delete_schema_directory_log(record.get_old_file_path());
+      break;
+
     case Log_Type::DELETE_SPACE_LOG:
       replay_delete_space_log(record.get_space_id(),
                               record.get_old_file_path());
@@ -1735,12 +1855,6 @@ void Log_DDL::replay_delete_space_log(space_id_t space_id,
   DBUG_EXECUTE_IF("ddl_log_replay_delete_space_crash_before_drop",
                   DBUG_SUICIDE(););
 
-  /* Update filename with correct partition case, of needed. */
-  std::string path_str(file_path);
-  std::string space_name;
-  fil_update_partition_name(space_id, 0, false, space_name, path_str);
-  file_path = path_str.c_str();
-
   row_drop_tablespace(space_id, file_path);
 
   /* If this is an undo space_id, allow the undo number for it
@@ -1759,22 +1873,8 @@ void Log_DDL::replay_delete_space_log(space_id_t space_id,
 void Log_DDL::replay_rename_space_log(space_id_t space_id,
                                       const char *old_file_path,
                                       const char *new_file_path) {
-  bool ret;
-  page_id_t page_id(space_id, 0);
-
-  std::string space_name;
-
-  /* Update old filename with correct partition case, of needed. */
-  std::string old_path(old_file_path);
-  fil_update_partition_name(space_id, 0, false, space_name, old_path);
-  old_file_path = old_path.c_str();
-
-  /* Update new filename with correct partition case, of needed. */
-  std::string new_path(new_file_path);
-  fil_update_partition_name(space_id, 0, false, space_name, new_path);
-  new_file_path = new_path.c_str();
-
-  ret = fil_op_replay_rename_for_ddl(page_id, old_file_path, new_file_path);
+  const bool ret =
+      fil_op_replay_rename_for_ddl(space_id, old_file_path, new_file_path);
 
   if (!ret && srv_print_ddl_logs) {
     ib::info(ER_IB_MSG_656) << "DDL log replay : RENAME from " << old_file_path
@@ -1902,7 +2002,6 @@ void Log_DDL::replay_rename_table_log(const char *old_name,
     we may consider to do this in row_rename_table_for_mysql,
     so no need to worry this rename here */
     char errstr[512];
-
     dict_stats_rename_table(old_name, new_name, errstr, sizeof(errstr));
   }
 }

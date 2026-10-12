@@ -1,11 +1,6 @@
 #
 # simple test of all group functions
 #
-
---disable_warnings
-drop table if exists t1,t2;
---enable_warnings
-
 set @sav_dpi= @@div_precision_increment;
 set div_precision_increment= 5;
 show variables like 'div_precision_increment';
@@ -490,7 +485,7 @@ CREATE TABLE t1 (
   id int(10) unsigned NOT NULL auto_increment,
   val enum('one','two','three') NOT NULL default 'one',
   PRIMARY KEY  (id)
-) ENGINE=MyISAM DEFAULT CHARSET=utf8;
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb3;
  
 INSERT INTO t1 VALUES
 (1,'one'),(2,'two'),(3,'three'),(4,'one'),(5,'two');
@@ -502,7 +497,7 @@ CREATE TABLE t1 (
   id int(10) unsigned NOT NULL auto_increment,
   val set('one','two','three') NOT NULL default 'one',
   PRIMARY KEY  (id)
-) ENGINE=MyISAM DEFAULT CHARSET=utf8;
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb3;
 
 INSERT INTO t1 VALUES
 (1,'one'),(2,'two'),(3,'three'),(4,'one'),(5,'two');
@@ -1504,3 +1499,71 @@ INSERT INTO t2 VALUES
 SELECT VARIANCE(value) FROM t2 GROUP BY grp;
 
 DROP TABLE t2;
+
+--echo #
+--echo # Bug#35444004: Result diff seen with hypergraph off and on
+--echo #               (different number of rows)
+--echo #
+
+CREATE TABLE t(x INT, KEY (x));
+INSERT INTO t VALUES (0), (1), (2), (3), (4), (5), (6);
+
+SELECT MAX(x) FROM t WHERE x <= 1 AND x BETWEEN 3 AND 5;
+SELECT MAX(x) FROM t WHERE x BETWEEN 3 AND 5 AND x <= 1;
+SELECT MAX(x) FROM t WHERE x < 5 AND x BETWEEN 3 AND 5;
+SELECT MAX(x) FROM t WHERE x < 5 AND x BETWEEN 2 AND 4;
+
+SELECT MIN(x) FROM t WHERE x >= 5 AND x BETWEEN 1 AND 3;
+SELECT MIN(x) FROM t WHERE x BETWEEN 1 AND 3 AND x >= 5;
+SELECT MIN(x) FROM t WHERE x > 1 AND x BETWEEN 1 AND 3;
+SELECT MIN(x) FROM t WHERE x > 1 AND x BETWEEN 2 AND 4;
+
+DROP TABLE t;
+
+--echo #
+--echo # Bug#34057432: MAX gives a different answer after an index is added
+--echo #
+
+CREATE TABLE t(x VARCHAR(2), KEY(x));
+INSERT INTO t VALUES
+  ('01'), ('1'), ('3'), ('5'), ('7'), ('9'), ('11'), ('13');
+SELECT MAX(x) FROM t WHERE x < 2;
+SELECT MIN(x) FROM t WHERE x > 20;
+SELECT MAX(x) FROM t WHERE x BETWEEN 0 AND 2;
+SELECT MIN(x) FROM t WHERE x BETWEEN 9 AND 20;
+SELECT MIN(x) FROM t WHERE x = 1;
+DROP TABLE t;
+
+--echo #
+--echo # Bug#35102083: void Query_expression::set_prepared():
+--echo #               Assertion `!is_prepared()' failed.
+--echo #
+
+CREATE TABLE t1(pk INTEGER PRIMARY KEY);
+INSERT INTO t1 VALUES(1);
+
+DELIMITER //;
+
+CREATE PROCEDURE p1()
+BEGIN
+  DECLARE dbl DOUBLE;
+  DECLARE deci DECIMAL(10, 2);
+  DECLARE intv INTEGER;
+  DECLARE str VARBINARY(16);
+
+  SELECT DISTINCT VAR_POP(1) FROM t1 GROUP BY pk INTO dbl;
+  SELECT DISTINCT STDDEV_POP(1) FROM t1 GROUP BY pk INTO dbl;
+  SELECT DISTINCT STDDEV_SAMP(1) FROM t1 GROUP BY pk INTO dbl;
+  SELECT DISTINCT AVG(3.14159) FROM t1 GROUP BY pk INTO deci;
+  SELECT DISTINCT AVG(3.14159E0) FROM t1 GROUP BY pk INTO dbl;
+  SELECT DISTINCT BIT_OR(x'0000') FROM t1 GROUP BY pk INTO str;
+  SELECT DISTINCT BIT_OR(9) FROM t1 GROUP BY pk INTO intv;
+END
+//
+DELIMITER ;//
+
+CALL p1();
+CALL p1();
+
+DROP PROCEDURE p1;
+DROP TABLE t1;

@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -35,6 +36,7 @@ typedef enum opt_connection_control {
   OPT_FAILED_CONNECTIONS_THRESHOLD = 0,
   OPT_MIN_CONNECTION_DELAY,
   OPT_MAX_CONNECTION_DELAY,
+  OPT_EXEMPT_UNKNOWN_USERS,
   OPT_LAST /* Must be last */
 } opt_connection_control;
 
@@ -44,6 +46,8 @@ typedef enum opt_connection_control {
 */
 typedef enum stats_connection_control {
   STAT_CONNECTION_DELAY_TRIGGERED = 0,
+  STAT_OPTION_USAGE = 1,
+  STAT_CONNECTION_EXEMPTED_USERS = 2,
   STAT_LAST /* Must be last */
 } stats_connection_control;
 
@@ -55,6 +59,7 @@ class Connection_control_variables {
   long long failed_connections_threshold;
   long long min_connection_delay;
   long long max_connection_delay;
+  bool exempt_unknown_users{false};
 };
 
 /** Structure to maintain statistics */

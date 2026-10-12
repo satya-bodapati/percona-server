@@ -1,15 +1,16 @@
-/* Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -32,6 +33,15 @@ bool Server_services_references::initialize() {
     error = true;
     goto end;
   }
+
+  if (registry_service->acquire("registry_registration",
+                                &m_registry_registration_handle)) {
+    error = true;
+    goto end;
+  }
+  registry_registration_service =
+      reinterpret_cast<SERVICE_TYPE(registry_registration) *>(
+          m_registry_registration_handle);
 
   if (registry_service->acquire("mysql_charset", &m_mysql_charset_handle)) {
     error = true;
@@ -68,6 +78,15 @@ bool Server_services_references::initialize() {
       reinterpret_cast<SERVICE_TYPE(mysql_system_variable_update_string) *>(
           m_mysql_system_variable_update_string_handle);
 
+  if (registry_service->acquire("mysql_global_variable_attributes",
+                                &m_mysql_global_variable_attributes_handle)) {
+    error = true;
+    goto end;
+  }
+  mysql_global_variable_attributes_service =
+      reinterpret_cast<SERVICE_TYPE(mysql_global_variable_attributes) *>(
+          m_mysql_global_variable_attributes_handle);
+
   if (registry_service->acquire(
           "mysql_system_variable_update_integer",
           &m_mysql_system_variable_update_integer_handle)) {
@@ -78,14 +97,14 @@ bool Server_services_references::initialize() {
       reinterpret_cast<SERVICE_TYPE(mysql_system_variable_update_integer) *>(
           m_mysql_system_variable_update_integer_handle);
 
-  if (registry_service->acquire("component_sys_variable_register",
-                                &m_component_sys_variable_register_handle)) {
+  if (registry_service->acquire("mysql_system_variable_reader",
+                                &m_component_sys_variable_reader_handle)) {
     error = true;
     goto end;
   }
-  component_sys_variable_register_service =
-      reinterpret_cast<SERVICE_TYPE(component_sys_variable_register) *>(
-          m_component_sys_variable_register_handle);
+  component_sys_variable_reader_service =
+      reinterpret_cast<SERVICE_TYPE(mysql_system_variable_reader) *>(
+          m_component_sys_variable_reader_handle);
 
 end:
   if (error) {
@@ -98,11 +117,10 @@ end:
 bool Server_services_references::finalize() {
   int error = 0;
 
-  component_sys_variable_register_service = nullptr;
-  if (nullptr != m_component_sys_variable_register_handle) {
-    error |=
-        registry_service->release(m_component_sys_variable_register_handle);
-    m_component_sys_variable_register_handle = nullptr;
+  component_sys_variable_reader_service = nullptr;
+  if (nullptr != m_component_sys_variable_reader_handle) {
+    error |= registry_service->release(m_component_sys_variable_reader_handle);
+    m_component_sys_variable_reader_handle = nullptr;
   }
 
   mysql_system_variable_update_integer_service = nullptr;
@@ -117,6 +135,13 @@ bool Server_services_references::finalize() {
     error |=
         registry_service->release(m_mysql_system_variable_update_string_handle);
     m_mysql_system_variable_update_string_handle = nullptr;
+  }
+
+  mysql_global_variable_attributes_service = nullptr;
+  if (nullptr != m_mysql_global_variable_attributes_handle) {
+    error |=
+        registry_service->release(m_mysql_global_variable_attributes_handle);
+    m_mysql_global_variable_attributes_handle = nullptr;
   }
 
   mysql_string_charset_converter_service = nullptr;
@@ -135,6 +160,12 @@ bool Server_services_references::finalize() {
   if (nullptr != m_mysql_charset_handle) {
     error |= registry_service->release(m_mysql_charset_handle);
     m_mysql_charset_handle = nullptr;
+  }
+
+  registry_registration_service = nullptr;
+  if (nullptr != m_registry_registration_handle) {
+    error |= registry_service->release(m_registry_registration_handle);
+    m_registry_registration_handle = nullptr;
   }
 
   if (nullptr != registry_service) {

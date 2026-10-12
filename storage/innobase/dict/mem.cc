@@ -1,18 +1,19 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2023, Oracle and/or its affiliates.
+Copyright (c) 1996, 2026, Oracle and/or its affiliates.
 Copyright (c) 2012, Facebook Inc.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -111,6 +112,8 @@ void dict_mem_table_free(dict_table_t *table) /*!< in: table */
   dict_table_autoinc_destroy(table);
 
   dict_table_stats_latch_destroy(table);
+
+  dict_table_stats_compute_mutex_destroy(table);
 
   table->foreign_set.~dict_foreign_set();
   table->referenced_set.~dict_foreign_set();
@@ -230,10 +233,12 @@ dict_table_t *dict_mem_table_create(const char *name, space_id_t space,
 
   /* true means that the stats latch will be enabled -
   dict_table_stats_lock() will not be noop. */
-  dict_table_stats_latch_create(table, true);
+  dict_table_stats_latch_create_lazy(table, true);
 
-  table->autoinc_lock =
-      static_cast<ib_lock_t *>(mem_heap_alloc(heap, lock_get_size()));
+  /* mutex is enabled */
+  dict_table_stats_compute_mutex_create_lazy(table, true);
+
+  table->autoinc_lock = lock_alloc_from_heap(heap);
 
   /* lazy creation of table autoinc latch */
   dict_table_autoinc_create_lazy(table);
@@ -242,6 +247,7 @@ dict_table_t *dict_mem_table_create(const char *name, space_id_t space,
   table->autoinc = 0;
   table->autoinc_persisted = 0;
   table->autoinc_field_no = ULINT_UNDEFINED;
+  table->vec_aux_col = ULINT_UNDEFINED;
   table->sess_row_id = 0;
   table->sess_trx_id = 0;
 
@@ -320,7 +326,7 @@ dict_index_t *dict_mem_index_create(
 void dict_mem_table_add_col(dict_table_t *table, mem_heap_t *heap,
                             const char *name, ulint mtype, ulint prtype,
                             ulint len, bool is_visible, uint32_t phy_pos,
-                            uint8_t v_added, uint8_t v_dropped) {
+                            row_version_t v_added, row_version_t v_dropped) {
   dict_col_t *col;
   ulint i;
 
@@ -356,8 +362,8 @@ void dict_mem_table_add_col(dict_table_t *table, mem_heap_t *heap,
 
 void dict_mem_fill_column_struct(dict_col_t *column, ulint col_pos, ulint mtype,
                                  ulint prtype, ulint col_len, bool is_visible,
-                                 uint32_t phy_pos, uint8_t v_added,
-                                 uint8_t v_dropped) {
+                                 uint32_t phy_pos, row_version_t v_added,
+                                 row_version_t v_dropped) {
   column->ind = (unsigned int)col_pos;
   column->ord_part = 0;
   column->max_prefix = 0;

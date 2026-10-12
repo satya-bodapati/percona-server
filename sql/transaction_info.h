@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,7 +30,8 @@
 #include "my_alloc.h"
 #include "my_dbug.h"
 #include "my_inttypes.h"
-#include "my_sys.h"                             // strmake_root
+#include "my_sys.h"  // strmake_root
+#include "sql/engine_combination_tracker.h"
 #include "sql/mdl.h"                            // MDL_savepoint
 #include "sql/rpl_transaction_ctx.h"            // Rpl_transaction_ctx
 #include "sql/rpl_transaction_write_set_ctx.h"  // Transaction_write_set_ctx
@@ -230,6 +232,13 @@ class Transaction_ctx {
     m_transaction_write_set_ctx.reset_state();
     trans_begin_hook_invoked = false;
     m_mem_root.ClearForReuse();
+
+    // Reset the flag indicating the warning of mixing transactional engine
+    // with non-transactional engine is always emitted per transaction
+    tracker.set_warning_already_emitted(false);
+
+    /// Clear the registered engine
+    tracker.clear_known_engine();
     return;
   }
 
@@ -380,6 +389,9 @@ class Transaction_ctx {
   Rpl_transaction_ctx m_rpl_transaction_ctx;
   Rpl_transaction_write_set_ctx m_transaction_write_set_ctx;
   bool trans_begin_hook_invoked;
+
+ public:
+  Engine_combination_tracker tracker;
 };
 
 /**

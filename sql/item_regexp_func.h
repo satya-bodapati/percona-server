@@ -1,18 +1,19 @@
 #ifndef SQL_ITEM_REGEXP_FUNC_H_
 #define SQL_ITEM_REGEXP_FUNC_H_
 
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -264,11 +265,13 @@ class Item_func_regexp_instr : public Item_func_regexp {
     just inherits Item_int_func and thus the implementation, but these classes
     need to have Item_func_regexp as base class because of fix_fields().
   */
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_int(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_int(date, flags);
   }
-
-  bool get_time(MYSQL_TIME *t) override { return get_time_from_int(t); }
+  bool val_time(Time_val *time) override { return get_time_from_int(time); }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_int(dt, flags);
+  }
   /// @}
 
  protected:
@@ -308,11 +311,13 @@ class Item_func_regexp_like : public Item_func_regexp {
     just inherits Item_int_func and thus the implementation, but these classes
     need to have Item_func_regexp as base class because of fix_fields().
   */
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_int(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_int(date, flags);
   }
-
-  bool get_time(MYSQL_TIME *t) override { return get_time_from_int(t); }
+  bool val_time(Time_val *time) override { return get_time_from_int(time); }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_int(dt, flags);
+  }
   /// @}
 
  protected:
@@ -350,11 +355,13 @@ class Item_func_regexp_replace : public Item_func_regexp {
     just inherits Item_str_func and thus the implementation, but these classes
     need to have Item_func_regexp as base class because of fix_fields().
   */
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_string(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_string(date, flags);
   }
-
-  bool get_time(MYSQL_TIME *t) override { return get_time_from_string(t); }
+  bool val_time(Time_val *time) override { return get_time_from_string(time); }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_string(dt, flags);
+  }
   /// @}
 
  protected:
@@ -387,11 +394,13 @@ class Item_func_regexp_substr : public Item_func_regexp {
     just inherits Item_str_func and thus the implementation, but these classes
     need to have Item_func_regexp as base class because of fix_fields().
   */
-  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
-    return get_date_from_string(ltime, fuzzydate);
+  bool val_date(Date_val *date, my_time_flags_t flags) override {
+    return get_date_from_string(date, flags);
   }
-
-  bool get_time(MYSQL_TIME *t) override { return get_time_from_string(t); }
+  bool val_time(Time_val *time) override { return get_time_from_string(time); }
+  bool val_datetime(Datetime_val *dt, my_time_flags_t flags) override {
+    return get_datetime_from_string(dt, flags);
+  }
   /// @}
 
  protected:

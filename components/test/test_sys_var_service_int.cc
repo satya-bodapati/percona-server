@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,12 +22,17 @@ along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include <fcntl.h>
+#include <cstdio>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 #include <mysql/components/component_implementation.h>
 #include <mysql/components/service_implementation.h>
+#include <mysql/components/services/bits/system_variables_bits.h>
 #include <mysql/components/services/component_sys_var_service.h>
-#include <mysql/plugin.h>
+#include <mysql/components/services/mysql_system_variable.h>
 
-#include "my_macros.h"
 #include "typelib.h"
 
 #define VARIABLE_BUFFER_SIZE 1023
@@ -44,6 +50,7 @@ const char *filename = "test_component_sys_var_service_int.log";
 
 REQUIRES_SERVICE_PLACEHOLDER(component_sys_variable_register);
 REQUIRES_SERVICE_PLACEHOLDER(component_sys_variable_unregister);
+REQUIRES_SERVICE_PLACEHOLDER(mysql_system_variable_reader);
 
 static int int_variable_value;
 static int int_var_2_value;
@@ -114,24 +121,27 @@ static mysql_service_status_t test_component_sys_var_service_int_deinit() {
   var_value = new char[VARIABLE_BUFFER_SIZE + 1];
 
   len = VARIABLE_BUFFER_SIZE;
-  if (mysql_service_component_sys_variable_register->get_variable(
-          "test_component_int", "int_sys_var", (void **)&var_value, &len)) {
+  if (mysql_service_mysql_system_variable_reader->get(
+          nullptr, "GLOBAL", "test_component_int", "int_sys_var",
+          (void **)&var_value, &len)) {
     WRITE_LOG("%s\n", "get_variable failed.");
   } else {
     WRITE_LOG("variable value : %s\n", var_value);
   }
 
   len = VARIABLE_BUFFER_SIZE;
-  if (mysql_service_component_sys_variable_register->get_variable(
-          "test_component_int", "uint_sys_var", (void **)&var_value, &len)) {
+  if (mysql_service_mysql_system_variable_reader->get(
+          nullptr, "GLOBAL", "test_component_int", "uint_sys_var",
+          (void **)&var_value, &len)) {
     WRITE_LOG("%s\n", "get_variable failed.");
   } else {
     WRITE_LOG("variable value : %s\n", var_value);
   }
 
   len = VARIABLE_BUFFER_SIZE;
-  if (mysql_service_component_sys_variable_register->get_variable(
-          "test_component_int", "int_sys_var_2", (void **)&var_value, &len)) {
+  if (mysql_service_mysql_system_variable_reader->get(
+          nullptr, "GLOBAL", "test_component_int", "int_sys_var_2",
+          (void **)&var_value, &len)) {
     WRITE_LOG("%s\n", "get_variable failed.");
   } else {
     WRITE_LOG("variable value : %s\n", var_value);
@@ -153,8 +163,9 @@ static mysql_service_status_t test_component_sys_var_service_int_deinit() {
   }
 
   len = VARIABLE_BUFFER_SIZE;
-  if (mysql_service_component_sys_variable_register->get_variable(
-          "test_component_int", "int_sys_var_2", (void **)&var_value, &len)) {
+  if (mysql_service_mysql_system_variable_reader->get(
+          nullptr, "GLOBAL", "test_component_int", "int_sys_var_2",
+          (void **)&var_value, &len)) {
     WRITE_LOG("%s\n", "get_variable failed.");
   } else {
     WRITE_LOG("variable value : %s\n", var_value);
@@ -175,7 +186,7 @@ END_COMPONENT_PROVIDES();
 BEGIN_COMPONENT_REQUIRES(test_component_sys_var_service)
 REQUIRES_SERVICE(component_sys_variable_register),
     REQUIRES_SERVICE(component_sys_variable_unregister),
-    END_COMPONENT_REQUIRES();
+    REQUIRES_SERVICE(mysql_system_variable_reader), END_COMPONENT_REQUIRES();
 
 /* A list of metadata to describe the Component. */
 BEGIN_COMPONENT_METADATA(test_component_sys_var_service)

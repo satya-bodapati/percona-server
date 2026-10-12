@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2023, Oracle and/or its affiliates.
+  Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,27 +28,24 @@
 #include "classic_connection_base.h"
 #include "classic_frame.h"
 #include "classic_lazy_connect.h"
-#include "classic_quit_sender.h"
 #include "mysql/harness/stdx/expected.h"
 #include "mysql/harness/tls_error.h"
 #include "mysqld_error.h"  // mysql errors
 #include "mysqlrouter/client_error_code.h"
 #include "mysqlrouter/datatypes.h"
 #include "mysqlrouter/routing.h"
+#include "sql_parser_state.h"
 #include "sql_splitting_allowed.h"
 
 namespace {
 
 stdx::expected<SplittingAllowedParser::Allowed, std::string> splitting_allowed(
     std::string_view stmt) {
-  MEM_ROOT mem_root;
-  THD session;
-  session.mem_root = &mem_root;
+  SqlParserState sql_parser_state;
 
-  Parser_state parser_state;
-  parser_state.init(&session, stmt.data(), stmt.size());
-  session.m_parser_state = &parser_state;
-  SqlLexer lexer{&session};
+  sql_parser_state.statement(stmt);
+
+  auto lexer = sql_parser_state.lexer();
 
   return SplittingAllowedParser(lexer.begin(), lexer.end()).parse();
 }
@@ -61,10 +59,6 @@ StmtPrepareForwarder::process() {
       return command();
     case Stage::ForbidCommand:
       return forbid_command();
-    case Stage::PoolBackend:
-      return pool_backend();
-    case Stage::SwitchBackend:
-      return switch_backend();
     case Stage::PrepareBackend:
       return prepare_backend();
     case Stage::Connect:
@@ -100,21 +94,19 @@ StmtPrepareForwarder::process() {
 
 stdx::expected<Processor::Result, std::error_code>
 StmtPrepareForwarder::command() {
-  auto *socket_splicer = connection()->socket_splicer();
-  auto *src_channel = socket_splicer->client_channel();
-  auto *src_protocol = connection()->client_protocol();
+  auto &src_conn = connection()->client_conn();
 
   auto msg_res =
       ClassicFrame::recv_msg<classic_protocol::message::client::StmtPrepare>(
-          src_channel, src_protocol);
+          src_conn);
   if (!msg_res) {
     // all codec-errors should result in a Malformed Packet error..
     if (msg_res.error().category() == classic_protocol::codec_category()) {
-      discard_current_msg(src_channel, src_protocol);
+      discard_current_msg(src_conn);
 
       const auto send_msg = ClassicFrame::send_msg<
           classic_protocol::borrowed::message::server::Error>(
-          src_channel, src_protocol,
+          src_conn,
           {ER_MALFORMED_PACKET, "Malformed communication packet", "HY000"});
       if (!send_msg) send_client_failed(send_msg.error());
 
@@ -146,12 +138,11 @@ StmtPrepareForwarder::command() {
     if (!allowed_res) {
       auto send_res = ClassicFrame::send_msg<
           classic_protocol::borrowed::message::server::Error>(
-          src_channel, src_protocol,
-          {ER_ROUTER_NOT_ALLOWED_WITH_CONNECTION_SHARING, allowed_res.error(),
-           "HY000"});
+          src_conn, {ER_ROUTER_NOT_ALLOWED_WITH_CONNECTION_SHARING,
+                     allowed_res.error(), "HY000"});
       if (!send_res) return send_client_failed(send_res.error());
 
-      discard_current_msg(src_channel, src_protocol);
+      discard_current_msg(src_conn);
 
       stage(Stage::Done);
       return Result::SendToClient;
@@ -163,12 +154,12 @@ StmtPrepareForwarder::command() {
       case SplittingAllowedParser::Allowed::Never: {
         auto send_res = ClassicFrame::send_msg<
             classic_protocol::borrowed::message::server::Error>(
-            src_channel, src_protocol,
+            src_conn,
             {ER_ROUTER_NOT_ALLOWED_WITH_CONNECTION_SHARING,
              "Statement not allowed if access_mode is 'auto'", "HY000"});
         if (!send_res) return send_client_failed(send_res.error());
 
-        discard_current_msg(src_channel, src_protocol);
+        discard_current_msg(src_conn);
 
         stage(Stage::Done);
         return Result::SendToClient;
@@ -180,14 +171,14 @@ StmtPrepareForwarder::command() {
             connection()->trx_state()->trx_type() == '_') {
           auto send_res = ClassicFrame::send_msg<
               classic_protocol::borrowed::message::server::Error>(
-              src_channel, src_protocol,
+              src_conn,
               {ER_ROUTER_NOT_ALLOWED_WITH_CONNECTION_SHARING,
                "Statement not allowed outside a transaction if access_mode "
                "is 'auto'",
                "HY000"});
           if (!send_res) return send_client_failed(send_res.error());
 
-          discard_current_msg(src_channel, src_protocol);
+          discard_current_msg(src_conn);
 
           stage(Stage::Done);
           return Result::SendToClient;
@@ -200,7 +191,7 @@ StmtPrepareForwarder::command() {
       tr.trace(Tracer::Event().stage("stmt_prepare::command::auto"));
     }
 
-    if (!connection()->client_protocol()->access_mode().has_value()) {
+    if (!connection()->client_protocol().access_mode().has_value()) {
       // session's access-mode is 'auto'
       if (connection()->expected_server_mode() ==
           mysqlrouter::ServerMode::ReadWrite) {
@@ -218,38 +209,23 @@ StmtPrepareForwarder::command() {
 
         // read-only, but can be switched.
         connection()->expected_server_mode(mysqlrouter::ServerMode::ReadWrite);
-
-        if (socket_splicer->server_conn().is_open()) {
-          // as the connection will be switched, get rid of this connection.
-          stage(Stage::PoolBackend);
-        }
       } else {
         // read-only, but can't be switched.
         stage(Stage::ForbidCommand);
       }
     } else {
-      auto session_access_mode =
-          *connection()->client_protocol()->access_mode();
+      auto session_access_mode = *connection()->client_protocol().access_mode();
 
-      if (session_access_mode == ClassicProtocolState::AccessMode::ReadOnly &&
+      if (session_access_mode ==
+              ClientSideClassicProtocolState::AccessMode::ReadOnly &&
           connection()->expected_server_mode() !=
               mysqlrouter::ServerMode::ReadOnly) {
         connection()->expected_server_mode(mysqlrouter::ServerMode::ReadOnly);
-
-        if (socket_splicer->server_conn().is_open()) {
-          // as the connection will be switched, get rid of this connection.
-          stage(Stage::PoolBackend);
-        }
       } else if (session_access_mode ==
-                     ClassicProtocolState::AccessMode::ReadWrite &&
+                     ClientSideClassicProtocolState::AccessMode::ReadWrite &&
                  connection()->expected_server_mode() !=
                      mysqlrouter::ServerMode::ReadWrite) {
         connection()->expected_server_mode(mysqlrouter::ServerMode::ReadWrite);
-
-        if (socket_splicer->server_conn().is_open()) {
-          // as the connection will be switched, get rid of this connection.
-          stage(Stage::PoolBackend);
-        }
       }
     }
   }
@@ -260,81 +236,33 @@ StmtPrepareForwarder::command() {
 // drain the current command and return an error-msg.
 stdx::expected<Processor::Result, std::error_code>
 StmtPrepareForwarder::forbid_command() {
-  auto *socket_splicer = connection()->socket_splicer();
-  auto *src_channel = socket_splicer->client_channel();
-  auto *src_protocol = connection()->client_protocol();
+  auto &src_conn = connection()->client_conn();
 
   // take the client::command from the connection.
-  auto recv_res =
-      ClassicFrame::ensure_has_full_frame(src_channel, src_protocol);
+  auto recv_res = ClassicFrame::ensure_has_full_frame(src_conn);
   if (!recv_res) return recv_client_failed(recv_res.error());
 
   if (auto &tr = tracer()) {
     tr.trace(Tracer::Event().stage("stmt_prepare::command::forbid"));
   }
 
-  discard_current_msg(src_channel, src_protocol);
+  discard_current_msg(src_conn);
 
   stage(Stage::Done);
 
   auto send_res = ClassicFrame::send_msg<
       classic_protocol::borrowed::message::server::Error>(
-      src_channel, src_protocol,
+      src_conn,
       {1064, "prepared statements not allowed with access_mode = 'auto'",
        "42000"});
-  if (!send_res) return stdx::make_unexpected(send_res.error());
+  if (!send_res) return stdx::unexpected(send_res.error());
 
   return Result::SendToClient;
 }
 
-// pool the current server connection.
-stdx::expected<Processor::Result, std::error_code>
-StmtPrepareForwarder::pool_backend() {
-  stage(Stage::SwitchBackend);
-
-  auto pooled_res = pool_server_connection();
-  if (!pooled_res) return send_server_failed(pooled_res.error());
-
-  const auto pooled = *pooled_res;
-
-  if (pooled) {
-    if (auto &tr = tracer()) {
-      tr.trace(Tracer::Event().stage("stmt_prepare::switch_backend::pooled"));
-    }
-  } else {
-    if (auto &tr = tracer()) {
-      tr.trace(Tracer::Event().stage("stmt_prepare::switch_backend::full"));
-    }
-
-    // as the pool is full, close the server connection nicely.
-    connection()->push_processor(std::make_unique<QuitSender>(connection()));
-  }
-
-  return Result::Again;
-}
-
-stdx::expected<Processor::Result, std::error_code>
-StmtPrepareForwarder::switch_backend() {
-  auto *socket_splicer = connection()->socket_splicer();
-
-  // toggle the read-only state.
-  // and connect to the backend again.
-  stage(Stage::PrepareBackend);
-
-  // server socket is closed, reset its state.
-  auto ssl_mode = socket_splicer->server_conn().ssl_mode();
-  socket_splicer->server_conn() =
-      TlsSwitchableConnection{nullptr,   // connection
-                              nullptr,   // routing-connection
-                              ssl_mode,  //
-                              std::make_unique<ClassicProtocolState>()};
-
-  return Result::Again;
-}
-
 stdx::expected<Processor::Result, std::error_code>
 StmtPrepareForwarder::prepare_backend() {
-  auto &server_conn = connection()->socket_splicer()->server_conn();
+  auto &server_conn = connection()->server_conn();
   if (!server_conn.is_open()) {
     stage(Stage::Connect);
   } else {
@@ -357,18 +285,14 @@ StmtPrepareForwarder::connect() {
 
 stdx::expected<Processor::Result, std::error_code>
 StmtPrepareForwarder::connected() {
-  auto &server_conn = connection()->socket_splicer()->server_conn();
-  if (!server_conn.is_open()) {
-    auto *socket_splicer = connection()->socket_splicer();
-    auto *src_channel = socket_splicer->client_channel();
-    auto *src_protocol = connection()->client_protocol();
+  if (reconnect_error().error_code() != 0) {
+    auto &src_conn = connection()->client_conn();
 
     // take the client::command from the connection.
-    auto recv_res =
-        ClassicFrame::ensure_has_full_frame(src_channel, src_protocol);
+    auto recv_res = ClassicFrame::ensure_has_full_frame(src_conn);
     if (!recv_res) return recv_client_failed(recv_res.error());
 
-    discard_current_msg(src_channel, src_protocol);
+    discard_current_msg(src_conn);
 
     if (auto &tr = tracer()) {
       tr.trace(Tracer::Event().stage("stmt_prepare::connect::error"));
@@ -378,7 +302,7 @@ StmtPrepareForwarder::connected() {
     trace_command_end(trace_event_command_);
 
     stage(Stage::Done);
-    return reconnect_send_error_msg(src_channel, src_protocol);
+    return reconnect_send_error_msg(src_conn);
   }
 
   if (auto &tr = tracer()) {
@@ -409,15 +333,13 @@ StmtPrepareForwarder::forward_done() {
 
 stdx::expected<Processor::Result, std::error_code>
 StmtPrepareForwarder::response() {
-  auto *socket_splicer = connection()->socket_splicer();
-  auto src_channel = socket_splicer->server_channel();
-  auto src_protocol = connection()->server_protocol();
+  auto &src_conn = connection()->server_conn();
+  auto &src_protocol = src_conn.protocol();
 
-  auto read_res =
-      ClassicFrame::ensure_has_msg_prefix(src_channel, src_protocol);
+  auto read_res = ClassicFrame::ensure_has_msg_prefix(src_conn);
   if (!read_res) return recv_server_failed(read_res.error());
 
-  const uint8_t msg_type = src_protocol->current_msg_type().value();
+  const uint8_t msg_type = src_protocol.current_msg_type().value();
 
   enum class Msg {
     Ok = ClassicFrame::cmd_byte<classic_protocol::message::server::Ok>(),
@@ -437,19 +359,15 @@ StmtPrepareForwarder::response() {
     tr.trace(Tracer::Event().stage("stmt_prepare::response"));
   }
 
-  return stdx::make_unexpected(make_error_code(std::errc::bad_message));
+  return stdx::unexpected(make_error_code(std::errc::bad_message));
 }
 
 stdx::expected<Processor::Result, std::error_code> StmtPrepareForwarder::ok() {
-  auto *socket_splicer = connection()->socket_splicer();
-  auto *src_channel = socket_splicer->server_channel();
-  auto *src_protocol = connection()->server_protocol();
-  auto *dst_channel = socket_splicer->client_channel();
-  auto *dst_protocol = connection()->client_protocol();
+  auto &src_conn = connection()->server_conn();
+  auto &dst_conn = connection()->client_conn();
 
   const auto msg_res = ClassicFrame::recv_msg<
-      classic_protocol::borrowed::message::server::StmtPrepareOk>(src_channel,
-                                                                  src_protocol);
+      classic_protocol::borrowed::message::server::StmtPrepareOk>(src_conn);
   if (!msg_res) return recv_server_failed(msg_res.error());
 
   auto msg = *msg_res;
@@ -483,10 +401,10 @@ stdx::expected<Processor::Result, std::error_code> StmtPrepareForwarder::ok() {
 
     msg.warning_count(msg.warning_count() + 1);
 
-    auto send_res = ClassicFrame::send_msg(dst_channel, dst_protocol, msg);
-    if (!send_res) return stdx::make_unexpected(send_res.error());
+    auto send_res = ClassicFrame::send_msg(dst_conn, msg);
+    if (!send_res) return stdx::unexpected(send_res.error());
 
-    discard_current_msg(src_channel, src_protocol);
+    discard_current_msg(src_conn);
 
     return has_more_messages() ? Result::Again : Result::SendToClient;
   }
@@ -506,17 +424,17 @@ StmtPrepareForwarder::param() {
     return Result::Again;
   }
 
-  auto *socket_splicer = connection()->socket_splicer();
-  auto *src_channel = socket_splicer->server_channel();
-  auto *src_protocol = connection()->server_protocol();
-  auto *dst_protocol = connection()->client_protocol();
+  auto &src_conn = connection()->server_conn();
+
+  auto &dst_conn = connection()->client_conn();
+  auto &dst_protocol = dst_conn.protocol();
 
   const auto skips_eof =
       classic_protocol::capabilities::pos::text_result_with_session_tracking;
 
   auto msg_res =
       ClassicFrame::recv_msg<classic_protocol::message::server::ColumnMeta>(
-          src_channel, src_protocol);
+          src_conn);
   if (!msg_res) return recv_server_failed(msg_res.error());
 
   bool is_unsigned =
@@ -537,23 +455,23 @@ StmtPrepareForwarder::param() {
   return forward_server_to_client(
       has_more_messages() ||
       // there will be EOF, no need to flush the column already.
-      !dst_protocol->shared_capabilities().test(skips_eof));
+      !dst_protocol.shared_capabilities().test(skips_eof));
 }
 
 stdx::expected<Processor::Result, std::error_code>
 StmtPrepareForwarder::end_of_params() {
-  auto *socket_splicer = connection()->socket_splicer();
-  auto *src_channel = socket_splicer->server_channel();
-  auto *src_protocol = connection()->server_protocol();
-  auto *dst_channel = socket_splicer->client_channel();
-  auto *dst_protocol = connection()->client_protocol();
+  auto &src_conn = connection()->server_conn();
+  auto &src_protocol = src_conn.protocol();
+
+  auto &dst_conn = connection()->client_conn();
+  auto &dst_protocol = dst_conn.protocol();
 
   stage(Stage::Column);
 
   const auto skips_eof =
       classic_protocol::capabilities::pos::text_result_with_session_tracking;
-  const auto server_skips = src_protocol->shared_capabilities().test(skips_eof);
-  const auto router_skips = dst_protocol->shared_capabilities().test(skips_eof);
+  const auto server_skips = src_protocol.shared_capabilities().test(skips_eof);
+  const auto router_skips = dst_protocol.shared_capabilities().test(skips_eof);
 
   if (auto &tr = tracer()) {
     tr.trace(Tracer::Event().stage("stmt_prepare::end_of_params"));
@@ -567,9 +485,8 @@ StmtPrepareForwarder::end_of_params() {
 
     // ... but client expects a EOF packet.
     auto send_res = ClassicFrame::send_msg<
-        classic_protocol::borrowed::message::server::Eof>(dst_channel,
-                                                          dst_protocol, {});
-    if (!send_res) return stdx::make_unexpected(send_res.error());
+        classic_protocol::borrowed::message::server::Eof>(dst_conn, {});
+    if (!send_res) return stdx::unexpected(send_res.error());
 
     return has_more_messages() ? Result::Again : Result::SendToClient;
   }
@@ -577,11 +494,10 @@ StmtPrepareForwarder::end_of_params() {
   if (router_skips) {
     // drop the Eof packet the server sent as the client does not want it.
     auto msg_res = ClassicFrame::recv_msg<
-        classic_protocol::borrowed::message::server::Eof>(src_channel,
-                                                          src_protocol);
-    if (!msg_res) return stdx::make_unexpected(msg_res.error());
+        classic_protocol::borrowed::message::server::Eof>(src_conn);
+    if (!msg_res) return stdx::unexpected(msg_res.error());
 
-    discard_current_msg(src_channel, src_protocol);
+    discard_current_msg(src_conn);
 
     return Result::Again;
   }
@@ -592,7 +508,7 @@ StmtPrepareForwarder::end_of_params() {
 
 stdx::expected<Processor::Result, std::error_code>
 StmtPrepareForwarder::column() {
-  auto *dst_protocol = connection()->client_protocol();
+  auto &dst_protocol = connection()->client_conn().protocol();
 
   if (columns_left_ > 0) {
     if (auto &tr = tracer()) {
@@ -607,7 +523,7 @@ StmtPrepareForwarder::column() {
     return forward_server_to_client(
         has_more_messages() ||
         // there will be EOF, no need to flush the column already.
-        !dst_protocol->shared_capabilities().test(skips_eof));
+        !dst_protocol.shared_capabilities().test(skips_eof));
   }
 
   stage(Stage::OkDone);
@@ -627,10 +543,10 @@ StmtPrepareForwarder::end_of_columns() {
 
 stdx::expected<Processor::Result, std::error_code>
 StmtPrepareForwarder::ok_done() {
-  auto *dst_protocol = connection()->client_protocol();
+  auto &dst_protocol = connection()->client_conn().protocol();
 
   // remember the stmt.
-  dst_protocol->prepared_statements().emplace(stmt_id_, prep_stmt_);
+  dst_protocol.prepared_statements().emplace(stmt_id_, prep_stmt_);
 
   trace_command_end(trace_event_command_);
 
@@ -641,13 +557,11 @@ StmtPrepareForwarder::ok_done() {
 
 stdx::expected<Processor::Result, std::error_code>
 StmtPrepareForwarder::error() {
-  auto *socket_splicer = connection()->socket_splicer();
-  auto *src_channel = socket_splicer->server_channel();
-  auto *src_protocol = connection()->server_protocol();
+  auto &src_conn = connection()->server_conn();
+  auto &src_protocol = src_conn.protocol();
 
   auto msg_res = ClassicFrame::recv_msg<
-      classic_protocol::borrowed::message::server::Error>(src_channel,
-                                                          src_protocol);
+      classic_protocol::borrowed::message::server::Error>(src_conn);
   if (!msg_res) return recv_server_failed(msg_res.error());
 
   auto msg = *msg_res;

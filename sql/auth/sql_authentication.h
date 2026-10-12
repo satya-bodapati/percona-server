@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,6 +28,7 @@
 #include <openssl/rsa.h>
 #include <stddef.h>
 #include <sys/types.h>
+#include <vector>
 
 #include "lex_string.h"
 #include "my_thread_local.h"    // my_thread_id
@@ -158,19 +160,20 @@ extern bool allow_all_hosts;
 
 typedef enum {
   PLUGIN_CACHING_SHA2_PASSWORD = 0,
-  PLUGIN_MYSQL_NATIVE_PASSWORD,
   PLUGIN_SHA256_PASSWORD,
   /* Add new plugin before this */
   PLUGIN_LAST
 } cached_plugins_enum;
 
-extern LEX_CSTRING default_auth_plugin_name;
-
 class Cached_authentication_plugins {
  public:
   static const LEX_CSTRING cached_plugins_names[(uint)PLUGIN_LAST];
   static void optimize_plugin_compare_by_pointer(LEX_CSTRING *plugin);
-
+  /**
+    List of cached plugins that are active (loaded and enabled)
+    @sa @ref decoy_user
+  */
+  std::vector<cached_plugins_enum> enabled_plugins;
   /**
     Compare given plugin against one of the cached ones
 
@@ -242,10 +245,11 @@ class Cached_authentication_plugins {
 };
 
 using name_and_host_t = std::pair<std::string, std::string>;
-using external_roles_t =
-    std::map<name_and_host_t, std::vector<name_and_host_t>>;
+using external_roles_t = std::map<name_and_host_t, std::vector<std::string>>;
 extern external_roles_t g_external_roles;
 extern Cached_authentication_plugins *g_cached_authentication_plugins;
+
+constexpr unsigned int AUTH_PLUGIN_SHUTDOWN_TIMEOUT_MS = 2000;
 
 ACL_USER *decoy_user(const LEX_CSTRING &username, const LEX_CSTRING &hostname,
                      MEM_ROOT *mem, struct rand_struct *rand,

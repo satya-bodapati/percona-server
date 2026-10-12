@@ -1,15 +1,16 @@
-/* Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -305,7 +306,7 @@ int table_events_statements_common::make_row_part_1(
   ulonglong timer_end;
 
   auto *unsafe = (PFS_statement_class *)statement->m_class;
-  PFS_statement_class *klass = sanitize_statement_class(unsafe);
+  const PFS_statement_class *klass = sanitize_statement_class(unsafe);
   if (unlikely(klass == nullptr)) {
     return HA_ERR_RECORD_DELETED;
   }
@@ -342,8 +343,13 @@ int table_events_statements_common::make_row_part_1(
                      m_row.m_source, sizeof(m_row.m_source),
                      m_row.m_source_length);
 
-  memcpy(m_row.m_message_text, statement->m_message_text,
-         sizeof(m_row.m_message_text));
+  m_row.m_message_text_length = statement->m_message_text_length;
+  if (m_row.m_message_text_length > 0) {
+    memcpy(m_row.m_message_text, statement->m_message_text,
+           m_row.m_message_text_length);
+  }
+  m_row.m_message_text[m_row.m_message_text_length] = '\0';
+
   memcpy(m_row.m_sqlstate, statement->m_sqlstate, SQLSTATE_LENGTH);
 
   m_row.m_sql_errno = statement->m_sql_errno;
@@ -532,7 +538,7 @@ int table_events_statements_common::read_row_values(TABLE *table,
           }
           break;
         case 19: /* MESSAGE_TEXT */
-          len = (uint)strlen(m_row.m_message_text);
+          len = m_row.m_message_text_length;
           if (len) {
             set_field_varchar_utf8mb4(f, m_row.m_message_text, len);
           } else {
@@ -643,7 +649,8 @@ PFS_engine_table *table_events_statements_current::create(
 }
 
 table_events_statements_current::table_events_statements_current()
-    : table_events_statements_common(&m_share, &m_pos), m_pos(), m_next_pos() {}
+    : table_events_statements_common(&m_share, &m_pos),
+      m_opened_index(nullptr) {}
 
 void table_events_statements_current::reset_position() {
   m_pos.reset();
@@ -686,12 +693,9 @@ int table_events_statements_current::rnd_next() {
 }
 
 int table_events_statements_current::rnd_pos(const void *pos) {
-  PFS_thread *pfs_thread;
-  PFS_events_statements *statement;
-
   set_position(pos);
 
-  pfs_thread = global_thread_container.get(m_pos.m_index_1);
+  PFS_thread *pfs_thread = global_thread_container.get(m_pos.m_index_1);
   if (pfs_thread != nullptr) {
     const uint safe_events_statements_count =
         pfs_thread->m_events_statements_count;
@@ -710,7 +714,8 @@ int table_events_statements_current::rnd_pos(const void *pos) {
 
     assert(m_pos.m_index_2 < statement_stack_max);
 
-    statement = &pfs_thread->m_statement_stack[m_pos.m_index_2];
+    PFS_events_statements *statement =
+        &pfs_thread->m_statement_stack[m_pos.m_index_2];
 
     if (statement->m_class != nullptr) {
       return make_row(pfs_thread, statement);
@@ -812,7 +817,8 @@ PFS_engine_table *table_events_statements_history::create(
 }
 
 table_events_statements_history::table_events_statements_history()
-    : table_events_statements_common(&m_share, &m_pos), m_pos(), m_next_pos() {}
+    : table_events_statements_common(&m_share, &m_pos),
+      m_opened_index(nullptr) {}
 
 void table_events_statements_history::reset_position() {
   m_pos.reset();
@@ -858,13 +864,10 @@ int table_events_statements_history::rnd_next() {
 }
 
 int table_events_statements_history::rnd_pos(const void *pos) {
-  PFS_thread *pfs_thread;
-  PFS_events_statements *statement;
-
   assert(events_statements_history_per_thread != 0);
   set_position(pos);
 
-  pfs_thread = global_thread_container.get(m_pos.m_index_1);
+  PFS_thread *pfs_thread = global_thread_container.get(m_pos.m_index_1);
   if (pfs_thread != nullptr) {
     assert(m_pos.m_index_2 < events_statements_history_per_thread);
 
@@ -873,7 +876,8 @@ int table_events_statements_history::rnd_pos(const void *pos) {
       return HA_ERR_RECORD_DELETED;
     }
 
-    statement = &pfs_thread->m_statements_history[m_pos.m_index_2];
+    PFS_events_statements *statement =
+        &pfs_thread->m_statements_history[m_pos.m_index_2];
     if (statement->m_class != nullptr) {
       return make_row(pfs_thread, statement);
     }

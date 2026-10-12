@@ -1,15 +1,16 @@
-/*  Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+/*  Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License, version 2.0,
     as published by the Free Software Foundation.
 
-    This program is also distributed with certain software (including
+    This program is designed to work with certain software (including
     but not limited to OpenSSL) that is licensed under separate terms,
     as designated in a particular file or component or in included license
     documentation.  The authors of MySQL hereby grant you an additional
     permission to link the program and your derivative works with the
-    separately licensed software that they have included with MySQL.
+    separately licensed software that they have either included with
+    the program or referenced in the documentation.
 
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -50,22 +51,45 @@ DEFINE_METHOD(int, compare_keys,
               (const Column_mysql &key1, const Column_mysql &key2,
                const Column_meta &col_meta));
 
-DEFINE_METHOD(bool, get_row_metadata,
+DEFINE_METHOD(bool, get_row_metadata_all,
               (THD * thd, const TABLE *table, bool have_key,
-               Row_meta &metadata));
+               std::vector<Row_meta> &row_meta_all));
+
+DEFINE_METHOD(bool, get_table_metadata,
+              (THD * thd, const TABLE *table, Table_meta &table_meta));
 
 }  // namespace Bulk_data_convert
 
 namespace Bulk_data_load {
 
+DEFINE_METHOD(
+    void *, begin,
+    (THD * thd, const TABLE *table, size_t data_size, size_t memory,
+     size_t num_threads,
+     const std::vector<Bulk_load::Source_table_data> &source_table_data));
+
+/* Load data to an index. */
 DEFINE_METHOD(void *, begin,
-              (THD * thd, const TABLE *table, size_t data_size, size_t memory,
-               size_t num_threads));
+              (THD * thd, const TABLE *table, size_t nth_key, size_t data_size,
+               size_t memory, size_t num_threads));
 
 DEFINE_METHOD(bool, load,
               (THD * thd, void *ctx, const TABLE *table,
                const Rows_mysql &sql_rows, size_t thread,
                Bulk_load::Stat_callbacks &wait_cbks));
+
+DEFINE_METHOD(bool, open_blob,
+              (THD * thd, void *load_ctx, const TABLE *table,
+               Blob_context &blob_ctx, unsigned char *blobref, size_t thread));
+
+DEFINE_METHOD(bool, write_blob,
+              (THD * thd, void *load_ctx, const TABLE *table,
+               Blob_context blob_ctx, unsigned char *blobref, size_t thread,
+               const unsigned char *data, size_t data_len));
+
+DEFINE_METHOD(bool, close_blob,
+              (THD * thd, void *load_ctx, const TABLE *table,
+               Blob_context blob_ctx, unsigned char *blobref, size_t thread));
 
 DEFINE_METHOD(bool, end,
               (THD * thd, void *ctx, const TABLE *table, bool error));
@@ -73,5 +97,14 @@ DEFINE_METHOD(bool, end,
 DEFINE_METHOD(bool, is_table_supported, (THD * thd, const TABLE *table));
 
 DEFINE_METHOD(size_t, get_se_memory_size, (THD * thd, const TABLE *table));
+
+DEFINE_METHOD(bool, copy_existing_data,
+              (void *ctx, const TABLE *duplicate_table, size_t thread,
+               Bulk_load::Stat_callbacks &wait_cbks));
+
+DEFINE_METHOD(
+    bool, set_source_table_data,
+    (void *ctx, const TABLE *duplicate_table,
+     const std::vector<Bulk_load::Source_table_data> &source_table_data));
 
 }  // namespace Bulk_data_load

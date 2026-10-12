@@ -27,68 +27,56 @@ if (mysqld.global.error_on_md_query === undefined) {
   mysqld.global.error_on_md_query = 0;
 }
 
-var nodes = function(host, port_and_state) {
-  return port_and_state.map(function(current_value) {
-    return [
-      current_value[0], host, current_value[1], current_value[2],
-      current_value[3]
-    ];
-  });
-};
 
 
-var group_replication_members_online =
-    nodes(gr_node_host, mysqld.global.gr_nodes, mysqld.global.gr_id);
-
-var options = {
-  metadata_schema_version: mysqld.global.metadata_schema_version,
-  group_replication_members: group_replication_members_online,
-  innodb_cluster_instances: gr_memberships.cluster_nodes(
-      mysqld.global.gr_node_host, mysqld.global.cluster_nodes),
-  gr_id: mysqld.global.gr_id,
-  view_id: mysqld.global.view_id,
-  primary_port: group_replication_members_online[mysqld.global.primary_id][2],
-  cluster_type: "gr",
-  innodb_cluster_name: "test",
-  rest_user_credentials: mysqld.global.rest_user_credentials
-};
-
-options.group_replication_primary_member =
-    options.group_replication_members[mysqld.global.primary_id][0];
-
-// prepare the responses for common statements
-var common_responses = common_stmts.prepare_statement_responses(
-    [
-      "router_set_session_options",
-      "router_set_gr_consistency_level",
-      "router_start_transaction",
-      "select_port",
-      "router_commit",
-      "router_rollback",
-      "router_select_metadata",
-      "router_select_schema_version",
-      "router_select_cluster_type_v2",
-      "router_check_member_state",
-      "router_select_members_count",
-      "router_select_group_replication_primary_member",
-      "router_select_group_membership_with_primary_mode",
-      "router_select_metadata_v2_gr",
-      "router_update_last_check_in_v2",
-      "router_select_router_options_view",
-    ],
-    options);
-
-var router_select_rest_accounts_credentials_gr_by_uuid = common_stmts.get(
-    "router_select_rest_accounts_credentials_gr_by_uuid", options);
-
-var common_responses_regex = common_stmts.prepare_statement_responses_regex(
-    [
-      "router_update_attributes_v2",
-    ],
-    options);
+var members = gr_memberships.gr_members(
+    mysqld.global.gr_node_host, mysqld.global.gr_nodes);
 
 ({
   stmts: function(stmt) {
+    var options = {
+      metadata_schema_version: mysqld.global.metadata_schema_version,
+      group_replication_members: members,
+      innodb_cluster_instances: gr_memberships.cluster_nodes(
+          mysqld.global.gr_node_host, mysqld.global.cluster_nodes),
+      gr_id: mysqld.global.gr_id,
+      view_id: mysqld.global.view_id,
+      cluster_type: "gr",
+      innodb_cluster_name: "test",
+      rest_user_credentials: mysqld.global.rest_user_credentials
+    };
+
+    // prepare the responses for common statements
+    var common_responses = common_stmts.prepare_statement_responses(
+        [
+          "router_set_session_options",
+          "router_set_gr_consistency_level",
+          "router_start_transaction",
+          "select_port",
+          "router_commit",
+          "router_rollback",
+          "router_select_schema_version",
+          "router_select_cluster_type_v2",
+          "router_check_member_state",
+          "router_select_members_count",
+          "router_select_group_membership",
+          "router_select_metadata_v2_gr",
+          "router_update_last_check_in_v2_4",
+          "router_select_router_options_view",
+          "get_guidelines_router_info",
+          "get_routing_guidelines",
+        ],
+        options);
+
+    var common_responses_regex = common_stmts.prepare_statement_responses_regex(
+        [
+          "router_update_attributes_v2",
+        ],
+        options);
+
+    var router_select_rest_accounts_credentials_gr_by_uuid = common_stmts.get(
+        "router_select_rest_accounts_credentials_gr_by_uuid", options);
+
     if (common_responses.hasOwnProperty(stmt)) {
       return common_responses[stmt];
     } else if (
@@ -106,8 +94,9 @@ var common_responses_regex = common_stmts.prepare_statement_responses_regex(
             message: "Syntax Error at: " + stmt
           }
         }
-      } else
-        return router_select_rest_accounts_credentials_gr_by_uuid;
+      }
+
+      return router_select_rest_accounts_credentials_gr_by_uuid;
     } else {
       return common_stmts.unknown_statement_response(stmt);
     }

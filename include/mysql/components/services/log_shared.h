@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -68,7 +69,8 @@ enum enum_log_type {
   LOG_TYPE_GENERAL = 2,
   LOG_TYPE_SLOW = 4,
   LOG_TYPE_AUDIT = 8,
-  LOG_TYPE_MISC = 16
+  LOG_TYPE_MISC = 16,
+  LOG_TYPE_DIAG = 32
 };
 
 /**
@@ -155,6 +157,11 @@ typedef enum enum_log_item_type {
   LOG_ITEM_RET_BUFFER = 1 << 30      /**< sink's output to pfs table */
 } log_item_type;
 
+/** Log line flags */
+typedef enum enum_log_line_flags {
+  LOG_LINE_EMIT_TELEMETRY = 1 << 0 /**< emit log line as telemetry record */
+} log_line_flags;
+
 /* some suggested keys for generic items */
 
 /** DIAGNOSTICS: for da->message_text() */
@@ -219,6 +226,9 @@ typedef struct _log_line log_line;
 
 /** log iter: an iterator over the collection of log items in a log line */
 typedef struct _log_item_iter log_item_iter;
+
+/** a bit mask with flags describing a log line */
+typedef uint64 log_line_flags_mask;
 
 /** advisory. components must not rely on others using the same value. */
 #define LOG_BUFF_MAX 8192

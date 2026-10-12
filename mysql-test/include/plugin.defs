@@ -40,8 +40,6 @@ ha_example                              plugin_output_directory  no EXAMPLE_PLUG
 conflicting_variables                   plugin_output_directory  no CONFLICTING_VARIABLES
 semisync_source                         plugin_output_directory  no SEMISYNC_SOURCE_PLUGIN
 semisync_replica                        plugin_output_directory  no SEMISYNC_REPLICA_PLUGIN
-semisync_master                         plugin_output_directory  no SEMISYNC_MASTER_PLUGIN
-semisync_slave                          plugin_output_directory  no SEMISYNC_SLAVE_PLUGIN
 ha_archive                              plugin_output_directory  no ARCHIVE_PLUGIN
 ha_blackhole                            plugin_output_directory  no BLACKHOLE_PLUGIN
 ha_federated                            plugin_output_directory  no FEDERATED_PLUGIN
@@ -51,13 +49,9 @@ mypluglib                               plugin_output_directory  no SIMPLE_PARSE
 libpluginmecab                          plugin_output_directory  no MECAB
 adt_null                                plugin_output_directory  no AUDIT_NULL
 keyring_udf                             plugin_output_directory  no KEYRING_UDF keyring_udf
-keyring_file                            plugin_output_directory  no KEYRING_PLUGIN        keyring_file
 test_security_context                   plugin_output_directory  no TEST_SECURITY_CONTEXT  test_security_context
 libdaemon_example                       plugin_output_directory  no DAEMONEXAMPLE
 replication_observers_example_plugin    plugin_output_directory  no RPL_OBS_EXAMPLE
-libmemcached                            plugin_output_directory  no DAEMON_MEMCACHED
-# libmemcached     			plugin_output_directory  no DAEMON_MEMCACHED daemon_memcached
-innodb_engine      			plugin_output_directory  no INNODB_ENGINE
 validate_password  			plugin_output_directory  no VALIDATE_PASSWORD validate_password
 rewrite_example    			plugin_output_directory  no REWRITE_EXAMPLE
 ddl_rewriter                            plugin_output_directory  no DDL_REWRITER
@@ -68,7 +62,6 @@ test_udf_services  			plugin_output_directory  no TESTUDFREGISTRATION test_udf_r
 test_udf_services  			plugin_output_directory  no TESTUDFEXTENSIONSERVICES test_udf_extension_services
 group_replication  			plugin_output_directory  no GROUP_REPLICATION
 locking_service    			plugin_output_directory  no LOCKING_SERVICE
-version_token      			plugin_output_directory  no VERSION_TOKEN
 # Test services framework
 libtest_services                        plugin_output_directory  no TESTSERVICES
 libtest_services_threaded               plugin_output_directory  no TESTSERVICESTHREADED
@@ -131,6 +124,7 @@ component_test_component_sys_var_service   plugin_output_directory  no  TEST_COM
 component_test_sys_var_service plugin_output_directory  no SYS_VAR_SERVICE component_test_sys_var_service
 component_test_sys_var_service_same plugin_output_directory  no SYS_VAR_SERVICE_SAME component_test_sys_var_service_same
 component_test_status_var_service plugin_output_directory  no STATUS_VAR_SERVICE component_test_status_var_service
+component_test_session_var_service plugin_output_directory  no SESSION_VAR_SERVICE component_test_session_var_service
 
 # pfs_example
 component_pfs_example    plugin_output_directory  no  PFS_EXAMPLE
@@ -148,6 +142,9 @@ component_test_mysql_current_thread_reader  plugin_output_directory  no  TEST_MY
 
 # test mysql_runtime_error service
 component_test_mysql_runtime_error  plugin_output_directory  no  TEST_MYSQL_RUNTIME_ERROR_COMPONENT
+
+# test mysql_udf_aggregate_error service
+component_test_udf_aggregate  plugin_output_directory  no  TEST_UDF_AGGREGATE
 
 # mysqlbackup component
 component_mysqlbackup           plugin_output_directory  no  MYSQLBACKUP_COMPONENT
@@ -193,6 +190,44 @@ component_test_event_tracking_consumer  	        plugin_output_directory no COMP
 # component_test_event_tracking_producer_a
 component_test_event_tracking_producer_a  	        plugin_output_directory no COMPONENT_TEST_EVENT_TRACKING_PRODUCER_A
 
+# component test_server_telemetry_logs
+component_test_server_telemetry_logs       plugin_output_directory no TEST_SERVER_TELEMETRY_LOGS_COMPONENT
+
+# component_test_execute_prepared_statement
+component_test_execute_prepared_statement  plugin_output_directory  no  COMPONENT_TEST_EXECUTE_PREPARED_STATEMENT
+
+# component_test_execute_regular_statement
+component_test_execute_regular_statement  plugin_output_directory  no  COMPONENT_TEST_EXECUTE_REGULAR_STATEMENT
+
+# connection control component
+component_connection_control     plugin_output_directory  no  COMPONENT_CONNECTION_CONTROL
+
+# init before register test component
+component_test_component_init_then_register     plugin_output_directory  no  COMPONENT_TEST_COMPONENT_INIT_THEN_REGISTER
+
+# deinit no deadlock test component
+component_test_component_deinit_no_deadlock     plugin_output_directory  no  COMPONENT_TEST_COMPONENT_DEINIT_NO_DEADLOCK
+
+# init fail test component
+component_test_component_init_fail     plugin_output_directory  no  COMPONENT_TEST_COMPONENT_INIT_FAIL
+# component_test_mysql_file_service
+component_test_mysql_file_service     plugin_output_directory  no  COMPONENT_TEST_MYSQL_FILE_SERVICE
+
+# Server telemetry component
+component_telemetry plugin_output_directory no COMPONENT_TELEMETRY component_telemetry
+
+# replication applier metrics component
+component_replication_applier_metrics plugin_output_directory no REPLICATION_APPLIER_METRICS component_replication_applier_metrics
+
+# Group Replication flow control statistics component
+component_group_replication_flow_control_stats plugin_output_directory no GROUP_REPLICATION_FLOW_CONTROL_STATS component_group_replication_flow_control_stats
+
+# Group Replication resource manager
+component_group_replication_resource_manager plugin_output_directory no GROUP_REPLICATION_RESOURCE_MANAGER component_group_replication_resource_manager
+
+# Group Replication primary election prefer most updated
+component_group_replication_elect_prefers_most_updated plugin_output_directory no GROUP_REPLICATION_PRIMARY_ELECT_PREFER_MOST_UPDATED component_group_replication_group_replication_elect_prefers_most_updated
+
 # Percona additions
 auth_socket        plugin_output_directory  no  SOCKET_AUTH
 component_audit_log_filter   plugin_output_directory  no  AUDIT_LOG_COMPONENT
@@ -208,3 +243,5 @@ component_binlog_utils_udf          plugin_output_directory  no  BINLOG_UTILS_UD
 component_encryption_udf            plugin_output_directory  no  ENCRYPTION_UDF_COMPONENT
 component_masking_functions         plugin_output_directory  no  MASKING_FUNCTIONS_COMPONENT
 component_percona_udf               plugin_output_directory  no  PERCONA_UDF_COMPONENT
+component_js_lang                   plugin_output_directory  no  JS_LANG_COMPONENT
+auth_openid_connect                 plugin_output_directory  no  AUTH_OIDC             auth_openid_connect

@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -33,18 +34,16 @@
 
 #include "mysys/my_static.h"
 
-#include "my_config.h"
+#include <sys/types.h>
+#include <atomic>
+#include <cassert>
+#include <cstdarg>
 
-#include <stdarg.h>
-#include <stddef.h>
-
-#include "my_compiler.h"
-#include "mysql/components/services/bits/psi_bits.h"
+#include "my_sys.h"
 #include "mysql/my_loglevel.h"
-#include "mysql/psi/mysql_cond.h"
 #include "mysql/psi/mysql_mutex.h"
 #include "mysql/psi/psi_memory.h"
-#include "mysql/psi/psi_stage.h"
+#include "mysql/psi/psi_thread.h"
 #include "mysys/mysys_priv.h"  // IWYU pragma: keep
 
 /* get memory in hunks */
@@ -161,8 +160,8 @@ int my_umask = 0664, my_umask_dir = 0777;
 ulong my_default_record_cache_size = RECORD_CACHE_SIZE;
 
 /* from my_malloc */
-USED_MEM *my_once_root_block = nullptr; /* pointer to first block */
-uint my_once_extra = ONCE_ALLOC_INIT;   /* Memory to alloc / block */
+USED_MEM *my_once_root_block = nullptr;       /* pointer to first block */
+unsigned int my_once_extra = ONCE_ALLOC_INIT; /* Memory to alloc / block */
 
 std::atomic<ErrorHandlerFunctionPointer> error_handler_hook{my_message_stderr};
 

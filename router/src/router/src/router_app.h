@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -34,19 +35,25 @@
  *
  */
 
+#include "keyring_handler.h"
 #include "mysql/harness/arg_handler.h"
 #include "mysql/harness/loader.h"
 #include "mysql/harness/signal_handler.h"
 #include "mysqlrouter/keyring_info.h"
 #include "mysqlrouter/sys_user_operations.h"
+#include "router_conf.h"
 
 #include <cstdint>
-#include <iostream>
+#include <iostream>  // cerr, cout
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 static const size_t kHelpScreenWidth = 72;
 static const size_t kHelpScreenIndent = 8;
+
+static const std::string kSystemRouterName = "system";
+static const std::string kDefaultSystemUserName = "";
 
 class ConfigFiles;
 
@@ -92,7 +99,8 @@ class MySQLRouter {
         ,
         sys_user_operations_(mysqlrouter::SysUserOperations::instance())
 #endif
-  {
+        ,
+        bootstrapper_(keyring_.get_ki()) {
   }
 
   /** @brief Constructor with command line arguments as vector
@@ -371,23 +379,6 @@ class MySQLRouter {
    */
   void show_help();
 
-  /** @brief Saves the selected command line option in the internal options
-   * array after verifying it's value not empty and the router is doing
-   * bootstrap.
-   *
-   *  Throws: std::runtime_error
-   */
-  void save_bootstrap_option_not_empty(const std::string &option_name,
-                                       const std::string &save_name,
-                                       const std::string &option_value);
-
-  /**
-   * @brief verify that bootstrap option (--bootstrap or -B) was given by user.
-   *
-   * @throw std::runtime_error if called in non-bootstrap mode.
-   */
-  void assert_bootstrap_mode(const std::string &option_name) const;
-
   /**
    * @brief verify that option given by user is not used with bootstrap option
    * (--bootstrap or -B).
@@ -395,16 +386,6 @@ class MySQLRouter {
    * @throw std::runtime_error if called in bootstrap mode.
    */
   void assert_not_bootstrap_mode(const std::string &option_name) const;
-
-  /**
-   * @brief verify that option given by user is an integer value in the given
-   * range.
-   *
-   * @throw std::out_of_range - option not in [min, max] range
-   * @throw std::invalid_argument - not a valid integer
-   */
-  void assert_option_value_in_range(const std::string &option_value,
-                                    const int min, const int max) const;
 
   /** @brief Shows command line usage and option description
    *
@@ -449,9 +430,6 @@ class MySQLRouter {
    */
   void set_default_config_files(const char *locations) noexcept;
 
-  void bootstrap(const std::string &program_name,
-                 const std::string &metadata_server_uri);
-
   /*
    * @brief returns id of the router.
    *
@@ -462,28 +440,6 @@ class MySQLRouter {
   void init_keyring(mysql_harness::Config &config);
 
   void init_dynamic_state(mysql_harness::Config &config);
-
-  /**
-   * @brief Initializes keyring using master-key-reader and master-key-writer.
-   *
-   * @throw MasterKeyReadError
-   */
-  void init_keyring_using_external_facility(mysql_harness::Config &config);
-
-  /**
-   * @brief Initializes keyring using master key file.
-   *
-   * @throw std::runtime_error
-   */
-  void init_keyring_using_master_key_file();
-
-  /**
-   * @brief Initializes keyring using password read from STDIN.
-   *
-   * @throw std::runtime_error
-   */
-  void init_keyring_using_prompted_password();
-
   // throws std::runtime_error
   void init_loader(mysql_harness::LoaderConfig &config);
 
@@ -491,8 +447,6 @@ class MySQLRouter {
   mysql_harness::LoaderConfig *make_config(
       const std::map<std::string, std::string> params,
       const std::vector<std::string> &config_files);
-
-  std::map<std::string, std::string> get_default_paths() const;
 
   /** @brief Tuple describing the MySQL Router version, with major, minor and
    * patch level **/
@@ -505,6 +459,7 @@ class MySQLRouter {
   /** @brief Vector with configuration files passed through command line
    * arguments **/
   std::vector<std::string> config_files_;
+
   /** @brief PID file location **/
   std::string pid_file_path_;
   bool pid_file_created_{false};
@@ -518,25 +473,6 @@ class MySQLRouter {
   /** @brief Whether we are showing information on command line, for example,
    * using --help or --version **/
   bool showing_info_;
-  /**
-   * @brief Value of the argument passed to the -B or --bootstrap
-   *        command line option for bootstrapping.
-   */
-  std::string bootstrap_uri_;
-  /**
-   * @brief Valueof the argument passed to the --directory command line option
-   */
-  std::string bootstrap_directory_;
-  /**
-   * @brief key/value map of additional configuration options for bootstrap
-   */
-  std::map<std::string, std::string> bootstrap_options_;
-
-  /**
-   * @brief key/list-of-values map of additional configuration options for
-   * bootstrap
-   */
-  std::map<std::string, std::vector<std::string>> bootstrap_multivalue_options_;
 
   /**
    * Path to origin of executable.
@@ -546,7 +482,7 @@ class MySQLRouter {
    */
   mysql_harness::Path origin_;
 
-  KeyringInfo keyring_info_;
+  KeyringHandler keyring_;
 
   std::ostream &out_stream_;
   std::ostream &err_stream_;
@@ -567,20 +503,22 @@ class MySQLRouter {
 
   /** @brief Pointer to the object to be used to perform system specific
    * user-related operations **/
-  mysqlrouter::SysUserOperationsBase *sys_user_operations_;
+  mysqlrouter::SysUserOperationsBase *sys_user_operations_ = nullptr;
 #endif
 
   mysql_harness::SignalHandler signal_handler_;
 
+  MySQLRouterConf bootstrapper_;
 #ifdef FRIEND_TEST
   FRIEND_TEST(Bug24909259, PasswordPrompt_plain);
   FRIEND_TEST(Bug24909259, PasswordPrompt_keyed);
 #endif
 };
 
-class silent_exception : public std::exception {
- public:
-  silent_exception() : std::exception() {}
-};
+/** @brief Expose the configured application-level options (the ones
+ * from [DEFAULT] section that are not specific to any particular plugin and are
+ * relevant from the Cluster metadata perspective) **/
+void expose_router_configuration(const bool initial,
+                                 const mysql_harness::ConfigSection &section);
 
 #endif  // ROUTER_MYSQL_ROUTER_INCLUDED

@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,12 +25,10 @@
 
 #include "mysqlrouter/routing_plugin_export.h"
 
-#include <atomic>
 #include <mutex>
 #include <stdexcept>
 #include <vector>
 
-#include "dim.h"
 #include "hostname_validator.h"
 #include "mysql/harness/config_parser.h"
 #include "mysql/harness/filesystem.h"
@@ -39,18 +38,16 @@
 #include "mysql/harness/tls_server_context.h"
 #include "mysql/harness/utility/string.h"  // join, string_format
 #include "mysql_routing.h"
-#include "mysqlrouter/connection_pool.h"
-#include "mysqlrouter/connection_pool_component.h"
-#include "mysqlrouter/destination.h"
 #include "mysqlrouter/io_component.h"
+#include "mysqlrouter/metadata_cache.h"
 #include "mysqlrouter/routing_component.h"
+#include "mysqlrouter/ssl_mode.h"
 #include "mysqlrouter/supported_routing_options.h"
 #include "plugin_config.h"
+#include "routing_guidelines_adapter.h"
 #include "scope_guard.h"
-#include "ssl_mode.h"
+#include "sql_lexer.h"  // init_library()
 
-using mysql_harness::AppInfo;
-using mysql_harness::ConfigSection;
 using mysqlrouter::URI;
 using mysqlrouter::URIError;
 IMPORT_LOG_FUNCTIONS()
@@ -59,6 +56,7 @@ const mysql_harness::AppInfo *g_app_info;
 static const std::string kSectionName = "routing";
 std::mutex g_dest_tls_contexts_mtx;
 std::vector<std::unique_ptr<DestinationTlsContext>> g_dest_tls_contexts;
+std::mutex routing_guidelines_create_mtx;
 
 static void validate_socket_info(const std::string &err_prefix,
                                  const mysql_harness::ConfigSection *section,
@@ -89,7 +87,7 @@ static void validate_socket_info(const std::string &err_prefix,
 
   // validate bind_address : IP
   if (have_bind_addr &&
-      !mysql_harness::is_valid_domainname(config.bind_address.address())) {
+      !mysql_harness::is_valid_domainname(config.bind_address.hostname())) {
     throw std::invalid_argument(err_prefix +
                                 "invalid IP or name in bind_address '" +
                                 config.bind_address.str() + "'");
@@ -150,12 +148,14 @@ std::list<IoComponent::Workguard> io_context_work_guards;
 static void init(mysql_harness::PluginFuncEnv *env) {
   const mysql_harness::AppInfo *info = get_app_info(env);
 
+  SqlLexer::init_library();
+
   try {
     if (info->config != nullptr) {
       MySQLRoutingComponent::get_instance().init(*info->config);
       bool have_metadata_cache = false;
       bool need_metadata_cache = false;
-      std::vector<mysql_harness::TCPAddress> bind_addresses;
+      std::vector<mysql_harness::TcpDestination> bind_addresses;
       for (const mysql_harness::ConfigSection *section :
            info->config->sections()) {
         if (section->name == kSectionName) {
@@ -166,58 +166,61 @@ static void init(mysql_harness::PluginFuncEnv *env) {
               section->key.empty() ? "" : ":", section->key.c_str());
           // Check the configuration
           RoutingPluginConfig config(section);  // throws std::invalid_argument
-          validate_socket_info(err_prefix, section,
-                               config);  // throws std::invalid_argument
+          if (config.accept_connections) {
+            validate_socket_info(err_prefix, section,
+                                 config);  // throws std::invalid_argument
 
-          // ensure that TCP port is unique
-          if (config.bind_address.port()) {
-            const auto &config_addr = config.bind_address;
+            // ensure that TCP port is unique
+            if (config.bind_address.port() != 0) {
+              const auto &config_addr = config.bind_address;
 
-            // Check uniqueness of bind_address and port, using IP address
-            auto found_addr =
-                std::find(bind_addresses.begin(), bind_addresses.end(),
-                          config.bind_address);
-            if (found_addr != bind_addresses.end()) {
-              throw std::invalid_argument(
-                  err_prefix + "duplicate IP or name found in bind_address '" +
-                  config.bind_address.str() + "'");
-            }
-            // Check ADDR_ANY binding on same port
-            else if (config_addr.address() == "0.0.0.0" ||
-                     config_addr.address() == "::") {
-              found_addr = std::find_if(
-                  bind_addresses.begin(), bind_addresses.end(),
-                  [&config](const mysql_harness::TCPAddress &addr) {
-                    return config.bind_address.port() == addr.port();
-                  });
+              // Check uniqueness of bind_address and port, using IP address
+              auto found_addr =
+                  std::find(bind_addresses.begin(), bind_addresses.end(),
+                            config.bind_address);
               if (found_addr != bind_addresses.end()) {
                 throw std::invalid_argument(
                     err_prefix +
                     "duplicate IP or name found in bind_address '" +
                     config.bind_address.str() + "'");
               }
+              // Check ADDR_ANY binding on same port
+              else if (config_addr.hostname() == "0.0.0.0" ||
+                       config_addr.hostname() == "::") {
+                found_addr = std::find_if(
+                    bind_addresses.begin(), bind_addresses.end(),
+                    [&config](const mysql_harness::TcpDestination &dest) {
+                      return config.bind_address.port() == dest.port();
+                    });
+                if (found_addr != bind_addresses.end()) {
+                  throw std::invalid_argument(
+                      err_prefix +
+                      "duplicate IP or name found in bind_address '" +
+                      config.bind_address.str() + "'");
+                }
+              }
+              bind_addresses.push_back(config.bind_address);
             }
-            bind_addresses.push_back(config.bind_address);
-          }
 
-          // We check if we need special plugins based on URI
-          try {
-            auto uri = URI(config.destinations, false);
-            if (uri.scheme == "metadata-cache") {
-              need_metadata_cache = true;
+            // We check if we need special plugins based on URI
+            try {
+              auto uri = URI(config.destinations, false);
+              if (uri.scheme == "metadata-cache") {
+                need_metadata_cache = true;
+              }
+            } catch (URIError &) {
+              // No URI, no extra plugin needed
             }
-          } catch (URIError &) {
-            // No URI, no extra plugin needed
           }
         } else if (section->name == "metadata_cache") {
           have_metadata_cache = true;
         }
-      }
 
-      if (need_metadata_cache && !have_metadata_cache) {
-        throw std::invalid_argument(
-            "Routing needs Metadata Cache, but no none "
-            "was found in configuration.");
+        if (need_metadata_cache && !have_metadata_cache) {
+          throw std::invalid_argument(
+              "Routing needs Metadata Cache, but none "
+              "was found in configuration.");
+        }
       }
     }
     g_app_info = info;
@@ -257,6 +260,14 @@ static std::string get_default_ciphers() {
   return mysql_harness::join(TlsServerContext::default_ciphers(), ":");
 }
 
+static bool has_metadata_cache() {
+  for (const mysql_harness::ConfigSection *section :
+       g_app_info->config->sections()) {
+    if (section->name == "metadata_cache") return true;
+  }
+  return false;
+}
+
 static void start(mysql_harness::PluginFuncEnv *env) {
   const mysql_harness::ConfigSection *section = get_config_section(env);
 
@@ -268,7 +279,18 @@ static void start(mysql_harness::PluginFuncEnv *env) {
   }
 
   try {
-    RoutingPluginConfig config(section);
+    const RoutingPluginConfig config(section);
+
+    if (config.router_require_enforce != 0) {
+      if (config.source_ssl_ca_file.empty() &&
+          config.source_ssl_ca_dir.empty()) {
+        log_info(
+            "[%s] %s", name.c_str(),
+            "'router_require_enforce=1', but neither 'client_ssl_ca' nor "
+            "'client_ssl_cadir' are set. MySQL account with ATTRIBUTE "
+            "'{ \"router_require\": { \"x509\": true } }' will fail to auth.");
+      }
+    }
 
     // client side TlsContext.
     TlsServerContext source_tls_ctx{TlsVersion::TLS_1_2, TlsVersion::AUTO,
@@ -332,6 +354,59 @@ static void start(mysql_harness::PluginFuncEnv *env) {
                                                    ssl_cipher + " failed");
         }
       }
+
+      if (!config.source_ssl_ca_file.empty() ||
+          !config.source_ssl_ca_dir.empty()) {
+        if (!config.source_ssl_ca_dir.empty()) {
+          // throws on error
+          ensure_readable_directory("client_ssl_capath",
+                                    config.source_ssl_ca_dir);
+        }
+        {
+          const auto res = source_tls_ctx.ssl_ca(config.source_ssl_ca_file,
+                                                 config.source_ssl_ca_dir);
+          if (!res) {
+            throw std::system_error(
+                res.error(),
+                "setting client_ssl_ca=" + config.source_ssl_ca_file +
+                    " and client_ssl_capath=" + config.source_ssl_ca_dir +
+                    " failed");
+          }
+        }
+
+        if (!config.source_ssl_crl_file.empty() ||
+            !config.source_ssl_crl_dir.empty()) {
+          const auto res = source_tls_ctx.crl(config.source_ssl_crl_file,
+                                              config.source_ssl_crl_dir);
+          if (!res) {
+            throw std::system_error(
+                res.error(),
+                "setting client_ssl_crl=" + config.source_ssl_crl_file +
+                    " and client_ssl_crlpath=" + config.source_ssl_crl_dir +
+                    " failed");
+          }
+        }
+
+        source_tls_ctx.verify(TlsVerify::PEER, TlsVerifyOpts::kClientOnce);
+      }
+
+      if (!config.source_ssl_crl_file.empty() ||
+          !config.source_ssl_crl_dir.empty()) {
+        if (!config.source_ssl_crl_dir.empty()) {
+          // throws on error
+          ensure_readable_directory("client_ssl_crlpath",
+                                    config.source_ssl_crl_dir);
+        }
+        const auto res = source_tls_ctx.crl(config.source_ssl_crl_file,
+                                            config.source_ssl_crl_dir);
+        if (!res) {
+          throw std::system_error(
+              res.error(),
+              "setting client_ssl_crl=" + config.source_ssl_crl_file +
+                  " and client_ssl_crlpath=" + config.source_ssl_crl_dir +
+                  " failed");
+        }
+      }
     }
 
     auto dest_tls_context = std::make_unique<DestinationTlsContext>(
@@ -340,13 +415,13 @@ static void start(mysql_harness::PluginFuncEnv *env) {
         config.server_ssl_session_cache_timeout);
     if (config.dest_ssl_mode != SslMode::kDisabled) {
       // validate the config-values one time
-      TlsServerContext tls_server_ctx;
+      TlsClientContext precheck_dest_tls_ctx;
 
       {
         const std::string dest_ssl_cipher = config.dest_ssl_cipher.empty()
                                                 ? get_default_ciphers()
                                                 : config.dest_ssl_cipher;
-        const auto res = tls_server_ctx.cipher_list(dest_ssl_cipher);
+        const auto res = precheck_dest_tls_ctx.cipher_list(dest_ssl_cipher);
         if (!res) {
           throw std::system_error(res.error(), "setting server_ssl_cipher=" +
                                                    dest_ssl_cipher + " failed");
@@ -354,7 +429,8 @@ static void start(mysql_harness::PluginFuncEnv *env) {
         dest_tls_context->ciphers(dest_ssl_cipher);
       }
       if (!config.dest_ssl_curves.empty()) {
-        const auto res = tls_server_ctx.curves_list(config.dest_ssl_curves);
+        const auto res =
+            precheck_dest_tls_ctx.curves_list(config.dest_ssl_curves);
         if (!res) {
           if (res.error() == std::errc::function_not_supported) {
             throw std::runtime_error(
@@ -368,14 +444,15 @@ static void start(mysql_harness::PluginFuncEnv *env) {
         }
         dest_tls_context->curves(config.dest_ssl_curves);
       }
+
       if (!config.dest_ssl_ca_file.empty() || !config.dest_ssl_ca_dir.empty()) {
         if (!config.dest_ssl_ca_dir.empty()) {
           // throws on error
           ensure_readable_directory("server_ssl_capath",
                                     config.dest_ssl_ca_dir);
         }
-        const auto res = tls_server_ctx.ssl_ca(config.dest_ssl_ca_file,
-                                               config.dest_ssl_ca_dir);
+        const auto res = precheck_dest_tls_ctx.ssl_ca(config.dest_ssl_ca_file,
+                                                      config.dest_ssl_ca_dir);
         if (!res) {
           throw std::system_error(
               res.error(), "setting server_ssl_ca=" + config.dest_ssl_ca_file +
@@ -393,8 +470,8 @@ static void start(mysql_harness::PluginFuncEnv *env) {
           ensure_readable_directory("server_ssl_crlpath",
                                     config.dest_ssl_crl_dir);
         }
-        const auto res = tls_server_ctx.crl(config.dest_ssl_crl_file,
-                                            config.dest_ssl_crl_dir);
+        const auto res = precheck_dest_tls_ctx.crl(config.dest_ssl_crl_file,
+                                                   config.dest_ssl_crl_dir);
         if (!res) {
           throw std::system_error(
               res.error(),
@@ -408,6 +485,18 @@ static void start(mysql_harness::PluginFuncEnv *env) {
       }
 
       dest_tls_context->verify(config.dest_ssl_verify);
+
+      if (!config.dest_ssl_key.empty() && !config.dest_ssl_cert.empty()) {
+        dest_tls_context->client_key_and_cert_file(config.dest_ssl_key,
+                                                   config.dest_ssl_cert);
+      } else if (config.dest_ssl_cert.empty() && config.dest_ssl_key.empty()) {
+        // ok
+      } else {
+        throw std::system_error(
+            make_error_code(std::errc::invalid_argument),
+            "setting server_ssl_key=" + config.dest_ssl_key +
+                " and server_ssl_cert=" + config.dest_ssl_cert + " failed");
+      }
     }
 
     if (config.connection_sharing == 1) {
@@ -424,21 +513,6 @@ static void start(mysql_harness::PluginFuncEnv *env) {
             name.c_str());
       }
 
-      auto &pool_component = ConnectionPoolComponent::get_instance();
-      auto default_pool_name = pool_component.default_pool_name();
-      auto default_pool = pool_component.get(default_pool_name);
-      if (!default_pool) {
-        log_warning(
-            "[%s].connection_sharing=1 has been ignored, as "
-            "there is no [connection_pool]",
-            name.c_str());
-      } else if (default_pool->max_pooled_connections() == 0) {
-        log_warning(
-            "[%s].connection_sharing=1 has been ignored, as "
-            "[connection_pool].max_idle_server_connections=0",
-            name.c_str());
-      }
-
       if (config.protocol == Protocol::Type::kXProtocol) {
         log_warning("[%s].connection_sharing=1 has been ignored, as protocol=x",
                     name.c_str());
@@ -446,24 +520,70 @@ static void start(mysql_harness::PluginFuncEnv *env) {
     }
 
     net::io_context &io_ctx = IoComponent::get_instance().io_context();
+    {
+      auto &routing_component = MySQLRoutingComponent::get_instance();
+      std::lock_guard lock(routing_guidelines_create_mtx);
+      if (!routing_component.routing_guidelines_initialized()) {
+        const auto &routing_guidelines_document =
+            create_routing_guidelines_document(g_app_info->config->sections(),
+                                               io_ctx);
+        if (routing_guidelines_document) {
+          log_debug("Initial routing guidelines: \n%s",
+                    routing_guidelines_document.value().c_str());
+          routing_component.set_routing_guidelines(
+              routing_guidelines_document.value());
+        } else if (routing_guidelines_document.error() ==
+                   std::errc::not_supported) {
+          log_debug(
+              "Skip generating initial routing guidelines, only static routes "
+              "are configured");
+        } else {
+          throw std::runtime_error(
+              "Unable to create routing guidelines from configuration file: " +
+              routing_guidelines_document.error().message());
+        }
+      }
+    }
+
+    auto routing_guidelines =
+        MySQLRoutingComponent::get_instance().get_routing_guidelines();
     auto r = std::make_shared<MySQLRouting>(
-        config, io_ctx, name,
+        config, io_ctx, std::move(routing_guidelines), name,
         config.source_ssl_mode != SslMode::kDisabled ? &source_tls_ctx
                                                      : nullptr,
         config.dest_ssl_mode != SslMode::kDisabled ? dest_tls_context.get()
                                                    : nullptr);
 
-    try {
-      // don't allow rootless URIs as we did already in the
-      // get_option_destinations()
-      r->set_destinations_from_uri(URI(config.destinations, false));
-    } catch (const URIError &) {
-      r->set_destinations_from_csv(config.destinations);
-    }
+    r->set_destinations(config.destinations);
+
     MySQLRoutingComponent::get_instance().register_route(section->key, r);
 
-    Scope_guard guard{[section_key = section->key]() {
+    auto *mdc = metadata_cache::MetadataCacheAPI::instance();
+    using namespace std::chrono_literals;
+    const bool has_md = has_metadata_cache();
+    while (has_md && !mdc->is_initialized() && (!env || is_running(env))) {
+      std::this_thread::sleep_for(1ms);
+    }
+
+    if (mdc->is_initialized() && !r->is_standalone()) {
+      mdc->add_routing_guidelines_update_callbacks(
+          [r](const std::string &routing_guidelines_document) {
+            return r->update_routing_guidelines(routing_guidelines_document);
+          },
+          [&r](const auto &affected_routes) {
+            r->on_routing_guidelines_update(affected_routes);
+          });
+      mdc->add_router_info_update_callback([&r](const auto &router_info) {
+        r->on_router_info_update(router_info);
+      });
+    }
+
+    Scope_guard guard{[r, mdc, section_key = section->key]() {
       MySQLRoutingComponent::get_instance().erase(section_key);
+      if (mdc->is_initialized() && !r->is_standalone()) {
+        mdc->clear_routing_guidelines_update_callbacks();
+        mdc->clear_router_info_update_callback();
+      }
     }};
 
     {
@@ -498,14 +618,32 @@ static void deinit(mysql_harness::PluginFuncEnv * /* env */) {
   g_dest_tls_contexts.clear();
 }
 
-static const std::array<const char *, 6> required = {{
-    "logger",
-    "router_protobuf",
-    "router_openssl",
+static const std::array required{
+    "logger",           //
+    "router_protobuf",  //
+    "router_openssl",   //
     "io",
     "connection_pool",
     "destination_status",
-}};
+    "host_cache",
+};
+
+static void expose_configuration(mysql_harness::PluginFuncEnv *env,
+                                 const char *key, bool initial) {
+  const mysql_harness::AppInfo *info = get_app_info(env);
+
+  if (!info->config) return;
+
+  for (const mysql_harness::ConfigSection *section : info->config->sections()) {
+    if (section->name != kSectionName || section->key != key) {
+      continue;
+    }
+
+    RoutingPluginConfig config(section);
+    config.expose_configuration(key, info->config->get_default_section(),
+                                initial);
+  }
+}
 
 mysql_harness::Plugin ROUTING_PLUGIN_EXPORT harness_plugin_routing = {
     mysql_harness::PLUGIN_ABI_VERSION,       // abi-version
@@ -526,4 +664,5 @@ mysql_harness::Plugin ROUTING_PLUGIN_EXPORT harness_plugin_routing = {
     true,     // declares_readiness
     routing_supported_options.size(),
     routing_supported_options.data(),
+    expose_configuration,
 };

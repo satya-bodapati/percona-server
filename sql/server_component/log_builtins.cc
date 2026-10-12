@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,9 +30,12 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #define LOG_SUBSYSTEM_TAG "Server"
 
+#include <atomic>
+
 #include "log_builtins_filter_imp.h"
 #include "log_builtins_imp.h"  // internal structs
                                // connection_events_loop_aborted()
+#include "sql/server_component/mysql_timestamp_imp.h"  //make_iso8601_timestamp
 
 #include "log_sink_buffer.h"
 #include "log_sink_perfschema.h"
@@ -45,7 +49,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 #include "my_time.h"  // str_to_datetime()
 
 #include "sql/current_thd.h"  // current_thd
-#include "sql/log.h"          // make_iso8601_timestamp, log_write_errstream,
+#include "sql/log.h"          // log_write_errstream,
                               // log_get_thread_id, mysql_errno_to_symbol,
                               // mysql_symbol_to_errno, log_vmessage,
                               // error_message_for_error_log
@@ -67,11 +71,32 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 #include "my_time.h"  // str_to_datetime()
 #endif
 
+#include <mysql/psi/mysql_telemetry_logs_client.h>
+extern PSI_logger_key key_error_logger;
+
 PSI_memory_key key_memory_log_error_loaded_services;
 PSI_memory_key key_memory_log_error_stack;
 
 using std::string;
 using std::unique_ptr;
+
+// helper to add telemetry log record attribute from log item field
+#define ADD_STR_ATTR(rec, ll, type, name)                               \
+  if (ll->seen & type) {                                                \
+    const int m = log_line_index_by_type(ll, type);                     \
+    if (m >= 0 && ll->item[m].data.data_string.length > 0) {            \
+      rec.add_attribute_string(name, ll->item[m].data.data_string.str); \
+    }                                                                   \
+  }
+
+#define ADD_INT_ATTR(rec, ll, type, name)                                     \
+  if (ll->seen & type) {                                                      \
+    const int m = log_line_index_by_type(ll, type);                           \
+    if (m >= 0) {                                                             \
+      rec.add_attribute_uint64(name,                                          \
+                               (uint64_t)(int)ll->item[m].data.data_integer); \
+    }                                                                         \
+  }
 
 /**
   Initial log-processor:
@@ -582,8 +607,10 @@ void log_item_free(log_item *li) {
 log_line *log_line_init() {
   log_line *ll;
   if ((ll = static_cast<log_line *>(my_malloc(
-           key_memory_log_error_stack, sizeof(log_line), MYF(0)))) != nullptr)
+           key_memory_log_error_stack, sizeof(log_line), MYF(0)))) != nullptr) {
     memset(ll, 0, sizeof(log_line));
+    ll->flags = LOG_LINE_EMIT_TELEMETRY;
+  }
   return ll;
 }
 
@@ -1022,6 +1049,21 @@ enum loglevel log_prio_from_label(const char *label) {
   @retval false success
 */
 bool log_line_error_stack_run(log_line *ll) {
+  /*
+    If we have enabled the diagnostic log, then the diagnostic messages
+    are treated separately without running through the service stack. If we
+    have not enabled the diagnostic log, then diagnostic messages are ignored.
+  */
+  if (ll->seen & LOG_ITEM_LOG_TYPE) {
+    const int n = log_line_index_by_type(ll, LOG_ITEM_LOG_TYPE);
+    const enum enum_log_type log_type =
+        (enum enum_log_type)ll->item[n].data.data_integer;
+    if (log_type == LOG_TYPE_DIAG) {
+      if (log_diagnostic_enable) log_sink_trad(nullptr, ll);
+      return false;
+    }
+  }
+
   // Get S-lock.
   mysql_rwlock_rdlock(&THR_LOCK_log_stack);
 
@@ -1098,6 +1140,20 @@ bool log_line_error_stack_run(log_line *ll) {
 }
 
 /**
+  Set/reset one or more log line flags.
+
+  Example to set the flag:
+    log_line_set_flag(ll, LOG_LINE_EMIT_TELEMETRY, LOG_LINE_EMIT_TELEMETRY);
+  to reset the flag:
+    log_line_set_flag(ll, LOG_LINE_EMIT_TELEMETRY, 0);
+*/
+void log_line_set_flag(log_line *ll, log_line_flags_mask mask,
+                       log_line_flags_mask value) {
+  ll->flags &= ~mask;
+  ll->flags |= (mask & value);
+}
+
+/**
   Complete, filter, and write submitted log items.
 
   This expects a log_line collection of log-related key/value pairs,
@@ -1115,7 +1171,7 @@ bool log_line_error_stack_run(log_line *ll) {
 */
 int log_line_submit(log_line *ll) {
   log_item_iter iter_save;
-  static ulonglong previous_microtime = 0;
+  static std::atomic_uint64_t previous_microtime = 0;
 
   DBUG_TRACE;
 
@@ -1172,8 +1228,8 @@ int log_line_submit(log_line *ll) {
       else
         previous_microtime = now;
 
-      make_iso8601_timestamp(local_time_buff, now,
-                             iso8601_sysvar_logtimestamps);
+      Mysql_timestamp_imp::make_iso8601_timestamp(local_time_buff, now,
+                                                  iso8601_sysvar_logtimestamps);
 
       d = log_line_item_set(ll, LOG_ITEM_LOG_TIMESTAMP);
       d->data_string.str = local_time_buff;
@@ -1183,7 +1239,7 @@ int log_line_submit(log_line *ll) {
     /* auto-add a ts item if needed */
     if (!(ll->seen & LOG_ITEM_LOG_TS) && !log_line_full(ll)) {
       log_item_data *d;
-      ulonglong now = my_milli_time();
+      ulonglong now = my_micro_time() / 1000ULL;  // milliseconds
 
       DBUG_EXECUTE_IF("log_error_normalize", { now = 0; });
 
@@ -1299,6 +1355,56 @@ int log_line_submit(log_line *ll) {
       }
     });
 
+#ifdef HAVE_PSI_SERVER_TELEMETRY_LOGS_INTERFACE
+    {
+      /* telemetry logging */
+      if (ll->flags & LOG_LINE_EMIT_TELEMETRY) {
+        int n = log_line_index_by_type(ll, LOG_ITEM_LOG_MESSAGE);
+        if (n >= 0 && ll->item[n].data.data_string.length > 0) {
+          const char *msg = ll->item[n].data.data_string.str;
+
+          // map log level to OTELLevel
+          OTELLogLevel level = OTELLogLevel::TLOG_ERROR;
+          if (ll->seen & LOG_ITEM_LOG_PRIO) {
+            n = log_line_index_by_type(ll, LOG_ITEM_LOG_PRIO);
+            if (n >= 0) {
+              switch ((int)ll->item[n].data.data_integer) {
+                case ERROR_LEVEL:
+                case SYSTEM_LEVEL:
+                  level = OTELLogLevel::TLOG_ERROR;
+                  break;
+                case WARNING_LEVEL:
+                  level = OTELLogLevel::TLOG_WARN;
+                  break;
+                case INFORMATION_LEVEL:
+                  level = OTELLogLevel::TLOG_INFO;
+                  break;
+              }
+            }
+          }
+
+          PSI_LogRecord rec(key_error_logger, level, msg);
+          if (rec.check_enabled()) {
+            ADD_INT_ATTR(rec, ll, LOG_ITEM_SQL_ERRCODE, "err_code");
+            ADD_STR_ATTR(rec, ll, LOG_ITEM_SQL_ERRSYMBOL, "err_symbol");
+            ADD_STR_ATTR(rec, ll, LOG_ITEM_SQL_STATE, "SQL_state");
+            ADD_INT_ATTR(rec, ll, LOG_ITEM_SRV_THREAD, "thread");
+            ADD_STR_ATTR(rec, ll, LOG_ITEM_SRC_FILE, "source_file");
+            ADD_INT_ATTR(rec, ll, LOG_ITEM_SRC_LINE, "source_line");
+            ADD_STR_ATTR(rec, ll, LOG_ITEM_SRC_FUNC, "function");
+            ADD_STR_ATTR(rec, ll, LOG_ITEM_SRV_COMPONENT, "component");
+            ADD_STR_ATTR(rec, ll, LOG_ITEM_SRV_SUBSYS, "subsystem");
+            ADD_STR_ATTR(rec, ll, LOG_ITEM_MSC_USER, "user");
+            ADD_STR_ATTR(rec, ll, LOG_ITEM_MSC_HOST, "host");
+            ADD_INT_ATTR(rec, ll, LOG_ITEM_SYS_ERRNO, "OS_errno");
+            ADD_STR_ATTR(rec, ll, LOG_ITEM_SYS_STRERROR, "OS_errmsg");
+            rec.emit();
+          }
+        }
+      }
+    }
+#endif  // HAVE_PSI_SERVER_TELEMETRY_LOGS_INTERFACE
+
     /*
       We were called before even the buffered sink (and our locks)
       were set up. This usually means that something went
@@ -1326,6 +1432,15 @@ int log_line_submit(log_line *ll) {
                (ec >= ER_SERVER_RANGE_START));
       }
     }
+
+    // Assert that log priority value is within a valid range
+    if (ll->seen & LOG_ITEM_LOG_PRIO) {
+      const int n = log_line_index_by_type(ll, LOG_ITEM_LOG_PRIO);
+      if (n >= 0) {
+        const int prio = ll->item[n].data.data_integer;
+        assert(SYSTEM_LEVEL <= prio && prio <= INFORMATION_LEVEL);
+      }
+    }
 #endif
 
     // release any memory that might need it
@@ -1335,76 +1450,6 @@ int log_line_submit(log_line *ll) {
   ll->iter = iter_save;
 
   return ll->count;
-}
-
-/**
-  Make and return an ISO 8601 / RFC 3339 compliant timestamp.
-  Accepts the log_timestamps global variable in its third parameter.
-
-  @param buf       A buffer of at least iso8601_size bytes to store
-                   the timestamp in. The timestamp will be \0 terminated.
-  @param utime     Microseconds since the epoch
-  @param mode      if 0, use UTC; if 1, use local time
-
-  @retval          length of timestamp (excluding \0)
-*/
-int make_iso8601_timestamp(char *buf, ulonglong utime,
-                           enum enum_iso8601_tzmode mode) {
-  struct tm my_tm;
-  char tzinfo[8] = "Z";  // max 6 chars plus \0
-  size_t len;
-  time_t seconds;
-
-  seconds = utime / 1000000;
-  utime = utime % 1000000;
-
-  if (mode == iso8601_sysvar_logtimestamps)
-    mode = (opt_log_timestamps == 0) ? iso8601_utc : iso8601_system_time;
-
-  if (mode == iso8601_utc)
-    gmtime_r(&seconds, &my_tm);
-  else if (mode == iso8601_system_time) {
-    localtime_r(&seconds, &my_tm);
-
-#ifdef HAVE_TM_GMTOFF
-    /*
-      The field tm_gmtoff is the offset (in seconds) of the time represented
-      from UTC, with positive values indicating east of the Prime Meridian.
-      Originally a BSDism, this is also supported in glibc, so this should
-      cover the majority of our platforms.
-    */
-    long tim = -my_tm.tm_gmtoff;
-#else
-    /*
-      Work this out "manually".
-    */
-    struct tm my_gm;
-    long tim, gm;
-    gmtime_r(&seconds, &my_gm);
-    gm = (my_gm.tm_sec + 60 * (my_gm.tm_min + 60 * my_gm.tm_hour));
-    tim = (my_tm.tm_sec + 60 * (my_tm.tm_min + 60 * my_tm.tm_hour));
-    tim = gm - tim;
-#endif
-    char dir = '-';
-
-    if (tim < 0) {
-      dir = '+';
-      tim = -tim;
-    }
-    snprintf(tzinfo, sizeof(tzinfo), "%c%02u:%02u", dir,
-             (unsigned int)((tim / (60 * 60)) % 100),
-             (unsigned int)((tim / 60) % 60));
-  } else {
-    assert(false);
-  }
-
-  // length depends on whether timezone is "Z" or "+12:34" style
-  len = snprintf(buf, iso8601_size, "%04d-%02d-%02dT%02d:%02d:%02d.%06lu%s",
-                 my_tm.tm_year + 1900, my_tm.tm_mon + 1, my_tm.tm_mday,
-                 my_tm.tm_hour, my_tm.tm_min, my_tm.tm_sec,
-                 (unsigned long)utime, tzinfo);
-
-  return std::min<int>((int)len, iso8601_size - 1);
 }
 
 /**
@@ -2415,6 +2460,24 @@ DEFINE_METHOD(bool, log_builtins_imp::item_set_cstring,
 }
 
 /**
+  Set/reset one or more log line flags.
+
+  Example to set the flag:
+    log_line_set_flag(ll, LOG_LINE_EMIT_TELEMETRY, LOG_LINE_EMIT_TELEMETRY);
+  to reset the flag:
+    log_line_set_flag(ll, LOG_LINE_EMIT_TELEMETRY, 0);
+
+  @param           ll                  log line structure
+  @param           mask                mask that defines flags to be changed
+  @param           value               value to set to selected flags
+*/
+DEFINE_METHOD(void, log_builtins_imp::line_set_flag,
+              (log_line * ll, log_line_flags_mask mask,
+               log_line_flags_mask value)) {
+  return log_line_set_flag(ll, mask, value);
+}
+
+/**
   Create new log item with key name "key", and allocation flags of
   "alloc" (see enum_log_item_free).
   Will return a pointer to the item's log_item_data struct for
@@ -3104,7 +3167,7 @@ DEFINE_METHOD(log_service_error, log_builtins_imp::write_errstream,
   log_errstream *les = static_cast<log_errstream *>(my_errstream);
 
   if ((les == nullptr) || (les->file == nullptr))
-    log_write_errstream(buffer, length);
+    log_write_errstream(buffer, length, LOG_TYPE_ERROR);
   else {
     mysql_mutex_lock(&les->LOCK_errstream);
     fprintf(les->file, "%.*s\n", (int)length, buffer);

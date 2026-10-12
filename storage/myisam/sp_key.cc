@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,8 +21,8 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
-#include <assert.h>
 #include <sys/types.h>
+#include <cassert>
 #include <cfloat>
 #include <cmath>
 
@@ -53,7 +54,6 @@ uint sp_make_key(MI_INFO *info, uint keynr, uchar *key, const uchar *record,
   uint dlen;
   uchar *dptr;
   double mbr[SPDIMS * 2];
-  uint i;
 
   keyseg = &keyinfo->seg[-1];
   pos = record + keyseg->start;
@@ -66,7 +66,7 @@ uint sp_make_key(MI_INFO *info, uint keynr, uchar *key, const uchar *record,
   }
   sp_mbr_from_wkb(dptr + 4, dlen - 4, SPDIMS, mbr); /* SRID */
 
-  for (i = 0, keyseg = keyinfo->seg; keyseg->type; keyseg++, i++) {
+  for (keyseg = keyinfo->seg; keyseg->type; keyseg++) {
     uint length = keyseg->length, start = keyseg->start;
     double val;
 
@@ -124,7 +124,7 @@ static int sp_add_point_to_mbr(uchar *(*wkb), uchar *end, uint n_dims,
 
   while (mbr < mbr_end) {
     if ((*wkb) > end - 8) return -1;
-    double ord = float8get((const uchar *)*wkb);
+    double const ord = float8get((const uchar *)*wkb);
     (*wkb) += 8;
     if (ord < *mbr) *mbr = ord;
     mbr++;

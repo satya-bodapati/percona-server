@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -574,7 +575,7 @@ log.writer_mutex acquired iff has_writer_mutex is true.
 @param[in,out]  log               redo log
 @param[in]      has_writer_mutex  true iff this thread has log.writer_mutex
                                   acquired
-@return @see Log_files_governor_iteration_result */
+@return @ref Log_files_governor_iteration_result */
 static Log_files_governor_iteration_result log_files_governor_iteration_low(
     log_t &log, bool has_writer_mutex);
 
@@ -1272,7 +1273,18 @@ static Log_files_governor_iteration_result log_files_governor_iteration_low(
       has possibly already consumed what we wanted to request.
       Such spurious claims / requests are not considered dangerous. */
       if (auto *consumer = log_consumer_get_oldest(log, oldest_needed_lsn)) {
-        consumer->consumption_requested();
+        ut_a(!log.m_files.empty());
+        /* LOG_FILE_HDR_SIZE bytes of next file are not counted in the lsn
+        sequence, but the LOG_BLOCK_HDR_SIZE bytes of the first log data
+        block are counted. Because oldest_file->m_end_lsn %
+        OS_FILE_LOG_BLOCK_SIZE == 0, we need to add LOG_BLOCK_HDR_SIZE to
+        build a proper lsn (pointing on data byte). */
+        const auto next_file_lsn =
+            log.m_files.begin()->m_end_lsn + LOG_BLOCK_HDR_SIZE;
+        if (next_file_lsn <= log_get_lsn(log)) {
+          IB_mutex_guard limits_lock{&log.limits_mutex, UT_LOCATION_HERE};
+          consumer->consumption_requested(next_file_lsn);
+        }
       }
     }
 
@@ -1942,8 +1954,11 @@ static void log_files_truncate(log_t &log) {
   log_files_write_allowed_validate(log);
   ut_a(log_files_is_truncate_allowed(log));
 
+  /* We add one to prevent truncating the file to exactly the current write
+  position as we want to use log_files_update_current_file_low() which in
+  case lsn is at boundary between two files, tries to open the next */
   const os_offset_t end_offset = ut_uint64_align_up(
-      log.m_current_file.offset(log.write_lsn.load()), UNIV_PAGE_SIZE);
+      log.m_current_file.offset(log.write_lsn.load() + 1), UNIV_PAGE_SIZE);
 
   const os_offset_t new_size =
       std::max(end_offset, log.m_capacity.next_file_size());

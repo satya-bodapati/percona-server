@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -44,8 +45,6 @@ using keyring_reader_with_status_t =
     SERVICE_TYPE_NO_CONST(keyring_reader_with_status);
 using keyring_writer_t = SERVICE_TYPE_NO_CONST(keyring_writer);
 
-using const_registry_type_t = SERVICE_TYPE(registry);
-using const_dynamic_loader_type_t = SERVICE_TYPE(dynamic_loader);
 using const_keyring_keys_metadata_iterator_t =
     SERVICE_TYPE(keyring_keys_metadata_iterator);
 using const_keyring_load_t = SERVICE_TYPE(keyring_load);
@@ -58,12 +57,11 @@ void deinit_components_subsystem();
 
 class Keyring_component_load final {
  public:
-  Keyring_component_load(const std::string component_name,
-                         const std::string type);
+  Keyring_component_load(const std::string &component_name, std::string type);
 
   ~Keyring_component_load();
 
-  bool ok() { return ok_; }
+  bool ok() const { return ok_; }
 
  private:
   dynamic_loader_type_t *dynamic_loader_;
@@ -74,12 +72,12 @@ class Keyring_component_load final {
 
 class Keyring_services {
  public:
-  Keyring_services(const std::string implementation_name,
-                   const std::string instance_path);
+  Keyring_services(const std::string &implementation_name,
+                   const std::string &instance_path);
 
   virtual ~Keyring_services();
 
-  bool ok() { return ok_; }
+  bool ok() const { return ok_; }
 
  protected:
   registry_type_t *registry_;
@@ -90,10 +88,10 @@ class Keyring_services {
 
 class Source_keyring_services final : public Keyring_services {
  public:
-  Source_keyring_services(const std::string implementation_name,
-                          const std::string instance_path);
+  Source_keyring_services(const std::string &implementation_name,
+                          const std::string &instance_path);
 
-  ~Source_keyring_services();
+  ~Source_keyring_services() override;
 
   const_keyring_keys_metadata_iterator_t *metadata_iterator() {
     return keyring_keys_metadata_service_;
@@ -110,10 +108,10 @@ class Source_keyring_services final : public Keyring_services {
 
 class Destination_keyring_services final : public Keyring_services {
  public:
-  Destination_keyring_services(const std::string implementation_name,
-                               const std::string instance_path);
+  Destination_keyring_services(const std::string &implementation_name,
+                               const std::string &instance_path);
 
-  ~Destination_keyring_services();
+  ~Destination_keyring_services() override;
 
   const_keyring_writer_t *writer() { return keyring_writer_service_; }
 
@@ -132,7 +130,7 @@ class Keyring_migrate final {
 
   bool lock_source_keyring();
   bool unlock_source_keyring();
-  bool ok() { return ok_; }
+  bool ok() const { return ok_; }
 
  private:
   Source_keyring_services &src_;

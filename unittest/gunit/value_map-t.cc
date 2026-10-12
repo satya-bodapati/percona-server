@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -167,12 +168,12 @@ TEST_F(ValueMapTest, DecimalValueMap) {
 }
 
 TEST_F(ValueMapTest, MysqlTimeValueMap) {
-  histograms::Value_map<MYSQL_TIME> value_map(
+  histograms::Value_map<Datetime_val> value_map(
       &my_charset_numeric, histograms::Value_map_type::DATETIME);
 
   EXPECT_EQ(value_map.size(), 0U);
 
-  MYSQL_TIME time1;
+  Datetime_val time1;
   time1.year = 2017;
   time1.month = 1;
   time1.day = 1;
@@ -185,7 +186,7 @@ TEST_F(ValueMapTest, MysqlTimeValueMap) {
   value_map.add_values(time1, 1);
   EXPECT_EQ(value_map.size(), 1U);
 
-  MYSQL_TIME time2;
+  Datetime_val time2;
   time2.year = 2017;
   time2.month = 1;
   time2.day = 1;
@@ -198,7 +199,7 @@ TEST_F(ValueMapTest, MysqlTimeValueMap) {
   value_map.add_values(time2, 2);
   EXPECT_EQ(value_map.size(), 2U);
 
-  MYSQL_TIME time3;
+  Datetime_val time3;
   time3.year = 1000;
   time3.month = 1;
   time3.day = 1;
@@ -212,7 +213,7 @@ TEST_F(ValueMapTest, MysqlTimeValueMap) {
   EXPECT_EQ(value_map.size(), 3U);
 
   // Same value as time2
-  MYSQL_TIME time4;
+  Datetime_val time4;
   time4.year = 2017;
   time4.month = 1;
   time4.day = 1;

@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -43,6 +44,7 @@
 #include "sql/handler.h"
 #include "sql/iterators/row_iterator.h"
 #include "sql/mem_root_array.h"
+#include "sql/range_optimizer/range_optimizer.h"
 #include "sql/sql_bitmap.h"
 #include "sql/sql_class.h"  // THD
 #include "sql/sql_executor.h"
@@ -73,7 +75,7 @@ IndexScanIterator<Reverse>::~IndexScanIterator() {
 }
 
 template <bool Reverse>
-bool IndexScanIterator<Reverse>::Init() {
+bool IndexScanIterator<Reverse>::DoInit() {
   if (!table()->file->inited) {
     if (table()->covering_keys.is_set(m_idx) && !table()->no_keyread) {
       table()->set_keyread(true);
@@ -97,7 +99,7 @@ bool IndexScanIterator<Reverse>::Init() {
 
 //! @cond
 template <>
-int IndexScanIterator<false>::Read() {  // Forward read.
+int IndexScanIterator<false>::DoRead() {  // Forward read.
   int error;
   if (m_first) {
     error = table()->file->prepare_index_scan();
@@ -115,7 +117,7 @@ int IndexScanIterator<false>::Read() {  // Forward read.
 }
 
 template <>
-int IndexScanIterator<true>::Read() {  // Backward read.
+int IndexScanIterator<true>::DoRead() {  // Backward read.
   int error;
   if (m_first) {
     error = table()->file->prepare_index_scan();
@@ -135,6 +137,64 @@ int IndexScanIterator<true>::Read() {  // Backward read.
 
 template class IndexScanIterator<true>;
 template class IndexScanIterator<false>;
+
+IndexDistanceScanIterator::IndexDistanceScanIterator(THD *thd, TABLE *table,
+                                                     int idx,
+                                                     QUICK_RANGE *query_mbr,
+                                                     double expected_rows,
+                                                     ha_rows *examined_rows)
+    : TableRowIterator(thd, table),
+      m_record(table->record[0]),
+      m_idx(idx),
+      m_query_mbr(query_mbr),
+      m_expected_rows(expected_rows),
+      m_examined_rows(examined_rows) {}
+
+// WL9440: purecov should be removed from below functions
+// i.e. IndexDistanceScanIterator destructor,
+// IndexDistanceScanIterator::DoInit(), IndexDistanceScanIterator::DoRead()
+// when innodb implements index distance scan.
+
+bool IndexDistanceScanIterator::DoInit() {
+  if (!table()->file->inited) {
+    int error = table()->file->ha_index_init(m_idx, true);
+    if (error) {
+      /* purecov: begin deadcode */
+      PrintError(error);
+      return true;
+      /* purecov: end */
+    }
+
+    if (set_record_buffer(table(), m_expected_rows)) {
+      return true;
+    }
+  }
+  m_first = true;
+  return false;
+}
+
+int IndexDistanceScanIterator::DoRead() {  // Forward read.
+  int error;
+  if (m_first) {
+    error = table()->file->ha_index_read_map(m_record, m_query_mbr->min_key,
+                                             m_query_mbr->min_keypart_map,
+                                             m_query_mbr->rkey_func_flag);
+    m_first = false;
+  } else {
+    /* purecov: begin deadcode */
+    error = table()->file->ha_index_next_same(m_record, m_query_mbr->min_key,
+                                              m_query_mbr->min_length);
+    /* purecov: end */
+  }
+
+  if (error) return HandleError(error);
+  /* purecov: begin deadcode */
+  if (m_examined_rows != nullptr) {
+    ++*m_examined_rows;
+  }
+  /* purecov: end */
+  return 0;
+}
 
 /**
   The default implementation of unlock-row method of RowIterator,
@@ -193,7 +253,7 @@ TableScanIterator::~TableScanIterator() {
   }
 }
 
-bool TableScanIterator::Init() {
+bool TableScanIterator::DoInit() {
   empty_record(table());
 
   /*
@@ -217,7 +277,7 @@ bool TableScanIterator::Init() {
   return false;
 }
 
-int TableScanIterator::Read() {
+int TableScanIterator::DoRead() {
   int tmp;
   if (table()->is_union_or_table()) {
     while ((tmp = table()->file->ha_rnd_next(m_record))) {
@@ -308,7 +368,7 @@ FollowTailIterator::~FollowTailIterator() {
   }
 }
 
-bool FollowTailIterator::Init() {
+bool FollowTailIterator::DoInit() {
   empty_record(table());
 
   // BeginMaterialization() must be called before this.
@@ -322,7 +382,7 @@ bool FollowTailIterator::Init() {
 
   if (first_init) {
     // Before starting a new WITH RECURSIVE execution,
-    // MaterializeIterator::Init() does ha_index_or_rnd_end() on all read
+    // MaterializeIterator::DoInit() does ha_index_or_rnd_end() on all read
     // cursors of recursive members, which sets file->inited = false, so we can
     // use that as a signal.
     if (!table()->is_created()) {
@@ -331,6 +391,22 @@ bool FollowTailIterator::Init() {
       // connect to it on first run here.
       assert(table()->in_use == nullptr || table()->in_use == thd());
       table()->in_use = thd();
+      // The CTE's primary materialization may have fallen back TempTable ->
+      // InnoDB, updating share->db_plugin. This clone's handler (set at
+      // preparation time from share->db_type()) may now be stale. Detect and
+      // fix before opening.
+      if (table()->file->ht != table()->s->db_type()) {
+        ::destroy_at(table()->file);
+        table()->file = get_new_handler(table()->s, false,
+                                        table()->s->alloc_for_tmp_file_handler,
+                                        table()->s->db_type());
+        if (table()->file == nullptr) return true;
+        table()->file->change_table_ptr(table(), table()->s);
+        if (table()->file->set_ha_share_ref(&table()->s->ha_share)) {
+          ::destroy_at(table()->file);
+          return true;
+        }
+      }
       if (open_tmp_table(table())) {
         return true;
       }
@@ -358,7 +434,7 @@ bool FollowTailIterator::Init() {
   return false;
 }
 
-int FollowTailIterator::Read() {
+int FollowTailIterator::DoRead() {
   if (m_read_rows == *m_stored_rows) {
     /*
       Return EOF without even checking if there are more rows

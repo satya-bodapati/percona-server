@@ -328,9 +328,9 @@ eval $show_trace;
 create table t3 (a mediumblob);
 set @a=repeat("x",1000000);
 set @b=repeat("y",1000000);
-select length(@a),md5(@a);
+select length(@a),sha2(@a, 0);
 flush status;
-prepare s from 'select length(?), md5(?)';
+prepare s from 'select length(?), sha2(?, 0)';
 eval $show_trace;
 execute s using @a,@a;
 prepare s from 'insert into t3 values(?)';
@@ -1859,11 +1859,6 @@ eval $show_trace;
 prepare s from 'select MBRWithin(?,?)';
 eval $show_trace;
 
-# MD5
-
-prepare s from 'select MD5(?)';
-eval $show_trace;
-
 # MICROSECOND
 
 prepare s from 'select MICROSECOND(?)';
@@ -2162,11 +2157,6 @@ eval $show_trace;
 # SESSION_USER
 
 prepare s from 'select SESSION_USER()';
-eval $show_trace;
-
-# SHA1
-
-prepare s from 'select SHA1(?)';
 eval $show_trace;
 
 # SHA2
@@ -3636,3 +3626,14 @@ EXECUTE ps USING @v;
 
 DEALLOCATE PREPARE ps;
 DROP TABLE t;
+
+--echo # Bug#35287798: Prepared statement assertion error
+
+PREPARE ps FROM "SELECT format_bytes(?)";
+eval $show_trace;
+
+PREPARE ps FROM "SELECT format_pico_time(?)";
+eval $show_trace;
+
+PREPARE ps FROM "SELECT ps_thread_id(?)";
+eval $show_trace;

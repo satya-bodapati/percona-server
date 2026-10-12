@@ -1,15 +1,16 @@
-/* Copyright (c) 2008, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -132,7 +133,10 @@ ha_rows table_socket_instances::get_row_count() {
 }
 
 table_socket_instances::table_socket_instances()
-    : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {}
+    : PFS_engine_table(&m_share, &m_pos),
+      m_pos(0),
+      m_next_pos(0),
+      m_opened_index(nullptr) {}
 
 void table_socket_instances::reset_position() {
   m_pos.m_index = 0;
@@ -235,7 +239,7 @@ int table_socket_instances::make_row(PFS_socket *pfs) {
   m_row.m_fd = pfs->m_fd;
   m_row.m_state =
       (pfs->m_idle ? PSI_SOCKET_STATE_IDLE : PSI_SOCKET_STATE_ACTIVE);
-  PFS_thread *safe_thread = sanitize_thread(pfs->m_thread_owner);
+  const PFS_thread *safe_thread = sanitize_thread(pfs->m_thread_owner);
 
   if (safe_thread != nullptr) {
     m_row.m_thread_id = safe_thread->m_thread_internal_id;

@@ -1,0 +1,2 @@
+--loose-percona-telemetry-disable=ON
+$LOGGING_COMPONENTS_OPT

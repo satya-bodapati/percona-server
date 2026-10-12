@@ -1,15 +1,16 @@
-# Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,77 +28,108 @@ IF(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
   ADD_DEFINITIONS(-D_CRT_SECURE_NO_WARNINGS)  # bypass Warning C4996 (getenv)
 ENDIF()
 
-SET(lib_source_files
-  auto_cleaner.cc
+ROUTER_ADD_SHARED_LIBRARY(router_utils
+  default_paths.cc
+  keyring_info.cc
+  utils.cc
+  uri.cc
+  routing_guidelines_version.cc
+  router_config_utils.cc
+
+  OUTPUT_NAME "mysqlrouter_utils"
+
+  LINK_LIBRARIES
+  PUBLIC
+  harness_stdx
+  harness-library
+  )
+
+ROUTER_ADD_SHARED_LIBRARY(router_mysql
+  common/accounts_cleaner.cc
+  common/log_filter.cc
+  common/mysql_session.cc
+  common/server_compatibility.cc
+  common/utils_sqlstring.cc
+
+  OUTPUT_NAME "mysqlrouter_mysql"
+
+  LINK_LIBRARIES
+  PUBLIC
+  harness_stdx
+  harness-library  # log_debug
+  router_mysqlclient
+  )
+IF(MY_COMPILER_IS_GNU AND (WITH_LTO OR CMAKE_COMPILER_FLAG_WITH_LTO))
+  TARGET_LINK_OPTIONS(router_mysql PRIVATE -Wno-error=stringop-overflow)
+ENDIF()
+
+ROUTER_ADD_SHARED_LIBRARY(router_cluster
+  cluster_aware_session.cc  
+  cluster_metadata.cc
+  cluster_metadata_instance_attributes.cc
+  cluster_metadata_dynamic_state.cc
+
+  OUTPUT_NAME "mysqlrouter_cluster"
+
+  LINK_LIBRARIES
+  PUBLIC
+  harness_stdx
+  harness-library
+  router_utils
+  router_mysql
+  routing_guidelines
+  )
+
+IF(WITH_LTO OR CMAKE_COMPILER_FLAG_WITH_LTO)
+  IF(MY_COMPILER_IS_GNU)
+    TARGET_LINK_OPTIONS(router_cluster PRIVATE
+      -Wno-error=stringop-overflow
+      )
+  ENDIF()
+ENDIF()
+
+
+IF(WIN32)
+  SET(router_lib_output_name "mysqlrouter_lib")
+ELSE()
+  SET(router_lib_output_name "mysqlrouter")
+ENDIF()
+
+ROUTER_ADD_SHARED_LIBRARY(router_lib
   certificate_generator.cc
   certificate_handler.cc
   config_files.cc
-  cluster_metadata.cc
-  cluster_metadata_dynamic_state.cc
-  cluster_metadata_instance_attributes.cc
   sys_user_operations.cc
-  utils.cc
-  uri.cc
-  keyring_info.cc
-  default_paths.cc
-  common/log_filter.cc
-  common/mysql_session.cc
-  common/utils_sqlstring.cc
-  )
 
-SET(source_files main.cc)
+  NO_EXPORT_HEADER  # custom names
+  OUTPUT_NAME "${router_lib_output_name}"
 
-IF(WIN32)
-  LIST(APPEND source_files
-    ../../harness/src/logging/eventlog_rc/message.rc
-    ../../harness/src/logging/eventlog_rc/MSG00001.bin)
-ENDIF()
-
-ADD_LIBRARY(router_lib
-  SHARED
-  ${lib_source_files}
-  ${common_files})
-TARGET_LINK_LIBRARIES(router_lib
+  LINK_LIBRARIES
   ${CMAKE_DL_LIBS}
   harness-library
   harness_stdx
   harness_tls
-  perconaserverclient
+  router_utils
+  router_cluster
+  # router_mysql
   OpenSSL::SSL OpenSSL::Crypto
   io_component
+  routing_guidelines
   extra::rapidjson
   )
+
 TARGET_INCLUDE_DIRECTORIES(router_lib
   PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/../include
   ${CMAKE_CURRENT_BINARY_DIR}/../include
   )
 
-SET_TARGET_PROPERTIES(router_lib PROPERTIES
-  LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/library_output_directory
-  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/runtime_output_directory
-)
-
-IF(WIN32)
-  SET_TARGET_PROPERTIES(router_lib PROPERTIES
-    OUTPUT_NAME "mysqlrouter_lib"
-    SOVERSION 1
-  )
-ELSE()
-  SET_TARGET_PROPERTIES(router_lib PROPERTIES
-    OUTPUT_NAME "mysqlrouter"
-    SOVERSION 1
-  )
-ENDIF()
-
-ADD_INSTALL_RPATH_FOR_OPENSSL(router_lib)
-SET_PATH_TO_CUSTOM_SSL_FOR_APPLE(router_lib)
-
 GENERATE_EXPORT_HEADER(router_lib
   EXPORT_FILE_NAME ${CMAKE_CURRENT_BINARY_DIR}/../include/mysqlrouter/router_export.h)
 
 SET(frontend_lib_source_files
   router_app.cc
+  router_conf.cc
   config_generator.cc
   )
 
@@ -115,19 +147,35 @@ ADD_LIBRARY(router_frontend_lib STATIC
 
 TARGET_LINK_LIBRARIES(router_frontend_lib
   router_lib
+  routing_frontend_lib
   harness-library)
+IF(WIN32)
+  # for the password_vault.cc
+  TARGET_LINK_LIBRARIES(router_frontend_lib Crypt32)
+ENDIF()
 
 TARGET_INCLUDE_DIRECTORIES(router_frontend_lib
   PUBLIC
+  ${PROJECT_SOURCE_DIR}/src/http/include/
+  ${PROJECT_SOURCE_DIR}/src/mysql_protocol/include/
   ${PROJECT_SOURCE_DIR}/src/routing/include/
+  ${CMAKE_BINARY_DIR}/router/src/routing/include/
   ${PROJECT_SOURCE_DIR}/src/metadata_cache/include/
   ${PROJECT_SOURCE_DIR}/src/http/include/
   ${PROJECT_SOURCE_DIR}/src/rest_api/include/
   ${PROJECT_SOURCE_DIR}/src/connection_pool/include/
+  ${CMAKE_BINARY_DIR}/router/src/connection_pool/include/
 )
 
+IF(WIN32)
+  SET(router_rc_files
+    ../../harness/src/logging/eventlog_rc/message.rc
+    ../../harness/src/logging/eventlog_rc/MSG00001.bin)
+ENDIF()
+
 MYSQL_ADD_EXECUTABLE(mysqlrouter
-  ${source_files}
+  main.cc
+  ${router_rc_files}
   COMPONENT Router
   LINK_LIBRARIES
   harness-library
@@ -135,7 +183,6 @@ MYSQL_ADD_EXECUTABLE(mysqlrouter
   router_frontend_lib
   ${CMAKE_DL_LIBS}
   )
-ADD_INSTALL_RPATH(mysqlrouter "${ROUTER_INSTALL_RPATH}")
 
 IF(SOLARIS)
   TARGET_LINK_LIBRARIES(mysqlrouter -lnsl -lsocket)
@@ -146,16 +193,11 @@ IF(APPLE)
     LINK_FLAGS "-undefined dynamic_lookup")
 ENDIF()
 
-INSTALL(TARGETS router_lib
-  RUNTIME DESTINATION ${ROUTER_INSTALL_BINDIR} COMPONENT Router
-  ARCHIVE DESTINATION ${ROUTER_INSTALL_LIBDIR} COMPONENT Router
-  LIBRARY DESTINATION ${ROUTER_INSTALL_LIBDIR} COMPONENT Router
-  NAMELINK_SKIP
-  )
-
 MYSQL_ADD_EXECUTABLE(mysqlrouter_keyring
   keyring_cli.cc
   keyring_frontend.cc
   COMPONENT Router
-  LINK_LIBRARIES router_lib
+  LINK_LIBRARIES
+  router_utils
+  extra::rapidjson
   )

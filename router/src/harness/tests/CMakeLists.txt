@@ -1,15 +1,16 @@
-# Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,9 +22,6 @@
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 INCLUDE_DIRECTORIES(SYSTEM ${GMOCK_INCLUDE_DIRS})
-
-# TODO(sgunders): Remove when all GMock tests use MOCK_METHOD().
-STRING(REPLACE "-Wsuggest-override" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 
 IF(BUILD_IS_SINGLE_CONFIG)
   EXECUTE_PROCESS(
@@ -53,7 +51,6 @@ SET(TEST_MODULE harness)
 
 SET(TESTS
   test_access_rights.cc
-  test_utility_string.cc
   test_loader.cc
   test_loader_lifecycle.cc
   test_logging.cc
@@ -73,12 +70,21 @@ SET(TESTS
   test_vt100.cc
   test_string_utils.cc
   test_process_launcher.cc
-  test_tcp_address.cc
   test_config_builder.cc
   test_event_state_tracker.cc
   test_config_option.cc
   test_hexify.cc
+  test_configuration_update_schema.cc
+  test_dynamic_config.cc
+  test_destination.cc
+  test_plugin_state.cc
 )
+
+IF(NOT SOLARIS)
+  LIST(APPEND TESTS
+    test_secure_memory_pool.cc
+  )
+ENDIF()
 
 FOREACH(TEST ${TESTS})
   ADD_HARNESS_TEST_FILE(${TEST} MODULE ${TEST_MODULE}
@@ -87,11 +93,18 @@ FOREACH(TEST ${TESTS})
     INCLUDE_DIRS ${MySQLRouter_SOURCE_DIR}/src/harness/tests/include/
     INCLUDE_DIRS ${MySQLRouter_SOURCE_DIR}/tests/
     LIB_DEPENDS test-helpers;harness_stdx)
+  # Warning at googletest-1.14.0/googletest/include/gtest/gtest.h:1379
+  IF(MY_COMPILER_IS_GNU AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
+    ROUTERTEST_GET_TARGET(T ${TEST} "${TEST_MODULE}")
+    TARGET_COMPILE_OPTIONS(${T} PRIVATE "-Wno-error=free-nonheap-object")
+    TARGET_LINK_OPTIONS(${T} PRIVATE "-Wno-error=free-nonheap-object")
+  ENDIF()
 ENDFOREACH()
 
 SET(TESTS
   test_keyring.cc
   test_keyring_manager.cc
+  test_secure_string.cc
 )
 
 FOREACH(TEST ${TESTS})
@@ -150,7 +163,6 @@ SET(TESTS
   test_stdx_flags.cc
   test_stdx_io_file_handle.cc
   test_stdx_monitor.cc
-  test_stdx_span.cc
   test_stdx_ranges.cc
 )
 
@@ -174,26 +186,48 @@ SET(TEST_FILES
   )
 COPY_TEST_FILES(${CMAKE_CURRENT_SOURCE_DIR}/data "${TEST_FILES}")
 
-MYSQL_ADD_EXECUTABLE(net_ts_netifs net_ts_netifs.cc SKIP_INSTALL)
-TARGET_LINK_LIBRARIES(net_ts_netifs harness_net_ts)
-ADD_DEPENDENCIES(mysqlrouter_all net_ts_netifs)
+MYSQL_ADD_EXECUTABLE(net_ts_netifs net_ts_netifs.cc
+  COMPONENT Router
+  SKIP_INSTALL
+  LINK_LIBRARIES harness_net_ts
+  )
 
-MYSQL_ADD_EXECUTABLE(net_ts_connect net_ts_connect.cc SKIP_INSTALL)
-TARGET_LINK_LIBRARIES(net_ts_connect harness_net_ts)
-ADD_DEPENDENCIES(mysqlrouter_all net_ts_connect)
+MYSQL_ADD_EXECUTABLE(net_ts_connect net_ts_connect.cc
+  COMPONENT Router
+  SKIP_INSTALL
+  LINK_LIBRARIES harness_net_ts
+  )
 
-MYSQL_ADD_EXECUTABLE(net_ts_accept net_ts_accept.cc SKIP_INSTALL)
-TARGET_LINK_LIBRARIES(net_ts_accept harness_net_ts)
-ADD_DEPENDENCIES(mysqlrouter_all net_ts_accept)
+MYSQL_ADD_EXECUTABLE(net_ts_accept net_ts_accept.cc
+  COMPONENT Router
+  SKIP_INSTALL
+  LINK_LIBRARIES harness_net_ts
+  )
 
-MYSQL_ADD_EXECUTABLE(net_ts_forward net_ts_forward.cc SKIP_INSTALL)
-TARGET_LINK_LIBRARIES(net_ts_forward harness_net_ts)
-ADD_DEPENDENCIES(mysqlrouter_all net_ts_forward)
+MYSQL_ADD_EXECUTABLE(net_ts_forward net_ts_forward.cc
+  COMPONENT Router
+  SKIP_INSTALL
+  LINK_LIBRARIES harness_net_ts
+  )
 
-MYSQL_ADD_EXECUTABLE(acl_cli acl_cli.cc SKIP_INSTALL)
-TARGET_LINK_LIBRARIES(acl_cli harness-library)
-ADD_DEPENDENCIES(mysqlrouter_all acl_cli)
+MYSQL_ADD_EXECUTABLE(acl_cli acl_cli.cc
+  COMPONENT Router
+  SKIP_INSTALL
+  LINK_LIBRARIES
+  harness-library
+  )
 
-MYSQL_ADD_EXECUTABLE(linux_timestamping linux_timestamping.cc SKIP_INSTALL)
-TARGET_LINK_LIBRARIES(linux_timestamping harness_net_ts harness_stdx)
-ADD_DEPENDENCIES(mysqlrouter_all linux_timestamping)
+MYSQL_ADD_EXECUTABLE(linux_timestamping linux_timestamping.cc 
+  COMPONENT Router
+  SKIP_INSTALL
+  LINK_LIBRARIES
+  harness_net_ts harness_stdx
+)
+
+ADD_GOOGLETEST_FILE(test_utility_string.cc
+  MODULE harness
+  INCLUDE_DIRS ${MySQLRouter_SOURCE_DIR}/src/harness/include/
+  INCLUDE_DIRS ${MySQLRouter_BINARY_DIR}/src/harness/include/
+  EXTRA_SOURCES
+    ${CMAKE_SOURCE_DIR}/unittest/gunit/benchmark.cc
+  )

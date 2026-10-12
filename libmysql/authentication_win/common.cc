@@ -1,15 +1,16 @@
-/* Copyright (c) 2011, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2011, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -141,7 +142,7 @@ Sid::Sid(const wchar_t *account_name)
 #ifndef NDEBUG
     Error_message_buf error_buf;
     DBUG_PRINT("error", ("Could not determine SID buffer size, "
-                         "LookupAccountName() failed with error %X (%s)",
+                         "LookupAccountName() failed with error %lX (%s)",
                          GetLastError(), get_last_error_message(error_buf)));
 #endif
     return;
@@ -160,7 +161,7 @@ Sid::Sid(const wchar_t *account_name)
 #ifndef NDEBUG
     Error_message_buf error_buf;
     DBUG_PRINT("error", ("Could not determine SID of '%S', "
-                         "LookupAccountName() failed with error %X (%s)",
+                         "LookupAccountName() failed with error %lX (%s)",
                          account_name, GetLastError(),
                          get_last_error_message(error_buf)));
 #endif
@@ -203,7 +204,7 @@ Sid::Sid(HANDLE token)
 #ifndef NDEBUG
     Error_message_buf error_buf;
     DBUG_PRINT("error", ("Could not determine SID buffer size, "
-                         "GetTokenInformation() failed with error %X (%s)",
+                         "GetTokenInformation() failed with error %lX (%s)",
                          GetLastError(), get_last_error_message(error_buf)));
 #endif
     return;
@@ -219,7 +220,7 @@ Sid::Sid(HANDLE token)
     if (!success) {
       Error_message_buf error_buf;
       DBUG_PRINT("error", ("Could not read SID from security token, "
-                           "GetTokenInformation() failed with error %X (%s)",
+                           "GetTokenInformation() failed with error %lX (%s)",
                            GetLastError(), get_last_error_message(error_buf)));
     }
 #endif
@@ -259,7 +260,7 @@ const char *Sid::as_string() {
 #ifndef NDEBUG
       Error_message_buf error_buf;
       DBUG_PRINT("error", ("Could not get textual representation of a SID, "
-                           "ConvertSidToStringSid() failed with error %X (%s)",
+                           "ConvertSidToStringSid() failed with error %lX (%s)",
                            GetLastError(), get_last_error_message(error_buf)));
 #endif
       m_as_string = nullptr;
@@ -272,7 +273,7 @@ const char *Sid::as_string() {
 
 #endif
 
-bool Sid::operator==(const Sid &other) {
+bool Sid::operator==(const Sid &other) const {
   if (!is_valid() || !other.is_valid()) return false;
 
   return EqualSid(m_data->User.Sid, other.m_data->User.Sid);
@@ -297,7 +298,7 @@ UPN::UPN() : m_buf(nullptr) {
 #ifndef NDEBUG
       Error_message_buf error_buf;
       DBUG_PRINT("note", ("When determining UPN"
-                          ", GetUserNameEx() failed with error %X (%s)",
+                          ", GetUserNameEx() failed with error %lX (%s)",
                           GetLastError(), get_last_error_message(error_buf)));
 #endif
       if (ERROR_MORE_DATA == GetLastError())
@@ -382,7 +383,7 @@ char *wchar_to_utf8(const wchar_t *string, size_t *len) {
   Error_message_buf error_buf;
   DBUG_PRINT("error",
              ("Could not convert string '%S' to utf8"
-              ", WideCharToMultiByte() failed with error %X (%s)",
+              ", WideCharToMultiByte() failed with error %lX (%s)",
               string, GetLastError(), get_last_error_message(error_buf)));
 #endif
 
@@ -443,7 +444,7 @@ wchar_t *utf8_to_wchar(const char *string, size_t *len) {
 #ifndef NDEBUG
   Error_message_buf error_buf;
   DBUG_PRINT("error", ("Could not convert UPN from UTF-8"
-                       ", MultiByteToWideChar() failed with error %X (%s)",
+                       ", MultiByteToWideChar() failed with error %lX (%s)",
                        GetLastError(), get_last_error_message(error_buf)));
 #endif
 

@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -20,20 +21,44 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
-#include <gtest/gtest.h>
+#include <atomic>
+#include <cassert>
 #include <cstring>
+#include <initializer_list>
+#include <map>
 #include <memory>
+#include <new>
+#include <string>
+#include <utility>
+
+#include "gtest/gtest.h"
 
 #include "base64.h"
+#include "decimal.h"
+#include "field_types.h"
 #include "my_byteorder.h"
 #include "my_inttypes.h"
+#include "my_sys.h"
+#include "my_time.h"
+#include "mysql/components/services/bits/psi_bits.h"
+#include "mysql/mysql_lex_string.h"
+#include "mysql/strings/m_ctype.h"
+#include "mysql_time.h"
+#include "mysqld_error.h"
 #include "sql-common/json_binary.h"
+#include "sql-common/json_diff.h"
 #include "sql-common/json_dom.h"
+#include "sql-common/json_error_handler.h"
 #include "sql-common/json_path.h"
 #include "sql-common/my_decimal.h"
-#include "sql/json_diff.h"
+#include "sql/current_thd.h"
+#include "sql/field.h"
+#include "sql/item_json_func.h"
+#include "sql/psi_memory_key.h"
 #include "sql/sql_class.h"
+#include "sql/sql_const.h"
 #include "sql/sql_time.h"
+#include "sql/table.h"
 #include "sql_string.h"
 #include "template_utils.h"  // down_cast
 #include "unittest/gunit/base_mock_field.h"
@@ -106,8 +131,7 @@ static Json_dom_ptr parse_json(const char *json_text) {
 static Json_path parse_path(const char *json_path) {
   Json_path path(key_memory_JSON);
   size_t bad_index;
-  EXPECT_FALSE(parse_path(std::strlen(json_path), json_path, &path, &bad_index,
-                          [] { ASSERT_TRUE(false); }))
+  EXPECT_FALSE(parse_path(std::strlen(json_path), json_path, &path, &bad_index))
       << "bad index: " << bad_index;
   return path;
 }
@@ -303,15 +327,14 @@ TEST_F(JsonDomTest, BasicTest) {
   EXPECT_EQ(std::string("[null, false, true]"), format(a.clone()));
 
   /* DATETIME scalar */
-  MYSQL_TIME dt;
-  std::memset(&dt, 0, sizeof dt);
+  Datetime_val dt;
   MYSQL_TIME_STATUS status;
   EXPECT_FALSE(str_to_datetime(&my_charset_utf8mb4_bin, "19990412", 8, &dt,
                                (my_time_flags_t)0, &status));
   const Json_datetime scalar(dt, MYSQL_TYPE_DATETIME);
   EXPECT_EQ(enum_json_type::J_DATETIME, scalar.json_type());
 
-  const MYSQL_TIME *dt_out = scalar.value();
+  const Datetime_val *dt_out = scalar.value();
 
   EXPECT_FALSE(std::memcmp(&dt, dt_out, sizeof(MYSQL_TIME)));
   EXPECT_EQ(std::string("\"1999-04-12\""), format(scalar));
@@ -443,8 +466,8 @@ void vet_wrapper_length(const char *text, size_t expected_length) {
 
   String serialized_form;
   EXPECT_FALSE(json_binary::serialize(
-      dom_wrapper.to_dom(), &serialized_form, &JsonDepthErrorHandler,
-      &JsonKeyTooBigErrorHandler, &JsonValueTooBigErrorHandler));
+      dom_wrapper.to_dom(), JsonSerializationDefaultErrorHandler(current_thd),
+      &serialized_form));
   json_binary::Value binary = json_binary::parse_binary(
       serialized_form.ptr(), serialized_form.length());
   Json_wrapper binary_wrapper(binary);
@@ -702,8 +725,7 @@ TEST_F(JsonDomTest, AttemptBinaryUpdate) {
 
   String buffer;
   EXPECT_FALSE(json_binary::serialize(
-      dom.get(), &buffer, &JsonDepthErrorHandler, &JsonKeyTooBigErrorHandler,
-      &JsonValueTooBigErrorHandler));
+      dom.get(), JsonSerializationDefaultErrorHandler(thd()), &buffer));
 
   json_binary::Value binary =
       json_binary::parse_binary(buffer.ptr(), buffer.length());
@@ -908,16 +930,15 @@ TEST_F(JsonDomTest, AttemptBinaryUpdate_AllTypes) {
   my_decimal decimal;
   EXPECT_FALSE(double2my_decimal(0, 3.14, &decimal));
 
-  MYSQL_TIME dt;
-  std::memset(&dt, 0, sizeof(dt));
+  Datetime_val dt;
   MYSQL_TIME_STATUS status;
-  EXPECT_FALSE(str_to_datetime(&my_charset_utf8mb4_bin, "20170223", 8, &dt,
-                               static_cast<my_time_flags_t>(0), &status));
+  EXPECT_FALSE(str_to_datetime(&my_charset_utf8mb4_bin, "2017-02-23 01:02:03",
+                               19, &dt, static_cast<my_time_flags_t>(0),
+                               &status));
 
-  MYSQL_TIME tm;
-  std::memset(&dt, 0, sizeof(tm));
-  EXPECT_FALSE(str_to_time(&my_charset_utf8mb4_bin, "17:28:25", 8, &tm,
-                           static_cast<my_time_flags_t>(0), &status));
+  Time_val time{false, 17, 28, 25, 0};
+
+  Date_val date(2017, 02, 23);
 
   Json_dom *doms[] = {
       new (std::nothrow) Json_null,
@@ -936,9 +957,9 @@ TEST_F(JsonDomTest, AttemptBinaryUpdate_AllTypes) {
       new (std::nothrow) Json_string("xyz"),
       new (std::nothrow) Json_decimal(decimal),
       new (std::nothrow) Json_datetime(dt, MYSQL_TYPE_DATETIME),
-      new (std::nothrow) Json_datetime(dt, MYSQL_TYPE_DATE),
+      new (std::nothrow) Json_date(date),
       new (std::nothrow) Json_datetime(dt, MYSQL_TYPE_TIMESTAMP),
-      new (std::nothrow) Json_datetime(tm, MYSQL_TYPE_TIME),
+      new (std::nothrow) Json_time(time),
       new (std::nothrow) Json_opaque(MYSQL_TYPE_BLOB, 5, 'x'),
       new (std::nothrow) Json_array(),
       parse_json("[1,2,3]").release(),
@@ -962,9 +983,8 @@ TEST_F(JsonDomTest, AttemptBinaryUpdate_AllTypes) {
     EXPECT_FALSE(m_field.val_json(&doc));
 
     StringBuffer<STRING_BUFFER_USUAL_SIZE> original;
-    EXPECT_FALSE(doc.to_binary(
-        &original, &JsonDepthErrorHandler, &JsonKeyTooBigErrorHandler,
-        &JsonValueTooBigErrorHandler, &InvalidJsonErrorHandler));
+    EXPECT_FALSE(
+        doc.to_binary(JsonSerializationDefaultErrorHandler(thd()), &original));
 
     Json_wrapper new_value(dom->clone());
 
@@ -1090,14 +1110,12 @@ void test_apply_json_diffs(Field_json *field, const Json_diff_vector &diffs,
 
   TABLE *table = field->table;
   if (table->is_binary_diff_enabled(field)) {
+    JsonSerializationDefaultErrorHandler error_handler{current_thd};
     StringBuffer<STRING_BUFFER_USUAL_SIZE> original;
-    EXPECT_FALSE(json_binary::serialize(
-        parse_json(orig_json).get(), &original, &JsonDepthErrorHandler,
-        &JsonKeyTooBigErrorHandler, &JsonValueTooBigErrorHandler));
+    EXPECT_FALSE(json_binary::serialize(parse_json(orig_json).get(),
+                                        error_handler, &original));
     StringBuffer<STRING_BUFFER_USUAL_SIZE> updated;
-    EXPECT_FALSE(doc.to_binary(
-        &updated, &JsonDepthErrorHandler, &JsonKeyTooBigErrorHandler,
-        &JsonValueTooBigErrorHandler, &InvalidJsonErrorHandler));
+    EXPECT_FALSE(doc.to_binary(error_handler, &updated));
     verify_binary_diffs(field, table->get_binary_diffs(field), original,
                         updated);
   }
@@ -1327,8 +1345,8 @@ static void benchmark_dom_parse(size_t num_iterations, const char *json_text) {
 
   String buffer;
   EXPECT_FALSE(json_binary::serialize(
-      dom.get(), &buffer, &JsonDepthErrorHandler, &JsonKeyTooBigErrorHandler,
-      &JsonValueTooBigErrorHandler));
+      dom.get(), JsonSerializationDefaultErrorHandler(initializer.thd()),
+      &buffer));
 
   json_binary::Value binary =
       json_binary::parse_binary(buffer.ptr(), buffer.length());
@@ -1390,9 +1408,8 @@ static void benchmark_binary_seek(size_t num_iterations, const Json_path &path,
   initializer.SetUp();
 
   String buffer;
-  EXPECT_FALSE(json_binary::serialize(&o, &buffer, &JsonDepthErrorHandler,
-                                      &JsonKeyTooBigErrorHandler,
-                                      &JsonValueTooBigErrorHandler));
+  EXPECT_FALSE(json_binary::serialize(
+      &o, JsonSerializationDefaultErrorHandler(initializer.thd()), &buffer));
   json_binary::Value val =
       json_binary::parse_binary(buffer.ptr(), buffer.length());
 
@@ -1628,9 +1645,9 @@ static void BM_JsonDateArrayToString(size_t num_iterations) {
   initializer.SetUp();
 
   Json_array_ptr array = create_dom_ptr<Json_array>();
-  MysqlTime date(2018, 11, 20, 0, 0, 0, 0, false, MYSQL_TIMESTAMP_DATE);
+  Date_val date(2018, 11, 20);
   for (size_t i = 0; i < 1000; ++i) {
-    array->append_alias(create_dom_ptr<Json_datetime>(date, MYSQL_TYPE_DATE));
+    array->append_alias(create_dom_ptr<Json_date>(date));
   }
   Json_wrapper wrapper(std::move(array));
 
@@ -1671,7 +1688,7 @@ static void BM_JsonWrapperObjectIteratorDOM(size_t num_iterations) {
 
   for (size_t i = 0; i < num_iterations; ++i) {
     for (const auto &it : Json_object_wrapper(wrapper)) {
-      EXPECT_NE(0U, it.first.length);
+      EXPECT_NE(0U, it.first.size());
       EXPECT_EQ(enum_json_type::J_NULL, it.second.type());
     }
   }
@@ -1700,8 +1717,8 @@ static void BM_JsonWrapperObjectIteratorBinary(size_t num_iterations) {
 
   String serialized_object;
   EXPECT_FALSE(json_binary::serialize(
-      &dom_object, &serialized_object, &JsonDepthErrorHandler,
-      &JsonKeyTooBigErrorHandler, &JsonValueTooBigErrorHandler));
+      &dom_object, JsonSerializationDefaultErrorHandler(initializer.thd()),
+      &serialized_object));
   Json_wrapper wrapper(json_binary::parse_binary(serialized_object.ptr(),
                                                  serialized_object.length()));
   EXPECT_EQ(enum_json_type::J_OBJECT, wrapper.type());
@@ -1710,7 +1727,7 @@ static void BM_JsonWrapperObjectIteratorBinary(size_t num_iterations) {
 
   for (size_t i = 0; i < num_iterations; ++i) {
     for (const auto &it : Json_object_wrapper(wrapper)) {
-      EXPECT_NE(0U, it.first.length);
+      EXPECT_NE(0U, it.first.size());
       EXPECT_EQ(enum_json_type::J_NULL, it.second.type());
     }
   }
@@ -1720,5 +1737,108 @@ static void BM_JsonWrapperObjectIteratorBinary(size_t num_iterations) {
   initializer.TearDown();
 }
 BENCHMARK(BM_JsonWrapperObjectIteratorBinary)
+
+/**
+  Microbenchmark that tests Json_dom::parse(text) on an array of 100
+  floating-point numbers, each with 17 significant decimal digits (10 before and
+  7 after the decimal point), to simulate high-precision double scenarios.
+*/
+static void BM_JsonParseHighPrecisionFloatArray(size_t num_iterations) {
+  StopBenchmarkTiming();
+
+  my_testing::Server_initializer initializer;
+  initializer.SetUp();
+
+  // Build JSON array once, outside the timed region.
+  std::string json;
+  json.push_back('[');
+  for (size_t i = 0; i < 100; ++i) {
+    if (i > 0) json += ", ";
+    json += "1234567890.";  // 10 digits before decimal
+    // Always use 7 fractional digits for a total of 17 significant digits.
+    for (size_t j = 0; j < 7; ++j) {
+      int digit = static_cast<int>((i * 7 + j * 3) % 10);
+      json.push_back(static_cast<char>('0' + digit));
+    }
+  }
+  json.push_back(']');
+
+  // One-time parse and sanity check before timing.
+  Json_dom_ptr dom = Json_dom::parse(
+      json.c_str(), json.size(), [](const char *, size_t) {},
+      [] { ASSERT_TRUE(false); });
+  ASSERT_NE(dom, nullptr);
+  EXPECT_EQ(enum_json_type::J_ARRAY, dom->json_type());
+  const Json_array *arr = down_cast<const Json_array *>(dom.get());
+  EXPECT_EQ(100U, arr->size());
+  for (size_t i = 0; i < arr->size(); ++i) {
+    EXPECT_EQ(enum_json_type::J_DOUBLE, (*arr)[i]->json_type());
+  }
+
+  StartBenchmarkTiming();
+
+  for (size_t i = 0; i < num_iterations; ++i) {
+    dom = Json_dom::parse(
+        json.c_str(), json.size(), [](const char *, size_t) {},
+        [] { ASSERT_TRUE(false); });
+  }
+
+  StopBenchmarkTiming();
+
+  initializer.TearDown();
+}
+BENCHMARK(BM_JsonParseHighPrecisionFloatArray)
+
+/**
+  Microbenchmark that tests Json_dom::parse(text) on an array of
+  100 varied low-precision floating-point numbers
+  (3 digits before and 3 digits after the decimal point).
+*/
+static void BM_JsonParseLowPrecisionFloatArray(size_t num_iterations) {
+  StopBenchmarkTiming();
+
+  my_testing::Server_initializer initializer;
+  initializer.SetUp();
+
+  // Build JSON array once, outside the timed region.
+  std::string json;
+  json.push_back('[');
+  for (size_t i = 0; i < 100; ++i) {
+    if (i > 0) json += ", ";
+    // Format: <3 digits>.<3 digits> (e.g., 123.456), 6 digits total
+    unsigned int before_decimal = 100 + ((i * 13) % 900);  // 3 digits: 100..999
+    unsigned int after_decimal = 100 + ((i * 31) % 900);   // 3 digits: 100..999
+
+    json += std::to_string(before_decimal);
+    json += ".";
+    json += std::to_string(after_decimal);
+  }
+  json.push_back(']');
+
+  // One-time parse and sanity check before timing.
+  Json_dom_ptr dom = Json_dom::parse(
+      json.c_str(), json.size(), [](const char *, size_t) {},
+      [] { ASSERT_TRUE(false); });
+  ASSERT_NE(dom, nullptr);
+  EXPECT_EQ(enum_json_type::J_ARRAY, dom->json_type());
+  const Json_array *arr = down_cast<const Json_array *>(dom.get());
+  EXPECT_EQ(100U, arr->size());
+  for (size_t i = 0; i < arr->size(); ++i) {
+    EXPECT_EQ(enum_json_type::J_DOUBLE, (*arr)[i]->json_type());
+  }
+
+  StartBenchmarkTiming();
+
+  for (size_t i = 0; i < num_iterations; ++i) {
+    dom = Json_dom::parse(
+        json.c_str(), json.size(), [](const char *, size_t) {},
+        [] { ASSERT_TRUE(false); });
+  }
+
+  StopBenchmarkTiming();
+
+  initializer.TearDown();
+}
+BENCHMARK(BM_JsonParseLowPrecisionFloatArray)
 
 }  // namespace json_dom_unittest

@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -67,7 +68,7 @@ void Plugin_gcs_message::encode_header(
   int8store(slider, m_msg_len);
   slider += WIRE_MSG_LEN_SIZE;
 
-  unsigned short s_cargo_type = (unsigned short)m_cargo_type;
+  auto s_cargo_type = (unsigned short)m_cargo_type;
   int2store(slider, s_cargo_type);
   slider += WIRE_CARGO_TYPE_SIZE;
 
@@ -118,8 +119,7 @@ Plugin_gcs_message::enum_cargo_type Plugin_gcs_message::get_cargo_type(
   unsigned short s_cargo_type = 0;
   s_cargo_type = uint2korr(slider);
   // enum may have 32bit storage
-  Plugin_gcs_message::enum_cargo_type cargo_type =
-      (Plugin_gcs_message::enum_cargo_type)s_cargo_type;
+  auto cargo_type = (Plugin_gcs_message::enum_cargo_type)s_cargo_type;
 
   return cargo_type;
 }
@@ -134,6 +134,36 @@ void Plugin_gcs_message::get_first_payload_item_raw_data(
   *payload_item_length = uint8korr(slider);
   slider += WIRE_PAYLOAD_ITEM_LEN_SIZE;
   *payload_item_data = slider;
+}
+
+bool Plugin_gcs_message::get_payload_item_type_raw_data(
+    const unsigned char *buffer, const unsigned char *end,
+    uint16 payload_item_type, const unsigned char **payload_item_data,
+    unsigned long long *payload_item_length) {
+  DBUG_TRACE;
+  const unsigned char *slider = buffer;
+  uint16 payload_item_type_aux{0};
+  unsigned long long payload_item_length_aux{0};
+
+  while (slider + WIRE_PAYLOAD_ITEM_HEADER_SIZE <= end) {
+    // Read payload item header to find payload item length.
+    decode_payload_item_type_and_length(&slider, &payload_item_type_aux,
+                                        &payload_item_length_aux);
+    if (slider + payload_item_length_aux <= end) {
+      if (payload_item_type_aux == payload_item_type) {
+        *payload_item_data = slider;
+        *payload_item_length = payload_item_length_aux;
+        return false;
+      }
+
+      // Seek to next payload item.
+      slider += payload_item_length_aux;
+    } else {
+      return true;
+    }
+  }
+
+  return true;
 }
 
 int64_t Plugin_gcs_message::get_sent_timestamp(
@@ -152,7 +182,7 @@ int64_t Plugin_gcs_message::get_sent_timestamp(
 
     if (timestamp_payload_item_type == payload_item_type) {
       if (slider + payload_item_length <= end) {
-        uint64 sent_timestamp = uint8korr(slider);
+        uint64 const sent_timestamp = uint8korr(slider);
         assert(0 != sent_timestamp);
         return sent_timestamp;
       }

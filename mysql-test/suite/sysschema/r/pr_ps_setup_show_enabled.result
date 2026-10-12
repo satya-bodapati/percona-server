@@ -72,6 +72,7 @@ idle	YES
 memory/performance_schema/accounts	NULL
 memory/performance_schema/cond_class	NULL
 memory/performance_schema/cond_instances	NULL
+memory/performance_schema/data_container	NULL
 memory/performance_schema/events_errors_summary_by_account_by_error	NULL
 memory/performance_schema/events_errors_summary_by_host_by_error	NULL
 memory/performance_schema/events_errors_summary_by_thread_by_error	NULL
@@ -117,6 +118,7 @@ memory/performance_schema/file_class	NULL
 memory/performance_schema/file_handle	NULL
 memory/performance_schema/file_instances	NULL
 memory/performance_schema/hosts	NULL
+memory/performance_schema/logger_class	NULL
 memory/performance_schema/memory_class	NULL
 memory/performance_schema/memory_summary_by_account_by_event_name	NULL
 memory/performance_schema/memory_summary_by_host_by_event_name	NULL
@@ -218,7 +220,6 @@ statements_digest
 thread_instrumentation
 enabled_threads	thread_type
 innodb/buf_dump_thread	BACKGROUND
-innodb/buf_lru_manager_thread	BACKGROUND
 innodb/buf_resize_thread	BACKGROUND
 innodb/clone_gtid_thread	BACKGROUND
 innodb/dict_stats_thread	BACKGROUND
@@ -243,6 +244,7 @@ root@localhost	FOREGROUND
 sql/compress_gtid_table	FOREGROUND
 sql/event_scheduler	FOREGROUND
 sql/main	BACKGROUND
+sql/rpl_opt_tracker	BACKGROUND
 CALL sys.ps_setup_show_enabled(TRUE, TRUE);
 performance_schema_enabled
 1
@@ -270,7 +272,6 @@ statements_digest
 thread_instrumentation
 enabled_threads	thread_type
 innodb/buf_dump_thread	BACKGROUND
-innodb/buf_lru_manager_thread	BACKGROUND
 innodb/buf_resize_thread	BACKGROUND
 innodb/clone_gtid_thread	BACKGROUND
 innodb/dict_stats_thread	BACKGROUND
@@ -295,11 +296,13 @@ root@localhost	FOREGROUND
 sql/compress_gtid_table	FOREGROUND
 sql/event_scheduler	FOREGROUND
 sql/main	BACKGROUND
+sql/rpl_opt_tracker	BACKGROUND
 enabled_instruments	timed
 idle	YES
 memory/performance_schema/accounts	NULL
 memory/performance_schema/cond_class	NULL
 memory/performance_schema/cond_instances	NULL
+memory/performance_schema/data_container	NULL
 memory/performance_schema/events_errors_summary_by_account_by_error	NULL
 memory/performance_schema/events_errors_summary_by_host_by_error	NULL
 memory/performance_schema/events_errors_summary_by_thread_by_error	NULL
@@ -345,6 +348,7 @@ memory/performance_schema/file_class	NULL
 memory/performance_schema/file_handle	NULL
 memory/performance_schema/file_instances	NULL
 memory/performance_schema/hosts	NULL
+memory/performance_schema/logger_class	NULL
 memory/performance_schema/memory_class	NULL
 memory/performance_schema/memory_summary_by_account_by_event_name	NULL
 memory/performance_schema/memory_summary_by_host_by_event_name	NULL

@@ -15,14 +15,16 @@
 # Bug#33090128 RANDOM ERROR 1201: COULD NOT INITIALIZE MASTER INFO STRUCTURE; ON CHANGE MASTER
 #
 
+--source include/not_valgrind.inc
+--source include/have_nodebug.inc
+--source include/big_test.inc
 --source include/have_binlog_format_row.inc
---source include/have_slave_repository_type_table.inc
---source include/master-slave.inc
+--source include/rpl/init_source_replica.inc
 
 --echo #
 --echo # 1. Create a table on the source and use Slap to apply load on the server
 
---source include/rpl_connection_master.inc
+--source include/rpl/connection_source.inc
 
 CREATE TABLE test.t1 (a INT NOT NULL AUTO_INCREMENT PRIMARY KEY , b INT);
 
@@ -31,7 +33,7 @@ CREATE TABLE test.t1 (a INT NOT NULL AUTO_INCREMENT PRIMARY KEY , b INT);
 --echo #
 --echo # 2. Create 20 channels, 1 per second in the replica
 
---source include/rpl_connection_slave.inc
+--source include/rpl/connection_replica.inc
 
 --let $limit=20
 
@@ -67,8 +69,8 @@ while ( $iteration <= $limit )
   --inc $iteration
 }
 
---source include/rpl_connection_master.inc
+--source include/rpl/connection_source.inc
 
 DROP TABLE test.t1;
 
---source include/rpl_end.inc
+--source include/rpl/deinit.inc

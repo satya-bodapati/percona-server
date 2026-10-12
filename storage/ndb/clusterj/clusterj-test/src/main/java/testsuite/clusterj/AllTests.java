@@ -1,16 +1,17 @@
 /*
- Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+ Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License, version 2.0,
  as published by the Free Software Foundation.
 
- This program is also distributed with certain software (including
+ This program is designed to work with certain software (including
  but not limited to OpenSSL) that is licensed under separate terms,
  as designated in a particular file or component or in included license
  documentation.  The authors of MySQL hereby grant you an additional
  permission to link the program and your derivative works with the
- separately licensed software that they have included with MySQL.
+ separately licensed software that they have either included with
+ the program or referenced in the documentation.
 
  This program is distributed in the hope that it will be useful,
  but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,11 +25,15 @@
 
 package testsuite.clusterj;
 
+import com.sun.management.HotSpotDiagnosticMXBean;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.lang.annotation.Annotation;
+import java.lang.management.ManagementFactory;
+import java.lang.Process;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.jar.JarEntry;
 import java.util.jar.JarInputStream;
@@ -45,9 +50,18 @@ public class AllTests {
 
     private static boolean enableDebugTests = false;
 
-    private static void usage() {
-        System.out.println("Usage: java -cp <jar file>:... AllTests <jar file> [--enable-debug-tests]");
+    private static void usage(String message) {
+        System.out.println(message);
+        System.out.println();
+        System.out.println("Usage: java -cp <jar file>:... AllTests <jar file> [options]");
         System.out.println("Will run all tests in the given jar file.");
+        System.out.println("  Options: ");
+        System.out.println("     --print-cases / -l   : List test cases");
+        System.out.println("     --enable-debug-tests : Run extra debug-only tests");
+        System.out.println("     --gc=<n>             : Run <n> GC iterations after tests");
+        System.out.println("     --hprof              : Create heap dump at exit");
+        System.out.println("     -n TestName [...]    : Run named tests");
+        System.out.println("     --stop-on-error      : Stop after first failure");
         System.exit(2);
     }
 
@@ -71,7 +85,9 @@ public class AllTests {
     private static boolean isTestClass(Class<?> klass) {
         return klass.getName().endsWith("Test")
             && !klass.getName().contains("Abstract")
-            && Test.class.isAssignableFrom(klass);
+            && !klass.getName().contains("ClearSmokeTest")
+            && Test.class.isAssignableFrom(klass)
+            && ! Test.class.equals(klass);
     }
 
     private static boolean isDebugTestAnnotationPresent(Class<?> candidate)  {
@@ -111,7 +127,7 @@ public class AllTests {
     }
 
     @SuppressWarnings("unchecked") // addTestSuite requires non-template Class argument
-    public static Test suite() throws IllegalAccessException, IOException, ClassNotFoundException {
+    public static TestSuite suite(HashSet<String> namedTests) throws IllegalAccessException, IOException, ClassNotFoundException {
         TestSuite suite = new TestSuite("Cluster/J");
 
         if (jarFile.equals("")) {
@@ -120,15 +136,56 @@ public class AllTests {
 
         List<Class<?>> classes = getClasses(new File(jarFile));
         for (Class<?> klass : classes) {
-            if (isTestClass(klass) && !isTestDisabled(klass)) {
-                suite.addTestSuite((Class)klass);
+            if (isTestClass(klass)) {
+                if(! namedTests.isEmpty()) {
+                    String longName = klass.getName();
+                    String shortName = longName.substring(longName.lastIndexOf(".") + 1);
+                    if(namedTests.contains(shortName) || namedTests.contains(longName))
+                        suite.addTestSuite((Class)klass);
+                } else if(! isTestDisabled(klass)) {
+                    suite.addTestSuite((Class)klass);
+                }
             }
         }
+
+        /* The ClearSmokeTest closes the SessionFactory and can perform any
+           other final cleanup for the test suite.
+        */
+        if(suite.testCount() > 0)
+            suite.addTestSuite(ClearSmokeTest.class);
+
         return suite;
     }
 
+    public static void printCases() throws IOException, ClassNotFoundException {
+        List<Class<?>> classes = getClasses(new File(jarFile));
+        int n = 0;
+        for (Class<?> cls : classes) {
+            if (isTestClass(cls)) {
+                n++;
+                String note = "";
+                for(Annotation a : cls.getDeclaredAnnotations())
+                    note = note.concat(a.toString()).concat(" ");
+                String name = cls.getName();
+                String shortName = name.substring(name.lastIndexOf(".") + 1);
+                System.out.printf("  %-36s %s\n", shortName, note);
+            }
+        }
+        System.out.println("Found " + n + " test classes.");
+    }
+
+    private static void tryGc(int n) throws InterruptedException {
+        System.out.println("Awaiting GC " + n);
+        for(int i = 0 ; i < n ; i++) {
+            Thread.sleep(1000);
+            System.gc();
+        }
+    }
+
     /**
-     * Usage: java -cp ... AllTests file.jar [--enable-debug-tests]
+     * Usage: java -cp ... AllTests file.jar [-l] [--print-cases]
+     *                                       [--enable-debug-tests]
+     *                                       [-n test ...]
      *
      * --enable-debug-tests parameter additionally runs tests annotated
      * with @DebugTest, else these tests will be skipped.
@@ -137,30 +194,72 @@ public class AllTests {
      */
     public static void main(String[] args) throws Exception {
 
-        if (args.length < 0 || args.length > 2) {
-            usage();
-            return;
-        }
+        if (args.length < 1)
+            usage("JAR file required");
 
         // First argument is the jarfile
         jarFile = args[0];
 
-        // Optional debug-build argument
-        if (args.length == 2) {
-            if (args[1].equalsIgnoreCase("--enable-debug-tests")) {
+        boolean runNamedTests = false;
+        boolean printTestList = false;
+        int doGc = 0;
+        boolean doHeapDump = false;
+        HashSet<String> namedTests = new HashSet<String>();
+
+        for(int i = 1 ; i < args.length ; i++) {
+            if (args[i].equals("-l") || args[i].equals("--print-cases"))
+                printTestList = true;
+
+            else if (args[i].equalsIgnoreCase("--enable-debug-tests"))
                 enableDebugTests = true;
-            } else {
-                usage();
-                return;
-            }
+
+            else if (args[i].equals("--hprof"))
+                doHeapDump = true;
+
+            else if (args[i].startsWith("--gc="))
+                doGc = Integer.parseInt(args[i].substring(5));
+
+            else if(runNamedTests)
+                namedTests.add(args[i]);
+
+            else if (args[i].equals("-n"))
+                runNamedTests = true;
+
+            else
+              usage("Unrecognized option");
         }
 
-        System.out.println("Running all tests in '" + jarFile + "'");
-        TestSuite suite = (TestSuite) suite();
-        System.out.println("Found '" + suite.testCount() + "' test classes in jar file.");
+        if(printTestList && runNamedTests)
+            usage("Incompatible options");
+
+        if(printTestList) {
+            printCases();
+            System.exit(0);
+        }
+
+        TestSuite suite = suite(namedTests);
+
+        System.out.println("Java " + System.getProperty("java.version"));
+        System.out.println("Running " + (runNamedTests ? "named" : "all") +
+                           " tests in '" + jarFile + "'");
+        System.out.println("Found " + suite.testCount() + " test classes.");
         TestResult res = junit.textui.TestRunner.run(suite);
         System.out.println("Finished running tests in '" + jarFile + "'");
-        System.exit(res.wasSuccessful() ? 0 : 1);
+
+        int exitCode = res.wasSuccessful() ? 0 : 1;
+        if(doGc > 0) {
+            suite = null;
+            res = null;
+            tryGc(doGc);
+        }
+
+        if(doHeapDump) {
+            String pid = ManagementFactory.getRuntimeMXBean().getName().split("@")[0];
+            String file = "clusterj-test." + pid + ".hprof";
+            System.out.println("Creating heap dump: " + file);
+            ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean.class).dumpHeap(file, true);
+        }
+
+        System.exit(exitCode);
     }
 }
-

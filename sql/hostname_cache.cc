@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -47,9 +48,9 @@
 #ifndef _WIN32
 #include <netdb.h>
 #endif
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #ifdef HAVE_SYS_SOCKET_H
 #include <sys/socket.h>
 #endif
@@ -78,10 +79,6 @@
 #include <arpa/inet.h>
 #endif
 
-#ifdef HAVE_PSI_INTERFACE
-extern PSI_mutex_key key_hash_filo_lock;
-#endif  // HAVE_PSI_INTERFACE
-
 using std::list;
 using std::string;
 using std::unique_ptr;
@@ -108,9 +105,9 @@ Host_errors::Host_errors()
       m_max_user_connection_per_hour(0),
       m_default_database(0),
       m_init_connect(0),
-      m_local(0) {}
-
-Host_errors::~Host_errors() = default;
+      m_local(0),
+      m_account_locked(0),
+      m_temporary_account_locked(0) {}
 
 void Host_errors::reset() {
   m_connect = 0;
@@ -134,6 +131,8 @@ void Host_errors::reset() {
   m_default_database = 0;
   m_init_connect = 0;
   m_local = 0;
+  m_account_locked = 0;
+  m_temporary_account_locked = 0;
 }
 
 void Host_errors::aggregate(const Host_errors *errors) {
@@ -158,6 +157,8 @@ void Host_errors::aggregate(const Host_errors *errors) {
   m_default_database += errors->m_default_database;
   m_init_connect += errors->m_init_connect;
   m_local += errors->m_local;
+  m_account_locked += errors->m_account_locked;
+  m_temporary_account_locked += errors->m_temporary_account_locked;
 }
 
 static size_t hostname_cache_max_size;
@@ -324,23 +325,17 @@ static void add_hostname_impl(const char *ip_string, const char *hostname,
     hostname_cache_lru->emplace_front(entry);
     hostname_cache_by_ip->emplace(entry->ip_key, hostname_cache_lru->begin());
   }
-
-  return;
 }
 
 static void add_hostname(const char *ip_string, const char *hostname,
                          bool validated, Host_errors *errors) {
   mysql_mutex_assert_not_owner(&hostname_cache_mutex);
 
-  if (specialflag & SPECIAL_NO_HOST_CACHE) return;
-
   const ulonglong now = my_micro_time();
 
   MUTEX_LOCK(hostname_lock, &hostname_cache_mutex);
   if (hostname_cache_size() != 0)
     add_hostname_impl(ip_string, hostname, validated, errors, now);
-
-  return;
 }
 
 void inc_host_errors(const char *ip_string, Host_errors *errors) {
@@ -444,7 +439,7 @@ static inline bool is_hostname_valid(const char *hostname) {
 
 int ip_to_hostname(struct sockaddr_storage *ip_storage, const char *ip_string,
                    char **hostname, uint *connect_errors) {
-  const struct sockaddr *ip = (const sockaddr *)ip_storage;
+  const auto *ip = (const sockaddr *)ip_storage;
   int err_code;
   Host_errors errors;
 
@@ -470,39 +465,39 @@ int ip_to_hostname(struct sockaddr_storage *ip_storage, const char *ip_string,
   }
 
   /* Check first if we have host name in the cache. */
-
-  if (!(specialflag & SPECIAL_NO_HOST_CACHE)) {
-    const ulonglong now = my_micro_time();
-
+  {
     MUTEX_LOCK(hostname_lock, &hostname_cache_mutex);
 
-    Host_entry *entry = hostname_cache_search(ip_string);
+    if (hostname_cache_size() > 0) {
+      Host_entry *entry = hostname_cache_search(ip_string);
 
-    if (entry) {
-      entry->m_last_seen = now;
-      *connect_errors = entry->m_errors.m_connect;
+      if (entry) {
+        const ulonglong now = my_micro_time();
+        entry->m_last_seen = now;
+        *connect_errors = entry->m_errors.m_connect;
 
-      if (entry->m_errors.m_connect >= max_connect_errors) {
-        entry->m_errors.m_host_blocked++;
-        entry->set_error_timestamps(now);
-        return RC_BLOCKED_HOST;
-      }
+        if (entry->m_errors.m_connect >= max_connect_errors) {
+          entry->m_errors.m_host_blocked++;
+          entry->set_error_timestamps(now);
+          return RC_BLOCKED_HOST;
+        }
 
-      /*
-        If there is an IP -> HOSTNAME association in the cache,
-        but for a hostname that was not validated,
-        do not return that hostname: perform the network validation again.
-      */
-      if (entry->m_host_validated) {
-        if (entry->m_hostname_length)
-          *hostname = my_strdup(key_memory_host_cache_hostname,
-                                entry->m_hostname, MYF(0));
+        /*
+          If there is an IP -> HOSTNAME association in the cache,
+          but for a hostname that was not validated,
+          do not return that hostname: perform the network validation again.
+        */
+        if (entry->m_host_validated) {
+          if (entry->m_hostname_length)
+            *hostname = my_strdup(key_memory_host_cache_hostname,
+                                  entry->m_hostname, MYF(0));
 
-        DBUG_PRINT("info", ("IP (%s) has been found in the cache. "
-                            "Hostname: '%s'",
-                            ip_string, (*hostname ? *hostname : "null")));
+          DBUG_PRINT("info", ("IP (%s) has been found in the cache. "
+                              "Hostname: '%s'",
+                              ip_string, (*hostname ? *hostname : "null")));
 
-        return 0;
+          return 0;
+        }
       }
     }
   }
@@ -966,7 +961,7 @@ int ip_to_hostname(struct sockaddr_storage *ip_storage, const char *ip_string,
       char ip_buffer[HOST_ENTRY_KEY_SIZE];
 
 #ifndef NDEBUG
-      bool err_status =
+      bool const err_status =
 #endif
           vio_get_normalized_ip_string(addr_info->ai_addr,
                                        addr_info->ai_addrlen, ip_buffer,

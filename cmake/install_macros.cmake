@@ -1,15 +1,16 @@
-# Copyright (c) 2009, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2009, 2026, Oracle and/or its affiliates.
 # 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -265,13 +266,22 @@ FUNCTION(INSTALL_DEBUG_TARGET target)
   # We have a template .cmake.in file for any plugin that needs cleanup.
 
   # NOTE: scripts should work for 'make install' and 'make package'.
-  IF(UNIX_INSTALL_RPATH_ORIGIN_PRIV_LIBDIR)
+  IF(LINUX AND
+      (UNIX_INSTALL_RPATH_ORIGIN_PRIV_LIBDIR OR
+        WITH_MLE OR WITH_KEYRING_AWS OR
+        ADD_INSTALL_RPATH_FOR_ICU OR
+        INSTALL_RPATH_FOR_FIDO2))
     IF(${target} STREQUAL "mysqld")
       INSTALL(SCRIPT ${CMAKE_SOURCE_DIR}/cmake/rpath_remove.cmake)
     ENDIF()
-    # These plugins depend, directly or indirectly, on protobuf.
+    # These plugins depend, directly or indirectly, on protobuf or fido2.
     IF(${target} STREQUAL "group_replication" OR
         ${target} STREQUAL "telemetry_client" OR
+        ${target} STREQUAL "authentication_webauthn" OR
+        ${target} STREQUAL "authentication_webauthn_client" OR
+        ${target} STREQUAL "keyring_aws" OR
+        ${target} STREQUAL "component_keyring_aws" OR
+        ${target} STREQUAL "component_mle" OR
         ${target} STREQUAL "component_telemetry"
         )
       GET_TARGET_PROPERTY(output_name ${target} OUTPUT_NAME)
@@ -325,16 +335,32 @@ ENDFUNCTION()
 
 # On Unix: add to RPATH of an executable when it is installed.
 # Use 'chrpath' or 'patchelf --print-rpath' to inspect results.
-# For Solaris, use 'elfdump -d'
-MACRO(ADD_INSTALL_RPATH TARGET VALUE)
-  GET_TARGET_PROPERTY(CURRENT_RPATH_${TARGET} ${TARGET} INSTALL_RPATH)
-  IF(NOT CURRENT_RPATH_${TARGET})
-    SET(CURRENT_RPATH_${TARGET})
+# For Solaris, use 'elfdump -d'.
+FUNCTION(ADD_INSTALL_RPATH_VALUE TARGET VALUE)
+  GET_TARGET_PROPERTY(CURRENT_RPATH ${TARGET} INSTALL_RPATH)
+  IF(NOT CURRENT_RPATH)
+    SET(CURRENT_RPATH)
   ENDIF()
-  LIST(APPEND CURRENT_RPATH_${TARGET} ${VALUE})
+
+  # Strip off trailing "/"
+  STRING(REGEX REPLACE "(.*)\/$" "\\1" VALUE "${VALUE}")
+  LIST(APPEND CURRENT_RPATH ${VALUE})
+
+  # Sort list such that items containing $ORIGIN/... comes first
+  IF(LINUX)
+    LIST(REMOVE_DUPLICATES CURRENT_RPATH)
+    LIST(SORT CURRENT_RPATH)
+  ENDIF()
+
   SET_TARGET_PROPERTIES(${TARGET}
-    PROPERTIES INSTALL_RPATH "${CURRENT_RPATH_${TARGET}}")
-ENDMACRO()
+    PROPERTIES INSTALL_RPATH "${CURRENT_RPATH}")
+ENDFUNCTION(ADD_INSTALL_RPATH_VALUE)
+
+FUNCTION(ADD_INSTALL_RPATH TARGET VALUE_LIST)
+  FOREACH(_value ${VALUE_LIST})
+    ADD_INSTALL_RPATH_VALUE(${TARGET} ${_value})
+  ENDFOREACH()
+ENDFUNCTION()
 
 
 # For standalone Linux build or community RPM build, we support
@@ -457,7 +483,7 @@ MACRO(MYSQL_CHECK_PROTOBUF_DLLS)
       ADD_DEPENDENCIES(symlink_protobuf_dlls link_protobuf_dlls_bin_xcode)
     ENDIF()
   ENDIF()
-ENDMACRO()
+ENDMACRO(MYSQL_CHECK_PROTOBUF_DLLS)
 
 # For APPLE: set INSTALL_RPATH, and adjust path dependecy for libprotobuf.
 # Use 'otool -L' to inspect results.
@@ -542,11 +568,11 @@ MACRO(MYSQL_CHECK_FIDO_DLLS)
       ADD_DEPENDENCIES(symlink_fido2_dlls link_fido2_dlls_plugin_xcode)
     ENDIF()
   ENDIF()
-ENDMACRO()
+ENDMACRO(MYSQL_CHECK_FIDO_DLLS)
 
 MACRO(ADD_INSTALL_RPATH_FOR_FIDO2 TARGET)
-  MESSAGE(STATUS "ADD_INSTALL_RPATH_FOR_FIDO2 ${TARGET}")
   IF(APPLE)
+    MESSAGE(STATUS "ADD_INSTALL_RPATH_FOR_FIDO2 ${TARGET}")
     SET_PROPERTY(TARGET ${TARGET} PROPERTY INSTALL_RPATH "@loader_path")
     # install_name_tool [-change old new] input
 
@@ -558,6 +584,7 @@ MACRO(ADD_INSTALL_RPATH_FOR_FIDO2 TARGET)
           "$<TARGET_FILE:${TARGET}>"
       )
   ELSEIF(UNIX)
+    MESSAGE(STATUS "ADD_INSTALL_RPATH_FOR_FIDO2 ${TARGET}")
     GET_TARGET_PROPERTY(TARGET_TYPE_${TARGET} ${TARGET} TYPE)
     IF(TARGET_TYPE_${TARGET} STREQUAL "EXECUTABLE")
       ADD_INSTALL_RPATH(${TARGET} "\$ORIGIN/../${INSTALL_PRIV_LIBDIR}")
@@ -568,6 +595,47 @@ MACRO(ADD_INSTALL_RPATH_FOR_FIDO2 TARGET)
     ENDIF()
   ENDIF()
 ENDMACRO()
+
+
+# For APPLE builds we support
+#   -DWITH_KERBEROS=</path/to/custom/kerberos>
+# For Xcode builds, we ignore CMAKE_CFG_INTDIR and
+# leave copied libs in lib/ with symlinks in plugin_output_directory.
+# i.e. all configurations will share the same set of copied files.
+#
+# otool -L plugin_output_directory/Debug/authentication_kerberos_client.so
+# plugin_output_directory/Debug/authentication_kerberos_client.so:
+#   @loader_path/../libgssapi_krb5.2.2.dylib (compatibility version 2.0.0, current version 2.2.0)
+# .....
+# ls -l plugin_output_directory/libgssapi_krb5.2.2.dylib
+# .....  plugin_output_directory/libgssapi_krb5.2.2.dylib@ ->
+#             ../lib/libgssapi_krb5.2.2.dylib
+
+FUNCTION(SET_PATH_TO_CUSTOM_KERBEROS_FOR_APPLE target)
+  IF(APPLE_WITH_CUSTOM_KERBEROS AND ${target} MATCHES "kerberos")
+    SET(CUSTOM_COMMAND_LINE)
+    # Read the original library paths to get symlinks.
+    # The copied libs/symlinks may not have been created yet.
+    FOREACH(lib ${EXTERNAL_KERBEROS_CUSTOM_LIBS})
+      EXECUTE_PROCESS(
+        COMMAND readlink "${${lib}}" OUTPUT_VARIABLE SYMLINK_TARGET
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+      IF(BUILD_IS_SINGLE_CONFIG)
+        LIST(APPEND CUSTOM_COMMAND_LINE
+          COMMAND install_name_tool -change
+          "@rpath/${SYMLINK_TARGET}" "@loader_path/${SYMLINK_TARGET}"
+          $<TARGET_FILE:${target}>)
+      ELSE()
+        LIST(APPEND CUSTOM_COMMAND_LINE
+          COMMAND install_name_tool -change
+          "@rpath/${SYMLINK_TARGET}" "@loader_path/../${SYMLINK_TARGET}"
+          $<TARGET_FILE:${target}>)
+      ENDIF()
+    ENDFOREACH()
+    MESSAGE(STATUS "KERBEROS CUSTOM_COMMAND_LINE ${CUSTOM_COMMAND_LINE}")
+    ADD_CUSTOM_COMMAND(TARGET ${target} POST_BUILD ${CUSTOM_COMMAND_LINE})
+  ENDIF()
+ENDFUNCTION(SET_PATH_TO_CUSTOM_KERBEROS_FOR_APPLE)
 
 
 # For APPLE builds we support
@@ -656,7 +724,6 @@ FUNCTION(COPY_OPENSSL_BINARY executable_full_filename
     -DOPENSSL_VERSION="${OPENSSL_VERSION}"
     -DINSTALL_PRIV_LIBDIR="${INSTALL_PRIV_LIBDIR}"
     -DPATCHELF_EXECUTABLE="${PATCHELF_EXECUTABLE}"
-    -DCPU_PAGE_SIZE="${CPU_PAGE_SIZE}"
     -DBUILD_IS_SINGLE_CONFIG="${BUILD_IS_SINGLE_CONFIG}"
     -DCMAKE_GENERATOR="${CMAKE_GENERATOR}"
     -DCMAKE_SYSTEM_PROCESSOR="${CMAKE_SYSTEM_PROCESSOR}"
@@ -707,12 +774,13 @@ ENDFUNCTION(COPY_OPENSSL_BINARY)
 # We also update the RUNPATH of libraries to be '$ORIGIN' to ensure that
 # libraries get correct load-time dependencies. This is done using the
 # linux tool patchelf(1)
+# This cmake macro is duplicated in `router/cmake/install_macros.cmake`.
 #
 # Set ${OUTPUT_LIBRARY_NAME} to the new location.
 # Set ${OUTPUT_TARGET_NAME} to the name of a target which will do the copying.
 # Add an INSTALL(FILES ....) rule to install library and symlinks into
 #   ${INSTALL_PRIV_LIBDIR} or ${INSTALL_PRIV_LIBDIR}/sasl2
-FUNCTION(COPY_CUSTOM_SHARED_LIBRARY library_full_filename subdir
+FUNCTION(COPY_CUSTOM_SHARED_LIBRARY_LINUX library_full_filename subdir
     OUTPUT_LIBRARY_NAME
     OUTPUT_TARGET_NAME
     )
@@ -763,7 +831,6 @@ FUNCTION(COPY_CUSTOM_SHARED_LIBRARY library_full_filename subdir
     -Dlibrary_version="${library_version}"
     -Dsubdir="${subdir}"
     -DPATCHELF_EXECUTABLE="${PATCHELF_EXECUTABLE}"
-    -DCPU_PAGE_SIZE="${CPU_PAGE_SIZE}"
     -DCMAKE_SYSTEM_PROCESSOR="${CMAKE_SYSTEM_PROCESSOR}"
     -P ${CMAKE_SOURCE_DIR}/cmake/copy_custom_library.cmake
 
@@ -778,7 +845,7 @@ FUNCTION(COPY_CUSTOM_SHARED_LIBRARY library_full_filename subdir
   SET(${OUTPUT_LIBRARY_NAME} "${COPIED_LIBRARY_NAME}" PARENT_SCOPE)
   SET(${OUTPUT_TARGET_NAME} "${COPY_TARGET_NAME}" PARENT_SCOPE)
 
-  ADD_DEPENDENCIES(copy_linux_custom_dlls ${COPY_TARGET_NAME})
+  ADD_DEPENDENCIES(copy_custom_libraries ${COPY_TARGET_NAME})
 
   MESSAGE(STATUS "INSTALL ${library_name} to ${INSTALL_PRIV_LIBDIR}/${subdir}")
 
@@ -793,13 +860,15 @@ FUNCTION(COPY_CUSTOM_SHARED_LIBRARY library_full_filename subdir
     GROUP_READ GROUP_EXECUTE
     WORLD_READ WORLD_EXECUTE
     )
-ENDFUNCTION(COPY_CUSTOM_SHARED_LIBRARY)
+ENDFUNCTION(COPY_CUSTOM_SHARED_LIBRARY_LINUX)
 
 
 # For 3rd party .dlls on Windows.
 # Adds a target which copies the .dll to runtime_output_directory.
 # Adds INSTALL(FILES ....) rule to install the .dll to ${INSTALL_BINDIR}.
 # Looks for matching .pdb file, and installs it if found.
+# This cmake macro is duplicated in `router/cmake/install_macros.cmake`.
+#
 # Sets ${OUTPUT_TARGET_NAME} to the name of a target which will do the copying.
 FUNCTION(COPY_CUSTOM_DLL library_full_filename OUTPUT_TARGET_NAME)
   IF(NOT WIN32)
@@ -856,3 +925,136 @@ FUNCTION(COPY_CUSTOM_DLL library_full_filename OUTPUT_TARGET_NAME)
       )
   ENDIF()
 ENDFUNCTION(COPY_CUSTOM_DLL)
+
+# For macOS builds and -DWITH_KERBEROS set to a custom path.
+# See similar function for Linux COPY_CUSTOM_SHARED_LIBRARY_LINUX
+# See also the IF(APPLE_WITH_CUSTOM_SSL) part of cmake/ssl.cmake
+#
+# Copy the custom shared library and symlinks to library_output_directory.
+# The subdir argument is currently empty, support for sasl2 not (yet)
+# implemented.
+#
+# Set ${OUTPUT_LIBRARY_NAME} to the new location.
+# Set ${OUTPUT_TARGET_NAME} to the name of a target which will do the copying.
+#
+# Make symlink in plugin_output_directory to the library in
+#   library_output_directory. This allows plugins to refer to the library as
+#   @loader_path/libcom_err.3.0.dylib @loader_path/libk5crypto.3.1.dylib etc.
+#
+# INSTALL the copied library, and its symlink to library_output_directory
+# INSTALL the symlinks to ${INSTALL_PLUGINDIR} (which is lib/plugin).
+# For "dual" builds, also INSTALL symlinks to lib/plugin/debug.
+
+FUNCTION(COPY_CUSTOM_SHARED_LIBRARY_APPLE library_full_filename subdir
+    OUTPUT_LIBRARY_NAME OUTPUT_TARGET_NAME)
+  IF(NOT APPLE)
+    RETURN()
+  ENDIF()
+
+  EXECUTE_PROCESS(
+    COMMAND readlink "${library_full_filename}" OUTPUT_VARIABLE SYMLINK_TARGET
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  FIND_OBJECT_DEPENDENCIES("${library_full_filename}" LIBRARY_DEPS)
+
+  GET_FILENAME_COMPONENT(library_directory "${library_full_filename}" DIRECTORY)
+  GET_FILENAME_COMPONENT(library_name "${library_full_filename}" NAME)
+  GET_FILENAME_COMPONENT(library_name_we "${library_full_filename}" NAME_WE)
+
+  SET(COPIED_LIBRARY_NAME
+    "${CMAKE_BINARY_DIR}/library_output_directory/${subdir}/${library_name}")
+
+  SET(COPY_TARGET_NAME "copy_${library_name_we}_dylib")
+  SET(LINK_TARGET_NAME "link_${library_name_we}_dylib")
+
+  # This will also do create_symlink in plugin_output_directory
+  # The BYPRODUCTS arguments are important for building with Ninja.
+  ADD_CUSTOM_TARGET(${COPY_TARGET_NAME} ALL
+    COMMAND ${CMAKE_COMMAND}
+    -Dlibrary_full_filename="${library_full_filename}"
+    -Dlibrary_directory="${library_directory}"
+    -Dlibrary_name="${library_name}"
+    -Dlibrary_version="${SYMLINK_TARGET}"
+    -Dsubdir="${subdir}"
+    -DLIBRARY_DEPS="${LIBRARY_DEPS}"
+    -DPLUGIN_DIR="${CMAKE_BINARY_DIR}/plugin_output_directory"
+
+    -P ${CMAKE_SOURCE_DIR}/cmake/copy_custom_dylib.cmake
+
+    BYPRODUCTS
+    ${CMAKE_BINARY_DIR}/library_output_directory/${subdir}/${library_name}
+    ${CMAKE_BINARY_DIR}/library_output_directory/${subdir}/${SYMLINK_TARGET}
+
+    WORKING_DIRECTORY
+    "${CMAKE_BINARY_DIR}/library_output_directory/${subdir}"
+    )
+
+  # Directory layout after 'make install' is different.
+  # Create some symlinks from lib/plugin/*.dylib to ../../lib/*.dylib
+  FILE(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/plugin_output_directory/plugin")
+  ADD_CUSTOM_TARGET(${LINK_TARGET_NAME} ALL
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+    "../../lib/${SYMLINK_TARGET}" "${SYMLINK_TARGET}"
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/plugin_output_directory/plugin"
+    )
+  ADD_DEPENDENCIES(symlink_custom_libraries ${LINK_TARGET_NAME})
+
+  # See INSTALL_DEBUG_TARGET used for installing debug versions of plugins.
+  IF(BUILD_IS_SINGLE_CONFIG AND
+      NOT CMAKE_BUILD_TYPE_UPPER STREQUAL "DEBUG" AND
+      EXISTS ${DEBUGBUILDDIR})
+    FILE(MAKE_DIRECTORY
+      "${CMAKE_BINARY_DIR}/plugin_output_directory/plugin/debug")
+    SET(LINK_TARGET_NAME_DEBUG "${LINK_TARGET_NAME}_debug")
+    ADD_CUSTOM_TARGET(${LINK_TARGET_NAME_DEBUG} ALL
+      COMMAND ${CMAKE_COMMAND} -E create_symlink
+      "../../../lib/${SYMLINK_TARGET}" "${SYMLINK_TARGET}"
+      WORKING_DIRECTORY
+      "${CMAKE_BINARY_DIR}/plugin_output_directory/plugin/debug"
+      )
+    ADD_DEPENDENCIES(symlink_custom_libraries ${LINK_TARGET_NAME_DEBUG})
+  ENDIF()
+
+  MESSAGE(STATUS "INSTALL KERBEROS ${SYMLINK_TARGET} to ${INSTALL_LIBDIR}")
+  MESSAGE(STATUS "INSTALL KERBEROS ${library_name} to ${INSTALL_LIBDIR}")
+  INSTALL(FILES
+    ${CMAKE_BINARY_DIR}/library_output_directory/${SYMLINK_TARGET}
+    ${CMAKE_BINARY_DIR}/library_output_directory/${library_name}
+    DESTINATION ${INSTALL_LIBDIR} COMPONENT SharedLibraries
+    )
+  INSTALL(FILES
+    ${CMAKE_BINARY_DIR}/plugin_output_directory/plugin/${SYMLINK_TARGET}
+    DESTINATION ${INSTALL_PLUGINDIR} COMPONENT SharedLibraries
+    )
+  # See INSTALL_DEBUG_TARGET used for installing debug versions of plugins.
+  IF(EXISTS ${DEBUGBUILDDIR})
+    INSTALL(FILES
+      ${CMAKE_BINARY_DIR}/plugin_output_directory/plugin/debug/${SYMLINK_TARGET}
+      DESTINATION ${INSTALL_PLUGINDIR}/debug COMPONENT SharedLibraries
+      )
+  ENDIF()
+
+  MESSAGE(STATUS "INSTALL ${library_full_filename} to ${INSTALL_LIBDIR}")
+  INSTALL(FILES "${COPIED_LIBRARY_NAME}"
+    DESTINATION "${INSTALL_LIBDIR}" COMPONENT SharedLibraries
+    )
+
+  ADD_DEPENDENCIES(copy_custom_libraries ${COPY_TARGET_NAME})
+
+  SET(${OUTPUT_LIBRARY_NAME} "${COPIED_LIBRARY_NAME}" PARENT_SCOPE)
+  SET(${OUTPUT_TARGET_NAME} "${COPY_TARGET_NAME}" PARENT_SCOPE)
+
+ENDFUNCTION(COPY_CUSTOM_SHARED_LIBRARY_APPLE)
+
+FUNCTION(COPY_CUSTOM_SHARED_LIBRARY library_full_filename subdir
+    OUTPUT_LIBRARY_NAME OUTPUT_TARGET_NAME)
+  IF(LINUX)
+    COPY_CUSTOM_SHARED_LIBRARY_LINUX("${library_full_filename}" "${subdir}"
+      LIBRARY_NAME TARGET_NAME)
+  ELSEIF(APPLE)
+    COPY_CUSTOM_SHARED_LIBRARY_APPLE("${library_full_filename}" "${subdir}"
+      LIBRARY_NAME TARGET_NAME)
+  ENDIF()
+
+  SET(${OUTPUT_LIBRARY_NAME} "${LIBRARY_NAME}" PARENT_SCOPE)
+  SET(${OUTPUT_TARGET_NAME} "${TARGET_NAME}" PARENT_SCOPE)
+ENDFUNCTION(COPY_CUSTOM_SHARED_LIBRARY)

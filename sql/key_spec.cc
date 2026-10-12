@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -33,14 +34,18 @@
 #include "mysql/strings/m_ctype.h"
 #include "mysql_com.h"
 #include "mysqld_error.h"
-#include "sql/create_field.h"   // Create_field
-#include "sql/dd/dd.h"          // dd::get_dictionary
-#include "sql/dd/dictionary.h"  // dd::Dictionary::check_dd...
-#include "sql/derror.h"         // ER_THD
-#include "sql/item.h"           // Item_field
-#include "sql/item_func.h"      // Item_field
-#include "sql/sql_class.h"      // THD
-#include "sql/sql_parse.h"      // check_string_char_length
+#include "sql/create_field.h"                // Create_field
+#include "sql/dd/cache/dictionary_client.h"  // dd::cache::Dictionary_client
+#include "sql/dd/dd.h"                       // dd::get_dictionary
+#include "sql/dd/dictionary.h"               // dd::Dictionary::check_dd...
+#include "sql/dd/types/index.h"              // dd::Index
+#include "sql/dd/types/index_element.h"      // dd::Index_element
+#include "sql/dd/types/table.h"              // dd::Table
+#include "sql/derror.h"                      // ER_THD
+#include "sql/item.h"                        // Item_field
+#include "sql/item_func.h"                   // Item_field
+#include "sql/sql_class.h"                   // THD
+#include "sql/sql_parse.h"                   // check_string_char_length
 #include "sql/table.h"
 #include "sql_lex.h"  // LEX
 
@@ -163,11 +168,70 @@ bool Foreign_key_spec::validate(THD *thd, const char *table_name,
   }
 
   for (const Key_part_spec *fk_col : ref_columns) {
-    if (check_column_name(fk_col->get_field_name())) {
+    if (check_column_name(to_lex_cstring(fk_col->get_field_name()))) {
       my_error(ER_WRONG_COLUMN_NAME, MYF(0), fk_col->get_field_name());
       return true;
     }
   }
 
+  return false;
+}
+
+bool Foreign_key_spec::set_ref_columns_for_implicit_pk(
+    THD *thd, bool is_self_referencing_fk,
+    Mem_root_array<Key_spec *> &key_list) {
+  assert(ref_columns.empty());
+
+  if (is_self_referencing_fk) {
+    for (auto key : key_list) {
+      if (key->type != KEYTYPE_PRIMARY) continue;
+
+      for (auto column : key->columns) {
+        ref_columns.push_back(column);
+      }
+      break;
+    }
+  } else {
+    /*
+      For non-self referencing FKs, implicit FK references is not supported with
+      FOREIGN_KEY_CHECKS = 0. Hence ref_columns is not set. Error is reported in
+      FK validate stage.
+    */
+    if (thd->variables.option_bits & OPTION_NO_FOREIGN_KEY_CHECKS) return false;
+
+    // Get parent table DD object.
+    const dd::cache::Dictionary_client::Auto_releaser releaser(
+        thd->dd_client());
+    const dd::Table *parent_table_def = nullptr;
+    if (thd->dd_client()->acquire(ref_db.str, ref_table.str, &parent_table_def))
+      return true;
+    if (parent_table_def == nullptr) {
+      /*
+        If parent table does not exists, then an error is reported in the
+        FK validate stage. In this case, ref_columns() is not set.
+      */
+      return false;
+    }
+
+    for (const dd::Index *idx : parent_table_def->indexes()) {
+      if (idx->type() != dd::Index::IT_PRIMARY) continue;
+
+      for (const dd::Index_element *idx_el : idx->elements()) {
+        if (idx_el->is_hidden()) continue;
+
+        Key_part_spec *ref_column = new (thd->mem_root)
+            Key_part_spec(idx_el->column().name().c_str(), nullptr, ORDER_ASC);
+        if (ref_column == nullptr || ref_columns.push_back(ref_column))
+          return true;  // OOM
+      }
+      break;
+    }
+  }
+
+  /*
+    ref_columns() is set or either parent table or PK in parent table is missing
+    and ref_columns() is not set. Error is reported in FK validate stage if
+    ref_columns() is empty.
+  */
   return false;
 }

@@ -1,15 +1,16 @@
-/* Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -32,7 +33,7 @@ namespace mysys_my_getpw {
 
 // Verify that a default-constructed PasswdValue is void
 TEST(MysysMyGetpw, DefaultPasswdValue) {
-  PasswdValue pv;
+  PasswdValue const pv;
   EXPECT_TRUE(pv.IsVoid());
 }
 // Verify basic value operations
@@ -41,7 +42,7 @@ TEST(MysysMyGetpw, BasicValueOperations) {
   pv.pw_name = "root";
   PasswdValue copy = pv;
   EXPECT_EQ(std::string{"root"}, copy.pw_name);
-  PasswdValue moved = std::move(copy);
+  PasswdValue const moved = std::move(copy);
   EXPECT_EQ(std::string{"root"}, moved.pw_name);
   PasswdValue assigned;
   assigned = pv;
@@ -50,23 +51,23 @@ TEST(MysysMyGetpw, BasicValueOperations) {
 
 // Verify that it is possible to retrive entry for root using symbolic name
 TEST(MysysMyGetpw, GetpwnamRoot) {
-  PasswdValue rootpw = my_getpwnam("root");
+  PasswdValue const rootpw = my_getpwnam("root");
   EXPECT_EQ(std::string{"root"}, rootpw.pw_name);
-  EXPECT_EQ(0u, rootpw.pw_uid);
-  EXPECT_EQ(0u, rootpw.pw_gid);
+  EXPECT_EQ(0U, rootpw.pw_uid);
+  EXPECT_EQ(0U, rootpw.pw_gid);
 }
 
 // Verify that it is possible to retrive entry for root using numeric id
 TEST(MysysMyGetpw, GetpwuidRoot) {
-  PasswdValue rootpw = my_getpwuid(0);
+  PasswdValue const rootpw = my_getpwuid(0);
   EXPECT_EQ(std::string{"root"}, rootpw.pw_name);
-  EXPECT_EQ(0u, rootpw.pw_uid);
-  EXPECT_EQ(0u, rootpw.pw_gid);
+  EXPECT_EQ(0U, rootpw.pw_uid);
+  EXPECT_EQ(0U, rootpw.pw_gid);
 }
 
 // Verify that non-existent user give void value
 TEST(MysysMyGetpw, NonExistentUser) {
-  PasswdValue none = my_getpwnam("thereisnosuchuser___");
+  PasswdValue const none = my_getpwnam("thereisnosuchuser___");
   EXPECT_TRUE(none.IsVoid());
 }
 

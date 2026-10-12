@@ -1,15 +1,16 @@
-/* Copyright (c) 2008, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -46,6 +47,9 @@
 #include "storage/perfschema/pfs_global.h"
 #include "storage/perfschema/pfs_instr.h"
 #include "storage/perfschema/table_helper.h"
+
+#include "sql/current_thd.h"
+#include "sql/debug_sync.h"
 
 size_t digest_max = 0;
 ulong digest_lost = 0;
@@ -175,18 +179,12 @@ static const uchar *digest_hash_get_key(const uchar *entry, size_t *length) {
 
 static uint digest_hash_func(const LF_HASH *, const uchar *key,
                              size_t key_len [[maybe_unused]]) {
-  const PFS_digest_key *digest_key;
-  uint64 nr1;
-  uint64 nr2;
-
   assert(key_len == sizeof(PFS_digest_key));
-  digest_key = reinterpret_cast<const PFS_digest_key *>(key);
+  const auto *digest_key = reinterpret_cast<const PFS_digest_key *>(key);
   assert(digest_key != nullptr);
 
-  nr1 = 0;
-  nr2 = 0;
-
-  nr1 = murmur3_32(digest_key->m_hash, DIGEST_HASH_SIZE, nr2);
+  uint64 nr2 = 0;
+  uint64 nr1 = murmur3_32(digest_key->m_hash, DIGEST_HASH_SIZE, nr2);
   digest_key->m_schema_name.hash(&nr1, &nr2);
 
   return nr1;
@@ -273,7 +271,7 @@ PFS_statements_digest_stat *find_or_create_digest(
 
   int res;
   uint retry_count = 0;
-  const uint retry_max = 3;
+  constexpr uint retry_max = 3;
   size_t safe_index;
   size_t attempts = 0;
   PFS_statements_digest_stat **entry;
@@ -287,6 +285,8 @@ search:
   /* Lookup LF_HASH using this new key. */
   entry = reinterpret_cast<PFS_statements_digest_stat **>(
       lf_hash_search(&digest_hash, pins, &hash_key, sizeof(PFS_digest_key)));
+
+  DEBUG_SYNC(current_thd, "after_lf_hash_search");
 
   if (entry && (entry != MY_LF_ERRPTR)) {
     /* If digest already exists, update stats and return. */

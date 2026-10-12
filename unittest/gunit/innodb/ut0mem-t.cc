@@ -1,15 +1,16 @@
-/* Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -32,7 +33,7 @@ namespace innodb_ut0mem_unittest {
 /* test ut_str_sql_format() */
 TEST(ut0mem, utstrsqlformat) {
   const char *buf_initial = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
-  ulint buf_initial_sz = strlen(buf_initial) + 1;
+  ulint const buf_initial_sz = strlen(buf_initial) + 1;
   char buf[64];
   ulint ret;
   struct {
@@ -79,14 +80,13 @@ TEST(ut0mem, utstrsqlformat) {
       {"a'b'c'", 6, 32, 12, "'a''b''c'''"},
   };
 
-  for (ulint i = 0; i < UT_ARR_SIZE(test_data); i++) {
+  for (auto &i : test_data) {
     memcpy(buf, buf_initial, buf_initial_sz);
 
-    ret = ut_str_sql_format(test_data[i].in, test_data[i].in_len, buf,
-                            test_data[i].buf_size);
+    ret = ut_str_sql_format(i.in, i.in_len, buf, i.buf_size);
 
-    EXPECT_EQ(test_data[i].ret_expected, ret);
-    EXPECT_STREQ(test_data[i].buf_expected, buf);
+    EXPECT_EQ(i.ret_expected, ret);
+    EXPECT_STREQ(i.buf_expected, buf);
   }
 }
 

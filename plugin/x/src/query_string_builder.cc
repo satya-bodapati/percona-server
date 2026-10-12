@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2015, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,7 +25,7 @@
 
 #include "plugin/x/src/query_string_builder.h"
 
-#include <assert.h>
+#include <cassert>
 #include <cstdint>
 
 #include <mutex>  // NOLINT(build/c++11)
@@ -70,16 +71,14 @@ Query_string_builder &Query_string_builder::quote_identifier_if_needed(
   } else {
     need_quote = true;
   }
-  if (need_quote)
-    return quote_identifier(s, length);
-  else
-    return put(s, length);
+  if (need_quote) return quote_identifier(s, length);
+  return put(s, length);
 }
 
 namespace {
 inline void escape_char(const char *s, const size_t length, const char escape,
                         ngs::PFS_string *buff) {
-  size_t str_pos = buff->size();
+  size_t const str_pos = buff->size();
   // resize the buffer to fit the original size + worst case length of s
   buff->resize(str_pos + length * 2);
 
@@ -103,12 +102,12 @@ Query_string_builder &Query_string_builder::escape_identifier(const char *s,
 
 Query_string_builder &Query_string_builder::escape_string(const char *s,
                                                           size_t length) {
-  size_t str_pos = m_str.size();
+  size_t const str_pos = m_str.size();
   // resize the buffer to fit the original size + worst case length of s
   m_str.resize(str_pos + 2 * length + 1);
 
-  size_t r = escape_string_for_mysql(m_charset, &m_str[str_pos], 2 * length + 1,
-                                     s, length);
+  size_t const r = escape_string_for_mysql(m_charset, &m_str[str_pos],
+                                           2 * length + 1, s, length);
   m_str.resize(str_pos + r);
 
   return *this;

@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -29,8 +30,8 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <assert.h>
 #include <sched.h>
+#include <cassert>
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -80,16 +81,19 @@ static int original_ns_fd = -1;
 static bool open_network_namespace(const std::string &network_namespace,
                                    int *fd) {
 #ifdef MYSQL_SERVER
-  std::lock_guard<std::mutex> lck_guard(lock);
+  std::lock_guard<std::mutex> const lck_guard(lock);
   auto iter = opened_namespaces.find(network_namespace);
   if (iter != opened_namespaces.end()) {
     *fd = iter->second;
     return false;
   }
 #endif
+  // Note that /var/run is deprecated, use /run instead.
+  // See https://lwn.net/Articles/436012/
   char path_to_ns_file[PATH_MAX];
-  int requested_len = snprintf(path_to_ns_file, sizeof(path_to_ns_file),
-                               "/var/run/netns/%s", network_namespace.c_str());
+  const int requested_len =
+      snprintf(path_to_ns_file, sizeof(path_to_ns_file), "/run/netns/%s",
+               network_namespace.c_str());
   if (requested_len + 1 > PATH_MAX) {
 #ifdef MYSQL_SERVER
     LogErr(ERROR_LEVEL, ER_NETWORK_NAMESPACE_FILE_PATH_TOO_LONG, requested_len,
@@ -134,7 +138,7 @@ static bool open_network_namespace(const std::string &network_namespace,
 static bool save_original_network_namespace(int *orig_ns_fd) {
   static const char *path_to_current_ns_file = "/proc/self/ns/net";
 
-  int fd = open(path_to_current_ns_file, O_RDONLY);
+  int const fd = open(path_to_current_ns_file, O_RDONLY);
 
   if (fd == -1) {
 #ifdef MYSQL_SERVER
@@ -189,7 +193,7 @@ bool restore_original_network_namespace() {
 
 void release_network_namespace_resources() {
 #ifdef MYSQL_SERVER
-  std::lock_guard<std::mutex> lck_guard(lock);
+  std::lock_guard<std::mutex> const lck_guard(lock);
 
   for (const auto &element : opened_namespaces) {
     (void)close(element.second);

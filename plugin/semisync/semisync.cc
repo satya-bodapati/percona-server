@@ -1,16 +1,17 @@
 /* Copyright (C) 2007 Google Inc.
-   Copyright (c) 2008, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,7 +23,7 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include "plugin/semisync/semisync.h"
-#include "mysql/components/services/component_sys_var_service.h"
+#include "mysql/components/services/mysql_system_variable.h"
 
 const unsigned char ReplSemiSyncBase::kPacketMagicNum = 0xef;
 const unsigned char ReplSemiSyncBase::kPacketFlagSync = 0x01;
@@ -41,11 +42,11 @@ bool is_sysvar_defined(const char *name) {
   size_t value_length = sizeof(buffer) - 1;
   auto registry_handle = mysql_plugin_registry_acquire();
   assert(registry_handle != nullptr);
-  my_service<SERVICE_TYPE(component_sys_variable_register)> svc(
-      "component_sys_variable_register", registry_handle);
+  my_service<SERVICE_TYPE(mysql_system_variable_reader)> svc(
+      "mysql_system_variable_reader", registry_handle);
   // Returns true on error, i.e., if the variable does *not* exist.
   bool get_var_error =
-      svc->get_variable("mysql_server", name, &value, &value_length);
+      svc->get(nullptr, "GLOBAL", "mysql_server", name, &value, &value_length);
   mysql_plugin_registry_release(registry_handle);
   return !get_var_error;
 }

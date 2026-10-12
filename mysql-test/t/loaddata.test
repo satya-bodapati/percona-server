@@ -29,6 +29,8 @@ load data infile '../../std_data/loaddata1.dat' count 10 into table t1;
 # Source other than file is not allowed without BULK
 --error ER_WRONG_USAGE
 load data url '../../std_data/loaddata1.dat' into table t1;
+--error ER_WRONG_USAGE
+load data uri '../../std_data/loaddata1.dat' into table t1;
 
 load data infile '../../std_data/loaddata1.dat' ignore into table t1 fields terminated by ',' LINES STARTING BY ',' (b,c,d);
 SELECT * from t1;
@@ -633,7 +635,7 @@ disconnect con1;
 CREATE TABLE t1(f1 INT);
 EVAL SELECT 0xE1C330 INTO OUTFILE 't1.dat';
 --disable_warnings
-LOAD DATA INFILE 't1.dat' IGNORE INTO TABLE t1 CHARACTER SET utf8;
+LOAD DATA INFILE 't1.dat' IGNORE INTO TABLE t1 CHARACTER SET utf8mb3;
 --enable_warnings
 
 DROP TABLE t1;
@@ -693,7 +695,7 @@ DROP TABLE t1;
 
 --echo #
 --echo # Bug#20683959 LOAD DATA INFILE IGNORES A SPECIFIC ROW SILENTLY
---echo #              UNDER DB CHARSET IS UTF8
+--echo #              UNDER DB CHARSET IS utf8mb3
 --echo #
 
 CREATE DATABASE d1 CHARSET latin1;
@@ -703,7 +705,7 @@ LOAD DATA INFILE '../../std_data/bug20683959loaddata.txt' INTO TABLE t1;
 SELECT COUNT(*) FROM t1;
 SELECT HEX(val) FROM t1;
 
-CREATE DATABASE d2 CHARSET utf8;
+CREATE DATABASE d2 CHARSET utf8mb3;
 USE d2;
 CREATE TABLE t1 (val TEXT);
 LOAD DATA INFILE '../../std_data/bug20683959loaddata.txt' INTO TABLE t1;

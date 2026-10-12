@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,6 +26,7 @@
 #include "sql/log_event.h"
 
 using mysql::binlog::event::enum_binlog_checksum_alg;
+using mysql::binlog::event::Event_decoding_error;
 using mysql::binlog::event::Format_description_event;
 using mysql::binlog::event::Log_event_footer;
 
@@ -46,14 +48,15 @@ static void debug_corrupt_event(unsigned char *buffer, unsigned int event_len) {
     Previous_gtids_log_event and Gtid_log_event
     events from injected corruption to allow dump thread to move forward
     on binary log until the missing transactions from slave when
-    MASTER_AUTO_POSITION= 1.
+    SOURCE_AUTO_POSITION= 1.
   */
   DBUG_EXECUTE_IF(
       "corrupt_read_log_event", unsigned char type = buffer[EVENT_TYPE_OFFSET];
       if (type != mysql::binlog::event::FORMAT_DESCRIPTION_EVENT &&
           type != mysql::binlog::event::PREVIOUS_GTIDS_LOG_EVENT &&
           type != mysql::binlog::event::GTID_LOG_EVENT &&
-          type != mysql::binlog::event::ANONYMOUS_GTID_LOG_EVENT) {
+          type != mysql::binlog::event::ANONYMOUS_GTID_LOG_EVENT &&
+          type != mysql::binlog::event::GTID_TAGGED_LOG_EVENT) {
         int cor_pos = rand() % (event_len - BINLOG_CHECKSUM_LEN -
                                 LOG_EVENT_MINIMAL_HEADER_LEN) +
                       LOG_EVENT_MINIMAL_HEADER_LEN;
@@ -247,18 +250,6 @@ Binlog_read_error::Error_type binlog_event_deserialize(
     case mysql::binlog::event::FORMAT_DESCRIPTION_EVENT:
       ev = new Format_description_log_event(buf, fde);
       break;
-    case mysql::binlog::event::WRITE_ROWS_EVENT_V1:
-      if (!(fde->post_header_len.empty()))
-        ev = new Write_rows_log_event(buf, fde);
-      break;
-    case mysql::binlog::event::UPDATE_ROWS_EVENT_V1:
-      if (!(fde->post_header_len.empty()))
-        ev = new Update_rows_log_event(buf, fde);
-      break;
-    case mysql::binlog::event::DELETE_ROWS_EVENT_V1:
-      if (!(fde->post_header_len.empty()))
-        ev = new Delete_rows_log_event(buf, fde);
-      break;
     case mysql::binlog::event::TABLE_MAP_EVENT:
       if (!(fde->post_header_len.empty()))
         ev = new Table_map_log_event(buf, fde);
@@ -278,6 +269,15 @@ Binlog_read_error::Error_type binlog_event_deserialize(
     case mysql::binlog::event::GTID_LOG_EVENT:
     case mysql::binlog::event::ANONYMOUS_GTID_LOG_EVENT:
       ev = new Gtid_log_event(buf, fde);
+      break;
+    case mysql::binlog::event::GTID_TAGGED_LOG_EVENT:
+      ev = new Gtid_log_event(buf, fde);
+      DBUG_EXECUTE_IF(
+          "simulate_gtid_tagged_log_event_with_unknown_non_ignorable_fields", {
+            ev->common_header->set_decoding_error(
+                Event_decoding_error::unknown_non_ignorable_fields);
+            ev->common_header->set_is_valid(false);
+          });
       break;
     case mysql::binlog::event::PREVIOUS_GTIDS_LOG_EVENT:
       ev = new Previous_gtids_log_event(buf, fde);
@@ -332,7 +332,14 @@ Binlog_read_error::Error_type binlog_event_deserialize(
     Same for Format_description_log_event, member 'post_header_len'.
   */
   if (!ev || !ev->is_valid()) {
+    auto decoding_error = Event_decoding_error::ok;
+    if (ev && ev->common_header) {
+      decoding_error = ev->common_header->get_decoding_error();
+    }
     delete ev;
+    if (decoding_error == Event_decoding_error::unknown_non_ignorable_fields) {
+      return Binlog_read_error::EVENT_UNSUPPORTED_NEW_VERSION;
+    }
     return Binlog_read_error::INVALID_EVENT;
   }
 

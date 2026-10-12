@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -56,7 +57,7 @@ Log log_error(std::cerr, "ERROR");
 
 class Migration_setup {
  public:
-  explicit Migration_setup(char *progname) {
+  explicit Migration_setup(const char *progname) {
     MY_INIT(progname);
     init_components_subsystem();
     init_connection_basic();
@@ -75,23 +76,23 @@ int main(int argc, char **argv) {
   const Migration_setup migration_setup(argv[0]);
   DBUG_TRACE;
   DBUG_PROCESS(argv[0]);
-  const int exit_status = EXIT_FAILURE;
 
   int exit_code;
-  if (process_options(&argc, &argv, exit_code) == false) {
+  if (!process_options(&argc, &argv, exit_code)) {
     return exit_code;
   }
 
   {
-    Keyring_component_load source_component_load(Options::s_source_keyring,
-                                                 "source");
+    constexpr int exit_status = EXIT_FAILURE;
+    const Keyring_component_load source_component_load(
+        Options::s_source_keyring, "source");
 
     if (!source_component_load.ok()) {
       log_error << "Error loading source keyring component. Exiting."
                 << std::endl;
       return exit_status;
     }
-    Keyring_component_load destination_component_load(
+    const Keyring_component_load destination_component_load(
         Options::s_destination_keyring, "destination");
 
     if (!destination_component_load.ok()) {

@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1994, 2023, Oracle and/or its affiliates.
+Copyright (c) 1994, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -192,7 +193,8 @@ enum page_cur_mode_t {
   PAGE_CUR_MBR_EQUAL = 11,
   PAGE_CUR_RTREE_INSERT = 12,
   PAGE_CUR_RTREE_LOCATE = 13,
-  PAGE_CUR_RTREE_GET_FATHER = 14
+  PAGE_CUR_RTREE_GET_FATHER = 14,
+  PAGE_CUR_NN = 15
 };
 
 /** Compressed page descriptor */
@@ -234,6 +236,14 @@ struct page_zip_stat_t {
   std::chrono::microseconds compress_time;
   /** Duration of page decompressions */
   std::chrono::microseconds decompress_time;
+  /** The pages can linger in BP for a while after the index was already
+  dropped. Compression and decompression are done at very low level. We have no
+  access to a dict_index_t object there. Such objects might be evicted by
+  LRU anyway. We use this flag here to indicate that the stats for this index
+  are no longer of interest. This way this information is easily accessible to
+  the low-level logic, and can outlive eviction or drop of dict_index_t. */
+  bool dropped{false};
+
   page_zip_stat_t()
       : /* Initialize members to 0 so that when we do
         stlmap[key].compressed++ and element with "key" does not

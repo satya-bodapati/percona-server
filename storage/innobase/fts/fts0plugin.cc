@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -40,16 +41,18 @@ struct CHARSET_INFO;
 
 /** FTS default parser init
  @return 0 */
-static int fts_default_parser_init(MYSQL_FTPARSER_PARAM *param [
-    [maybe_unused]]) /*!< in: plugin parser param */
+static int fts_default_parser_init(
+    MYSQL_FTPARSER_PARAM *param
+    [[maybe_unused]]) /*!< in: plugin parser param */
 {
   return (0);
 }
 
 /** FTS default parser deinit
  @return 0 */
-static int fts_default_parser_deinit(MYSQL_FTPARSER_PARAM *param [
-    [maybe_unused]]) /*!< in: plugin parser param */
+static int fts_default_parser_deinit(
+    MYSQL_FTPARSER_PARAM *param
+    [[maybe_unused]]) /*!< in: plugin parser param */
 {
   return (0);
 }
@@ -102,7 +105,7 @@ static int fts_query_add_word_for_parser(
     int word_len,                      /*!< in: token length */
     MYSQL_FTPARSER_BOOLEAN_INFO *info) /*!< in: token info */
 {
-  fts_ast_state_t *state = static_cast<fts_ast_state_t *>(param->mysql_ftparam);
+  auto *state = static_cast<fts_ast_state_t *>(param->mysql_ftparam);
   fts_ast_node_t *cur_node = state->cur_node;
   fts_ast_node_t *oper_node = nullptr;
   fts_ast_node_t *term_node = nullptr;
@@ -216,8 +219,8 @@ static int fts_parse_query_internal(
 {
   MYSQL_FTPARSER_BOOLEAN_INFO info;
   const CHARSET_INFO *cs = param->cs;
-  uchar **start = reinterpret_cast<uchar **>(&query);
-  uchar *end = reinterpret_cast<uchar *>(query + len);
+  auto **start = reinterpret_cast<uchar **>(&query);
+  auto *end = reinterpret_cast<uchar *>(query + len);
   FT_WORD w = {nullptr, 0, 0};
   const bool extra_word_chars = thd_get_ft_query_extra_word_chars();
 

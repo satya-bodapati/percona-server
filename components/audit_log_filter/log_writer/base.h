@@ -62,7 +62,7 @@ class LogWriterBase {
   explicit LogWriterBase(
       std::unique_ptr<log_record_formatter::LogRecordFormatterBase> formatter);
 
-  virtual ~LogWriterBase() = default;
+  virtual ~LogWriterBase();
 
   /**
    * @brief Init log writer.
@@ -106,7 +106,7 @@ class LogWriterBase {
   /**
    * @brief Rotate log file.
    *
-   * @param record File rotation result
+   * @param result File rotation result
    */
   virtual void rotate(FileRotationResult *result [[maybe_unused]]) noexcept {}
 
@@ -138,9 +138,13 @@ class LogWriterBase {
    */
   void init_formatter() noexcept;
 
+  /**
+   * @brief Mutex serializing record formatting with writer state changes.
+   */
+  mutable std::mutex m_write_mutex;
+
  private:
   std::unique_ptr<log_record_formatter::LogRecordFormatterBase> m_formatter;
-  std::mutex m_write_mutex;
 };
 
 template <AuditLogHandlerType HandlerType>

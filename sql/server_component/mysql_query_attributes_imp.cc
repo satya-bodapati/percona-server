@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -350,7 +351,8 @@ static String *query_parameter_val_str(const PS_PARAM *param,
     case MYSQL_TYPE_TINY_BLOB:
     case MYSQL_TYPE_MEDIUM_BLOB:
     case MYSQL_TYPE_LONG_BLOB:
-    case MYSQL_TYPE_BLOB: {
+    case MYSQL_TYPE_BLOB:
+    case MYSQL_TYPE_VECTOR: {
       str = new String[1];
       uint dummy_errors;
       if (str->copy(reinterpret_cast<const char *>(param->value), param->length,
@@ -406,4 +408,20 @@ DEFINE_BOOL_METHOD(mysql_query_attributes_imp::string_get,
   String *str = query_parameter_val_str(param, iter_ptr->get_thd()->charset());
   *out_string_value = reinterpret_cast<my_h_string>(str);
   return false;
+}
+
+DEFINE_BOOL_METHOD(mysql_query_attributes_imp::get_first_name_data,
+                   (const char **name_buffer, size_t *name_length)) {
+  if (current_thd == nullptr || current_thd->bind_parameter_values_count == 0) {
+    return 1;
+  }
+  auto *bind_parameter_values = current_thd->bind_parameter_values;
+  if (bind_parameter_values == nullptr ||
+      bind_parameter_values->name == nullptr ||
+      bind_parameter_values->name_length == 0) {
+    return 1;
+  }
+  *name_buffer = reinterpret_cast<const char *>(bind_parameter_values->name);
+  *name_length = bind_parameter_values->name_length;
+  return 0;
 }

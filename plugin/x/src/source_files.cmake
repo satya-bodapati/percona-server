@@ -1,15 +1,16 @@
-# Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,6 +28,7 @@ SET(XPL_SRC
   admin_cmd_handler.cc
   admin_cmd_index.cc
   auth_plain.cc
+  auth_legacy.cc
   buffering_command_delegate.cc
   cache_based_verification.cc
   callback_command_delegate.cc
@@ -72,7 +74,6 @@ SET(XPL_SRC
   mysql_show_variable_wrapper.cc
   mysql_variables.cc
   native_plain_verification.cc
-  native_verification.cc
   ngs/client_list.cc
   ngs/document_id_generator.cc
   ngs/message_cache.cc

@@ -304,7 +304,7 @@ WHERE table_name = 't1_my_tablex';
 # Check indirect modification of TABLE_COLLATION
 SELECT table_name, table_collation FROM information_schema.tables
 WHERE table_name = 't1_my_tablex';
-ALTER TABLE db_datadict.t1_my_tablex DEFAULT CHARACTER SET utf8;
+ALTER TABLE db_datadict.t1_my_tablex DEFAULT CHARACTER SET utf8mb3;
 SELECT table_name, table_collation FROM information_schema.tables
 WHERE table_name = 't1_my_tablex';
 # Check direct modification of TABLE_COLLATION
@@ -350,7 +350,10 @@ SELECT UPDATE_TIME, checksum INTO @UPDATE_TIME, @checksum
 FROM information_schema.tables
 WHERE table_name = 't1_my_tablex';
 #   Enforce a time difference bigger than the smallest unit (1 second).
---sleep 1.1
+#   Also take into account that we might be running on 'vfat' FS (to get
+#   case-insensitive file names). This FS only stores file modification
+#   times with 2 second precision.
+--sleep 2.1
 INSERT INTO db_datadict.t1_my_tablex SET f1 = 3;
 FLUSH TABLES;
 ANALYZE TABLE db_datadict.t1_my_tablex;

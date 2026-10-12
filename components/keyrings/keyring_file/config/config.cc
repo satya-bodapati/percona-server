@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -21,8 +22,6 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include <memory>
-
-#define RAPIDJSON_HAS_STDSTRING 1
 
 #include "my_rapidjson_size_t.h"
 
@@ -44,9 +43,7 @@ using keyring_file::g_config_pod;
 */
 DLL_EXPORT int keyring_file_component_exported_symbol() { return 0; }
 
-namespace keyring_file {
-
-namespace config {
+namespace keyring_file::config {
 
 char *g_component_path = nullptr;
 char *g_instance_path = nullptr;
@@ -65,9 +62,21 @@ const std::string config_file_name = "component_keyring_file.cnf";
 /* Config names */
 const std::string config_options[] = {"read_local_config", "path", "read_only"};
 
-bool find_and_read_config_file(std::unique_ptr<Config_pod> &config_pod) {
+template <typename T>
+bool get_mandatory_element(const std::unique_ptr<Config_reader> &config_reader,
+                           const std::string &element_name, T &element_value,
+                           std::string &err) {
+  if (config_reader->get_element(element_name, element_value)) {
+    err = "Could not find '" + element_name + "' value in configuration file";
+    return true;
+  }
+  return false;
+}
+
+bool find_and_read_config_file(std::unique_ptr<Config_pod> &config_pod,
+                               std::string &err) {
   config_pod = std::make_unique<Config_pod>();
-  if (!config_pod) return true;
+
   /* Get shared library location */
   std::string path(g_component_path);
 
@@ -81,17 +90,19 @@ bool find_and_read_config_file(std::unique_ptr<Config_pod> &config_pod) {
     full_path.append(config_file_name);
     return false;
   };
-  if (set_config_path(path) == true) return true;
-
+  if (set_config_path(path)) {
+    err = "Failed to set path to configuration file";
+    return true;
+  }
   /* Read config file that's located at shared library location */
   std::unique_ptr<Config_reader> config_reader(new (std::nothrow)
                                                    Config_reader(path));
-
+  if (!config_reader->is_valid(err)) goto error;
   {
     bool read_local_config = false;
-    if (config_reader->get_element<bool>(config_options[0],
-                                         read_local_config) == false) {
-      if (read_local_config == true) {
+    if (!config_reader->get_element<bool>(config_options[0],
+                                          read_local_config)) {
+      if (read_local_config) {
         config_reader.reset();
         /*
           Read config file from current working directory
@@ -99,21 +110,22 @@ bool find_and_read_config_file(std::unique_ptr<Config_pod> &config_pod) {
           current working directory appropriately.
         */
         std::string instance_path(g_instance_path);
-        if (set_config_path(instance_path) == true)
-          instance_path = config_file_name;
+        if (set_config_path(instance_path)) instance_path = config_file_name;
         config_reader = std::make_unique<Config_reader>(instance_path);
+        if (!config_reader->is_valid(err)) goto error;
       }
     }
   }
-
-  if (config_reader->get_element<std::string>(
-          config_options[1], config_pod.get()->config_file_path_) ||
-      config_reader->get_element<bool>(config_options[2],
-                                       config_pod.get()->read_only_)) {
-    config_pod.reset();
-    return true;
-  }
+  if (get_mandatory_element(config_reader, config_options[1],
+                            config_pod->config_file_path_, err))
+    goto error;
+  if (get_mandatory_element(config_reader, config_options[2],
+                            config_pod->read_only_, err))
+    goto error;
   return false;
+error:
+  config_pod.reset();
+  return true;
 }
 
 bool create_config(
@@ -121,7 +133,7 @@ bool create_config(
         &metadata) {
   metadata =
       std::make_unique<std::vector<std::pair<std::string, std::string>>>();
-  if (metadata.get() == nullptr) return true;
+  if (metadata == nullptr) return true;
   keyring_file::config::Config_pod config_pod;
   bool global_config_available = false;
   if (g_config_pod != nullptr) {
@@ -129,32 +141,31 @@ bool create_config(
     global_config_available = true;
   }
 
-  for (auto entry : keyring_file::config::s_component_metadata) {
-    metadata.get()->push_back(std::make_pair(entry[0], entry[1]));
+  for (const auto *entry : keyring_file::config::s_component_metadata) {
+    metadata->push_back(std::make_pair(entry[0], entry[1]));
   }
 
   /* Status */
-  metadata.get()->push_back(std::make_pair(
+  metadata->push_back(std::make_pair(
       "Component_status",
       keyring_file::g_component_callbacks->keyring_initialized() ? "Active"
                                                                  : "Disabled"));
 
   /* Backend file */
-  metadata.get()->push_back(std::make_pair(
-      "Data_file", ((global_config_available == true)
-                        ? ((config_pod.config_file_path_.length() == 0)
-                               ? "<NONE>"
-                               : config_pod.config_file_path_)
-                        : "<NOT APPLICABLE>")));
+  metadata->push_back(std::make_pair(
+      "Data_file",
+      (global_config_available ? ((config_pod.config_file_path_.length() == 0)
+                                      ? "<NONE>"
+                                      : config_pod.config_file_path_)
+                               : "<NOT APPLICABLE>")));
 
   /* Read only flag */
-  metadata.get()->push_back(std::make_pair(
-      "Read_only", ((global_config_available == true)
-                        ? ((config_pod.read_only_ == true) ? "Yes" : "No")
-                        : "<NOT APPLICABLE>")));
+  metadata->push_back(std::make_pair(
+      "Read_only",
+      (global_config_available ? (config_pod.read_only_ ? "Yes" : "No")
+                               : "<NOT APPLICABLE>")));
 
   return false;
 }
 
-}  // namespace config
-}  // namespace keyring_file
+}  // namespace keyring_file::config

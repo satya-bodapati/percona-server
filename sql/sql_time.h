@@ -1,15 +1,16 @@
-/* Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -44,6 +45,7 @@
 #include "lex_string.h"
 #include "my_dbug.h"
 #include "my_inttypes.h"
+#include "my_temporal.h"
 #include "my_time.h"
 #include "mysql/strings/m_ctype.h"
 #include "mysql_time.h"    /* enum_mysql_timestamp_type */
@@ -79,27 +81,33 @@ bool datetime_with_no_zero_in_date_to_timeval(const MYSQL_TIME *t,
                                               my_timeval *tm, int *warnings);
 bool datetime_to_timeval(const MYSQL_TIME *t, const Time_zone &tz,
                          my_timeval *tm, int *warnings);
-bool str_to_datetime_with_warn(String *str, MYSQL_TIME *l_time,
+bool str_to_datetime_with_warn(String *str, Datetime_val *dt,
                                my_time_flags_t flags);
-bool decimal_to_datetime(const my_decimal *decimal, MYSQL_TIME *ltime,
+bool decimal_to_time(const my_decimal *decimal, Time_val *time);
+bool decimal_to_date(const my_decimal *decimal, Date_val *date,
+                     my_time_flags_t flags, int *warnings);
+bool decimal_to_datetime(const my_decimal *decimal, Datetime_val *dt,
                          my_time_flags_t flags);
-bool decimal_to_time(const my_decimal *decimal, MYSQL_TIME *ltime);
-bool double_to_datetime(double nr, MYSQL_TIME *ltime, my_time_flags_t flags);
-bool double_to_time(double nr, MYSQL_TIME *ltime);
-
-bool my_decimal_to_datetime_with_warn(const my_decimal *decimal,
-                                      MYSQL_TIME *ltime, my_time_flags_t flags);
-bool my_double_to_datetime_with_warn(double nr, MYSQL_TIME *ltime,
-                                     my_time_flags_t flags);
-bool my_longlong_to_datetime_with_warn(longlong nr, MYSQL_TIME *ltime,
-                                       my_time_flags_t flags);
-bool my_decimal_to_time_with_warn(const my_decimal *decimal, MYSQL_TIME *ltime);
-bool my_double_to_time_with_warn(double nr, MYSQL_TIME *ltime);
-bool my_longlong_to_time_with_warn(longlong nr, MYSQL_TIME *ltime);
-bool str_to_time_with_warn(String *str, MYSQL_TIME *l_time);
-void time_to_datetime(THD *thd, const MYSQL_TIME *tm, const Time_zone &tz,
-                      MYSQL_TIME *dt);
-void time_to_datetime(THD *thd, const MYSQL_TIME *in, MYSQL_TIME *out);
+bool double_to_datetime(double nr, Datetime_val *dt, my_time_flags_t flags);
+bool double_to_date(double nr, Date_val *date, my_time_flags_t flags);
+bool double_to_time(double nr, Time_val *time);
+bool decimal_to_date_with_warn(const my_decimal *decimal, Date_val *date,
+                               my_time_flags_t flags);
+bool decimal_to_datetime_with_warn(const my_decimal *decimal, Datetime_val *dt,
+                                   my_time_flags_t flags);
+bool double_to_datetime_with_warn(double nr, Datetime_val *dt,
+                                  my_time_flags_t flags);
+bool int_to_datetime_with_warn(longlong val, Datetime_val *dt,
+                               my_time_flags_t flags);
+bool int_to_date_with_warn(longlong val, Date_val *date, my_time_flags_t flags);
+bool decimal_to_time_with_warn(const my_decimal *decimal, Time_val *time);
+bool double_to_time_with_warn(double nr, Time_val *time);
+bool double_to_date_with_warn(double nr, Date_val *date, my_time_flags_t flags);
+bool int_to_time_with_warn(longlong nr, Time_val *time);
+bool str_to_time_with_warn(String *str, Time_val *time);
+bool str_to_date_with_warn(String *str, Date_val *date, my_time_flags_t flags);
+void time_to_date(THD *thd, const Time_val *in, Date_val *out);
+void time_to_datetime(THD *thd, const Time_val *in, Datetime_val *out);
 
 bool make_truncated_value_warning(THD *thd,
                                   Sql_condition::enum_severity_level level,
@@ -116,6 +124,8 @@ void make_time(const Date_time_format *format, const MYSQL_TIME *l_time,
 void make_datetime(const Date_time_format *format, const MYSQL_TIME *l_time,
                    String *str, uint dec);
 bool my_TIME_to_str(const MYSQL_TIME *ltime, String *str, uint dec);
+
+my_time_flags_t DatetimeConversionFlags(const THD *thd);
 
 void propagate_datetime_overflow_helper(THD *thd, int *warnings);
 

@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1997, 2023, Oracle and/or its affiliates.
+Copyright (c) 1997, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -66,12 +67,22 @@ class MVCC {
   @param own_mutex      true if caller owns trx_sys_t::mutex */
   void view_close(ReadView *&view, bool own_mutex);
 
-  /** Clones the oldest view and stores it in view. No need to
-  call view_close(). The caller owns the view that is passed in.
-  It will also move the closed views from the m_views list to the
-  m_free list. This function is called by Purge to determine whether it should
-  purge the delete marked record or not.
-  @param view           Preallocated view, owned by the caller */
+  /** Clones the oldest view into the provided view, unless the function
+  determines that the provided view is already a good enough lower bound.
+  The caller owns the view that is passed in, which is interpreted to be a
+  previous lower bound known to the caller.
+  No need to call view_close(view,..).
+
+  Note: This function is called by Purge to determine the purge_sys->view used
+  to distinguish which transactions are considered committed by everybody, and
+  thus their undo logs can be purged.
+  Purge mainly uses purge_sys->view->low_limit_no(), which is a safe
+  lower-bound on what can be purged based on NO, and further limits it to the
+  lowest needed NO reported by GTID Persistor. But other places like ROLLBACK
+  use purge_sys->view->changes_visible(ID,..).
+  @param[in,out] view   Preallocated view, owned by the caller. Can be either
+                        default constructed (m_low_limit_no is 0) or a fully
+                        initialized ReadView object. */
   void clone_oldest_view(ReadView *view);
 
   /**
@@ -113,10 +124,14 @@ class MVCC {
 
  public:
   /**
-  Get the oldest view in the system. It will also move the delete
-  marked read views from the views list to the freed list.
+  Get the oldest view in the system for statistical purposes.
+
+  @note This method should be used for statistical purposes only, purge needs
+  to use more strict condition (see clone_oldest_view()) when selecting the
+  oldest view.
+
   @return oldest view if found or NULL */
-  ReadView *get_oldest_view() const;
+  const ReadView *get_oldest_view_stats() const;
 
  private:
   // Prevent copying

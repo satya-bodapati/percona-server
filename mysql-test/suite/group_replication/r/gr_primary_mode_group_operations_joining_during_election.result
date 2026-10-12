@@ -20,6 +20,8 @@ SET sql_log_bin=0;
 CREATE USER 'recovery_user'@'%' IDENTIFIED BY 'rpl';
 GRANT GROUP_REPLICATION_STREAM ON *.* TO 'recovery_user'@'%';
 FLUSH PRIVILEGES;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 SET sql_log_bin=1;
 include/start_and_bootstrap_group_replication.inc
 [connection server2]
@@ -28,6 +30,8 @@ SET sql_log_bin=0;
 CREATE USER 'recovery_user'@'%' IDENTIFIED BY 'rpl';
 GRANT GROUP_REPLICATION_STREAM ON *.* TO 'recovery_user'@'%';
 FLUSH PRIVILEGES;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 SET sql_log_bin=1;
 include/start_group_replication.inc
 [connection server3]
@@ -36,6 +40,8 @@ CREATE USER 'recovery_user'@'%' IDENTIFIED BY 'rpl';
 GRANT REPLICATION SLAVE ON *.* TO 'recovery_user'@'%';
 GRANT GROUP_REPLICATION_STREAM ON *.* TO 'recovery_user'@'%';
 FLUSH PRIVILEGES;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 SET sql_log_bin=1;
 include/start_group_replication.inc
 
@@ -67,7 +73,10 @@ ERROR HY000: The function 'group_replication_switch_to_multi_primary_mode' faile
 
 # 8. Unlock the table to unblock the election
 [connection server2]
+SET @group_replication_consistency_save= @@SESSION.group_replication_consistency;
+SET @@SESSION.group_replication_consistency= 'EVENTUAL';
 UNLOCK TABLES;
+SET @@SESSION.group_replication_consistency= @group_replication_consistency_save;
 
 # 9. Check the election results are the expected
 include/gr_assert_primary_member.inc

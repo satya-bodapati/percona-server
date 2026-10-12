@@ -1,15 +1,16 @@
-/* Copyright (c) 2008, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -129,8 +130,6 @@ int table_setup_objects::write_row(PFS_engine_table *, TABLE *table,
   String *object_name = &object_name_data;
   enum_yes_no enabled_value = ENUM_YES;
   enum_yes_no timed_value = ENUM_YES;
-  bool enabled = true;
-  bool timed = true;
 
   for (; (f = *fields); fields++) {
     if (bitmap_is_set(table->write_set, f->field_index())) {
@@ -172,8 +171,8 @@ int table_setup_objects::write_row(PFS_engine_table *, TABLE *table,
     return HA_ERR_NO_REFERENCED_ROW;
   }
 
-  enabled = (enabled_value == ENUM_YES);
-  timed = (timed_value == ENUM_YES);
+  const bool enabled = (enabled_value == ENUM_YES);
+  const bool timed = (timed_value == ENUM_YES);
 
   PFS_schema_name schema_value;
   PFS_object_name object_value;
@@ -210,7 +209,10 @@ ha_rows table_setup_objects::get_row_count() {
 }
 
 table_setup_objects::table_setup_objects()
-    : PFS_engine_table(&m_share, &m_pos), m_pos(0), m_next_pos(0) {}
+    : PFS_engine_table(&m_share, &m_pos),
+      m_pos(0),
+      m_next_pos(0),
+      m_opened_index(nullptr) {}
 
 void table_setup_objects::reset_position() {
   m_pos.m_index = 0;
@@ -246,9 +248,8 @@ int table_setup_objects::rnd_pos(const void *pos) {
 }
 
 int table_setup_objects::index_init(uint idx [[maybe_unused]], bool) {
-  PFS_index_setup_objects *result = nullptr;
   assert(idx == 0);
-  result = PFS_NEW(PFS_index_setup_objects);
+  auto *result = PFS_NEW(PFS_index_setup_objects);
   m_opened_index = result;
   m_index = result;
   return 0;

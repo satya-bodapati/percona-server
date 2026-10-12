@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -81,7 +82,7 @@ bool Autorejoin_thread::abort_rejoin() {
   m_being_terminated = true;
 
   /*
-    Unblock the call to mysql_cond_wait() on the auto-rejoin loop,
+    Unblock the call to mysql_cond_timedwait() on the auto-rejoin loop,
     effectively ending the auto-rejoin loop.
   */
   while (m_autorejoin_thd_state.is_thread_alive()) {
@@ -142,7 +143,9 @@ int Autorejoin_thread::start_autorejoin(uint attempts, ulonglong timeout) {
   */
   while (m_autorejoin_thd_state.is_alive_not_running()) {
     DBUG_PRINT("sleep", ("Waiting for the auto-rejoin thread to start"));
-    mysql_cond_wait(&m_run_cond, &m_run_lock);
+    struct timespec abstime;
+    set_timespec(&abstime, 1);
+    mysql_cond_timedwait(&m_run_cond, &m_run_lock, &abstime);
   }
 
 end:
@@ -219,7 +222,7 @@ void Autorejoin_thread::execute_rejoin_process() {
     LogPluginErr(SYSTEM_LEVEL, ER_GRP_RPL_FINISHED_AUTO_REJOIN,
                  num_attempts - 1UL, m_attempts, " not");
 
-    enable_server_read_mode();
+    enable_server_read_mode("(GR) autorejoin failed");
     /*
       Only abort() if the auto-rejoin thread wasn't explicitly stopped, i.e.
       if someone called Autorejoin_thread::abort(), because that implies an
@@ -236,7 +239,7 @@ void Autorejoin_thread::execute_rejoin_process() {
           break;
         }
         case EXIT_STATE_ACTION_OFFLINE_MODE:
-          enable_server_offline_mode();
+          enable_server_offline_mode("(GR) autorejoin failed");
           break;
       }
     }

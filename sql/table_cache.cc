@@ -1,15 +1,16 @@
-/* Copyright (c) 2012, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -347,10 +348,10 @@ void Table_cache_manager::free_table(THD *thd [[maybe_unused]],
   for (uint i = 0; i < table_cache_instances; i++) {
     if (cache_el[i]) {
       /*
-        Since freeing last TABLE object for the share will destroy all
+        Since freeing the last TABLE object for the share will destroy all
         related Table_cache_element objects and hence their list members,
-        we need to remember the fact whether unused TABLE objects lists
-        are empty (and avoid iterating through them) before proceeding to
+        we need to remember whether the unused TABLE objects lists are
+        empty (and avoid iterating through them) before proceeding to
         freeing TABLE objects.
       */
       bool has_free_tables_slim = !cache_el[i]->free_tables_slim.is_empty();
@@ -369,7 +370,8 @@ void Table_cache_manager::free_table(THD *thd [[maybe_unused]],
         }
       }
 #endif
-      if (remove_type == TDC_RT_MARK_FOR_REOPEN) {
+      if (remove_type == TDC_RT_MARK_FOR_REOPEN ||
+          remove_type == TDC_RT_MARK_FOR_REOPEN_AND_INVALIDATE_SHARE) {
         Table_cache_element::TABLE_list::Iterator it2(cache_el[i]->used_tables);
         TABLE *table;
         while ((table = it2++)) {

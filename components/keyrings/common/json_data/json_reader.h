@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,8 +28,6 @@
 #include <string>
 #include <vector>
 
-#define RAPIDJSON_HAS_STDSTRING 1
-
 #include "my_rapidjson_size_t.h"
 
 #include <rapidjson/document.h>
@@ -39,8 +38,7 @@
 
 #include "json_ds.h"
 
-namespace keyring_common {
-namespace json_data {
+namespace keyring_common::json_data {
 
 using output_vector =
     std::vector<std::pair<std::pair<meta::Metadata, data::Data>,
@@ -69,18 +67,23 @@ using output_vector =
 
 class Json_reader {
  public:
-  Json_reader(const std::string schema, const std::string data,
-              const std::string version_key = "version",
-              const std::string array_key = "elements");
+  Json_reader(const std::string &schema, const std::string &data,
+              std::string version_key = "version",
+              std::string array_key = "elements");
 
-  Json_reader(const std::string data);
+  Json_reader(const std::string &data);
 
   Json_reader();
 
   /** Destructor */
   virtual ~Json_reader() = default;
 
-  std::string version() const;
+  /**
+    Get version info
+
+    @returns version string in case same is present, empty string otherwise.
+  */
+  std::string version() const { return property(version_key_); }
 
   /**
     Get number of elements in the document
@@ -118,6 +121,14 @@ class Json_reader {
 
   bool valid() const { return valid_; }
 
+  /**
+    Get property from the main JSON object. It is intended to be used for some
+    specific, data file-wide properties.
+
+    @returns value of the property
+  */
+  std::string property(const std::string &property_key) const;
+
  private:
   /** Data in JSON DOM format */
   rapidjson::Document document_;
@@ -129,8 +140,6 @@ class Json_reader {
   bool valid_;
 };
 
-}  // namespace json_data
-
-}  // namespace keyring_common
+}  // namespace keyring_common::json_data
 
 #endif  // !JSON_READER_INCLUDED

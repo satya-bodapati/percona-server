@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -214,6 +215,8 @@ enum latch_level_t {
 
   SYNC_ANY_LATCH,
 
+  SYNC_ALTER_STAGE,
+
   SYNC_FIL_SHARD,
 
   SYNC_PAGE_ARCH_OPER,
@@ -273,6 +276,8 @@ enum latch_level_t {
 
   SYNC_INDEX_ONLINE_LOG,
 
+  SYNC_PAGE_ZIP_STAT,
+
   SYNC_IBUF_BITMAP,
   SYNC_IBUF_BITMAP_MUTEX,
   SYNC_IBUF_TREE_NODE,
@@ -291,13 +296,13 @@ enum latch_level_t {
   SYNC_RSEG_HEADER_NEW,
   SYNC_TEMP_SPACE_RSEG,
   SYNC_UNDO_SPACE_RSEG,
-  SYNC_TRX_SYS_RSEG,
   SYNC_TRX_UNDO,
   SYNC_PURGE_LATCH,
   SYNC_TREE_NODE,
   SYNC_TREE_NODE_FROM_HASH,
   SYNC_TREE_NODE_NEW,
   SYNC_INDEX_TREE,
+  SYNC_TABLE_STATS_COMPUTE,
   SYNC_RSEGS,
   SYNC_UNDO_SPACES,
 
@@ -323,6 +328,8 @@ enum latch_level_t {
 
   SYNC_TRX_I_S_RWLOCK,
 
+  SYNC_RECV_WRITER,
+
   /** Level is varying. Only used with buffer pool page locks, which
   do not have a fixed level, but instead have their level set after
   the page is locked; see e.g.  ibuf_bitmap_get_map_page(). */
@@ -342,6 +349,7 @@ alphabetical ordering seems useful */
 enum latch_id_t {
   LATCH_ID_NONE = 0,
   LATCH_ID_AHI_ENABLED,
+  LATCH_ID_ALTER_STAGE,
   LATCH_ID_AUTOINC,
   LATCH_ID_BUF_BLOCK_MUTEX,
   LATCH_ID_BUF_POOL_CHUNKS,
@@ -402,7 +410,6 @@ enum latch_id_t {
   LATCH_ID_RECV_WRITER,
   LATCH_ID_TEMP_SPACE_RSEG,
   LATCH_ID_UNDO_SPACE_RSEG,
-  LATCH_ID_TRX_SYS_RSEG,
   LATCH_ID_RW_LOCK_DEBUG,
   LATCH_ID_RTR_SSN_MUTEX,
   LATCH_ID_RTR_ACTIVE_MUTEX,
@@ -451,6 +458,7 @@ enum latch_id_t {
   LATCH_ID_IBUF_INDEX_TREE,
   LATCH_ID_INDEX_TREE,
   LATCH_ID_DICT_TABLE_STATS,
+  LATCH_ID_DICT_TABLE_STATS_COMPUTE,
   LATCH_ID_HASH_TABLE_RW_LOCK,
   LATCH_ID_BUF_CHUNK_MAP_LATCH,
   LATCH_ID_SYNC_DEBUG_MUTEX,
@@ -1128,7 +1136,8 @@ struct dict_sync_check : public sync_check_functor_t {
     if (!m_dict_mutex_allowed ||
         (level != SYNC_DICT && level != SYNC_UNDO_SPACES &&
          level != SYNC_FTS_CACHE && level != SYNC_DICT_OPERATION &&
-         level != SYNC_NO_ORDER_CHECK)) {
+         /* This only happens in recv_apply_hashed_log_recs. */
+         level != SYNC_RECV_WRITER && level != SYNC_NO_ORDER_CHECK)) {
       m_result = true;
 #ifdef UNIV_NO_ERR_MSGS
       ib::error()

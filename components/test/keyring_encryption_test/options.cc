@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -32,7 +33,6 @@
 #include <my_inttypes.h>              /* typedefs */
 #include <my_macros.h>                /* STRINGIFY_ARG */
 #include <mysql.h>                    /* MYSQL */
-#include <mysql/service_mysql_alloc.h>/* my_strdup */
 #include <mysql_com.h>                /* get_tty_password */
 #include <print_version.h>            /* print_version */
 #include <typelib.h>                  /* find_type_or_exit */
@@ -100,11 +100,8 @@ bool get_one_option(int optid, const struct my_option *, char *) {
 }
 
 static bool check_options_for_sanity() {
-  if (Options::s_component_dir == nullptr || !*Options::s_component_dir ||
-      Options::s_keyring == nullptr || !*Options::s_keyring) {
-    return false;
-  }
-  return true;
+  return !(Options::s_component_dir == nullptr || !*Options::s_component_dir ||
+           Options::s_keyring == nullptr || !*Options::s_keyring);
 }
 
 static bool get_options(int argc, char **argv, int &exit_code) {
@@ -113,7 +110,7 @@ static bool get_options(int argc, char **argv, int &exit_code) {
     return false;
   }
 
-  if (check_options_for_sanity() == false) return false;
+  if (!check_options_for_sanity()) return false;
 
   return true;
 }
@@ -131,9 +128,9 @@ bool process_options(int *argc, char ***argv, int &exit_code) {
   }
   my_getopt_use_args_separator = false;
 
-  bool save_skip_unknown = my_getopt_skip_unknown;
+  const bool save_skip_unknown = my_getopt_skip_unknown;
   my_getopt_skip_unknown = true;
-  bool ret = get_options(*argc, *argv, exit_code);
+  const bool ret = get_options(*argc, *argv, exit_code);
   my_getopt_skip_unknown = save_skip_unknown;
   return ret;
 }

@@ -108,6 +108,7 @@ EXPLAIN FORMAT = tree
 --echo #
 --echo # Bug#33905918 Server crashes after using explain of a query with except/intersect.
 --echo #
+SET explain_json_format_version = 1;
 EXPLAIN SELECT * FROM r UNION ALL SELECT * FROM s;
 EXPLAIN SELECT * FROM r EXCEPT ALL SELECT * FROM s;
 EXPLAIN SELECT * FROM r INTERSECT ALL SELECT * FROM s;
@@ -157,6 +158,7 @@ EXPLAIN FORMAT = json
    (SELECT * FROM r EXCEPT DISTINCT SELECT * FROM s) UNION DISTINCT
    (SELECT * FROM t INTERSECT DISTINCT SELECT * FROM t);
 
+SET explain_json_format_version = DEFAULT;
 DROP TABLE r, s, t;
 
 --echo #
@@ -265,12 +267,15 @@ SELECT * FROM t1 INTERSECT ALL SELECT * FROM t2;
 SELECT * FROM t2 INTERSECT ALL SELECT * FROM t1;
 SELECT * FROM t1 INTERSECT ALL SELECT * FROM t3;
 SELECT * FROM t3 INTERSECT ALL SELECT * FROM t1;
+--sorted_result
 SELECT * FROM t2 INTERSECT ALL SELECT * FROM t3;
+--sorted_result
 SELECT * FROM t3 INTERSECT ALL SELECT * FROM t2;
 
 SELECT * FROM t1 EXCEPT    ALL SELECT * FROM t2;
 SELECT * FROM t2 EXCEPT    ALL SELECT * FROM t1;
 SELECT * FROM t1 EXCEPT    ALL SELECT * FROM t3;
+--sorted_result
 SELECT * FROM t3 EXCEPT    ALL SELECT * FROM t1;
 SELECT * FROM t2 EXCEPT    ALL SELECT * FROM t3;
 SELECT * FROM t3 EXCEPT    ALL SELECT * FROM t2;
@@ -313,6 +318,7 @@ eval $query;
 --replace_regex $elide_costs
 eval EXPLAIN FORMAT=tree $query;
 let $query = SELECT * FROM t3 EXCEPT (SELECT * FROM t2 EXCEPT SELECT * FROM t1);
+--sorted_result
 eval $query;
 --replace_regex $elide_costs
 eval EXPLAIN FORMAT=tree $query;
@@ -329,6 +335,7 @@ eval $query;
 --replace_regex $elide_costs
 eval EXPLAIN FORMAT=tree $query;
 let $query = SELECT * FROM t3 EXCEPT ALL (SELECT * FROM t2 EXCEPT ALL SELECT * FROM t1);
+--sorted_result
 eval $query;
 --replace_regex $elide_costs
 eval EXPLAIN FORMAT=tree $query;
@@ -345,6 +352,7 @@ eval $query;
 --replace_regex $elide_costs
 eval EXPLAIN FORMAT=tree $query;
 let $query = SELECT * FROM t3 EXCEPT ALL (SELECT * FROM t2 EXCEPT SELECT * FROM t1);
+--sorted_result
 eval $query;
 --replace_regex $elide_costs
 eval EXPLAIN FORMAT=tree $query;
@@ -461,12 +469,16 @@ eval EXPLAIN FORMAT=tree $query;
 --echo #
 let $query =
 SELECT i FROM t2 INTERSECT SELECT i FROM t2 LIMIT 1;
+# Non-deterministic because ORDER BY is missing. Both 1 and 2 is correct.
+--replace_regex /^[12]$/CORRECT/
 eval $query;
 --replace_regex $elide_costs
 eval EXPLAIN FORMAT=tree $query;
 
 let $query =
 SELECT i FROM t2 INTERSECT SELECT i FROM t2 LIMIT 1 OFFSET 1;
+# Non-deterministic because ORDER BY is missing. Both 1 and 2 is correct.
+--replace_regex /^[12]$/CORRECT/
 eval $query;
 --replace_regex $elide_costs
 eval EXPLAIN FORMAT=tree $query;
@@ -476,6 +488,8 @@ eval EXPLAIN FORMAT=tree $query;
 --echo #
 let $query =
 SELECT * FROM (SELECT i FROM t2 INTERSECT SELECT i FROM t2 LIMIT 1) t;
+# Non-deterministic because ORDER BY is missing. Both 1 and 2 is correct.
+--replace_regex /^[12]$/CORRECT/
 eval $query;
 --replace_regex $elide_costs
 eval EXPLAIN FORMAT=tree $query;
@@ -488,18 +502,24 @@ eval EXPLAIN FORMAT=tree $query;
 
 let $query =
 SELECT * FROM (SELECT i FROM t2 INTERSECT SELECT i FROM t2) t LIMIT 1;
+# Non-deterministic because ORDER BY is missing. Both 1 and 2 is correct.
+--replace_regex /^[12]$/CORRECT/
 eval $query;
 --replace_regex $elide_costs
 eval EXPLAIN FORMAT=tree $query;
 
 let $query =
 SELECT * FROM (SELECT i FROM t2 INTERSECT SELECT i FROM t2 LIMIT 1 OFFSET 1) t;
+# Non-deterministic because ORDER BY is missing. Both 1 and 2 is correct.
+--replace_regex /^[12]$/CORRECT/
 eval $query;
 --replace_regex $elide_costs
 eval EXPLAIN FORMAT=tree $query;
 
 let $query =
 SELECT * FROM (SELECT i FROM t2 INTERSECT SELECT i FROM t2) t LIMIT 1 OFFSET 1 ;
+# Non-deterministic because ORDER BY is missing. Both 1 and 2 is correct.
+--replace_regex /^[12]$/CORRECT/
 eval $query;
 --replace_regex $elide_costs
 eval EXPLAIN FORMAT=tree $query;
@@ -509,16 +529,22 @@ eval EXPLAIN FORMAT=tree $query;
 #
 let $query =
 SELECT SQL_CALC_FOUND_ROWS i FROM t2 INTERSECT SELECT i FROM t2 LIMIT 1;
+# Non-deterministic because ORDER BY is missing. Both 1 and 2 is correct.
+--replace_regex /^[12]$/CORRECT/
 eval $query;
 SELECT FOUND_ROWS();
 
 let $query =
 SELECT SQL_CALC_FOUND_ROWS * FROM (SELECT i FROM t2 INTERSECT SELECT i FROM t2) t LIMIT 1;
+# Non-deterministic because ORDER BY is missing. Both 1 and 2 is correct.
+--replace_regex /^[12]$/CORRECT/
 eval $query;
 SELECT FOUND_ROWS();
 
 let $query =
 SELECT SQL_CALC_FOUND_ROWS * FROM (SELECT i FROM t2 INTERSECT SELECT i FROM t2 LIMIT 1) t;
+# Non-deterministic because ORDER BY is missing. Both 1 and 2 is correct.
+--replace_regex /^[12]$/CORRECT/
 eval $query;
 SELECT FOUND_ROWS();
 
@@ -724,6 +750,7 @@ CREATE TABLE t3 (a INT, b INT);
 
 INSERT INTO t3 VALUES (NULL, NULL), (1, NULL), (2, 3), (4, 5);
 INSERT INTO t3 VALUES (NULL, NULL), (1, NULL), (2, 3), (4, 5);
+ANALYZE TABLE t1, t2, t3;
 
 let $query =
 SELECT *
@@ -788,6 +815,7 @@ CREATE TABLE t2 (id INT PRIMARY KEY AUTO_INCREMENT, d DATE);
 
 INSERT INTO t1 (d) VALUES ('2020-01-01'), ('2021-04-21'), ('2022-03-02');
 INSERT INTO t2 (d) VALUES ('2020-05-01'), ('2021-05-21'), ('2022-05-02');
+ANALYZE TABLE t1, t2;
 
 # The reference to t1 in the ORDER BY was flagged as an error
 # which is strictly is according the SQL standard, but MySQL used to
@@ -805,4 +833,21 @@ ORDER BY t1.d;
   FROM t1 INNER JOIN t2 USING (id) ) LIMIT 1)
 ORDER BY t1.d;
 
+DROP TABLE t1, t2;
+
+--echo #
+--echo # Follow-up to Bug#36739383 Assertion 'false'
+--echo # materialize_iterator::SpillState::read_next_row_secondary_over.
+--echo # This is a case of too large a row for default hash table
+--echo # space, which next also overflows the normal tmp table (error
+--echo # 135 HA_ERR_RECORD_FILE_FULL) and must go to InnoDB tmp table.
+--echo #
+CREATE TABLE t1 (a MEDIUMTEXT);
+INSERT INTO t1 VALUES ('a');
+CREATE TABLE t2 AS
+    SELECT REPEAT(a,20000000) AS a FROM t1
+    INTERSECT
+    SELECT REPEAT(a,20000000) AS a FROM t1;
+
+SELECT LENGTH(a), SUBSTRING(a FROM 20000000-4 FOR 4) FROM t2;
 DROP TABLE t1, t2;

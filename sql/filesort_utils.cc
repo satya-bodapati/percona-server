@@ -1,15 +1,16 @@
-/* Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,9 +23,9 @@
 
 #include "sql/filesort_utils.h"
 
-#include <string.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 #include "add_with_saturate.h"
 #include "my_dbug.h"
@@ -133,7 +134,14 @@ size_t Filesort_buffer::sort_buffer(Sort_param *param, size_t num_input_rows,
 
   if (max_output_rows == 0) return max_output_rows;
   if (num_input_rows <= 1) return num_input_rows;
-  if (param->max_compare_length() == 0) return num_input_rows;
+  if (param->max_compare_length() == 0) {
+    // Ensure LIMIT (and DISTINCT if enabled) is respected even when no sorting
+    // occurs.
+    if (param->m_remove_duplicates) {
+      return 1;
+    }
+    return std::min(num_input_rows, max_output_rows);
+  }
 
   const auto it_begin = begin(m_record_pointers);
   auto it_end = begin(m_record_pointers) + num_input_rows;
@@ -274,7 +282,7 @@ void Filesort_buffer::reset() {
 }
 
 bool Filesort_buffer::preallocate_records(size_t num_records) {
-  if (m_max_record_length == 0xFFFFFFFFu) {
+  if (m_max_record_length == 0xFFFFFFFFU) {
     // The rest of the code uses this value for “infinite” and saturates to it,
     // so even if we have a large sort buffer (> 4 GB), we we can't know for
     // sure there's going to be room.
@@ -303,7 +311,7 @@ bool Filesort_buffer::preallocate_records(size_t num_records) {
     m_record_pointers.reserve(num_records);
   }
   while (m_record_pointers.size() < num_records) {
-    Bounds_checked_array<uchar> ptr =
+    Bounds_checked_array<uchar> const ptr =
         get_next_record_pointer(m_max_record_length);
     (void)ptr;
     assert(ptr.array() != nullptr);
@@ -358,7 +366,7 @@ bool Filesort_buffer::allocate_block(size_t num_bytes) {
     This means that, for smaller records, we could go above the maximum
     permitted total memory usage.
   */
-  size_t min_num_rows_capacity =
+  size_t const min_num_rows_capacity =
       m_record_pointers.size() +
       space_left /
           AddWithSaturate(m_max_record_length, sizeof(m_record_pointers[0]));
@@ -377,11 +385,11 @@ bool Filesort_buffer::allocate_block(size_t num_bytes) {
       sort huge rows that wouldn't fit in the buffer otherwise -- in other
       words, nearly never.
     */
-    size_t excess_bytes =
+    size_t const excess_bytes =
         (m_record_pointers.capacity() - m_record_pointers.size()) *
         sizeof(m_record_pointers[0]);
     if (excess_bytes >= 32768) {
-      size_t old_capacity = m_record_pointers.capacity();
+      size_t const old_capacity = m_record_pointers.capacity();
       m_record_pointers.shrink_to_fit();
       if (m_record_pointers.capacity() < old_capacity) {
         return allocate_block(num_bytes);
@@ -438,11 +446,10 @@ Bounds_checked_array<uchar> Filesort_buffer::get_contiguous_buffer() {
     free_sort_buffer();
 
     if (allocate_sized_block(m_max_size_in_bytes)) {
-      return Bounds_checked_array<uchar>(nullptr, 0);
+      return {nullptr, 0};
     }
   }
-  return Bounds_checked_array<uchar>(m_blocks.back().get(),
-                                     m_max_size_in_bytes);
+  return {m_blocks.back().get(), m_max_size_in_bytes};
 }
 
 void Filesort_buffer::update_peak_memory_used() const {

@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License, version 2.0,
     as published by the Free Software Foundation.
 
-    This program is also distributed with certain software (including
+    This program is designed to work with certain software (including
     but not limited to OpenSSL) that is licensed under separate terms,
     as designated in a particular file or component or in included license
     documentation.  The authors of MySQL hereby grant you an additional
     permission to link the program and your derivative works with the
-    separately licensed software that they have included with MySQL.
+    separately licensed software that they have either included with
+    the program or referenced in the documentation.
 
     This program is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -57,12 +58,12 @@ std::unique_ptr<Geometry> Line_interpolate_point::eval(
 std::unique_ptr<Geometry> Line_interpolate_point::eval(
     const Cartesian_linestring &g) const {
   if (m_return_multiple_points) {
-    Cartesian_multipoint *mpt = new Cartesian_multipoint();
+    auto *mpt = new Cartesian_multipoint();
     std::unique_ptr<Geometry> result(mpt);
     bg::line_interpolate(g, m_distance, *mpt);
     return result;
   }
-  Cartesian_point *pt = new Cartesian_point();
+  auto *pt = new Cartesian_point();
   std::unique_ptr<Geometry> result(pt);
   bg::line_interpolate(g, m_distance, *pt);
   return result;
@@ -71,12 +72,12 @@ std::unique_ptr<Geometry> Line_interpolate_point::eval(
 std::unique_ptr<Geometry> Line_interpolate_point::eval(
     const Geographic_linestring &g) const {
   if (m_return_multiple_points) {
-    Geographic_multipoint *mpt = new Geographic_multipoint();
+    auto *mpt = new Geographic_multipoint();
     std::unique_ptr<Geometry> result(mpt);
     bg::line_interpolate(g, m_distance, *mpt);
     return result;
   }
-  Geographic_point *pt = new Geographic_point();
+  auto *pt = new Geographic_point();
   std::unique_ptr<Geometry> result(pt);
   bg::line_interpolate(g, m_distance, *pt);
   return result;

@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -241,6 +242,18 @@ DECLARE_METHOD(bool, item_set_lexstring,
   @retval false  all's well
 */
 DECLARE_METHOD(bool, item_set_cstring, (log_item_data * lid, const char *s));
+
+/**
+  Set/reset one or more log line flags.
+
+  Example to set the flag:
+    log_line_set_flag(ll, LOG_LINE_EMIT_TELEMETRY, LOG_LINE_EMIT_TELEMETRY);
+  to reset the flag:
+    log_line_set_flag(ll, LOG_LINE_EMIT_TELEMETRY, 0);
+*/
+DECLARE_METHOD(void, line_set_flag,
+               (log_line * ll, log_line_flags_mask mask,
+                log_line_flags_mask value));
 
 /**
   Create new log item with key name "key", and allocation flags of
@@ -755,6 +768,7 @@ extern SERVICE_TYPE(log_builtins_string) * log_bs;
 #define log_set_float log_bi->item_set_float
 #define log_set_lexstring log_bi->item_set_lexstring
 #define log_set_cstring log_bi->item_set_cstring
+#define log_line_set_flag log_bi->line_set_flag
 #define log_malloc log_bs->malloc
 #define log_free log_bs->free
 #define log_msg log_bs->substitutev
@@ -790,6 +804,22 @@ extern SERVICE_TYPE(log_builtins_string) * log_bs;
       .source_file(MY_BASENAME)      \
       .function(__FUNCTION__)        \
       .lookup(ecode, ##__VA_ARGS__)
+
+#ifdef HAVE_LOG_DIAGNOSTIC
+#define LogDiag(severity, ecode, ...) \
+  LogEvent()                          \
+      .prio(severity)                 \
+      .errcode(ecode)                 \
+      .subsys(LOG_SUBSYSTEM_TAG)      \
+      .component(LOG_COMPONENT_TAG)   \
+      .source_line(__LINE__)          \
+      .source_file(MY_BASENAME)       \
+      .function(__FUNCTION__)         \
+      .type(LOG_TYPE_DIAG)            \
+      .lookup(ecode, ##__VA_ARGS__)
+#else
+#define LogDiag(...)
+#endif /* HAVE_LOG_DIAGNOSTIC */
 
 #define LogComponentErr(severity, ecode, ...)                           \
   LogEvent()                                                            \
@@ -849,6 +879,20 @@ extern SERVICE_TYPE(log_builtins_string) * log_bs;
       .function(__FUNCTION__)        \
       .lookup(ecode, ##__VA_ARGS__)
 
+#ifdef HAVE_LOG_DIAGNOSTIC
+#define LogDiag(severity, ecode, ...) \
+  LogEvent()                          \
+      .prio(severity)                 \
+      .errcode(ecode)                 \
+      .subsys(LOG_SUBSYSTEM_TAG)      \
+      .source_line(__LINE__)          \
+      .source_file(MY_BASENAME)       \
+      .function(__FUNCTION__)         \
+      .type(LOG_TYPE_DIAG)            \
+      .lookup(ecode, ##__VA_ARGS__)
+#else
+#define LogDiag(...)
+#endif /* HAVE_LOG_DIAGNOSTIC */
 #endif
 
 #else
@@ -1365,12 +1409,30 @@ class LogEvent {
   */
   LogEvent &message_quoted(const char *tag, const char *fmt, ...)
       MY_ATTRIBUTE((format(printf, 3, 4))) {
-    msg_tag = tag;
-
     va_list args;
     va_start(args, fmt);
-    set_message(fmt, args);
+    message_quotedv(tag, fmt, args);
     va_end(args);
+
+    return *this;
+  }
+
+  /**
+    Fill in a format string by substituting the % with the given
+    arguments and tag, then add the result as the event's message.
+
+    @param  tag  Tag to prefix to message.
+    @param  fmt  message (treated as a printf-style format-string,
+                 so % substitution will happen)
+    @param  args varargs to satisfy any % in the message
+
+    @retval      the LogEvent, for easy fluent-style chaining.
+  */
+  LogEvent &message_quotedv(const char *tag, const char *fmt, va_list args)
+      MY_ATTRIBUTE((format(printf, 3, 0))) {
+    msg_tag = tag;
+
+    set_message(fmt, args);
 
     return *this;
   }
@@ -1490,6 +1552,16 @@ class LogEvent {
         log_line_item_set_with_key(this->ll, LOG_ITEM_GEN_LEX_STRING, key,
                                    LOG_ITEM_FREE_NONE),
         val);
+    return *this;
+  }
+
+  /**
+    Mark log line to skip being additionally emitted as a telemetry log record.
+
+    @retval      the LogEvent, for easy fluent-style chaining.
+  */
+  LogEvent &no_telemetry() {
+    log_line_set_flag(this->ll, LOG_LINE_EMIT_TELEMETRY, 0);
     return *this;
   }
 };

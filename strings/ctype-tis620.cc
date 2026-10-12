@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    Without limiting anything contained in the foregoing, this file,
    which is part of C Driver for MySQL (Connector/C), is also subject to the
@@ -62,7 +63,6 @@
 #include <cstdint>
 #include <cstring>
 
-#include "my_compiler.h"
 #include "mysql/strings/m_ctype.h"
 #include "strings/m_ctype_internals.h"
 #include "strings/str_alloc.h"
@@ -544,7 +544,7 @@ static size_t thai2sortable(uint8_t *tstr, size_t len) {
   size_t tlen = len;
   uint8_t l2bias = 256 - 8;
   for (uint8_t *p = tstr; tlen > 0; p++, tlen--) {
-    uint8_t c = *p;
+    uint8_t const c = *p;
 
     if (isthai(c)) {
       const int *t_ctype0 = t_ctype[c];
@@ -609,7 +609,7 @@ static int my_strnncoll_tis620(const CHARSET_INFO *cs [[maybe_unused]],
   tc2[len2] = 0; /* put end of string */
   thai2sortable(tc1, len1);
   thai2sortable(tc2, len2);
-  int i = strcmp(pointer_cast<char *>(tc1), pointer_cast<char *>(tc2));
+  int const i = strcmp(pointer_cast<char *>(tc1), pointer_cast<char *>(tc2));
   if (tc1 != buf) my_str_free(tc1);
   return i;
 }
@@ -680,8 +680,8 @@ static size_t my_strnxfrm_tis620(const CHARSET_INFO *cs, uint8_t *dst,
                                  size_t dstlen, unsigned nweights,
                                  const uint8_t *src, size_t srclen,
                                  unsigned flags) {
-  size_t dstlen0 = dstlen;
-  size_t min_len = std::min(dstlen, srclen);
+  size_t const dstlen0 = dstlen;
+  size_t const min_len = std::min(dstlen, srclen);
   size_t len = 0;
 
   /*
@@ -700,7 +700,7 @@ static size_t my_strnxfrm_tis620(const CHARSET_INFO *cs, uint8_t *dst,
   len = my_strxfrm_pad(cs, dst, dst + len, dst + dstlen,
                        (unsigned)(dstlen - len), flags);
   if ((flags & MY_STRXFRM_PAD_TO_MAXLEN) && len < dstlen0) {
-    size_t fill_length = dstlen0 - len;
+    size_t const fill_length = dstlen0 - len;
     cs->cset->fill(cs, (char *)dst + len, fill_length, cs->pad_char);
     len = dstlen0;
   }

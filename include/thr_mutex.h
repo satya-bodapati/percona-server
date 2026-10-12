@@ -1,18 +1,19 @@
 #ifndef THR_MUTEX_INCLUDED
 #define THR_MUTEX_INCLUDED
 
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -45,8 +46,7 @@
 #include <stdlib.h>
 #include <sys/types.h>
 
-#include "my_inttypes.h"
-#include "my_macros.h"
+#include "my_inttypes.h"  // IWYU pragma: keep
 #include "my_thread.h"
 
 /*
@@ -54,7 +54,7 @@
   - native_mutex_t
   - my_mutex_t
 */
-#include "mysql/components/services/bits/thr_mutex_bits.h"
+#include "mysql/components/services/bits/thr_mutex_bits.h"  // IWYU pragma: export
 
 /* Define mutex types, see my_thr_init.c */
 #define MY_MUTEX_INIT_SLOW NULL

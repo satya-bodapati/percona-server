@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2010, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2010, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,8 +25,8 @@
 
 #include "sql/dynamic_ids.h"
 
-#include <stdlib.h>
 #include <sys/types.h>
+#include <cstdlib>
 
 #include "m_string.h"  // my_strtok_r
 #include "my_dbug.h"
@@ -49,12 +50,9 @@ bool Server_ids::unpack_dynamic_ids(char *param_dynamic_ids) {
   num_items = atoi(token);
   for (uint i = 0; i < num_items; i++) {
     token = my_strtok_r(nullptr, " ", &last);
-    if (token == nullptr)
-      return true;
-    else {
-      const ulong val = atol(token);
-      dynamic_ids.insert_unique(val);
-    }
+    if (token == nullptr) return true;
+    const ulong val = atol(token);
+    dynamic_ids.insert_unique(val);
   }
   return false;
 }
@@ -64,8 +62,7 @@ bool Server_ids::pack_dynamic_ids(String *buffer) {
 
   if (buffer->set_int(dynamic_ids.size(), false, &my_charset_bin)) return true;
 
-  for (ulong i = 0; i < dynamic_ids.size(); i++) {
-    ulong s_id = dynamic_ids[i];
+  for (const unsigned long s_id : dynamic_ids) {
     if (buffer->append(" ") || buffer->append_ulonglong(s_id)) return true;
   }
 

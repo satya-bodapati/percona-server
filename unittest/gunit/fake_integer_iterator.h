@@ -1,18 +1,19 @@
 #ifndef UNITTEST_GUNIT_FAKE_INTEGER_ITERATOR_H_
 #define UNITTEST_GUNIT_FAKE_INTEGER_ITERATOR_H_
 
-/* Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -47,13 +48,13 @@ class FakeIntegerIterator final : public TableRowIterator {
         m_field(field),
         m_dataset(std::move(dataset)) {}
 
-  bool Init() override {
+ private:
+  bool DoInit() override {
     m_current_index = 0;
     return false;
   }
 
-  int Read() override {
-    ++m_num_read_calls;
+  int DoRead() override {
     if (m_current_index == m_dataset.size()) {
       return -1;
     }
@@ -69,11 +70,7 @@ class FakeIntegerIterator final : public TableRowIterator {
     return 0;
   }
 
-  int num_read_calls() const { return m_num_read_calls; }
-
- private:
   size_t m_current_index{0};
-  int m_num_read_calls{0};
   Field_long *m_field;
   std::vector<std::optional<int>> m_dataset;
 };

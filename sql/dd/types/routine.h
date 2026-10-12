@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -84,7 +85,7 @@ class Routine : virtual public Entity_object {
   virtual bool update_aux_key(Aux_key *) const { return true; }
 
  public:
-  enum enum_routine_type { RT_FUNCTION = 1, RT_PROCEDURE };
+  enum enum_routine_type { RT_FUNCTION = 1, RT_PROCEDURE, RT_LIBRARY };
 
   enum enum_sql_data_access {
     SDA_CONTAINS_SQL = 1,
@@ -213,6 +214,15 @@ class Routine : virtual public Entity_object {
   virtual Parameter *add_parameter() = 0;
 
   virtual const Parameter_collection &parameters() const = 0;
+
+  /////////////////////////////////////////////////////////////////////////
+  // options.
+  /////////////////////////////////////////////////////////////////////////
+
+  virtual const Properties &options() const = 0;
+  virtual Properties &options() = 0;
+  virtual bool set_options(const Properties &options) = 0;
+  virtual bool set_options(const String_type &options_raw) = 0;
 
   /**
     Allocate a new object graph and invoke the copy constructor for

@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2023, Oracle and/or its affiliates.
+  Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -38,13 +39,12 @@ class RouterComponentMetadataTest : public RouterComponentClusterSetTest {
  protected:
   std::string get_metadata_cache_section(
       ClusterType cluster_type = ClusterType::GR_V2,
-      const std::string &ttl = "0.5", const std::string &cluster_name = "test",
+      const std::string &ttl = "0.1", const std::string &cluster_name = "test",
       const std::string &ssl_mode = "");
 
   std::string get_metadata_cache_routing_section(
       uint16_t router_port, const std::string &role,
-      const std::string &strategy, const std::string &mode = "",
-      const std::string &section_name = "default",
+      const std::string &strategy, const std::string &section_name = "default",
       const std::string &protocol = "classic",
       const std::vector<std::pair<std::string, std::string>>
           &additional_options = {});
@@ -73,6 +73,10 @@ class RouterComponentMetadataTest : public RouterComponentClusterSetTest {
       std::vector<uint16_t> metadata_server_ports, const int expected_exitcode,
       std::chrono::milliseconds wait_for_notify_ready =
           std::chrono::seconds(30));
+
+  std::string setup_router_config(const std::string &metadata_cache_section,
+                                  const std::string &routing_section,
+                                  std::vector<uint16_t> metadata_server_ports);
 
   std::string state_file_;
   const std::string router_metadata_username{"mysql_router1_user"};

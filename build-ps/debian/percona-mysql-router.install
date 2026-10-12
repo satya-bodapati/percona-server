@@ -24,6 +24,8 @@ usr/bin/mysqlrouter
 usr/bin/mysqlrouter_keyring
 usr/bin/mysqlrouter_plugin_info
 usr/bin/mysqlrouter_passwd
+usr/bin/mysqlrouter_bootstrap
+usr/bin/mysqlrouter_mrs_client
 usr/lib/mysqlrouter/plugin/connection_pool.so
 usr/lib/mysqlrouter/plugin/destination_status.so
 usr/lib/mysqlrouter/plugin/http_auth_backend.so
@@ -33,6 +35,8 @@ usr/lib/mysqlrouter/plugin/io.so
 usr/lib/mysqlrouter/plugin/keepalive.so
 usr/lib/mysqlrouter/plugin/routing.so
 usr/lib/mysqlrouter/plugin/router_openssl.so
+usr/lib/mysqlrouter/plugin/host_cache.so
+usr/lib/mysqlrouter/plugin/rest_host_cache.so
 usr/lib/mysqlrouter/plugin/router_protobuf.so
 usr/lib/mysqlrouter/plugin/metadata_cache.so
 usr/lib/mysqlrouter/plugin/rest_api.so
@@ -41,7 +45,8 @@ usr/lib/mysqlrouter/plugin/rest_router.so
 usr/lib/mysqlrouter/plugin/rest_routing.so
 usr/lib/mysqlrouter/plugin/rest_metadata_cache.so
 # private shared libraries
-usr/lib/mysqlrouter/private/libprotobuf-lite.so.*
+usr/lib/mysqlrouter/private/libprotobuf.so.*
+usr/lib/mysqlrouter/private/libabsl_*.so
 usr/lib/mysqlrouter/private/libmysqlharness.so.1
 usr/lib/mysqlrouter/private/libmysqlharness_stdx.so.1
 usr/lib/mysqlrouter/private/libmysqlharness_tls.so.1
@@ -55,7 +60,19 @@ usr/lib/mysqlrouter/private/libmysqlrouter_io_component.so.1
 usr/lib/mysqlrouter/private/libmysqlrouter_metadata_cache.so.1
 usr/lib/mysqlrouter/private/libmysqlrouter_mysqlxmessages.so.1
 usr/lib/mysqlrouter/private/libmysqlrouter_routing.so.1
+usr/lib/mysqlrouter/private/libmysqlrouter_routing_connections.so.1
+usr/lib/mysqlrouter/private/libmysqlrouter_routing_guidelines.so.1
 usr/lib/mysqlrouter/private/libmysqlrouter_destination_status.so.1
+usr/lib/mysqlrouter/private/libmysqlrouter_cluster.so.1
+usr/lib/mysqlrouter/private/libmysqlrouter_mysqlxclient.so.1
+usr/lib/mysqlrouter/private/libmysqlrouter_mysqlclient.so.1
+usr/lib/mysqlrouter/private/libmysqlrouter_utils.so.1
+usr/lib/mysqlrouter/private/libmysqlrouter_http_server.so.1
+usr/lib/mysqlrouter/private/libmysqlrouter_mysql.so.1
+usr/lib/mysqlrouter/private/libmysqlrouter_http_client.so.1
+usr/lib/mysqlrouter/private/libicui18n.so.*
+usr/lib/mysqlrouter/private/libicustubdata.so.*
+usr/lib/mysqlrouter/private/libicuuc.so.*
 
 usr/share/mysqlrouter/docs/sample_mysqlrouter.conf
 usr/share/mysqlrouter/mysqlrouter-systemd-start

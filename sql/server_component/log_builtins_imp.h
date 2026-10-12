@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -26,6 +27,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 #include <stdarg.h>
 
 #include "log_builtins_internal.h"
+#include "mysql/attribute.h"
 
 #ifdef IN_DOXYGEN
 #include <mysql/components/services/log_builtins.h>
@@ -88,6 +90,9 @@ class log_builtins_imp {
                        (log_item_data * lid, const char *s, size_t s_len));
   static DEFINE_METHOD(bool, item_set_cstring,
                        (log_item_data * lid, const char *s));
+  static DEFINE_METHOD(void, line_set_flag,
+                       (log_line * ll, log_line_flags_mask mask,
+                        log_line_flags_mask value));
 
   static DEFINE_METHOD(log_item_data *, item_set_with_key,
                        (log_item * li, log_item_type t, const char *key,

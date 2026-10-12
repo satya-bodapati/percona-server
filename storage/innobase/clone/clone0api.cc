@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -40,9 +41,9 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "sql/mysqld.h"
 #include "sql/sql_backup_lock.h"
 #include "sql/sql_class.h"
-#include "sql/sql_prepare.h"
 #include "sql/sql_table.h"
 #include "sql/sql_thd_internal_api.h"
+#include "sql/statement/ed_connection.h"
 #include "sql/strfunc.h"
 
 #include "dict0dd.h"
@@ -1429,7 +1430,7 @@ void clone_update_gtid_status(std::string &gtids) {
   std::string recovery_file(CLONE_INNODB_RECOVERY_FILE);
   if (!file_exists(recovery_file)) {
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
   }
   /* Open status file to append GTID. */
   std::ofstream status_file;
@@ -2092,28 +2093,42 @@ bool Fixup_data::fix_one_object(THD *thd, const dd::Table *table,
     return (false);
   }
 
-  auto dc = dd::get_dd_client(thd);
-  Releaser releaser(dc);
+  /* Copy of schema name which will outlive the running of the Auto_releaser */
+  dd::String_type schema_name_copy;
 
-  const dd::Schema *table_schema = nullptr;
+  /* Temporarily set THD::system_thread to SYSTEM_THREAD_DD_INITIALIZE so that
+  DD MDL checks are disabled. This is ok beacuse the no DDL is permitted in
+  innobase_dict_recover. Note that restoring the old value of system_thread
+  needs to happen after the Auto_releaser has gone out of scope, since the same
+  DD MDL checks are run by ~Auto_releaser(). */
+  {
+    auto saved_thread_type = thd->system_thread;
+    auto sg = Scope_guard{[&]() { thd->system_thread = saved_thread_type; }};
+    thd->system_thread = SYSTEM_THREAD_DD_INITIALIZE;
 
-  auto saved_thread_type = thd->system_thread;
-  thd->system_thread = SYSTEM_THREAD_DD_INITIALIZE;
+    auto *dc = dd::get_dd_client(thd);
+    Releaser releaser(dc);
 
-  if (dc->acquire(table->schema_id(), &table_schema)) {
-    ++m_num_errors;
-    thd->system_thread = saved_thread_type;
-    return (true);
-  }
+    const dd::Schema *table_schema = nullptr;
+    if (dc->acquire(table->schema_id(), &table_schema)) {
+      ++m_num_errors;
+      return (true);
+    }
 
-  const auto schema_name = table_schema->name().c_str();
-  const auto table_name = table->name().c_str();
+    /* For performance schema drop the SDI table. */
+    if (is_drop() && is_performance_schema(table_schema->name().c_str())) {
+      dd::sdi::drop(thd, table);
+    }
 
-  /* For performance schema drop the SDI table. */
-  if (is_drop() && is_performance_schema(schema_name)) {
-    dd::sdi::drop(thd, table);
-  }
-  thd->system_thread = saved_thread_type;
+    /* Copy the schema name so that it will outlive the dd::Schema object */
+    schema_name_copy = table_schema->name();
+  } /* End Auto_releaser scope */
+
+  /* C-string referencing copy */
+  const char *schema_name = schema_name_copy.c_str();
+  /* C-string referencing dd::Table object being passed in
+  (not released by Auto_releaser) */
+  const char *table_name = table->name().c_str();
 
   if (skip_schema_tables(table, table_name, schema_name)) {
     return (false);
@@ -2124,7 +2139,6 @@ bool Fixup_data::fix_one_object(THD *thd, const dd::Table *table,
   if (!is_drop() && !is_system_schema(schema_name)) {
     ib::warn(ER_IB_CLONE_NON_INNODB_TABLE, schema_name, table_name);
   }
-
   auto ret_val =
       execute_sql(thd, schema_name, table_name, nullptr, thread_number);
   return (ret_val);
@@ -2335,9 +2349,9 @@ static int clone_drop_binary_logs(THD *thd) {
   skip_grants(thd, sctx);
   thd->set_security_context(&sctx);
 
-  /* 1. Attempt to stop slaves if any. */
+  /* 1. Attempt to stop replicas if any. */
   char sql_stmt[FN_LEN + FN_LEN + 64];
-  snprintf(sql_stmt, sizeof(sql_stmt), "STOP SLAVE");
+  snprintf(sql_stmt, sizeof(sql_stmt), "STOP REPLICA");
 
   channel_map.rdlock();
   auto is_slave = is_slave_configured();
@@ -2345,7 +2359,7 @@ static int clone_drop_binary_logs(THD *thd) {
 
   if (is_slave && clone_execute_query(thd, &sql_stmt[0], 1, false)) {
     err = ER_INTERNAL_ERROR;
-    my_error(err, MYF(0), "Clone failed to stop slave");
+    my_error(err, MYF(0), "Clone failed to stop replica");
   }
 
   if (err == 0) {
@@ -2442,7 +2456,7 @@ static void clone_init_compression(THD *thd) {
 
   if (dc->fetch_global_component_ids<dd::Table>(&dd_table_ids)) {
     ut_d(ut_error);
-    ut_o(return );
+    ut_o(return);
   }
 
   for (auto dd_table_id : dd_table_ids) {
@@ -2490,8 +2504,7 @@ static void clone_init_compression(THD *thd) {
   ib::info(ER_IB_CLONE_SQL) << "Clone: Finished initializing compressed tables";
 }
 
-Clone_notify::Clone_notify(Clone_notify::Type type, space_id_t space,
-                           bool no_wait)
+Clone_notify::Clone_notify(Type type, space_id_t space, bool no_wait)
     : m_space_id(space),
       m_type(type),
       m_wait(Wait_at::NONE),

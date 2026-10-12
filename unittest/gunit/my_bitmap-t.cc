@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -37,7 +38,7 @@ uint get_rand_bit(uint bitsize) { return (rand() % bitsize); }
 
 bool test_set_get_clear_bit(MY_BITMAP *map, uint bitsize) {
   uint i, test_bit;
-  uint no_loops = bitsize > 128 ? 128 : bitsize;
+  uint const no_loops = bitsize > 128 ? 128 : bitsize;
   for (i = 0; i < no_loops; i++) {
     test_bit = get_rand_bit(bitsize);
     bitmap_set_bit(map, test_bit);
@@ -56,7 +57,7 @@ error2:
 
 bool test_flip_bit(MY_BITMAP *map, uint bitsize) {
   uint i, test_bit;
-  uint no_loops = bitsize > 128 ? 128 : bitsize;
+  uint const no_loops = bitsize > 128 ? 128 : bitsize;
   for (i = 0; i < no_loops; i++) {
     test_bit = get_rand_bit(bitsize);
     bitmap_flip_bit(map, test_bit);
@@ -108,7 +109,7 @@ error6:
 
 bool test_compare_operators(MY_BITMAP *map, uint bitsize) {
   uint i, j, test_bit1, test_bit2, test_bit3, test_bit4;
-  uint no_loops = bitsize > 128 ? 128 : bitsize;
+  uint const no_loops = bitsize > 128 ? 128 : bitsize;
   MY_BITMAP map2_obj, map3_obj;
   MY_BITMAP *map2 = &map2_obj, *map3 = &map3_obj;
   my_bitmap_map map2buf[MAX_TESTED_BITMAP_SIZE];
@@ -200,7 +201,7 @@ error5:
 
 bool test_count_bits_set(MY_BITMAP *map, uint bitsize) {
   uint i, bit_count = 0, test_bit;
-  uint no_loops = bitsize > 128 ? 128 : bitsize;
+  uint const no_loops = bitsize > 128 ? 128 : bitsize;
   for (i = 0; i < no_loops; i++) {
     test_bit = get_rand_bit(bitsize);
     if (!bitmap_is_set(map, test_bit)) {
@@ -221,7 +222,7 @@ error2:
 
 bool test_get_first_bit(MY_BITMAP *map, uint bitsize) {
   uint i, test_bit = 0;
-  uint no_loops = bitsize > 128 ? 128 : bitsize;
+  uint const no_loops = bitsize > 128 ? 128 : bitsize;
 
   bitmap_set_all(map);
   for (i = 0; i < bitsize; i++) bitmap_clear_bit(map, i);
@@ -251,7 +252,7 @@ error2:
 
 bool test_set_next_bit(MY_BITMAP *map, uint bitsize) {
   uint i, j, test_bit;
-  uint no_loops = bitsize > 128 ? 128 : bitsize;
+  uint const no_loops = bitsize > 128 ? 128 : bitsize;
   for (i = 0; i < no_loops; i++) {
     test_bit = get_rand_bit(bitsize);
     for (j = 0; j < test_bit; j++) bitmap_set_next(map);
@@ -266,7 +267,7 @@ error1:
 
 bool test_get_next_bit(MY_BITMAP *map, uint bitsize) {
   uint i, bit_count = 0, test_bit, next_count = 0;
-  uint no_loops = bitsize > 128 ? 128 : bitsize;
+  uint const no_loops = bitsize > 128 ? 128 : bitsize;
   for (i = 0; i < no_loops; i++) {
     test_bit = get_rand_bit(bitsize);
     if (!bitmap_is_set(map, test_bit)) {
@@ -304,7 +305,7 @@ error5:
 
 bool test_prefix(MY_BITMAP *map, uint bitsize) {
   uint i, j, test_bit;
-  uint no_loops = bitsize > 128 ? 128 : bitsize;
+  uint const no_loops = bitsize > 128 ? 128 : bitsize;
   for (i = 0; i < no_loops; i++) {
     test_bit = get_rand_bit(bitsize);
     bitmap_set_prefix(map, test_bit);
@@ -352,7 +353,7 @@ bool test_compare(MY_BITMAP *map, uint bitsize) {
   MY_BITMAP map2;
   my_bitmap_map map2buf[MAX_TESTED_BITMAP_SIZE];
   uint i, test_bit;
-  uint no_loops = bitsize > 128 ? 128 : bitsize;
+  uint const no_loops = bitsize > 128 ? 128 : bitsize;
   bitmap_init(&map2, map2buf, bitsize);
 
   /* Test all 4 possible combinations of set/unset bits. */
@@ -394,13 +395,13 @@ error_is_overlapping:
 }
 
 bool test_intersect(MY_BITMAP *map, uint bitsize) {
-  uint bitsize2 = 1 + get_rand_bit(MAX_TESTED_BITMAP_SIZE - 1);
+  uint const bitsize2 = 1 + get_rand_bit(MAX_TESTED_BITMAP_SIZE - 1);
   MY_BITMAP map2;
-  my_bitmap_map *map2buf = new my_bitmap_map[bitsize2];
+  auto *map2buf = new my_bitmap_map[bitsize2];
   bitmap_init(&map2, map2buf, bitsize2);
 
-  uint test_bit1 = get_rand_bit(bitsize);
-  uint test_bit2 = get_rand_bit(bitsize2);
+  uint const test_bit1 = get_rand_bit(bitsize);
+  uint const test_bit2 = get_rand_bit(bitsize2);
 
   if (test_bit2 < bitsize) {
     // test_bit2 can be set in map, so the intersection is not empty iff
@@ -513,7 +514,7 @@ TEST_P(BitMapTest, TestIntersect) {
 bool bitmap_set_prefix_t() {
   MY_BITMAP map;
   my_bitmap_map buf[2]; /* 64-bit buffer */
-  uint32 _max = ~((uint32)0);
+  uint32 const _max = ~((uint32)0);
   bitmap_init(&map, buf, 32);
 
   // set all bits in the 2nd half of the buf

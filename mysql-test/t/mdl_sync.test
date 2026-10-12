@@ -5,6 +5,9 @@
 --source include/force_myisam_default.inc
 --source include/have_myisam.inc
 
+# This test doesn't support GTID as it uses MyISAM
+--source include/rpl/set_gtid_mode_off.inc
+
 # We need InnoDB tables for some of the tests.
 
 # Save the initial number of concurrent sessions.
@@ -5493,7 +5496,7 @@ let $wait_condition=SELECT COUNT(*)=1 FROM information_schema.processlist
 --source include/wait_condition.inc
 # This should not block.
 CREATE DATABASE db2;
-ALTER DATABASE db2 DEFAULT CHARACTER SET utf8;
+ALTER DATABASE db2 DEFAULT CHARACTER SET utf8mb3;
 DROP DATABASE db2;
 SET DEBUG_SYNC= 'now SIGNAL blocked';
 
@@ -5517,42 +5520,42 @@ connection con2;
 connection default;
 SET DEBUG_SYNC= 'after_wait_locked_schema_name SIGNAL locked WAIT_FOR blocked';
 --echo # Sending:
---send ALTER DATABASE db1 DEFAULT CHARACTER SET utf8
+--send ALTER DATABASE db1 DEFAULT CHARACTER SET utf8mb3
 
 --echo # Connection con2
 connection con2;
 SET DEBUG_SYNC= 'now WAIT_FOR locked';
 --echo # Sending:
 # This should block.
---send ALTER DATABASE db1 DEFAULT CHARACTER SET utf8
+--send ALTER DATABASE db1 DEFAULT CHARACTER SET utf8mb3
 
 --echo # Connection con3
 connection con3;
 let $wait_condition=SELECT COUNT(*)=1 FROM information_schema.processlist
   WHERE state='Waiting for schema metadata lock'
-  AND info='ALTER DATABASE db1 DEFAULT CHARACTER SET utf8';
+  AND info='ALTER DATABASE db1 DEFAULT CHARACTER SET utf8mb3';
 --source include/wait_condition.inc
 # This should not block.
 CREATE DATABASE db2;
-ALTER DATABASE db2 DEFAULT CHARACTER SET utf8;
+ALTER DATABASE db2 DEFAULT CHARACTER SET utf8mb3;
 DROP DATABASE db2;
 SET DEBUG_SYNC= 'now SIGNAL blocked';
 
 --echo # Connection default
 connection default;
---echo # Reaping: ALTER DATABASE db1 DEFAULT CHARACTER SET utf8
+--echo # Reaping: ALTER DATABASE db1 DEFAULT CHARACTER SET utf8mb3
 --reap
 
 --echo # Connection con2
 connection con2;
---echo # Reaping: ALTER DATABASE db1 DEFAULT CHARACTER SET utf8
+--echo # Reaping: ALTER DATABASE db1 DEFAULT CHARACTER SET utf8mb3
 --reap
 
 --echo # Connection default
 connection default;
 SET DEBUG_SYNC= 'after_wait_locked_schema_name SIGNAL locked WAIT_FOR blocked';
 --echo # Sending:
---send ALTER DATABASE db1 DEFAULT CHARACTER SET utf8
+--send ALTER DATABASE db1 DEFAULT CHARACTER SET utf8mb3
 
 --echo # Connection con2
 connection con2;
@@ -5570,7 +5573,7 @@ SET DEBUG_SYNC= 'now SIGNAL blocked';
 
 --echo # Connection default
 connection default;
---echo # Reaping: ALTER DATABASE db1 DEFAULT CHARACTER SET utf8
+--echo # Reaping: ALTER DATABASE db1 DEFAULT CHARACTER SET utf8mb3
 --reap
 
 --echo # Connection con2
@@ -5605,7 +5608,7 @@ let $wait_condition=SELECT COUNT(*)=1 FROM information_schema.processlist
 --source include/wait_condition.inc
 # This should not block.
 CREATE DATABASE db2;
-ALTER DATABASE db2 DEFAULT CHARACTER SET utf8;
+ALTER DATABASE db2 DEFAULT CHARACTER SET utf8mb3;
 DROP DATABASE db2;
 SET DEBUG_SYNC= 'now SIGNAL blocked';
 
@@ -5632,13 +5635,13 @@ connection con2;
 SET DEBUG_SYNC= 'now WAIT_FOR locked';
 --echo # Sending:
 # This should also block.
---send ALTER DATABASE db1 DEFAULT CHARACTER SET utf8
+--send ALTER DATABASE db1 DEFAULT CHARACTER SET utf8mb3
 
 --echo # Connection con3
 connection con3;
 let $wait_condition=SELECT COUNT(*)=1 FROM information_schema.processlist
   WHERE state='Waiting for schema metadata lock'
-  AND info='ALTER DATABASE db1 DEFAULT CHARACTER SET utf8';
+  AND info='ALTER DATABASE db1 DEFAULT CHARACTER SET utf8mb3';
 --source include/wait_condition.inc
 SET DEBUG_SYNC= 'now SIGNAL blocked';
 
@@ -5649,7 +5652,7 @@ connection default;
 
 --echo # Connection con2
 connection con2;
---echo # Reaping: ALTER DATABASE db1 DEFAULT CHARACTER SET utf8
+--echo # Reaping: ALTER DATABASE db1 DEFAULT CHARACTER SET utf8mb3
 --error ER_NO_SUCH_DB
 --reap
 
@@ -5853,19 +5856,19 @@ FLUSH TABLE WITH READ LOCK;
 --echo # Connection con2
 connection con2;
 # X global lock should block
---send ALTER DATABASE db1 DEFAULT CHARACTER SET utf8
+--send ALTER DATABASE db1 DEFAULT CHARACTER SET utf8mb3
 
 --echo # Connection default
 connection default;
 let $wait_condition=SELECT COUNT(*)=1 FROM information_schema.processlist
   WHERE state='Waiting for global read lock'
-  AND info='ALTER DATABASE db1 DEFAULT CHARACTER SET utf8';
+  AND info='ALTER DATABASE db1 DEFAULT CHARACTER SET utf8mb3';
 --source include/wait_condition.inc
 UNLOCK TABLES;
 
 --echo # Connection con2
 connection con2;
---echo # Reaping ALTER DATABASE db1 DEFAULT CHARACTER SET utf8
+--echo # Reaping ALTER DATABASE db1 DEFAULT CHARACTER SET utf8mb3
 --reap
 
 --echo # Connection default
@@ -6130,3 +6133,5 @@ DROP TABLE t2;
 # Check that all connections opened by test cases in this file are really
 # gone so execution of other tests won't be affected by their presence.
 --source include/wait_until_count_sessions.inc
+# Restore the default for gtid_mode which is ON
+--source include/rpl/set_gtid_mode_on.inc

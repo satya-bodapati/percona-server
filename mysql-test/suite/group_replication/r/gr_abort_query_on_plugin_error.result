@@ -10,6 +10,8 @@ SET sql_log_bin=0;
 CREATE USER 'dummy_user'@'%';
 GRANT GROUP_REPLICATION_STREAM ON *.* TO 'dummy_user'@'%';
 FLUSH PRIVILEGES;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 SET sql_log_bin=1;
 include/start_and_bootstrap_group_replication.inc
 CREATE TABLE t1 (a INT NOT NULL AUTO_INCREMENT PRIMARY KEY , b INT);
@@ -23,6 +25,8 @@ SET sql_log_bin=0;
 CREATE USER 'dummy_user'@'%';
 GRANT GROUP_REPLICATION_STREAM ON *.* TO 'dummy_user'@'%';
 FLUSH PRIVILEGES;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 SET sql_log_bin=1;
 set session sql_log_bin=0;
 call mtr.add_suppression("Replica I/O for channel 'group_replication_recovery': Source command COM_REGISTER_REPLICA failed*");
@@ -38,7 +42,11 @@ call mtr.add_suppression("The member is already leaving or joining a group.");
 call mtr.add_suppression("Error leaving the group");
 call mtr.add_suppression("Skipping leave operation: concurrent attempt to leave the group is on-going.");
 call mtr.add_suppression("The server was automatically set into read only mode after an error was detected.");
+call mtr.add_suppression("The server was automatically set into offline mode after an error was detected.");
 set session sql_log_bin=1;
+[connection server1]
+INSERT INTO test.t1 (b) VALUES (0);
+[connection server2]
 CHANGE REPLICATION SOURCE TO SOURCE_USER='dummy_user' FOR CHANNEL 'group_replication_recovery';
 SET @debug_save_retries= @@GLOBAL.group_replication_recovery_retry_count;
 SET GLOBAL group_replication_recovery_retry_count= 1;
@@ -56,13 +64,16 @@ ERROR HY000: The MySQL server is running with the --super-read-only option so it
 ##########################################
 # Solve the issue and re-execute the query
 include/stop_group_replication.inc
+[connection server1]
+INSERT INTO test.t1 (b) VALUES (0);
+[connection server2]
 SET sql_log_bin=0;
 DROP USER 'dummy_user'@'%';
 SET sql_log_bin=1;
 CHANGE REPLICATION SOURCE TO SOURCE_USER='root' FOR CHANNEL 'group_replication_recovery';
 include/start_group_replication.inc
 INSERT INTO test.t1 (b) VALUES (1);
-include/rpl_sync.inc
+include/rpl/sync.inc
 
 #######################################################################
 # Assert that server1 and server2 have the same data and GTID_EXECUTED.
@@ -70,9 +81,9 @@ SET sql_log_bin=0;
 DROP USER 'dummy_user'@'%';
 SET sql_log_bin=1;
 server1
-include/assert.inc ['There is a value 1 in table t1 on server1']
+include/assert.inc ['There are 3 values in table t1 on server1']
 server2
-include/assert.inc ['There is a value 1 in table t1 on server2']
+include/assert.inc ['There are 3 values in table t1 on server2']
 server1
 server2
 include/assert.inc ['server1 and server2 GTID_EXECUTED must be equal']

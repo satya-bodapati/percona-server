@@ -1,15 +1,16 @@
-# Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+# Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,6 +26,10 @@
 INCLUDE(innodb.cmake)
 
 MSVC_CPPCHECK_DISABLE()
+IF(NOT WITH_DEBUG)
+  # the innodb parts are documented assuming WITH_DEBUG (UNIV_DEBUG)
+  DISABLE_DOCUMENTATION_WARNINGS()
+ENDIF()
 
 ADD_DEFINITIONS(-DLOG_SUBSYSTEM_TAG="InnoDB")
 
@@ -34,9 +39,9 @@ ADD_DEFINITIONS(-DPFS_DIRECT_CALL)
 IF(MSVC AND NOT WIN32_CLANG)
   # Treat warnings as errors on MSVC for InnoDB
   ADD_COMPILE_OPTIONS("/WX")
-  # Remove /W3 from the flags to avoid the redefined option warning
-  STRING(REPLACE "/W3" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
-  STRING(REPLACE "/W3" "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
+  # Remove /Wn from the flags to avoid the redefined option warning
+  REMOVE_CMAKE_COMPILER_FLAGS(CMAKE_CXX_FLAGS "/W[01234]")
+  REMOVE_CMAKE_COMPILER_FLAGS(CMAKE_C_FLAGS "/W[01234]")
   # Add warnings from level 4
   ADD_COMPILE_OPTIONS("/W4")
   # Disable C4324: structure was padded due to __declspec(align())
@@ -152,10 +157,19 @@ SET(INNOBASE_SOURCES
   handler/ha_innodb.cc
   handler/ha_innopart.cc
   handler/handler0alter.cc
+  handler/ha0check.cc
   handler/i_s.cc
   handler/p_s.cc
+  handler/vec0vec.cc
   handler/xtradb_i_s.cc
+  vec/vec0arena.cc
+  vec/vec0aux.cc
+  vec/vec0label.cc
+  vec/vec0hnsw.cc
+  vec/vec0index.cc
+  vec/vec0dml.cc
   ibuf/ibuf0ibuf.cc
+  lob/lob0bulk.cc
   lob/lob0first.cc
   lob/lob0index.cc
   lob/lob0ins.cc
@@ -264,7 +278,7 @@ SET(INNOBASE_SOURCES
   ut/ut0wqueue.cc)
 
 # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=98753
-IF(MY_COMPILER_IS_GNU AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 11)
+IF(MY_COMPILER_IS_GNU)
   ADD_COMPILE_FLAGS(
     pars/pars0grm.cc
     COMPILE_FLAGS "-Wno-free-nonheap-object")
@@ -348,7 +362,7 @@ MYSQL_ADD_PLUGIN(innobase
   MANDATORY
   MODULE_OUTPUT_NAME ha_innodb
   LINK_LIBRARIES sql_dd sql_gis ext::zlib ext::lz4 ${NUMA_LIBRARY}
-                 extra::rapidjson)
+                 extra::rapidjson extra::unordered_dense library_mysys)
 
 # On linux: /usr/include/stdio.h:#define BUFSIZ 8192
 # On Solaris: /usr/include/iso/stdio_iso.h:#define    BUFSIZ  1024
@@ -387,4 +401,23 @@ IF(MSVC AND NOT WIN32_CLANG)
    SET("${flag}" "${${flag}} /wd4100")
   ENDFOREACH()
   TARGET_COMPILE_OPTIONS(innodb_zipdecompress PRIVATE "/wd4100")
+ENDIF()
+
+IF(MY_COMPILER_IS_GNU AND FPROFILE_USE)
+  ADD_COMPILE_FLAGS(page/page0zip.cc COMPILE_FLAGS
+    "-Wno-array-bounds"
+    "-Wno-restrict"
+    "-Wno-stringop-overflow"
+    )
+  ADD_COMPILE_FLAGS(lock/lock0lock.cc COMPILE_FLAGS
+    "-Wno-alloc-size-larger-than"
+    )
+  # This is needed for innodb_zipdecompress
+  ADD_COMPILE_FLAGS(
+    rem/rem0wrec.cc
+    COMPILE_FLAGS "-Wno-stringop-overflow"
+    )
+  IF(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 14)
+    STRING_APPEND(CMAKE_CXX_FLAGS " -Wno-error=alloc-size-larger-than=")
+  ENDIF()
 ENDIF()

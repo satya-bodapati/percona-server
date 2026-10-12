@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -61,6 +62,7 @@
 #include "sql/dd/types/event.h"                     // Event
 #include "sql/dd/types/function.h"                  // Routine, Function
 #include "sql/dd/types/index_stat.h"                // Index_stat
+#include "sql/dd/types/library.h"                   // dd::Library
 #include "sql/dd/types/procedure.h"                 // Procedure
 #include "sql/dd/types/schema.h"                    // Schema
 #include "sql/dd/types/spatial_reference_system.h"  // Spatial_reference_system
@@ -68,7 +70,6 @@
 #include "sql/dd/types/table_stat.h"                // Table_stat
 #include "sql/dd/types/tablespace.h"                // Tablespace
 #include "sql/dd/types/view.h"                      // View
-#include "sql/dd/upgrade_57/upgrade.h"              // allow_sdi_creation
 #include "sql/debug_sync.h"                         // DEBUG_SYNC
 #include "sql/error_handler.h"                      // Internal_error_handler
 #include "sql/log.h"
@@ -342,7 +343,7 @@ bool Storage_adapter::store(THD *thd, T *object) {
   // dictionary entry during upgrade.
   if (bootstrap::DD_bootstrap_ctx::instance().get_stage() >
           bootstrap::Stage::CREATED_TABLES &&
-      dd::upgrade_57::allow_sdi_creation() && sdi::store(thd, object))
+      sdi::store(thd, object))
     return true;
 
   return false;
@@ -461,6 +462,7 @@ template Object_id Storage_adapter::next_oid<Event>();
 template Object_id Storage_adapter::next_oid<Routine>();
 template Object_id Storage_adapter::next_oid<Function>();
 template Object_id Storage_adapter::next_oid<Procedure>();
+template Object_id Storage_adapter::next_oid<Library>();
 template Object_id Storage_adapter::next_oid<Schema>();
 template Object_id Storage_adapter::next_oid<Spatial_reference_system>();
 template Object_id Storage_adapter::next_oid<Tablespace>();
@@ -559,6 +561,8 @@ template bool Storage_adapter::drop(THD *, const Function *);
 template bool Storage_adapter::store(THD *, Function *);
 template bool Storage_adapter::drop(THD *, const Procedure *);
 template bool Storage_adapter::store(THD *, Procedure *);
+template bool Storage_adapter::drop(THD *, const Library *);
+template bool Storage_adapter::store(THD *, Library *);
 
 template bool Storage_adapter::get<Schema::Id_key, Schema>(
     THD *, const Schema::Id_key &, enum_tx_isolation, bool, const Schema **);

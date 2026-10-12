@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -51,9 +52,6 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ut0wqueue.h"
 
 struct CHARSET_INFO;
-
-/** "NULL" value of a document id. */
-#define FTS_NULL_DOC_ID 0
 
 /** FTS hidden column that is used to map to and from the row */
 #define FTS_DOC_ID_COL_NAME "FTS_DOC_ID"
@@ -102,6 +100,9 @@ those defined in mysql file ft_global.h */
 
 #define FTS_INDEX_TABLE_IND_NAME "FTS_INDEX_TABLE_IND"
 #define FTS_COMMON_TABLE_IND_NAME "FTS_COMMON_TABLE_IND"
+
+/** "NULL" value of a document id. */
+constexpr doc_id_t FTS_NULL_DOC_ID = 0;
 
 /** The number of FTS index partitions for a fulltext index. */
 constexpr size_t FTS_NUM_AUX_INDEX = 6;
@@ -289,7 +290,7 @@ we have to implement our own. We use UTF-16 without surrogate processing
 as our in-memory format. This typedef is a single such character. */
 typedef unsigned short ib_uc_t;
 
-/** An UTF-16 ro UTF-8 string. */
+/** An UTF-16 or UTF-8 string. */
 struct fts_string_t {
   byte *f_str;    /*!< string, not necessary terminated in
                   any way */
@@ -864,9 +865,11 @@ void fts_add_index(dict_index_t *index,  /*!< FTS index to be added */
 @param[in]      index           Index to be dropped
 @param[in]      trx             Transaction for the drop
 @param[in,out]  aux_vec         Aux table name vector
+@param[in]      adding_another  Another FTS index is to be added as part
+                                of the same transaction
 @return DB_SUCCESS or error number */
 dberr_t fts_drop_index(dict_table_t *table, dict_index_t *index, trx_t *trx,
-                       aux_name_vec_t *aux_vec);
+                       aux_name_vec_t *aux_vec, bool adding_another = false);
 
 /** Rename auxiliary tables for all fts index for a table
  @return DB_SUCCESS or error code */
@@ -946,22 +949,5 @@ tables' metadata updated in DD
 @param[in,out]  table           table to check
 @return DB_SUCCESS or error code */
 dberr_t fts_create_index_dd_tables(dict_table_t *table);
-
-/** Upgrade FTS AUX Tables. The FTS common and aux tables are
-renamed because they have table_id in their name. We move table_ids
-by DICT_MAX_DD_TABLES offset. Aux tables are registered into DD
-after rename.
-@param[in]      table           InnoDB table object
-@return DB_SUCCESS or error code */
-dberr_t fts_upgrade_aux_tables(dict_table_t *table);
-
-/** Rename FTS AUX tablespace name from 8.0 format to 5.7 format.
-This will be done on upgrade failure
-@param[in]      table           parent table
-@param[in]      rollback        rollback the rename from 8.0 to 5.7
-                                if true, rename to 5.7 format
-                                if false, mark the table as evictable
-@return DB_SUCCESS on success, DB_ERROR on error */
-dberr_t fts_upgrade_rename(const dict_table_t *table, bool rollback);
 
 #endif

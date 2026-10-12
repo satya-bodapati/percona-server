@@ -1,11 +1,11 @@
-include/master-slave.inc
+include/rpl/init_source_replica.inc
 Warnings:
 Note	####	Sending passwords in plain text without SSL/TLS is extremely insecure.
 Note	####	Storing MySQL user name or password information in the connection metadata repository is not secure and is therefore not recommended. Please consider using the USER and PASSWORD connection options for START REPLICA; see the 'START REPLICA Syntax' in the MySQL Manual for more information.
 [connection master]
 ####################################################################
-# Test Case 1: Simple MASTER-SLAVE setup.
-# Verify that slave displays appropriate XA_STATE in performance
+# Test Case 1: Simple SOURCE-REPLICA setup.
+# Verify that replica displays appropriate XA_STATE in performance
 # schema table, post XA PREPARE AND XA COMMIT command execution.
 ####################################################################
 [connection slave]
@@ -18,7 +18,7 @@ XA START 'xatest';
 INSERT INTO t VALUES (10);
 XA END 'xatest';
 XA PREPARE 'xatest';
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 # Wait for XA_STATE to become PREPARED on slave
 # Expecting one prepared transaction
 XA RECOVER;
@@ -27,7 +27,7 @@ formatID	gtrid_length	bqual_length	data
 ---- XA COMMIT ----
 [connection master]
 XA COMMIT 'xatest';
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 # Wait for XA_STATE to become COMMITTED on slave
 # Expecting no prepared transactions
 XA RECOVER;
@@ -35,21 +35,19 @@ formatID	gtrid_length	bqual_length	data
 include/diff_tables.inc [master:t,slave:t]
 [connection master]
 DROP TABLE t;
-include/sync_slave_sql_with_master.inc
-include/rpl_reset.inc
+include/rpl/sync_to_replica.inc
+include/rpl/reset.inc
 ####################################################################
-# Test Case 2: Enable Multithreaded Slave with replica_parallel_type as
-# DATABASE. Verify that slave displays appropriate XA_STATE in
+# Test Case 2: Enable Multithreaded Slave.
+# Verify that replica displays appropriate XA_STATE in
 # performance schema table, post XA PREPARE AND XA COMMIT command
 # execution.
 ####################################################################
 [connection slave]
+include/rpl/stop_replica.inc
 SET @save_replica_parallel_workers=@@global.replica_parallel_workers;
-SET @replica_parallel_type=@@global.replica_parallel_type;
-include/stop_slave.inc
 SET GLOBAL replica_parallel_workers=4;
-SET GLOBAL replica_parallel_type='DATABASE';
-include/start_slave.inc
+include/rpl/start_replica.inc
 [connection slave]
 TRUNCATE TABLE performance_schema.events_transactions_current;
 ---- Setup ----
@@ -60,7 +58,7 @@ XA START 'xatest';
 INSERT INTO t VALUES (10);
 XA END 'xatest';
 XA PREPARE 'xatest';
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 # Wait for XA_STATE to become PREPARED on slave
 # Expecting one prepared transaction
 XA RECOVER;
@@ -69,7 +67,7 @@ formatID	gtrid_length	bqual_length	data
 ---- XA COMMIT ----
 [connection master]
 XA COMMIT 'xatest';
-include/sync_slave_sql_with_master.inc
+include/rpl/sync_to_replica.inc
 # Wait for XA_STATE to become COMMITTED on slave
 # Expecting no prepared transactions
 XA RECOVER;
@@ -77,49 +75,9 @@ formatID	gtrid_length	bqual_length	data
 include/diff_tables.inc [master:t,slave:t]
 [connection master]
 DROP TABLE t;
-include/sync_slave_sql_with_master.inc
-include/rpl_reset.inc
-####################################################################
-# Test Case 3: Enable Multithreaded Slave with replica_parallel_type as
-# LOGICAL_CLOCK. Verify that slave displays appropriate XA_STATE in
-# performance schema table, post XA PREPARE AND XA COMMIT command
-# execution.
-####################################################################
-include/stop_slave.inc
-SET GLOBAL replica_parallel_workers=4;
-SET GLOBAL replica_parallel_type='LOGICAL_CLOCK';
-include/start_slave.inc
+include/rpl/sync_to_replica.inc
 [connection slave]
-TRUNCATE TABLE performance_schema.events_transactions_current;
----- Setup ----
-[connection master]
-CREATE TABLE t ( f INT) ENGINE=INNODB;
----- XA PREPARE ----
-XA START 'xatest';
-INSERT INTO t VALUES (10);
-XA END 'xatest';
-XA PREPARE 'xatest';
-include/sync_slave_sql_with_master.inc
-# Wait for XA_STATE to become PREPARED on slave
-# Expecting one prepared transaction
-XA RECOVER;
-formatID	gtrid_length	bqual_length	data
-1	6	0	xatest
----- XA COMMIT ----
-[connection master]
-XA COMMIT 'xatest';
-include/sync_slave_sql_with_master.inc
-# Wait for XA_STATE to become COMMITTED on slave
-# Expecting no prepared transactions
-XA RECOVER;
-formatID	gtrid_length	bqual_length	data
-include/diff_tables.inc [master:t,slave:t]
-[connection master]
-DROP TABLE t;
-include/sync_slave_sql_with_master.inc
-[connection slave]
-include/stop_slave.inc
+include/rpl/stop_replica.inc
 set @@global.replica_parallel_workers= @save_replica_parallel_workers;
-set @@global.replica_parallel_type= @replica_parallel_type;
-include/start_slave.inc
-include/rpl_end.inc
+include/rpl/start_replica.inc
+include/rpl/deinit.inc

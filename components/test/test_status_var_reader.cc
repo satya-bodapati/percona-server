@@ -1,15 +1,16 @@
-/* Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -67,7 +68,7 @@ class udf_list {
   bool unregister() {
     udf_list_t delete_set;
     /* try to unregister all of the udfs */
-    for (auto udf : set) {
+    for (const auto &udf : set) {
       int was_present = 0;
       if (!mysql_service_udf_registration->udf_unregister(udf.c_str(),
                                                           &was_present) ||
@@ -76,7 +77,7 @@ class udf_list {
     }
 
     /* remove the unregistered ones from the list */
-    for (auto udf : delete_set) set.remove(udf);
+    for (const auto &udf : delete_set) set.remove(udf);
 
     /* success: empty set */
     if (set.empty()) return false;
@@ -87,7 +88,7 @@ class udf_list {
 
  private:
   udf_list_t set;
-} * list;
+} *list;
 
 /* actual test material */
 namespace udf_impl {
@@ -112,7 +113,7 @@ static char *test_get_status_var(UDF_INIT *initid, UDF_ARGS *args,
                                  char * /* result */, unsigned long *length,
                                  unsigned char *is_null, unsigned char *error) {
   my_h_string str = nullptr;
-  bool get_global = *(reinterpret_cast<long long *>(args->args[1])) == 0;
+  bool const get_global = *(reinterpret_cast<long long *>(args->args[1])) == 0;
   MYSQL_THD thd = nullptr;
 
   if (!get_global && mysql_service_mysql_current_thread_reader->get(&thd)) {

@@ -1,15 +1,16 @@
-/* Copyright (c) 2012, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2012, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,12 +26,12 @@
 #include <mysql/plugin_validate_password.h>
 #include <mysql/service_my_plugin_log.h>
 #include <mysql/service_mysql_string.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/types.h>
-#include <time.h>
 #include <algorithm>  // std::swap
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <fstream>
 #include <set>
 #include <string>
@@ -410,15 +411,13 @@ static int get_password_strength(mysql_string_handle password) {
 
   mysql_string_iterator_free(iter);
   if (n_chars < MIN_DICTIONARY_WORD_LENGTH) return (policy);
-  if (n_chars < validate_password_length)
-    return (PASSWORD_SCORE);
-  else {
-    policy = PASSWORD_POLICY_LOW;
-    if (validate_password_policy_strength(password, PASSWORD_POLICY_MEDIUM)) {
-      policy = PASSWORD_POLICY_MEDIUM;
-      if (validate_dictionary_check(password)) policy = PASSWORD_POLICY_STRONG;
-    }
+  if (n_chars < validate_password_length) return (PASSWORD_SCORE);
+  policy = PASSWORD_POLICY_LOW;
+  if (validate_password_policy_strength(password, PASSWORD_POLICY_MEDIUM)) {
+    policy = PASSWORD_POLICY_MEDIUM;
+    if (validate_dictionary_check(password)) policy = PASSWORD_POLICY_STRONG;
   }
+
   return ((policy + 1) * PASSWORD_SCORE + PASSWORD_SCORE);
 }
 

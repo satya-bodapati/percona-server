@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1994, 2023, Oracle and/or its affiliates.
+Copyright (c) 1994, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -156,7 +157,7 @@ If len>0, tests the first len bytes of the content for equality.
 @return true if both fields are NULL or if they are equal */
 [[nodiscard]] inline bool dfield_datas_are_binary_equal(const dfield_t *field1,
                                                         const dfield_t *field2,
-                                                        ulint len);
+                                                        ulint len = 0);
 /** Tests if dfield data length and content is equal to the given.
 @param[in] field Field
 @param[in] len   Data length or UNIV_SQL_NULL
@@ -283,7 +284,7 @@ occupied by the field structs or the tuple struct is not counted.
 @param[in]      tuple   typed data tuple
 @param[in]      comp    nonzero=ROW_FORMAT=COMPACT
 @return sum of data lens */
-MY_NODISCARD
+[[nodiscard]]
 static inline ulint dtuple_get_data_size(const dtuple_t *tuple, ulint comp);
 /** Compare two data tuples.
 @param[in] tuple1 first data tuple
@@ -405,7 +406,14 @@ struct multi_value_data {
   If current data array is for INSERT and DELETE, this can(should) be
   nullptr since all values in current array should be handled in these
   two cases. */
-  Bitset *bitset;
+  Bitset<> *bitset;
+
+#ifdef UNIV_DEBUG
+  /** The size of bitmap buffer in bytes. The bitset might point into
+  some prefix of it, and be later made shorter or longer, but not longer
+  than this length of underlying buffer. */
+  size_t bitmap_bytes{};
+#endif
 
   /** Allocate specified number of elements for all arrays and initialize
   the structure accordingly
@@ -510,7 +518,12 @@ struct multi_value_data {
            sizeof(*conv_buf) * multi_value->num_v);
     if (multi_value->bitset != nullptr) {
       ut_ad(bitset != nullptr);
-      *bitset = *multi_value->bitset;
+      ut_ad_le(multi_value->bitset->size_bytes(), bitmap_bytes);
+      /* adjust the size to match that of multi_value, but keep pointing to the
+      old buffer */
+      *bitset = Bitset<>(bitset->data(), multi_value->bitset->size_bytes());
+      /* copy the actual data into the buffer from multi_value's buffer */
+      bitset->copy_from(multi_value->bitset->data());
     }
     num_v = multi_value->num_v;
   }
@@ -610,6 +623,8 @@ struct dfield_t {
   in undo log for purge */
   unsigned len; /*!< data length; UNIV_SQL_NULL if SQL null */
   dtype_t type; /*!< type of data */
+
+  bool is_ext() const { return ext; }
 
   bool is_virtual() const { return (type.is_virtual()); }
 
@@ -788,7 +803,14 @@ struct dtuple_t {
     return false;
   }
 
+  /** Choose a field suitable for storing externally. */
+  dfield_t *choose_ext(dict_index_t *index);
   dtuple_t *deep_copy(mem_heap_t *heap) const;
+
+#ifdef UNIV_DEBUG
+  void validate() const;
+  void validate_for_index(const dict_index_t *index) const;
+#endif /* UNIV_DEBUG */
 };
 
 /** A slot for a field in a big rec vector */

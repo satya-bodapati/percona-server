@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -120,7 +121,8 @@ int get_old_on_completion(Event::enum_on_completion on_completion) {
            event on completion value.
 */
 
-static Event::enum_on_completion get_on_completion(int on_completion) {
+static Event::enum_on_completion get_on_completion(
+    Event_parse_data::enum_on_completion on_completion) {
   switch (on_completion) {
     case Event_parse_data::ON_COMPLETION_DEFAULT:
     case Event_parse_data::ON_COMPLETION_DROP:
@@ -373,7 +375,9 @@ bool update_event(THD *thd, Event *event, const dd::Schema &schema,
   DBUG_TRACE;
 
   // Check whether alter event was given dates that are in the past.
-  if (event_data->check_dates(thd, static_cast<int>(event->on_completion())))
+  if (event_data->check_dates(thd,
+                              static_cast<Event_parse_data::enum_on_completion>(
+                                  event->on_completion())))
     return true;
 
   // Update Schema Id if there is a dbname change.

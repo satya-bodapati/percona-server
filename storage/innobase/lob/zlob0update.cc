@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -60,7 +61,8 @@ static dberr_t z_replace(InsertContext &ctx, trx_t *trx, dict_index_t *index,
 that the ZLOB partial update feature code is hit.
 @param[in]      uf      the update field information
 @param[in]      index   index where partial update happens.*/
-static void z_print_partial_update_hit(upd_field_t *uf, dict_index_t *index) {
+static void z_print_partial_update_hit(const upd_field_t *uf,
+                                       const dict_index_t *index) {
   ib::info(ER_IB_MSG_633) << "ZLOB partial update of field=("
                           << uf->mysql_field->field_name << ") on index=("
                           << index->name << ") in table=(" << index->table_name
@@ -85,7 +87,7 @@ dberr_t z_update(InsertContext &ctx, trx_t *trx, dict_index_t *index,
   const Binary_diff_vector *bdiff_vector =
       upd->get_binary_diff_by_field_no(field_no);
 
-  upd_field_t *uf = upd->get_field_by_field_no(field_no, index);
+  const upd_field_t *const uf = upd->get_field_by_field_no(field_no, index);
 
 #ifdef UNIV_DEBUG
   /* Print information on server error log file, which can be
@@ -198,7 +200,7 @@ static dberr_t z_replace(InsertContext &ctx, trx_t *trx, dict_index_t *index,
   space_id_t space_id = ref.space_id();
   const page_id_t first_page_id(space_id, first_page_no);
 
-  first_page.set_last_trx_id(trx->id);
+  first_page.set_last_trx_id(trxid);
   first_page.set_last_trx_undo_no(undo_no);
 
   ut_ad(first_page.get_page_type() == FIL_PAGE_TYPE_ZLOB_FIRST);

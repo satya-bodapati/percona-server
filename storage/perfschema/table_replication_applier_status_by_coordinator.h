@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2013, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2013, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -65,25 +66,25 @@ enum enum_rpl_yes_no {
 */
 struct st_row_coordinator {
   char channel_name[CHANNEL_NAME_LENGTH];
-  uint channel_name_length;
+  uint channel_name_length{0};
   ulonglong thread_id{0};
-  bool thread_id_is_null;
+  bool thread_id_is_null{0};
   enum_rpl_yes_no service_state;
-  uint last_error_number;
+  uint last_error_number{0};
   char last_error_message[MAX_SLAVE_ERRMSG];
-  uint last_error_message_length;
-  ulonglong last_error_timestamp;
+  uint last_error_message_length{0};
+  ulonglong last_error_timestamp{0};
   char last_processed_trx[Gtid::MAX_TEXT_LENGTH + 1];
-  uint last_processed_trx_length;
-  ulonglong last_processed_trx_original_commit_timestamp;
-  ulonglong last_processed_trx_immediate_commit_timestamp;
-  ulonglong last_processed_trx_start_buffer_timestamp;
-  ulonglong last_processed_trx_end_buffer_timestamp;
+  uint last_processed_trx_length{0};
+  ulonglong last_processed_trx_original_commit_timestamp{0};
+  ulonglong last_processed_trx_immediate_commit_timestamp{0};
+  ulonglong last_processed_trx_start_buffer_timestamp{0};
+  ulonglong last_processed_trx_end_buffer_timestamp{0};
   char processing_trx[Gtid::MAX_TEXT_LENGTH + 1];
-  uint processing_trx_length;
-  ulonglong processing_trx_original_commit_timestamp;
-  ulonglong processing_trx_immediate_commit_timestamp;
-  ulonglong processing_trx_start_buffer_timestamp;
+  uint processing_trx_length{0};
+  ulonglong processing_trx_original_commit_timestamp{0};
+  ulonglong processing_trx_immediate_commit_timestamp{0};
+  ulonglong processing_trx_start_buffer_timestamp{0};
 };
 
 class PFS_index_rpl_applier_status_by_coord : public PFS_engine_index {

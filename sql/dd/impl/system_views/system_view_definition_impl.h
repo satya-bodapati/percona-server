@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -57,6 +58,22 @@ class System_view_definition_impl : public System_view_definition {
   static const String_type fs_name_collation() {
     if (lower_case_table_names != 0) return " COLLATE utf8mb3_tolower_ci";
     return "";
+  }
+
+  /**
+    Get collation clause to append to view definition for some
+    utf8mb4 view columns that depend on lower_case_table_names.
+
+    Copying the behavior of fs_name_collation(), but wondering
+    why we don't use the the ci collation only for LCTN=2, that
+    would be more in line with the behavior oF the DD tables,
+    see Object_table_definition_impl::fs_name_collation().
+
+    @return utf8mb4_bin if lctn=0, otherwise utf8mb4_0900_as_ci.
+  */
+  static const String_type fs_name_collation_utf8mb4() {
+    if (lower_case_table_names != 0) return " COLLATE utf8mb4_0900_as_ci";
+    return " COLLATE utf8mb4_bin";
   }
 
   String_type build_ddl_create_view() const override = 0;

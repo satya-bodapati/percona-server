@@ -1,15 +1,16 @@
-/* Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -32,7 +33,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#include <mysql/components/services/bits/my_thread_bits.h>
+#include <mysql/components/services/bits/my_thread_bits.h>  // IWYU pragma: export
 
 #include "my_compiler.h"
 #include "my_config.h"
@@ -53,7 +54,7 @@
 // clang with DEBUG and UBSAN -O0 -fno-inline
 #define DEFAULT_THREAD_STACK (1024UL * 1024UL)
 
-static inline int is_timeout(int e) {
+static inline bool is_timeout(int e) {
 #if ETIMEDOUT == ETIME
   return e == ETIMEDOUT;
 #else
@@ -160,6 +161,7 @@ inline bool operator!=(const my_thread_handle &a, const my_thread_handle &b) {
 
 int my_thread_create(my_thread_handle *thread, const my_thread_attr_t *attr,
                      my_start_routine func, void *arg);
+void my_thread_handle_self(my_thread_handle *thread);
 int my_thread_join(my_thread_handle *thread, void **value_ptr);
 int my_thread_cancel(my_thread_handle *thread);
 
@@ -174,8 +176,8 @@ extern bool my_thread_global_init();
 extern void my_thread_global_reinit();
 extern void my_thread_global_end();
 
-// Need to be extern "C" for the time being, due to memcached.
-extern "C" bool my_thread_init();
-extern "C" void my_thread_end();
+extern bool my_thread_init();
+extern void my_thread_end();
+extern bool my_thread_is_inited();
 
 #endif /* MY_THREAD_INCLUDED */

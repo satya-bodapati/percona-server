@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 2000, 2023, Oracle and/or its affiliates.
+Copyright (c) 2000, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -34,11 +35,17 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "create_field.h"
 #include "field.h"
 #include "handler.h"
+#include "mysql/components/services/bulk_data_service.h"
 #include "mysql/components/services/clone_protocol_service.h"
 
 #include "row0pread-adapter.h"
 #include "row0pread-histogram.h"
 #include "trx0trx.h"
+#include "vec0aux.h"
+
+/** One open streaming ANN scan; defined in vec0hnsw.cc. Held here by
+pointer only, so this header does not pull in the graph. */
+struct vec_search_t;
 
 /** "GEN_CLUST_INDEX" is the name reserved for InnoDB default
 system clustered index when there is no primary key. */
@@ -192,6 +199,22 @@ class ha_innobase : public handler {
 
   int ft_read(uchar *buf) override;
 
+  int vec_init() override;
+  int vec_read_first(Item *item, uchar *buf, ha_rows limit) override;
+  int vec_read_next(uchar *buf) override;
+
+ private:
+  /** JT_VECTOR read-path state: one open streaming scan of the graph.
+
+  The scan is the whole of it. It carries the traversal's visited set and
+  unexplored frontier, so continuing costs nothing extra and a candidate
+  can never repeat - there is no batch to buffer, no read position, and no
+  set of already-returned labels to exclude. Opened by vec_read_first and
+  released by index_end, which is where the iterator's destructor lands. */
+  vec_search_t *m_vec_search = nullptr;
+  std::string m_vec_query;
+
+ public:
   void position(const uchar *record) override;
 
   int info(uint) override;
@@ -254,11 +277,6 @@ class ha_innobase : public handler {
   void position(uchar *record);
 
   int records(ha_rows *num_rows) override;
-
-  int records_from_index(ha_rows *num_rows, uint) override {
-    /* Force use of cluster index until we implement sec index parallel scan. */
-    return ha_innobase::records(num_rows);
-  }
 
   ha_rows records_in_range(uint inx, key_range *min_key,
                            key_range *max_key) override;
@@ -436,20 +454,6 @@ class ha_innobase : public handler {
                                   dd::Table *new_dd_tab) override;
   /** @} */
 
-  /** This function reads zip dict-related info from SYS_ZIP_DICT
-  and SYS_ZIP_DICT_COLS for all columns marked with
-  COLUMN_FORMAT_TYPE_COMPRESSED flag and updates
-  zip_dict_name / zip_dict_data for those which have associated
-  compression dictionaries.
-
-  @param	thd		Thread handle, used to determine whether it
-  is necessary to lock dict_sys mutex
-  @param	part_name	Full table name (including partition part).
-  Must be non-NULL only if called from
-  ha_partition.
-  */
-  virtual void upgrade_update_field_with_zip_dict_info(
-      THD *thd, const char *part_name) override;
 
   using Reader = Parallel_reader_adapter;
 
@@ -496,6 +500,46 @@ class ha_innobase : public handler {
   @return true iff bulk load can be done on the table. */
   bool bulk_load_check(THD *thd) const override;
 
+  /** Check the table for any foreign key constraint violations.
+  @return 0 when there are no violations (success) */
+  int check_foreign_constraints(THD *thd, size_t n_threads) const override;
+
+  /** Used during bulk load on a non-empty table, called after the CSV file
+  input is exhausted and we need to copy any existing data from the original
+  table to the duplicated one.
+  @param[in]  load_ctx      SE load context
+  @param[in]  thread_idx    loader thread index
+  @param[in]  wait_cbk      stat callbacks.
+  @return 0 if successful, HA_ERR_GENERIC otherwise. */
+  int bulk_load_copy_existing_data(
+      void *load_ctx, size_t thread_idx,
+      Bulk_load::Stat_callbacks &wait_cbk) const override;
+
+  /** Sets the source table data (table name and key range boundaries) for all
+  loaders.
+  @param[in,out]  load_ctx                SE load context
+  @param[in]      source_table_data  vector containing the source table data
+  @return true if successful, false otherwise. */
+  bool bulk_load_set_source_table_data(
+      void *load_ctx,
+      const std::vector<Bulk_load::Source_table_data> &source_table_data)
+      const override;
+
+  /** Generates a temporary table name to be used for table duplication during
+  bulk load.
+  @return a temporary table name. */
+  std::string bulk_load_generate_temporary_table_name() const override;
+
+  /** Get the row ID range of the table that we're bulk loading into. Only used
+  when the table has a generated clustered index and is not empty.
+  @param[out] min Minimum ROW_ID in table
+  @param[out] max Maximum ROW_ID in table
+  @return true if successful, false otherwise. */
+  bool bulk_load_get_row_id_range(size_t &min, size_t &max) const override;
+
+  /** Check whether the table is empty */
+  bool is_table_empty() const override;
+
   /** Get the total memory available for bulk load in innodb buffer pool.
   @param[in] thd user session
   @return available memory for bulk load */
@@ -503,11 +547,12 @@ class ha_innobase : public handler {
 
   /** Begin parallel bulk data load to the table.
   @param[in] thd       user session
+  @param[in] keynr     key number to identify the index.
   @param[in] data_size total data size in bytes
   @param[in] memory buffer pool memory to be used
   @param[in] num_threads Number of concurrent threads used for load.
   @return bulk load context or nullptr if unsuccessful. */
-  void *bulk_load_begin(THD *thd, size_t data_size, size_t memory,
+  void *bulk_load_begin(THD *thd, size_t keynr, size_t data_size, size_t memory,
                         size_t num_threads) override;
 
   /** Execute bulk load operation. To be called by each of the concurrent
@@ -521,6 +566,41 @@ class ha_innobase : public handler {
   int bulk_load_execute(THD *thd, void *load_ctx, size_t thread_idx,
                         const Rows_mysql &rows,
                         Bulk_load::Stat_callbacks &wait_cbk) override;
+
+  /** Open a blob for write operation.
+  @param[in,out]  thd         user session
+  @param[in,out]  load_ctx    load execution context
+  @param[in]      thread_idx  index of the thread executing
+  @param[out]     blob_ctx    a blob context
+  @param[out]     blobref     a blob reference to be placed in the record.
+  @return 0 on success, error code on failure */
+  int open_blob(THD *thd [[maybe_unused]], void *load_ctx, size_t thread_idx,
+                Blob_context &blob_ctx, unsigned char *blobref) override;
+
+  /** Write to a blob
+  @param[in,out]  thd         user session
+  @param[in,out]  load_ctx    load execution context
+  @param[in]      thread_idx  index of the thread executing
+  @param[in]      blob_ctx    a blob context
+  @param[out]     blobref     buffer to hold a blob reference.
+  @param[in]      data        data to be written to blob.
+  @param[in]      data_len    length of data to be written in bytes.
+  @return 0 on success, error code on failure */
+  int write_blob(THD *thd [[maybe_unused]], void *load_ctx, size_t thread_idx,
+                 Blob_context blob_ctx, unsigned char *blobref,
+                 const unsigned char *data, size_t data_len) override;
+
+  /** Close the blob
+  @param[in,out]  thd         user session
+  @param[in,out]  load_ctx    load execution context
+  @param[in]      thread_idx  index of the thread executing
+  @param[in]      blob_ctx    a blob context
+  @param[out]     blobref     blob reference will be populated in the provided
+  buffer. The buffer should have enough space (@ref lob::ref_t::SIZE) to hold
+  a blob reference.
+  @return 0 on success, error code on failure */
+  int close_blob(THD *thd [[maybe_unused]], void *load_ctx, size_t thread_idx,
+                 Blob_context blob_ctx, byte *blobref) override;
 
   /** End bulk load operation. Must be called after all execution threads have
   completed. Must be called even if the bulk load execution failed.
@@ -551,6 +631,7 @@ class ha_innobase : public handler {
   ha_rows multi_range_read_info_const(uint keyno, RANGE_SEQ_IF *seq,
                                       void *seq_init_param, uint n_ranges,
                                       uint *bufsz, uint *flags,
+                                      bool *force_default_mrr,
                                       Cost_estimate *cost) override;
 
   /** Initialize multi range read and get information.
@@ -628,6 +709,13 @@ class ha_innobase : public handler {
   /** Returns statistics information of the table to the MySQL interpreter, in
   various fields of the handle object.
   @param[in]    flag            what information is requested
+                                HA_STATUS_NO_LOCK is supported only for:
+                                ha_statistics::delete_length
+                                it is not supported for others like:
+                                ha_statistics::records
+                                But it will not lock for the duration of stats
+                                calculation. Only during copy to make sure
+                                stats are consistent.
   @param[in]    is_analyze      True if called from "::analyze()".
   @return HA_ERR_* error code or 0 */
   virtual int info_low(uint flag, bool is_analyze);
@@ -739,6 +827,21 @@ class ha_innobase : public handler {
 
   /** If mysql has locked with external_lock() */
   bool m_mysql_has_locked;
+
+  /** Get the table stats.
+  @param[in]  flag       flag indicating which statistics to return
+  @param[in]  ib_table   table
+  @param[out] n_rows     estimated number of rows
+  @param[out] stat_clustered_index_size      size of the clustered index
+  @param[out] stat_sum_of_other_index_sizes  total size of all indexes */
+  void info_low_table_stats(uint flag, const dict_table_t *ib_table,
+                            uint64_t &n_rows, ulint &stat_clustered_index_size,
+                            ulint &stat_sum_of_other_index_sizes) const;
+
+  /** Get number of records per key. Save them into array ib_table->key_info.
+  @param[in]      flag      flag indicating which statistics to return
+  @param[in,out]  ib_table  table */
+  void info_low_key(uint flag, const dict_table_t *ib_table);
 };
 
 struct trx_t;
@@ -1411,7 +1514,7 @@ will be closed before the index creation/drop.
 @param[in,out]	share		share structure where index translation table
                                 will be constructed in.
 @return true if index translation table built successfully */
-MY_NODISCARD
+[[nodiscard]]
 bool innobase_build_index_translation(const TABLE *table,
                                       dict_table_t *ib_table,
                                       INNOBASE_SHARE *share);

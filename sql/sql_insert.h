@@ -1,15 +1,16 @@
-/* Copyright (c) 2006, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2006, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -207,6 +208,9 @@ class Query_result_create final : public Query_result_insert {
     create_info = create_info_arg;
     alter_info = alter_info_arg;
   }
+  [[nodiscard]] Table_ref *get_create_table() const override {
+    return create_table;
+  }
 
  private:
   bool stmt_binlog_is_trans() const override;
@@ -225,6 +229,12 @@ class Sql_cmd_insert_base : public Sql_cmd_dml {
   bool check_privileges(THD *thd) override;
   bool prepare_inner(THD *thd) override;
   bool restore_cmd_properties(THD *thd) override;
+  bool prune_partitions(THD *thd, bool prune_needs_default_values,
+                        const mem_root_deque<Item *> &insert_field_list,
+                        MY_BITMAP *used_partitions, TABLE *const insert_table,
+                        COPY_INFO &info,
+                        partition_info::enum_can_prune *can_prune_partitions,
+                        bool tables_locked);
 
  private:
   bool resolve_update_expressions(THD *thd);

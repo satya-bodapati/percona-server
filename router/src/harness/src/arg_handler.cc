@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -65,8 +66,7 @@ void CmdArgHandler::add_option(const CmdOption &other) noexcept {
   assert(!other.names.empty());  // need none empty names container
   assert(debug_check_option_names(other.names));
 
-  options_.emplace_back(other.names, other.description, other.value_req,
-                        other.metavar, other.action, other.at_end_action);
+  options_.push_back(other);
 }
 
 OptionContainer::const_iterator CmdArgHandler::find_option(
@@ -107,6 +107,7 @@ bool is_valid_option_value(const std::string &value) {
 
 void CmdArgHandler::process(const std::vector<std::string> &arguments) {
   rest_arguments_.clear();
+  found_unkown_argument_ = false;
 
   std::vector<std::pair<CmdOption::ActionFunc, std::string>> schedule;
   std::vector<std::pair<CmdOption::AtEndActionFunc, std::string>>
@@ -192,6 +193,8 @@ void CmdArgHandler::process(const std::vector<std::string> &arguments) {
     if (opt_iter == options_.end()) {
       if (!ignore_unknown_arguments)
         throw std::invalid_argument("unknown option '" + argpart + "'.");
+
+      found_unkown_argument_ = true;
     }
 
     // if ignore_unknown_arguments is true we use this no-op handler when we see

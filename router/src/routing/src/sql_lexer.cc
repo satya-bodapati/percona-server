@@ -1,16 +1,17 @@
 /*
-  Copyright (c) 2022, 2023, Oracle and/or its affiliates.
+  Copyright (c) 2022, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,10 +28,8 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>  // memcpy
+#include <cstring>  // memcpy, strtol
 #include <mutex>
-
-#include <iostream>
 
 #include "lex_string.h"  // LEX_STRING
 #include "my_compiler.h"
@@ -39,6 +38,7 @@
 #include "my_sys.h"                 // strmake_root
 #include "mysql/strings/m_ctype.h"  // my_charset_...
 #include "mysql_version.h"          // MYSQL_VERSION_ID
+#include "sql/lex.h"
 #include "sql/lexer_yystype.h"
 #include "sql/sql_digest_stream.h"
 #include "sql/sql_lex_hash.h"
@@ -155,9 +155,11 @@ void Lex_input_stream::body_utf8_start(THD *thd, const char *begin_ptr) {
   assert(begin_ptr);
   assert(m_cpp_buf <= begin_ptr && begin_ptr <= m_cpp_buf + m_buf_length);
 
+  static const auto *utf8mb4_bin = get_charset(46, 0);
+
   size_t body_utf8_length =
       (m_buf_length / thd->variables.character_set_client->mbminlen) *
-      my_charset_utf8mb4_bin.mbmaxlen;
+      utf8mb4_bin->mbmaxlen;
 
   m_body_utf8 = (char *)thd->alloc(body_utf8_length + 1);
   m_body_utf8_ptr = m_body_utf8;
@@ -235,9 +237,11 @@ void Lex_input_stream::body_utf8_append_literal(THD *thd, const LEX_STRING *txt,
 
   LEX_STRING utf_txt{nullptr, 0};
 
-  if (!my_charset_same(txt_cs, &my_charset_utf8mb4_general_ci)) {
-    thd->convert_string(&utf_txt, &my_charset_utf8mb4_general_ci, txt->str,
-                        txt->length, txt_cs);
+  static const auto *utf8mb4_general_ci = get_charset(45, 0);
+
+  if (!my_charset_same(txt_cs, utf8mb4_general_ci)) {
+    thd->convert_string(&utf_txt, utf8mb4_general_ci, txt->str, txt->length,
+                        txt_cs);
   } else {
     utf_txt.str = txt->str;
     utf_txt.length = txt->length;
@@ -256,9 +260,9 @@ void Lex_input_stream::body_utf8_append_literal(THD *thd, const LEX_STRING *txt,
   m_cpp_utf8_processed_ptr = end_ptr;
 }
 
-void Lex_input_stream::add_digest_token(uint token, Lexer_yystype *yylval) {
+void Lex_input_stream::add_digest_token(uint token, Lexer_yystype *lval) {
   if (m_digest != nullptr) {
-    m_digest = digest_add_token(m_digest, token, yylval);
+    m_digest = digest_add_token(m_digest, token, lval);
   }
 }
 
@@ -445,6 +449,72 @@ static char *get_text(Lex_input_stream *lip, int pre_skip, int post_skip) {
   }
   return nullptr;  // unexpected end of query
 }
+
+#ifdef DOLLAR_QUOTED_STRING_SYM
+/**
+  Get the text literal between dollar quotes.
+
+  A dollar quote is of the form $tag$, where tag is zero or more characters.
+  The same characters that are permitted for unquoted identifiers,
+  except dollar, may be used for the tag.
+  That is, basic ASCII letters, digits 0-9, underscore,
+  and any multibyte UTF8 characters.
+
+  @param lip     The input stream. When called, the current position
+                 is right after the initial dollar character
+  @param tag_len The length of the tag
+
+  @returns The text literal without dollar quotes
+ */
+static LEX_CSTRING get_dollar_quoted_text(Lex_input_stream *lip, int tag_len) {
+  assert(lip->yyGetLast() == '$' && !lip->eof());
+
+  const CHARSET_INFO *cs = lip->m_thd->charset();
+
+  const uchar *left_delim = pointer_cast<const uchar *>(lip->get_tok_start());
+  lip->yySkipn(tag_len + 1);  // skip beyond the 2nd '$'
+
+  enum { TEXT_BODY, RIGHT_DELIMITER } state = TEXT_BODY;
+
+  const char *body_start = lip->get_cpp_ptr();
+  int delim_pos = 0;  // Position during delimiter matching
+
+  while (!lip->eof()) {
+    const uchar c = lip->yyGet();
+
+    switch (state) {
+      case TEXT_BODY:
+        if (use_mb(cs)) {
+          int mb_len =
+              my_ismbchar(cs, lip->get_ptr() - 1, lip->get_end_of_query());
+          if (mb_len > 1) {
+            lip->skip_binary(mb_len - 1);
+            break;
+          }
+        }
+        if (c == '$') {
+          state = RIGHT_DELIMITER;
+        }
+        break;
+
+      case RIGHT_DELIMITER:
+        if (c == left_delim[++delim_pos]) {
+          if (delim_pos == tag_len + 1) {
+            size_t length = lip->get_cpp_ptr() - body_start - tag_len - 2;
+            return LEX_CSTRING{body_start, length};
+          }
+        } else {  // Not a right delimiter after all
+          state = TEXT_BODY;
+          delim_pos = 0;
+        }
+        break;
+    }
+  }
+
+  assert(lip->eof());
+  return LEX_CSTRING{};  // error: unterminated text
+}
+#endif
 
 /*
 ** Calc type of integer; long integer, longlong integer or real.
@@ -654,11 +724,48 @@ static int lex_one_token(Lexer_yystype *yylval, THD *thd) {
         yylval->lex_str.length = lip->yytoklen;
         return (NCHAR_STRING);
 
-      case MY_LEX_IDENT_OR_DOLLAR_QUOTED_TEXT:
+      case MY_LEX_IDENT_OR_DOLLAR_QUOTED_TEXT: {
+#ifdef DOLLAR_QUOTED_STRING_SYM
+        int len = 0;             /* Length of the tag of the dollar quote */
+        uchar p = lip->yyPeek(); /* Character succeeding first $ */
+        // Find $ character after the tag
+        while (p != '$' && ident_map[p] &&
+               lip->get_ptr() + len <= lip->get_end_of_query()) {
+          if (use_mb(cs)) {
+            int l =
+                my_ismbchar(cs, lip->get_ptr() + len, lip->get_end_of_query());
+            if (l > 1) len += l - 1;
+          }
+          p = lip->yyPeekn(++len);
+        }
+
+        if (p != '$') { /* Not a dollar quote, could be an identifier */
+          push_deprecated_warn_no_replacement(
+              lip->m_thd, "$ as the first character of an unquoted identifier");
+          state = MY_LEX_IDENT;
+          break;
+        } else {
+          LEX_CSTRING text = get_dollar_quoted_text(lip, len);
+          if (text.length == NULL_CSTR.length)
+            return ABORT_SYM;  // error: unterminated text
+          else {
+            yylval->lex_str.str = const_cast<char *>(text.str);
+            yylval->lex_str.length = text.length;
+
+            lip->body_utf8_append(text.str);
+            lip->body_utf8_append_literal(thd, &yylval->lex_str, cs,
+                                          text.str + text.length);
+
+            return DOLLAR_QUOTED_STRING_SYM;  // $$ ... $$
+          }
+        }
+#else
         state = MY_LEX_IDENT;
         push_deprecated_warn_no_replacement(
             lip->m_thd, "$ as the first character of an unquoted identifier");
         break;
+#endif
+      }
       case MY_LEX_IDENT_OR_HEX:
         if (lip->yyPeek() == '\'') {  // Found x'hex-number'
           state = MY_LEX_HEX_NUMBER;
@@ -747,7 +854,11 @@ static int lex_one_token(Lexer_yystype *yylval, THD *thd) {
               get_charset_by_csname(charset_name, MY_CS_PRIMARY, MYF(0));
           if (underscore_cs) {
             lip->warn_on_deprecated_charset(underscore_cs, charset_name);
-            if (underscore_cs == &my_charset_utf8mb4_0900_ai_ci) {
+
+            // 255 is my_charset_utf8mb4_0900_ai_ci.number
+            static const auto *utf8mb4_0900_ai_ci = get_charset(255, 0);
+
+            if (underscore_cs == utf8mb4_0900_ai_ci) {
               /*
                 If underscore_cs is utf8mb4, and the collation of underscore_cs
                 is the default collation of utf8mb4, then update underscore_cs
@@ -1259,14 +1370,24 @@ static int lex_one_token(Lexer_yystype *yylval, THD *thd) {
   }
 }
 
+#ifdef MYSQLCLIENT_IS_STATIC
+// ^^ that define doesn't exist.
+//
+// the code is kept here as reference in case someone is using the SqlLexer with
+// a static libmysqlclient
 std::once_flag lexer_init;
+#endif
+
+void SqlLexer::init_library() {
+  my_init();
+
+  get_collation_number("latin1");  // init the charset subsystem
+}
 
 SqlLexer::SqlLexer(THD *session) : session_{session} {
-  std::call_once(lexer_init, []() {
-    my_init();
-
-    get_collation_number("latin1");  // init the charset subsystem
-  });
+#ifdef MYSQLCLIENT_IS_STATIC
+  std::call_once(lexer_init, []() { init_library(); });
+#endif
 }
 
 SqlLexer::iterator::iterator(THD *session) : session_(session) {
@@ -1275,6 +1396,37 @@ SqlLexer::iterator::iterator(THD *session) : session_(session) {
     token_ = next_token();
   }
 }
+
+#if 0
+
+// for debugging.
+std::ostream &operator<<(std::ostream &oss, SqlLexer::iterator::Token tkn) {
+  for (size_t ndx{}; ndx < sizeof(symbols) / sizeof(symbols[0]); ++ndx) {
+    auto sym = symbols[ndx];
+
+    if (sym.tok == tkn.id) {
+      oss << "sym[" << std::string_view(sym.name, sym.length) << "]";
+      return oss;
+    }
+  }
+
+  if (tkn.id >= 32 && tkn.id < 127) {
+    oss << (char)tkn.id;
+  } else if (tkn.id == IDENT || tkn.id == IDENT_QUOTED) {
+    oss << std::quoted(tkn.text, '`');
+  } else if (tkn.id == TEXT_STRING) {
+    oss << std::quoted(tkn.text);
+  } else if (tkn.id == NUM) {
+    oss << tkn.text;
+  } else if (tkn.id == ABORT_SYM) {
+    oss << "<ABORT>";
+  } else if (tkn.id == END_OF_INPUT) {
+    oss << "<END>";
+  }
+
+  return oss;
+}
+#endif
 
 SqlLexer::iterator::Token SqlLexer::iterator::next_token() {
   const auto token_id = lex_one_token(&st, session_);
@@ -1327,6 +1479,8 @@ std::string_view SqlLexer::iterator::get_token_text(TokenId token_id) const {
     return {"\0", 1};
   } else if (token_id == 0) {  // YYEOF
     return {};
+  } else if (token_id == ABORT_SYM) {
+    return raw_token;
   } else if (token_id < 256) {  // 0-255 are plain ASCII characters
     return raw_token;
   } else if (token_id == IDENT) {

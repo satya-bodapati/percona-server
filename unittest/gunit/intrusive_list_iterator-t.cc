@@ -1,15 +1,16 @@
-/* Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -45,8 +46,8 @@ struct IntrusivePointee {
 };
 
 void IntrusiveListIteratorTest::SetUp() {
-  auto two = new IntrusivePointee{2, nullptr};
-  auto one = new IntrusivePointee{1, two};
+  auto *two = new IntrusivePointee{2, nullptr};
+  auto *one = new IntrusivePointee{1, two};
   first = one;
 }
 
@@ -58,7 +59,8 @@ void IntrusiveListIteratorTest::TearDown() {
 }
 
 TEST_F(IntrusiveListIteratorTest, BarePointer) {
-  IntrusiveListIterator<IntrusivePointee, &IntrusivePointee::next> it(first);
+  IntrusiveListIterator<IntrusivePointee, &IntrusivePointee::next> const it(
+      first);
   EXPECT_EQ(1, (*it)->value);
 }
 
@@ -74,7 +76,7 @@ using TestedIterator = NextFunctionIterator<IntrusivePointee, GetNextInList>;
 IntrusivePointee *GetNextInList(const IntrusivePointee *ip) { return ip->next; }
 
 TEST_F(IntrusiveListIteratorTest, IndirectionFunction) {
-  TestedIterator it(first);
+  TestedIterator const it(first);
   EXPECT_EQ(1, (*it)->value);
 }
 
@@ -88,13 +90,13 @@ TEST_F(IntrusiveListIteratorTest, IteratorContainer) {
   IteratorContainer<TestedIterator> container(first);
   int answers[] = {1, 2};
   int i = 0;
-  for (auto element : container) EXPECT_EQ(answers[i++], element->value);
+  for (auto *element : container) EXPECT_EQ(answers[i++], element->value);
 }
 
 TEST_F(IntrusiveListIteratorTest, NextFunctionContainer) {
   NextFunctionContainer<IntrusivePointee, GetNextInList> container(first);
   int answers[] = {1, 2};
   int i = 0;
-  for (auto element : container) EXPECT_EQ(answers[i++], element->value);
+  for (auto *element : container) EXPECT_EQ(answers[i++], element->value);
 }
 }  // namespace intrusive_list_iterator_unittest

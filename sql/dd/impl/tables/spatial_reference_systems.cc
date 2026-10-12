@@ -1,15 +1,16 @@
-/* Copyright (c) 2016, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2016, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,7 +23,7 @@
 
 #include "sql/dd/impl/tables/spatial_reference_systems.h"
 
-#include <string.h>
+#include <cstring>
 #include <new>
 
 #include "mysql/strings/m_ctype.h"
@@ -32,12 +33,10 @@
 #include "sql/dd/impl/types/object_table_definition_impl.h"
 #include "sql/dd/impl/types/spatial_reference_system_impl.h"  // dd::Spatial_refere...
 
-namespace dd {
-namespace tables {
+namespace dd::tables {
 
 const Spatial_reference_systems &Spatial_reference_systems::instance() {
-  static Spatial_reference_systems *s_instance =
-      new Spatial_reference_systems();
+  static auto *s_instance = new Spatial_reference_systems();
   return *s_instance;
 }
 
@@ -129,5 +128,4 @@ Object_key *Spatial_reference_systems::create_key_by_catalog_id(
 
 ///////////////////////////////////////////////////////////////////////////
 
-}  // namespace tables
-}  // namespace dd
+}  // namespace dd::tables

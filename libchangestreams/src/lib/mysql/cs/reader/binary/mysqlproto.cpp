@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,7 +26,8 @@
 
 #include "libchangestreams/include/mysql/cs/reader/binary/mysqlproto.h"
 #include "my_byteorder.h"
-#include "mysql/gtid/gtid.h"
+#include "mysql/gtids/gtids.h"      // Gtid_set
+#include "mysql/strconv/strconv.h"  // encode
 
 namespace cs::reader::binary {
 
@@ -70,36 +72,11 @@ bool Mysql_protocol::setup() {
 }
 
 bool Mysql_protocol::encode_gtid_set_to_mysql_protocol(
-    const mysql::gtid::Gtid_set &gtid_set, std::string &buffer) const {
-  char tmp[8];
-  const auto &contents = gtid_set.get_gtid_set();
-
-  if (contents.size() == 0) {
-    return false;
-  }
-
-  // serialize number of uuids
-  int8store(tmp, static_cast<ulonglong>(contents.size()));
-  buffer.append(tmp, 8);
-
-  // for every uuid, serialize it and its intervals
-  for (auto const &[uuid, intervals] : contents) {
-    buffer.append(reinterpret_cast<const char *>(uuid.bytes),
-                  mysql::gtid::Uuid::BYTE_LENGTH);
-
-    // serialize the number of intervals and append the intervals data
-    int8store(tmp, intervals.size());
-    buffer.append(tmp, 8);
-
-    // for every interval serialize start, end
-    for (auto const &intv : intervals) {
-      int8store(tmp, intv.get_start());
-      buffer.append(tmp, 8);
-
-      int8store(tmp, intv.get_end() + 1);
-      buffer.append(tmp, 8);
-    }
-  }
+    const mysql::gtids::Gtid_set &gtid_set, std::string &buffer) const {
+  if (mysql::strconv::encode(mysql::strconv::Binary_format{},
+                             mysql::strconv::out_str_growable(buffer),
+                             gtid_set) != mysql::utils::Return_status::ok)
+    return true;
   return false;
 }
 

@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
   as published by the Free Software Foundation.
 
-  This program is also distributed with certain software (including
+  This program is designed to work with certain software (including
   but not limited to OpenSSL) that is licensed under separate terms,
   as designated in a particular file or component or in included license
   documentation.  The authors of MySQL hereby grant you an additional
   permission to link the program and your derivative works with the
-  separately licensed software that they have included with MySQL.
+  separately licensed software that they have either included with
+  the program or referenced in the documentation.
 
   This program is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -75,8 +76,6 @@ static str_map_t mutex_map_8_0_26 = {
      "wait/synch/mutex/sql/key_mts_temp_table_LOCK"},
     {"wait/synch/mutex/sql/key_mta_gaq_LOCK",
      "wait/synch/mutex/sql/key_mts_gaq_LOCK"},
-    {"wait/synch/mutex/sql/Relay_log_info::replica_worker_hash_lock",
-     "wait/synch/mutex/sql/Relay_log_info::slave_worker_hash_lock"},
     {"wait/synch/mutex/sql/LOCK_replica_list",
      "wait/synch/mutex/sql/LOCK_slave_list"},
     {"wait/synch/mutex/sql/LOCK_replica_net_timeout",
@@ -91,9 +90,6 @@ static str_map_t rwlock_map_8_0_26 = {
 };
 
 static str_map_t cond_map_8_0_26 = {
-    // Yes, it actually was called _lock! That was a typo.
-    {"wait/synch/cond/sql/Relay_log_info::replica_worker_hash_cond",
-     "wait/synch/cond/sql/Relay_log_info::slave_worker_hash_lock"},
     {"wait/synch/cond/sql/Source_info::data_cond",
      "wait/synch/cond/sql/Master_info::data_cond"},
     {"wait/synch/cond/sql/Source_info::start_cond",
@@ -198,7 +194,7 @@ static version_vector_t version_vector = {
 
 namespace terminology_use_previous {
 
-compatible_name_t lookup(PFS_class_type class_type, const std::string str,
+compatible_name_t lookup(PFS_class_type class_type, const std::string &str,
                          bool use_prefix) {
   for (version_vector_t::size_type int_version = 0;
        int_version < version_vector.size(); ++int_version) {

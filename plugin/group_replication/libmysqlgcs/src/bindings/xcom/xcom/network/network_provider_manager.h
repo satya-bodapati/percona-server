@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -180,7 +181,7 @@ class Network_provider_manager : public Network_provider_management_interface,
    * the active provider.
    * @return const std::shared_ptr<Network_provider>
    */
-  const std::shared_ptr<Network_provider> get_provider(
+  std::shared_ptr<Network_provider> get_provider(
       enum_transport_protocol provider);
 
   /**
@@ -190,7 +191,7 @@ class Network_provider_manager : public Network_provider_management_interface,
    * @return const std::shared_ptr<Gcs_network_provider> a shared_ptr to the
    * active provider.
    */
-  const std::shared_ptr<Network_provider> get_active_provider();
+  std::shared_ptr<Network_provider> get_active_provider();
 
   /**
    * @brief Retrieves the active provider for incoming connections.
@@ -200,7 +201,7 @@ class Network_provider_manager : public Network_provider_management_interface,
    * @return const std::shared_ptr<Gcs_network_provider> a shared_ptr to the
    * active provider for incoming connections.
    */
-  const std::shared_ptr<Network_provider> get_incoming_connections_provider();
+  std::shared_ptr<Network_provider> get_incoming_connections_provider();
 
   /**
    * @brief Start the active provider.
@@ -272,13 +273,16 @@ class Network_provider_manager : public Network_provider_management_interface,
    * @param port    port of the remote endpoint
    * @param use_ssl if this connection should use SSL
    * @param connection_timeout optional connection timeout.
+   * @param log_level runtime log level
    *
    * @return connection_descriptor an established connection.
    *                                                 nullptr in case of failure.
    */
   connection_descriptor *open_xcom_connection(
       const char *server, xcom_port port, bool use_ssl,
-      int connection_timeout = Network_provider::default_connection_timeout());
+      int connection_timeout = Network_provider::default_connection_timeout(),
+      network_provider_dynamic_log_level log_level =
+          network_provider_dynamic_log_level::PROVIDED);
 
   // SSL RELATED OPERATIONS
 
@@ -373,6 +377,8 @@ class Network_provider_manager : public Network_provider_management_interface,
   void set_incoming_connections_protocol(enum_transport_protocol value) {
     m_incoming_connections_protocol = value;
   }
+
+  void cleanup_incoming_connection(Network_provider &provider_ref);
 
   std::unordered_map<enum_transport_protocol, std::shared_ptr<Network_provider>,
                      std::hash<int>>

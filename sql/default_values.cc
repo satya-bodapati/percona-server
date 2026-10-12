@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -97,11 +98,14 @@ static size_t column_pack_length(const dd::Column &col_obj) {
   @retval      false         Success.
 */
 
-static bool find_record_length(const dd::Table &table, size_t min_length,
-                               TABLE_SHARE *share) {
+static bool find_record_length(const dd::Abstract_table &table,
+                               size_t min_length, TABLE_SHARE *share) {
   // Get the table property 'pack_record' and initialize out parameters.
-  bool pack_record;
-  if (table.options().get("pack_record", &pack_record)) return true;
+  bool pack_record = false;
+  if (table.options().exists("pack_record") &&
+      table.options().get("pack_record", &pack_record)) {
+    return true;
+  }
 
   assert(share);
   share->fields = 0;
@@ -255,22 +259,24 @@ bool prepare_default_value(THD *thd, uchar *buf, TABLE *table,
 err:
   // Destroy the field, despite being MEM_ROOT allocated, to avoid memory
   // leak for fields that allocate extra memory (e.g Field_blob::value).
-  destroy(regfield);
+  if (regfield != nullptr) ::destroy_at(regfield);
   return retval;
 }
 
-bool prepare_default_value_buffer_and_table_share(THD *thd,
-                                                  const dd::Table &table,
-                                                  TABLE_SHARE *share) {
+bool prepare_default_value_buffer_and_table_share(
+    THD *thd, const dd::Abstract_table *table, TABLE_SHARE *share) {
   assert(share);
 
   // Get the handler temporarily, needed to get minimal record length as
   // well as extra record length.
-  handler *file = nullptr;
+  bool partitioned =
+      share->is_mv_se_materialized
+          ? false
+          : dynamic_cast<const dd::Table *>(table)->partition_type() !=
+                dd::Table::PT_NONE;
   handlerton *engine = share->db_type();
-  if (!(file = get_new_handler(nullptr,
-                               table.partition_type() != dd::Table::PT_NONE,
-                               thd->mem_root, engine))) {
+  handler *file = get_new_handler(nullptr, partitioned, thd->mem_root, engine);
+  if (file == nullptr) {
     my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR),
              static_cast<int>(sizeof(handler)));
     return true;
@@ -280,10 +286,12 @@ bool prepare_default_value_buffer_and_table_share(THD *thd,
   const size_t extra_length = file->extra_rec_buf_length();
   const size_t min_length =
       static_cast<size_t>(file->min_record_length(share->db_create_options));
-  destroy(file);
+  ::destroy_at(file);
 
   // Get the number of columns, record length etc.
-  if (find_record_length(table, min_length, share)) return true;
+  if (find_record_length(*table, min_length, share)) {
+    return true;
+  }
 
   // Adjust buffer size and allocate the default value buffer.
   share->rec_buff_length = ALIGN_SIZE(share->reclength + 1 + extra_length);

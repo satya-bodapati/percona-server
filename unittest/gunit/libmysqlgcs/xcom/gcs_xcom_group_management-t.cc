@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -111,7 +112,7 @@ class mock_gcs_xcom_proxy : public Gcs_xcom_proxy_base {
    * which is non-copyable. */
   Gcs_xcom_input_queue::future_reply xcom_input_try_push_and_get_reply(
       app_data_ptr) override {
-    return std::future<std::unique_ptr<Gcs_xcom_input_queue::Reply>>();
+    return {};
   }
   MOCK_METHOD0(xcom_input_try_pop, xcom_input_request_ptr());
 };
@@ -168,7 +169,7 @@ TEST_F(XcomGroupManagementTest, EmptyPeerNodes) {
   Gcs_interface_parameters forced_group;
   forced_group.add_parameter("peer_nodes", "");
 
-  enum_gcs_error result =
+  enum_gcs_error const result =
       xcom_group_mgmt_if->modify_configuration(forced_group);
 
   ASSERT_EQ(GCS_NOK, result);
@@ -177,9 +178,9 @@ TEST_F(XcomGroupManagementTest, EmptyPeerNodes) {
 TEST_F(XcomGroupManagementTest, UnconfiguredPeerNodes) {
   EXPECT_CALL(proxy, xcom_client_force_config(_, _)).Times(0);
 
-  Gcs_interface_parameters forced_group;
+  Gcs_interface_parameters const forced_group;
 
-  enum_gcs_error result =
+  enum_gcs_error const result =
       xcom_group_mgmt_if->modify_configuration(forced_group);
 
   ASSERT_EQ(GCS_NOK, result);
@@ -202,9 +203,9 @@ MATCHER_P(node_list_pointer_matcher, other_nl, "Derreference pointer") {
 }
 
 TEST_F(XcomGroupManagementTest, TestListContent) {
-  Gcs_xcom_node_information node_1("127.0.0.1:12345");
-  Gcs_xcom_node_information node_2("127.0.0.1:12346");
-  Gcs_xcom_node_information node_3("127.0.0.1:12347");
+  Gcs_xcom_node_information const node_1("127.0.0.1:12345");
+  Gcs_xcom_node_information const node_2("127.0.0.1:12346");
+  Gcs_xcom_node_information const node_3("127.0.0.1:12347");
 
   Gcs_xcom_nodes nodes;
   nodes.add_node(node_1);
@@ -237,7 +238,7 @@ TEST_F(XcomGroupManagementTest, TestListContent) {
   forced_group.add_parameter("peer_nodes", "127.0.0.1:12345,127.0.0.1:12346");
 
   xcom_group_mgmt_if->set_xcom_nodes(nodes);
-  enum_gcs_error result =
+  enum_gcs_error const result =
       xcom_group_mgmt_if->modify_configuration(forced_group);
 
   ASSERT_EQ(GCS_OK, result);
@@ -252,8 +253,8 @@ TEST_F(XcomGroupManagementTest, TestListContent) {
 }
 
 TEST_F(XcomGroupManagementTest, DisallowForcingSameMembership) {
-  Gcs_xcom_node_information node_1("127.0.0.1:12345");
-  Gcs_xcom_node_information node_2("127.0.0.1:12346");
+  Gcs_xcom_node_information const node_1("127.0.0.1:12345");
+  Gcs_xcom_node_information const node_2("127.0.0.1:12346");
 
   Gcs_xcom_nodes nodes;
   nodes.add_node(node_1);
@@ -284,13 +285,13 @@ TEST_F(XcomGroupManagementTest, DisallowForcingSameMembership) {
 
   Gcs_interface_parameters forced_group_1;
   forced_group_1.add_parameter("peer_nodes", "127.0.0.1:12346,127.0.0.1:12345");
-  enum_gcs_error result_1 =
+  enum_gcs_error const result_1 =
       xcom_group_mgmt_if->modify_configuration(forced_group_1);
   ASSERT_EQ(GCS_NOK, result_1);
 
   Gcs_interface_parameters forced_group_2;
   forced_group_2.add_parameter("peer_nodes", "127.0.0.1:12345,127.0.0.1:12346");
-  enum_gcs_error result_2 =
+  enum_gcs_error const result_2 =
       xcom_group_mgmt_if->modify_configuration(forced_group_2);
   ASSERT_EQ(GCS_NOK, result_2);
 
@@ -308,7 +309,8 @@ TEST_F(XcomGroupManagementTest, getWriteConcurrencyGroupLeaving) {
   EXPECT_CALL(vce, is_leaving()).Times(1).WillOnce(Return(true));
 
   uint32_t out_value;
-  enum_gcs_error result = xcom_group_mgmt_if->get_write_concurrency(out_value);
+  enum_gcs_error const result =
+      xcom_group_mgmt_if->get_write_concurrency(out_value);
 
   ASSERT_EQ(GCS_NOK, result);
 }
@@ -318,7 +320,8 @@ TEST_F(XcomGroupManagementTest, getWriteConcurrencyNoGroup) {
   EXPECT_CALL(proxy, xcom_is_exit()).Times(1).WillOnce(Return(true));
 
   uint32_t out_value;
-  enum_gcs_error result = xcom_group_mgmt_if->get_write_concurrency(out_value);
+  enum_gcs_error const result =
+      xcom_group_mgmt_if->get_write_concurrency(out_value);
 
   ASSERT_EQ(GCS_NOK, result);
 }

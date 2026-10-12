@@ -5,12 +5,11 @@
 # The condition has the same form as expressions evaluated by include/eval.inc
 # ==== Usage ====
 #
-# --let $openssl_binary_version = 1\\.1\\..*
-# --let $openssl_binary_version_do_not_skip = 1 (optional)
+# --let $openssl_binary_version = 1.1.*
+# --let $not_have_openssl_binary_version = 1
+#       optional, by default not set,
+#       if set, skip the test if openssl is NOT of a particular version
 # --source include/have_openssl_binary_version.inc
-#
-# result (if $openssl_binary_version_do_not_skip was set to 1):
-# $openssl_binary_version_match = 0 | 1
 
 --disable_query_log
 --disable_result_log
@@ -54,18 +53,20 @@ EOF
 --error 0,1
 --remove_file $OPENSSL_CONFIG_INC
 
-if ($STATUS_VAR)
+if (!$not_have_openssl_binary_version)
 {
-  if (!$openssl_binary_version_do_not_skip)
+  if ($STATUS_VAR)
   {
     --skip Test requires openssl version to be $openssl_binary_version
   }
-  --let $openssl_binary_version_match = 0
 }
 
-if (!$STATUS_VAR)
+if ($not_have_openssl_binary_version)
 {
-  --let $openssl_binary_version_match = 1
+  if (!$STATUS_VAR)
+  {
+    --skip Test requires openssl version not to be $openssl_binary_version
+  }
 }
 
 --enable_query_log

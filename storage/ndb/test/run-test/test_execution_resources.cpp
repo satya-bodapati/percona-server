@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -22,15 +23,15 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 */
 
-#include "util/require.h"
 #include "test_execution_resources.hpp"
+#include "util/require.h"
 
 #include <string>
+#include <util/File.hpp>
 #include <utility>
 #include <vector>
-#include <util/File.hpp>
 
-bool TestExecutionResources::registerExecutable(std::string exe,
+bool TestExecutionResources::registerExecutable(const std::string &exe,
                                                 bool isRequired) {
   if (m_resources.find(exe) != m_resources.end()) {
     return false;
@@ -42,7 +43,8 @@ bool TestExecutionResources::registerExecutable(std::string exe,
   return true;
 }
 
-bool TestExecutionResources::registerLibrary(std::string lib, bool isRequired) {
+bool TestExecutionResources::registerLibrary(const std::string &lib,
+                                             bool isRequired) {
   if (m_resources.find(lib) != m_resources.end()) {
     return false;
   }
@@ -53,7 +55,7 @@ bool TestExecutionResources::registerLibrary(std::string lib, bool isRequired) {
   return true;
 }
 
-bool TestExecutionResources::setRequired(std::string resource) {
+bool TestExecutionResources::setRequired(const std::string &resource) {
   auto it = m_resources.find(resource);
   if (it == m_resources.end()) {
     return false;
@@ -91,7 +93,7 @@ bool TestExecutionResources::setPath(Resource &resource, int prefix,
 
   const bool setFolder = (resource.type == Resource::Type::Lib);
   std::string path = find_path(resource.name, prefix, setFolder);
-  if (path != "") {
+  if (!path.empty()) {
     resource.paths[prefix] = path;
     return true;
   }
@@ -107,8 +109,8 @@ bool TestExecutionResources::setPath(Resource &resource, int prefix,
   return ok;
 }
 
-std::string TestExecutionResources::find_path(std::string name, int prefix,
-                                              bool returnFolder) {
+std::string TestExecutionResources::find_path(const std::string &name,
+                                              int prefix, bool returnFolder) {
   for (auto &folder : m_search_path) {
     std::string path = std::string(m_prefixes[prefix]) + "/" + folder;
     std::string fullResourcePath = path + "/" + name;
@@ -120,7 +122,7 @@ std::string TestExecutionResources::find_path(std::string name, int prefix,
   return {};
 }
 
-void TestExecutionResources::reportNonRequired(std::string exe,
+void TestExecutionResources::reportNonRequired(const std::string &exe,
                                                const char *prefix,
                                                std::vector<std::string> *msgs) {
   if (msgs == nullptr) return;
@@ -129,7 +131,8 @@ void TestExecutionResources::reportNonRequired(std::string exe,
   msgs->push_back(std::move(msg));
 }
 
-void TestExecutionResources::reportRequired(std::string exe, const char *prefix,
+void TestExecutionResources::reportRequired(const std::string &exe,
+                                            const char *prefix,
                                             std::vector<std::string> *msgs) {
   if (msgs == nullptr) return;
 
@@ -137,7 +140,8 @@ void TestExecutionResources::reportRequired(std::string exe, const char *prefix,
   msgs->push_back(std::move(msg));
 }
 
-std::string TestExecutionResources::getPath(std::string name, int prefix) {
+std::string TestExecutionResources::getPath(const std::string &name,
+                                            int prefix) {
   require(isValidPrefix(prefix));
 
   const auto resource = m_resources.find(name);

@@ -1,17 +1,18 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2023, Oracle and/or its affiliates.
+Copyright (c) 1995, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License, version 2.0, as published by the
 Free Software Foundation.
 
-This program is also distributed with certain software (including but not
-limited to OpenSSL) that is licensed under separate terms, as designated in a
-particular file or component or in included license documentation. The authors
-of MySQL hereby grant you an additional permission to link the program and
-your derivative works with the separately licensed software that they have
-included with MySQL.
+This program is designed to work with certain software (including
+but not limited to OpenSSL) that is licensed under separate terms,
+as designated in a particular file or component or in included license
+documentation.  The authors of MySQL hereby grant you an additional
+permission to link the program and your derivative works with the
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -68,7 +69,6 @@ double fseg_reserve_pct = FSEG_RESERVE_PCT_DFLT;
 #ifndef UNIV_HOTBACKUP
 
 #include "dd/types/tablespace.h"
-#include "dict0dd.h"
 #include "mysqld.h"
 #include "sql/dd/dictionary.h"
 #include "sql_backup_lock.h"
@@ -275,12 +275,6 @@ bool fsp_is_undo_tablespace(space_id_t space_id) {
   if (space_id >= dict_sys_t::s_min_undo_space_id &&
       space_id <= dict_sys_t::s_max_undo_space_id) {
     return (true);
-  }
-
-  /* If upgrading from 5.7, there may be a list of old-style
-  undo tablespaces.  Search them. */
-  if (trx_sys_undo_spaces != nullptr) {
-    return (trx_sys_undo_spaces->contains(space_id));
   }
 
   return (false);
@@ -785,8 +779,9 @@ static void fsp_init_file_page(buf_block_t *block, mtr_t *mtr) {
 }
 #endif /* !UNIV_HOTBACKUP */
 
-byte *fsp_parse_init_file_page(byte *ptr, byte *end_ptr [[maybe_unused]],
-                               buf_block_t *block) {
+const byte *fsp_parse_init_file_page(const byte *ptr,
+                                     const byte *end_ptr [[maybe_unused]],
+                                     buf_block_t *block) {
   if (block) {
     fsp_init_file_page_low(block);
   }
@@ -991,14 +986,13 @@ bool fsp_header_rotate_encryption(fil_space_t *space, byte *encrypt_info,
 }
 
 /** Enable encryption for already existing tablespace.
-@param[in]	space_id	tablespace id
+@param[in]	space	tablespace id
 @return true if success */
 bool fsp_enable_encryption(fil_space_t *space) {
   byte encrypt_info[Encryption::INFO_SIZE];
 
   memset(encrypt_info, 0, Encryption::INFO_SIZE);
-  if (!Encryption::fill_encryption_info(space->m_encryption_metadata,
-                                        true,
+  if (!Encryption::fill_encryption_info(space->m_encryption_metadata, true,
                                         encrypt_info)) {
     return (false);
   }
@@ -1898,7 +1892,7 @@ static void fsp_free_page(const page_id_t &page_id,
       /* We put here some fault tolerance: if the page
       is already free, return without doing anything! */
 
-      ut_o(return );
+      ut_o(return);
     }
 
     ut_error;
@@ -1918,7 +1912,7 @@ static void fsp_free_page(const page_id_t &page_id,
     /* We put here some fault tolerance: if the page
     is already free, return without doing anything! */
 
-    ut_o(return );
+    ut_o(return);
   }
 
   const page_no_t bit = page_id.page_no() % FSP_EXTENT_SIZE;
@@ -4251,6 +4245,20 @@ static void mark_all_page_dirty_in_tablespace(THD *thd, space_id_t space_id,
     }
     mtr_commit(&mtr);
 
+    /* Flush the just-processed pages to disk before advancing the progress
+    persisted on page 0. buf_LRU_flush_or_remove_pages() drains the space's
+    flush list and fsyncs the file via fil_flush(), so once it returns the
+    pages are durably in their target encryption state. Advancing the progress
+    only after that keeps the persisted progress from ever running ahead of the
+    on-disk state. Otherwise a crash could leave pages below the progress still
+    in the old state on disk (a page's on-disk encryption state is decided at
+    write time in fil_io_set_encryption(), not by the redo-logged rewrite
+    above); the resumed operation would skip them and decrypt_end() would erase
+    the key, leaving unreadable pages that abort the next read with
+    DB_IO_DECRYPT_FAIL (PS-8670). */
+    buf_LRU_flush_or_remove_pages(space_id, BUF_REMOVE_FLUSH_WRITE, nullptr,
+                                  false);
+
     mtr_start(&mtr);
     /* Write (Un)Encryption progress on page 0 */
     fsp_header_write_encryption_progress(space_id, space_flags,
@@ -4850,18 +4858,26 @@ static bool load_encryption_from_header(fil_space_t *space) {
   ut_ad(space->id == page_get_space_id(buf_block_get_frame(block)));
   page_t *header_page = buf_block_get_frame(block);
 
+  /* If page 0 does not indicate an encrypted tablespace there is no encryption
+  info to load. This is an expected state when a crash interrupted an
+  ALTER ... ENCRYPTION just after writing its DDL log entry but before the new
+  encryption info was persisted on page 0 (or after a decryption finished).
+  Skip decoding in that case: attempting it would only decode the still-default
+  info and log a misleading "found unexpected version" error (the decode is
+  silenced during recovery, but this runs from the post-recovery resume
+  thread). */
+  if (!FSP_FLAGS_GET_ENCRYPTION(fsp_header_get_flags(header_page))) {
+    mtr_commit(&mtr);
+    return false;
+  }
+
   Encryption_key e_key{encryption_key, encryption_iv};
   bool ret = fsp_header_get_encryption_key(space->flags, e_key, header_page);
   mtr_commit(&mtr);
 
   if (!ret) {
-    /* NOTE : In case when crash happened just after DDL Log entry,
-    encryption info won't be loaded even now. Which is fine. In that case
-    flags on page 0 should not indicate tablespace encrypted. */
-    ut_ad(!FSP_FLAGS_GET_ENCRYPTION(fsp_header_get_flags(header_page)));
-    if (FSP_FLAGS_GET_ENCRYPTION(fsp_header_get_flags(header_page))) {
-      return true;
-    }
+    /* Page 0 indicated encryption but the info could not be decoded. */
+    return true;
   } else {
     dberr_t err [[maybe_unused]] = fil_set_encryption(
         space->id, Encryption::AES, encryption_key, encryption_iv);
@@ -4913,14 +4929,17 @@ static void resume_alter_encrypt_tablespace(THD *thd) {
       continue;
     }
 
-    /* If encryption was going on, make sure encryption information is
-    read/loaded from disk. */
-    if (it->get_encryption_type() == Encryption::Progress::ENCRYPTION &&
-        !space->can_encrypt()) {
+    /*
+      Make sure encryption information needed to read pages is loaded. This is
+      required for both encryption and decryption resume: pages after the
+      persisted progress watermark can still be encrypted on disk, and reading
+      them needs the in-memory key.
+    */
+    if (!space->can_encrypt()) {
       if (load_encryption_from_header(space)) {
-        ib::error() << "Encryption information can't be read for tablesapce "
+        ib::error() << "Encryption information can't be read for tablespace "
                     << space->name
-                    << ". Skipping resume encryption operation for it.";
+                    << ". Skipping resume (un)encryption operation for it.";
         continue;
       }
     }

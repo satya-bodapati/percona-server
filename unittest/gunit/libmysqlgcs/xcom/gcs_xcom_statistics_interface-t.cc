@@ -1,15 +1,16 @@
-/* Copyright (c) 2015, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2015, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -127,9 +128,9 @@ TEST_F(XcomStatisticsTest, SuspiciousCountTest) {
   ASSERT_EQ(suspicious_list_ret.size(), 3);
 
   uint32_t node_to_find = 0;
-  auto find_node_lambda = [&](Gcs_node_suspicious elem) {
-    return elem.m_node_address.compare(
-               suspicious_list.at(node_to_find).m_node_address) == 0;
+  auto find_node_lambda = [&](const Gcs_node_suspicious &elem) {
+    return elem.m_node_address ==
+           suspicious_list.at(node_to_find).m_node_address;
   };
 
   for (; node_to_find < suspicious_list_ret.size(); node_to_find++) {
@@ -140,8 +141,8 @@ TEST_F(XcomStatisticsTest, SuspiciousCountTest) {
               suspicious_list.at(node_to_find).m_node_suspicious_count);
   }
 
-  auto do_not_find_node_lambda = [](Gcs_node_suspicious elem) {
-    return elem.m_node_address.compare("node6") == 0;
+  auto do_not_find_node_lambda = [](const Gcs_node_suspicious &elem) {
+    return elem.m_node_address == "node6";
   };
 
   auto result_from_find =

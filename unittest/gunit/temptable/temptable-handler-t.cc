@@ -1,15 +1,16 @@
-/* Copyright (c) 2018, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2018, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -67,6 +68,7 @@ class Handler_test : public testing::Test {
   static void TearDownTestCase() {
     plugin_shutdown();  // see a comment in SetUpTestCase() for a reason why
                         // this is needed
+    cleanup_global_system_variables();
   }
   void SetUp() override {
     init_handlerton();
@@ -575,6 +577,47 @@ TEST_F(Handler_test, IndexOnOff) {
 
   EXPECT_EQ(handler.close(), 0);
   EXPECT_EQ(handler.delete_table(table_name, nullptr), 0);
+}
+
+TEST_F(Handler_test, LeakTable) {
+  const char *table_name = "t1";
+
+  Table_helper table_helper(table_name, thd());
+  table_helper.add_field_varstring("col0", 20, false);
+  table_helper.add_field_varstring("col1", 20, false);
+  table_helper.add_field_varstring("col2", 20, false);
+  table_helper.add_index(HA_KEY_ALG_HASH, true, {0});
+  table_helper.add_index(HA_KEY_ALG_BTREE, true, {1});
+  table_helper.add_index(HA_KEY_ALG_HASH, false, {0, 1});
+  table_helper.add_index(HA_KEY_ALG_BTREE, false, {0, 1});
+  table_helper.finalize();
+
+  temptable::Handler *handler =
+      new temptable::Handler(hton(), table_helper.table_share());
+  table_helper.set_handler(handler);
+
+  EXPECT_EQ(handler->create(table_name, table_helper.table(), nullptr, nullptr),
+            0);
+  EXPECT_EQ(handler->open(table_name, 0, 0, nullptr), 0);
+
+  /* Insert (success). */
+  table_helper.field<Field_varstring>(0)->store(1, false);
+  table_helper.field<Field_varstring>(1)->store(1, false);
+  table_helper.field<Field_varstring>(2)->store(1, false);
+  EXPECT_EQ(handler->write_row(table_helper.record_0()), 0);
+
+  table_helper.field<Field_varstring>(0)->store(2, false);
+  table_helper.field<Field_varstring>(1)->store(2, false);
+  table_helper.field<Field_varstring>(2)->store(2, false);
+  EXPECT_EQ(handler->write_row(table_helper.record_0()), 0);
+
+  table_helper.field<Field_varstring>(0)->store(3, false);
+  table_helper.field<Field_varstring>(1)->store(3, false);
+  table_helper.field<Field_varstring>(2)->store(3, false);
+  EXPECT_EQ(handler->write_row(table_helper.record_0()), 0);
+
+  temptable::close_connection(thd());
+  delete handler;
 }
 
 }  // namespace temptable_test

@@ -1,15 +1,16 @@
-// Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+// Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License, version 2.0,
 // as published by the Free Software Foundation.
 //
-// This program is also distributed with certain software (including
+// This program is designed to work with certain software (including
 // but not limited to OpenSSL) that is licensed under separate terms,
 // as designated in a particular file or component or in included license
 // documentation.  The authors of MySQL hereby grant you an additional
 // permission to link the program and your derivative works with the
-// separately licensed software that they have included with MySQL.
+// separately licensed software that they have either included with
+// the program or referenced in the documentation.
 //
 // This program is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -58,11 +59,11 @@ static bool geometry_collection_apply_intersects(const Intersects &f,
                                                  const Geometry *g1,
                                                  const Geometry *g2) {
   if (g1->type() == Geometry_type::kGeometrycollection) {
-    const auto gc1 = down_cast<const GC *>(g1);
+    const auto *const gc1 = down_cast<const GC *>(g1);
     for (const auto g1_i : *gc1)
       if (geometry_collection_apply_intersects<GC>(f, g1_i, g2)) return true;
   } else if (g2->type() == Geometry_type::kGeometrycollection) {
-    const auto gc2 = down_cast<const GC *>(g2);
+    const auto *const gc2 = down_cast<const GC *>(g2);
     for (const auto g2_j : *gc2)
       if (geometry_collection_apply_intersects<GC>(f, g1, g2_j)) return true;
   } else {
@@ -212,7 +213,7 @@ bool Intersects::eval(const Cartesian_polygon *g1,
 
 bool Intersects::eval(const Cartesian_polygon *g1,
                       const Cartesian_multipoint *g2) const {
-  Disjoint disjoint(m_semi_major, m_semi_minor);
+  Disjoint const disjoint(m_semi_major, m_semi_minor);
   return !disjoint(g1, g2);
 }
 
@@ -252,7 +253,7 @@ bool Intersects::eval(const Cartesian_multipoint *g1,
 
 bool Intersects::eval(const Cartesian_multipoint *g1,
                       const Cartesian_polygon *g2) const {
-  Disjoint disjoint(m_semi_major, m_semi_minor);
+  Disjoint const disjoint(m_semi_major, m_semi_minor);
   return !disjoint(g1, g2);
 }
 
@@ -274,7 +275,7 @@ bool Intersects::eval(const Cartesian_multipoint *g1,
 
 bool Intersects::eval(const Cartesian_multipoint *g1,
                       const Cartesian_multipolygon *g2) const {
-  Disjoint disjoint(m_semi_major, m_semi_minor);
+  Disjoint const disjoint(m_semi_major, m_semi_minor);
   return !disjoint(g1, g2);
 }
 
@@ -345,7 +346,7 @@ bool Intersects::eval(const Cartesian_multipolygon *g1,
 
 bool Intersects::eval(const Cartesian_multipolygon *g1,
                       const Cartesian_multipoint *g2) const {
-  Disjoint disjoint(m_semi_major, m_semi_minor);
+  Disjoint const disjoint(m_semi_major, m_semi_minor);
   return !disjoint(g1, g2);
 }
 
@@ -470,7 +471,7 @@ bool Intersects::eval(const Geographic_polygon *g1,
 
 bool Intersects::eval(const Geographic_polygon *g1,
                       const Geographic_multipoint *g2) const {
-  Disjoint disjoint(m_semi_major, m_semi_minor);
+  Disjoint const disjoint(m_semi_major, m_semi_minor);
   return !disjoint(g1, g2);
 }
 
@@ -512,7 +513,7 @@ bool Intersects::eval(const Geographic_multipoint *g1,
 
 bool Intersects::eval(const Geographic_multipoint *g1,
                       const Geographic_polygon *g2) const {
-  Disjoint disjoint(m_semi_major, m_semi_minor);
+  Disjoint const disjoint(m_semi_major, m_semi_minor);
   return !disjoint(g1, g2);
 }
 
@@ -536,7 +537,7 @@ bool Intersects::eval(const Geographic_multipoint *g1,
 
 bool Intersects::eval(const Geographic_multipoint *g1,
                       const Geographic_multipolygon *g2) const {
-  Disjoint disjoint(m_semi_major, m_semi_minor);
+  Disjoint const disjoint(m_semi_major, m_semi_minor);
   return !disjoint(g1, g2);
 }
 
@@ -607,7 +608,7 @@ bool Intersects::eval(const Geographic_multipolygon *g1,
 
 bool Intersects::eval(const Geographic_multipolygon *g1,
                       const Geographic_multipoint *g2) const {
-  Disjoint disjoint(m_semi_major, m_semi_minor);
+  Disjoint const disjoint(m_semi_major, m_semi_minor);
   return !disjoint(g1, g2);
 }
 
@@ -649,8 +650,8 @@ bool intersects(const dd::Spatial_reference_system *srs, const Geometry *g1,
 
     if ((*null = (g1->is_empty() || g2->is_empty()))) return false;
 
-    Intersects intersects_func(srs ? srs->semi_major_axis() : 0.0,
-                               srs ? srs->semi_minor_axis() : 0.0);
+    Intersects const intersects_func(srs ? srs->semi_major_axis() : 0.0,
+                                     srs ? srs->semi_minor_axis() : 0.0);
     *intersects = intersects_func(g1, g2);
   } catch (...) {
     handle_gis_exception(func_name);
@@ -673,8 +674,8 @@ bool mbr_intersects(const dd::Spatial_reference_system *srs, const Geometry *g1,
 
     if ((*null = (g1->is_empty() || g2->is_empty()))) return false;
 
-    Intersects intersects_func(srs ? srs->semi_major_axis() : 0.0,
-                               srs ? srs->semi_minor_axis() : 0.0);
+    Intersects const intersects_func(srs ? srs->semi_major_axis() : 0.0,
+                                     srs ? srs->semi_minor_axis() : 0.0);
 
     switch (g1->coordinate_system()) {
       case Coordinate_system::kCartesian: {

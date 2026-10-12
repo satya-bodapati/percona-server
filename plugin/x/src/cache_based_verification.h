@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -40,10 +41,15 @@ class Cache_based_verification : public Challenge_response_verification {
  public:
   explicit Cache_based_verification(iface::SHA256_password_cache *cache)
       : Challenge_response_verification(cache) {}
-  bool verify_authentication_string(
-      const std::string &user, const std::string &host,
-      const std::string &client_string_hex,
-      const std::string & /* unused */) const override;
+  bool verify_authentication_string(const std::string &user,
+                                    const std::string &host,
+                                    const std::string &client_string_hex,
+                                    const std::string & /* unused */,
+                                    const bool can_update_cache) const override;
+
+  bool is_cache2_password_compliant(
+      const std::string enforced_format,
+      const std::string &db_string) const override;
 
  private:
   void hex2octet(uint8_t *to, const char *str, uint32_t len) const;

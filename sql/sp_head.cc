@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2002, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2002, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -89,7 +90,7 @@
 #include "sql/sql_error.h"
 #include "sql/sql_parse.h"  // cleanup_items
 #include "sql/sql_profile.h"
-#include "sql/sql_show.h"  // append_identifier
+#include "sql/sql_show.h"  // append_identifier_*
 #include "sql/thd_raii.h"
 #include "sql/thr_malloc.h"
 #include "sql/transaction.h"  // trans_commit_stmt
@@ -1905,9 +1906,13 @@ sp_head::~sp_head() {
   // Parsing of SP-body must have been already finished.
   assert(!m_parser_data.is_parsing_sp_body());
 
-  for (uint ip = 0; (i = get_instr(ip)); ip++) ::destroy(i);
+  for (uint ip = 0; (i = get_instr(ip)) != nullptr; ip++) ::destroy_at(i);
 
-  ::destroy(m_root_parsing_ctx);
+  // The libraries do not have parsing context.
+  if (m_type == enum_sp_type::LIBRARY)
+    assert(m_root_parsing_ctx == nullptr);
+  else
+    ::destroy_at(m_root_parsing_ctx);
 
   /*
     If we have non-empty LEX stack then we just came out of parser with
@@ -1941,8 +1946,15 @@ Field *sp_head::create_result_field(THD *thd, size_t field_max_length,
                             ? field_max_length
                             : m_return_field_def.max_display_width_in_bytes();
 
-  auto field_name =
-      field_name_or_null != nullptr ? field_name_or_null : m_name.str;
+  const char *field_name = field_name_or_null;
+  if (field_name == nullptr) {
+    // No field name was provided, so we use the name of the stored program. The
+    // sp_head could have a different lifespan than the Field, so we copy the
+    // name to the same MEM_ROOT as the Field to ensure that it stays alive as
+    // long as the Field itself.
+    field_name = thd->strmake(m_name.str, m_name.length);
+    if (field_name == nullptr) return nullptr;
+  }
 
   // Add 1 for null byte.
   table->record[0] =
@@ -1991,7 +2003,7 @@ void sp_head::returns_type(THD *thd, String *result) const {
     }
   }
 
-  ::destroy(field);
+  ::destroy_at(field);
 }
 
 bool sp_head::execute(THD *thd, bool merge_da_on_success) {
@@ -2018,6 +2030,10 @@ bool sp_head::execute(THD *thd, bool merge_da_on_success) {
   Diagnostics_area *caller_da = thd->get_stmt_da();
   Diagnostics_area sp_da(false);
 
+  assert(thd->secondary_engine_optimization() !=
+         Secondary_engine_optimization::SECONDARY);
+  thd->set_secondary_engine_optimization(
+      Secondary_engine_optimization::PRIMARY_ONLY);
   /*
     Just reporting a stack overrun error
     (@sa check_stack_overrun()) requires stack memory for error
@@ -2413,11 +2429,87 @@ done:
               m_recursion_level + 1));
   m_first_instance->m_first_free_instance = this;
 
+  // CALL statement or similar can only be executed in primary engine:
+  thd->set_secondary_engine_optimization(
+      Secondary_engine_optimization::PRIMARY_ONLY);
+
+  return err_status;
+}
+
+bool sp_head::execute_external_routine_core(THD *thd) {
+  bool err_status = false;
+
+  my_service<SERVICE_TYPE(external_program_execution)> service(
+      "external_program_execution", srv_registry);
+
+  if ((err_status = init_external_routine(&service))) return err_status;
+
+  Diagnostics_area *caller_da = thd->get_stmt_da();
+  Diagnostics_area sp_da(false);
+  thd->push_diagnostics_area(&sp_da);
+  thd->get_stmt_da()->reset_condition_info(thd);
+
+  err_status = service->execute(m_language_stored_program, nullptr);
+
+  // Transfer error conditions if any to the callers's diagnostics area
+  if (err_status && thd->is_error() && !caller_da->is_error()) {
+    caller_da->set_error_status(thd->get_stmt_da()->mysql_errno(),
+                                thd->get_stmt_da()->message_text(),
+                                thd->get_stmt_da()->returned_sqlstate());
+  }
+
+  /*
+    Copy warnings into the caller DA.
+    If the error is already handled by the external routine then "err_status =
+    false" and error state is set in DA. Warnings are not listed in this case,
+    so warnings are not copied to the caller DA.
+  */
+  if (err_status || !thd->is_error()) {
+    caller_da->copy_sql_conditions_from_da(thd, thd->get_stmt_da());
+  }
+  thd->pop_diagnostics_area();
+
   return err_status;
 }
 
 bool sp_head::execute_external_routine(THD *thd) {
   bool err_status = false;
+
+  /*
+    Just reporting a stack overrun error
+    (@sa check_stack_overrun()) requires stack memory for error
+    message buffer. Thus, we have to put the below check
+    relatively close to the beginning of the execution stack,
+    where available stack margin is still big. As long as the check
+    has to be fairly high up the call stack, the amount of memory
+    we "book" for has to stay fairly high as well, and hence
+    not very accurate. The number below has been calculated
+    by trial and error, and reflects the amount of memory necessary
+    to execute a single stored procedure instruction, be it either
+    an SQL statement, or, heaviest of all, a CALL, which involves
+    parsing and loading of another stored procedure into the cache
+    (@sa db_load_routine() and Bug#10100).
+
+    TODO: that should be replaced by proper handling of stack overrun error.
+
+    Stack size depends on the platform:
+      - for most platforms (8 * STACK_MIN_SIZE) is enough;
+      - for Solaris SPARC 64 (10 * STACK_MIN_SIZE) is required.
+      - for clang and ASAN/UBSAN we need even more stack space.
+  */
+
+  {
+#if defined(__clang__) && defined(HAVE_ASAN)
+    const int sp_stack_size = 12 * STACK_MIN_SIZE;
+#elif defined(__clang__) && defined(HAVE_UBSAN)
+    const int sp_stack_size = 16 * STACK_MIN_SIZE;
+#else
+    const int sp_stack_size = 8 * STACK_MIN_SIZE;
+#endif
+
+    if (check_stack_overrun(thd, sp_stack_size, (uchar *)&err_status))
+      return true;
+  }
 
   char saved_cur_db_name_buf[NAME_LEN + 1];
   LEX_STRING saved_cur_db_name = {saved_cur_db_name_buf,
@@ -2426,8 +2518,30 @@ bool sp_head::execute_external_routine(THD *thd) {
   if (m_db.length && (err_status = mysql_opt_change_db(
                           thd, to_lex_cstring(m_db), &saved_cur_db_name, false,
                           &cur_db_changed))) {
-    return err_status;
+    return true;
   }
+
+  opt_trace_disable_if_no_security_context_access(thd);
+
+  assert(!(m_flags & IS_INVOKED));
+  m_flags |= IS_INVOKED;
+
+  m_first_instance->m_first_free_instance = m_next_cached_sp;
+  if (m_next_cached_sp) {
+    DBUG_PRINT("info", ("first free for %p ++: %p->%p  level: %lu  flags %x",
+                        m_first_instance, this, m_next_cached_sp,
+                        m_next_cached_sp->m_recursion_level,
+                        m_next_cached_sp->m_flags));
+  }
+  /*
+    Check that if there are not any instances after this one then
+    pointer to the last instance points on this instance or if there are
+    some instances after this one then recursion level of next instance
+    greater then recursion level of current instance on 1
+  */
+  assert((m_next_cached_sp == nullptr &&
+          m_first_instance->m_last_cached_sp == this) ||
+         (m_recursion_level + 1 == m_next_cached_sp->m_recursion_level));
 
   /*
     Use context used at routine creation time. Context sets client charset,
@@ -2443,12 +2557,16 @@ bool sp_head::execute_external_routine(THD *thd) {
   sql_mode_t saved_sql_mode = thd->variables.sql_mode;
   thd->variables.sql_mode = m_sql_mode;
 
-  my_service<SERVICE_TYPE(external_program_execution)> service(
-      "external_program_execution", srv_registry);
-  if (!(err_status = init_external_routine(service))) {
-    err_status = service->execute(m_language_stored_program, nullptr);
-    if (!err_status && thd->killed) err_status = true;
-  }
+  /*
+    Reset the metadata observer in THD. Remember the value of the observer
+    here, to be able to restore.
+  */
+  thd->push_reprepare_observer(nullptr);
+
+  err_status = execute_external_routine_core(thd);
+
+  // Restore the metadata observer.
+  thd->pop_reprepare_observer();
 
   // Restore sql_mode.
   thd->variables.sql_mode = saved_sql_mode;
@@ -2458,6 +2576,30 @@ bool sp_head::execute_external_routine(THD *thd) {
 
   // Restore context.
   m_creation_ctx->restore_env(thd, saved_creation_ctx);
+
+  m_flags &= ~IS_INVOKED;
+
+  /*
+    Check that we have one of following:
+
+    1) there are not free instances which means that this instance is last
+    in the list of instances (pointer to the last instance point on it and
+    there are not other instances after this one in the list)
+
+    2) There are some free instances which mean that first free instance
+    should go just after this one and recursion level of that free instance
+    should be on 1 more then recursion level of this instance.
+  */
+  assert((m_first_instance->m_first_free_instance == nullptr &&
+          this == m_first_instance->m_last_cached_sp &&
+          m_next_cached_sp == nullptr) ||
+         (m_first_instance->m_first_free_instance != nullptr &&
+          m_first_instance->m_first_free_instance == m_next_cached_sp &&
+          m_first_instance->m_first_free_instance->m_recursion_level ==
+              m_recursion_level + 1));
+  m_first_instance->m_first_free_instance = this;
+
+  if (!err_status && thd->killed) err_status = true;
 
   if (cur_db_changed && thd->killed != THD::KILL_CONNECTION) {
     err_status |= mysql_change_db(thd, to_lex_cstring(saved_cur_db_name), true);
@@ -2563,7 +2705,7 @@ err_with_cleanup:
 
   m_security_ctx.restore_security_context(thd, save_ctx);
 
-  ::destroy(trigger_runtime_ctx);
+  if (trigger_runtime_ctx != nullptr) ::destroy_at(trigger_runtime_ctx);
   call_arena.free_items();
   thd->sp_runtime_ctx = parent_sp_runtime_ctx;
 
@@ -2572,24 +2714,36 @@ err_with_cleanup:
   return err_status;
 }
 
+external_program_handle sp_head::get_external_program_handle() {
+  return m_language_stored_program;
+}
+
+bool sp_head::set_external_program_handle(external_program_handle sp) {
+  if (!m_language_stored_program && !sp) return false;  // nothing to do.
+  assert(!m_language_stored_program || !sp);  // One of these should be nullptr.
+  if (m_language_stored_program && sp) return true;  // already set.
+  m_language_stored_program = sp;
+  return false;
+}
+
 bool sp_head::init_external_routine(
-    my_service<SERVICE_TYPE(external_program_execution)> &service) {
+    my_service<SERVICE_TYPE(external_program_execution)> *service) {
   assert(!is_sql());
 
-  if (!service.is_valid()) {
+  if (!service->is_valid()) {
     my_error(ER_LANGUAGE_COMPONENT_NOT_AVAILABLE, MYF(0));
     return true;
   }
 
   if (m_language_stored_program == nullptr) {
-    if (service->init(reinterpret_cast<stored_program_handle>(this), nullptr,
-                      &m_language_stored_program)) {
+    if ((*service)->init(reinterpret_cast<stored_program_handle>(this), nullptr,
+                         &m_language_stored_program)) {
       my_error(ER_LANGUAGE_COMPONENT_UNSUPPORTED_LANGUAGE, MYF(0),
                m_chistics->language.str);
       m_language_stored_program = nullptr;
       return true;
     }
-    if (service->parse(m_language_stored_program, nullptr)) return true;
+    if ((*service)->parse(m_language_stored_program, nullptr)) return true;
   }
   return false;
 }
@@ -2624,8 +2778,16 @@ bool sp_head::execute_function(THD *thd, Item **argp, uint argcount,
   // Resetting THD::where to its default value
   thd->where = THD::DEFAULT_WHERE;
 
-  // Number of arguments has been checked during resolving
-  assert(argcount == m_root_parsing_ctx->context_var_count());
+  /*
+    Re-validate the argument count to verify the Stored Function definition has
+    not changed since preparation.
+  */
+  uint params = m_root_parsing_ctx->context_var_count();
+  if (argcount != params) {
+    my_error(ER_SP_WRONG_NO_OF_ARGS, MYF(0), "FUNCTION", m_qname.str, params,
+             argcount);
+    return true;
+  }
 
   thd->swap_query_arena(call_arena, &backup_arena);
 
@@ -2659,8 +2821,8 @@ bool sp_head::execute_function(THD *thd, Item **argp, uint argcount,
     /* Arguments must be fixed in Item_func_sp::fix_fields */
     assert(argp[arg_no]->fixed);
 
-    err_status = func_runtime_ctx->set_variable(thd, arg_no, &(argp[arg_no]));
-
+    err_status =
+        func_runtime_ctx->set_variable(thd, false, arg_no, &(argp[arg_no]));
     if (err_status) goto err_with_cleanup;
   }
 
@@ -2793,7 +2955,7 @@ bool sp_head::execute_function(THD *thd, Item **argp, uint argcount,
   m_security_ctx.restore_security_context(thd, save_security_ctx);
 
 err_with_cleanup:
-  ::destroy(func_runtime_ctx);
+  if (func_runtime_ctx != nullptr) ::destroy_at(func_runtime_ctx);
   call_arena.free_items();
   call_mem_root.Clear();
   thd->sp_runtime_ctx = parent_sp_runtime_ctx;
@@ -2823,8 +2985,16 @@ bool sp_head::execute_procedure(THD *thd, mem_root_deque<Item *> *args) {
   DBUG_TRACE;
   DBUG_PRINT("info", ("procedure %s", m_name.str));
 
-  // Argument count has been validated in prepare function.
-  assert((args != nullptr ? args->size() : 0) == params);
+  /*
+    Re-validate the argument count to verify the Stored Procedure definition has
+    not changed since preparation.
+  */
+  uint argcount = args != nullptr ? args->size() : 0;
+  if (argcount != params) {
+    my_error(ER_SP_WRONG_NO_OF_ARGS, MYF(0), "PROCEDURE", m_qname.str, params,
+             argcount);
+    return true;
+  }
 
   if (!parent_sp_runtime_ctx) {
     // Create a temporary old context. We need it to pass OUT-parameter values.
@@ -2843,11 +3013,12 @@ bool sp_head::execute_procedure(THD *thd, mem_root_deque<Item *> *args) {
   sp_rcontext *proc_runtime_ctx =
       sp_rcontext::create(thd, m_root_parsing_ctx, nullptr);
 
-  if (!proc_runtime_ctx) {
+  if (proc_runtime_ctx == nullptr) {
     thd->sp_runtime_ctx = sp_runtime_ctx_saved;
 
-    if (!sp_runtime_ctx_saved) ::destroy(parent_sp_runtime_ctx);
-
+    if (sp_runtime_ctx_saved != nullptr) {
+      ::destroy_at(parent_sp_runtime_ctx);
+    }
     return true;
   }
 
@@ -2860,17 +3031,15 @@ bool sp_head::execute_procedure(THD *thd, mem_root_deque<Item *> *args) {
 
     for (uint i = 0; i < params; ++i, ++it_args) {
       Item *arg_item = *it_args;
-      if (!arg_item) break;
+      if (arg_item == nullptr) break;
 
       sp_variable *spvar = m_root_parsing_ctx->find_variable(i);
-
-      if (!spvar) continue;
+      if (spvar == nullptr) continue;
 
       if (spvar->mode != sp_variable::MODE_IN) {
         Settable_routine_parameter *srp =
             arg_item->get_settable_routine_parameter();
-
-        if (!srp) {
+        if (srp == nullptr) {
           my_error(ER_SP_NOT_VAR_ARG, MYF(0), i + 1, m_qname.str);
           err_status = true;
           break;
@@ -2878,15 +3047,17 @@ bool sp_head::execute_procedure(THD *thd, mem_root_deque<Item *> *args) {
       }
 
       if (spvar->mode == sp_variable::MODE_OUT) {
-        Item_null *null_item = new Item_null();
-
-        if (!null_item ||
-            proc_runtime_ctx->set_variable(thd, i, (Item **)&null_item)) {
+        Item *null_item = new Item_null();
+        if (null_item == nullptr) {
+          err_status = true;
+          break;
+        }
+        if (proc_runtime_ctx->set_variable(thd, false, i, &null_item)) {
           err_status = true;
           break;
         }
       } else {
-        if (proc_runtime_ctx->set_variable(thd, i, &*it_args)) {
+        if (proc_runtime_ctx->set_variable(thd, false, i, &*it_args)) {
           err_status = true;
           break;
         }
@@ -2947,6 +3118,8 @@ bool sp_head::execute_procedure(THD *thd, mem_root_deque<Item *> *args) {
 
   Security_context *save_security_ctx = nullptr;
   if (!err_status) err_status = set_security_ctx(thd, &save_security_ctx);
+
+  DEBUG_SYNC(thd, "after_switching_security_context");
 
   opt_trace_disable_if_no_stored_proc_func_access(thd, this);
 
@@ -3015,9 +3188,10 @@ bool sp_head::execute_procedure(THD *thd, mem_root_deque<Item *> *args) {
   if (save_security_ctx)
     m_security_ctx.restore_security_context(thd, save_security_ctx);
 
-  if (!sp_runtime_ctx_saved) ::destroy(parent_sp_runtime_ctx);
+  if (sp_runtime_ctx_saved == nullptr && parent_sp_runtime_ctx != nullptr)
+    ::destroy_at(parent_sp_runtime_ctx);
 
-  ::destroy(proc_runtime_ctx);
+  ::destroy_at(proc_runtime_ctx);
   thd->sp_runtime_ctx = sp_runtime_ctx_saved;
   thd->pop_lock_usec(lock_usec_before_sp_exec);
 
@@ -3128,6 +3302,15 @@ void sp_head::set_info(longlong created, longlong modified,
     m_chistics->comment.str = strmake_root(
         &main_mem_root, m_chistics->comment.str, m_chistics->comment.length);
 
+  m_chistics->m_imported_libraries = nullptr;
+  if (chistics->m_imported_libraries != nullptr)
+    for (auto &library : *chistics->m_imported_libraries)
+      if (m_chistics->add_imported_library(
+              {library.m_db.str, library.m_db.length},
+              {library.m_name.str, library.m_name.length},
+              {library.m_alias.str, library.m_alias.length}, &main_mem_root))
+        break;
+
   m_sql_mode = sql_mode;
 }
 
@@ -3197,7 +3380,7 @@ void sp_head::optimize() {
   src = dst = 0;
   while ((i = get_instr(src))) {
     if (!i->opt_is_marked()) {
-      ::destroy(i);
+      ::destroy_at(i);
       src += 1;
     } else {
       if (src != dst) {
@@ -3215,7 +3398,7 @@ void sp_head::optimize() {
     }
   }
 
-  m_instructions.resize(dst);
+  m_instructions.erase(m_instructions.begin() + dst, m_instructions.end());
   bp.clear();
 }
 
@@ -3487,13 +3670,18 @@ bool sp_head::check_show_access(THD *thd, bool *full_access) {
 
   *full_access = has_full_view_routine_access(thd, m_db.str, m_definer_user.str,
                                               m_definer_host.str);
-  return *full_access ? false
-                      : !has_partial_view_routine_access(
-                            thd, m_db.str, m_name.str,
-                            m_type == enum_sp_type::PROCEDURE);
+  // User has full access
+  if (*full_access) return false;
+  return !has_partial_view_routine_access(thd, m_db.str, m_name.str,
+                                          enum_sp_type_to_acl_type(m_type));
 }
 
 bool sp_head::set_security_ctx(THD *thd, Security_context **save_ctx) {
+  if (m_type == enum_sp_type::LIBRARY) {
+    // Security context is never switched for the LIBRARY.
+    assert(false);
+    return true;
+  }
   *save_ctx = nullptr;
   const LEX_CSTRING definer_user = {m_definer_user.str, m_definer_user.length};
   const LEX_CSTRING definer_host = {m_definer_host.str, m_definer_host.length};
@@ -3512,7 +3700,7 @@ bool sp_head::set_security_ctx(THD *thd, Security_context **save_ctx) {
 
   if (*save_ctx &&
       check_routine_access(thd, EXECUTE_ACL, m_db.str, m_name.str,
-                           m_type == enum_sp_type::PROCEDURE, false)) {
+                           enum_sp_type_to_acl_type(m_type), false)) {
     m_security_ctx.restore_security_context(thd, *save_ctx);
     *save_ctx = nullptr;
     return true;

@@ -1,15 +1,16 @@
-/* Copyright (c) 2023 Oracle and/or its affiliates.
+/* Copyright (c) 2023, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,13 +28,19 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #if !defined(NDEBUG)
 
-#define DBUG_EXECUTE_IF(keyword, a1)                                  \
-  do {                                                                \
-    extern REQUIRES_SERVICE_PLACEHOLDER(mysql_debug_keyword_service); \
-    if (SERVICE_PLACEHOLDER(mysql_debug_keyword_service)              \
-            ->lookup_debug_keyword(keyword)) {                        \
-      a1                                                              \
-    }                                                                 \
+/**
+  Debug macro for conditional code execution.
+
+  @note Using this macro requires declaring extern mysql_debug_keyword_service
+        service reference:
+        extern REQUIRES_SERVICE_PLACEHOLDER(mysql_debug_keyword_service);
+*/
+#define DBUG_EXECUTE_IF(keyword, a1)                     \
+  do {                                                   \
+    if (SERVICE_PLACEHOLDER(mysql_debug_keyword_service) \
+            ->lookup_debug_keyword(keyword)) {           \
+      a1                                                 \
+    }                                                    \
   } while (0)
 
 #else

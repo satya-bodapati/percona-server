@@ -1,16 +1,17 @@
 /*
-   Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+   Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,7 +24,7 @@
 
 #include "sql/opt_costconstants.h"
 
-#include <assert.h>
+#include <cassert>
 
 #include "mysql/components/services/bits/psi_bits.h"
 #include "mysql/strings/m_ctype.h"
@@ -151,14 +152,14 @@ void SE_cost_constants::update_cost_value(double *cost_constant,
 }
 
 Cost_model_se_info::Cost_model_se_info() {
-  for (uint i = 0; i < MAX_STORAGE_CLASSES; ++i)
-    m_se_cost_constants[i] = nullptr;
+  for (auto &m_se_cost_constant : m_se_cost_constants)
+    m_se_cost_constant = nullptr;
 }
 
 Cost_model_se_info::~Cost_model_se_info() {
-  for (uint i = 0; i < MAX_STORAGE_CLASSES; ++i) {
-    delete m_se_cost_constants[i];
-    m_se_cost_constants[i] = nullptr;
+  for (auto &m_se_cost_constant : m_se_cost_constants) {
+    delete m_se_cost_constant;
+    m_se_cost_constant = nullptr;
   }
 }
 
@@ -267,7 +268,7 @@ uint Cost_model_constants::find_handler_slot_from_name(
   if (!plugin) return HA_SLOT_UNDEF;
 
   // Find the handlerton for this storage engine
-  handlerton *ht = plugin_data<handlerton *>(plugin);
+  auto *ht = plugin_data<handlerton *>(plugin);
   assert(ht != nullptr);
   if (!ht) {
     assert(false); /* purecov: inspected */
@@ -290,9 +291,8 @@ cost_constant_error Cost_model_constants::update_engine_default_cost(
   /*
     Update all constants for engines that have their own cost constants
   */
-  for (size_t i = 0; i < m_engines.size(); ++i) {
-    SE_cost_constants *se_cc =
-        m_engines[i].get_cost_constants(storage_category);
+  for (auto &m_engine : m_engines) {
+    SE_cost_constants *se_cc = m_engine.get_cost_constants(storage_category);
     if (se_cc) {
       const cost_constant_error err = se_cc->update_default(name, value);
       if (err != UNKNOWN_COST_NAME) retval = err;

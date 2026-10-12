@@ -1,16 +1,17 @@
 /*
- * Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+ * Copyright (c) 2017, 2026, Oracle and/or its affiliates.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License, version 2.0,
  * as published by the Free Software Foundation.
  *
- * This program is also distributed with certain software (including
+ * This program is designed to work with certain software (including
  * but not limited to OpenSSL) that is licensed under separate terms,
  * as designated in a particular file or component or in included license
  * documentation.  The authors of MySQL hereby grant you an additional
  * permission to link the program and your derivative works with the
- * separately licensed software that they have included with MySQL.
+ * separately licensed software that they have either included with
+ * the program or referenced in the documentation.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -236,6 +237,11 @@ Command::Command() {
       &Command::cmd_recv_with_stored_metadata;
   m_commands["clear_stored_metadata"] = &Command::cmd_clear_stored_metadata;
   m_commands["assert"] = &Command::cmd_assert;
+  m_commands["debug_stmt"] = &Command::cmd_debug_stmt;
+
+  // Added for mysqltest compatibility
+  m_commands["error"] = &Command::cmd_expecterror;
+  m_commands["eval"] = &Command::cmd_eval;
 }
 
 bool Command::is_command_registred(const std::string &command_line,
@@ -285,7 +291,7 @@ Command::Result Command::process(std::istream &input,
                                                context->m_command_arguments);
 }
 
-Command::Result Command::cmd_echo(std::istream &input,
+Command::Result Command::cmd_echo(std::istream & /*input*/,
                                   Execution_context *context,
                                   const std::string &args) {
   std::string s = args;
@@ -295,7 +301,7 @@ Command::Result Command::cmd_echo(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_title(std::istream &input,
+Command::Result Command::cmd_title(std::istream & /*input*/,
                                    Execution_context *context,
                                    const std::string &args) {
   if (!args.empty()) {
@@ -311,7 +317,7 @@ Command::Result Command::cmd_title(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_recvtype(std::istream &input,
+Command::Result Command::cmd_recvtype(std::istream & /*input*/,
                                       Execution_context *context,
                                       const std::string &args) {
   std::string s = args;
@@ -448,9 +454,9 @@ Command::Result Command::cmd_recvtype(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_recvok(std::istream &input,
+Command::Result Command::cmd_recvok(std::istream & /*input*/,
                                     Execution_context *context,
-                                    const std::string &args) {
+                                    const std::string & /*args*/) {
   xcl::XError error;
   xcl::XProtocol::Server_message_type_id out_msgid;
 
@@ -492,7 +498,7 @@ Command::Result Command::cmd_recvok(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_recvmessage(std::istream &input,
+Command::Result Command::cmd_recvmessage(std::istream & /*input*/,
                                          Execution_context *context,
                                          const std::string &args) {
   if (args.empty()) {
@@ -560,7 +566,7 @@ Command::Result Command::cmd_recvmessage(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_recverror(std::istream &input,
+Command::Result Command::cmd_recverror(std::istream & /*input*/,
                                        Execution_context *context,
                                        const std::string &args) {
   xcl::XProtocol::Server_message_type_id msgid;
@@ -642,7 +648,7 @@ Command::Result Command::cmd_recvresult(std::istream &input,
   return cmd_recvresult(input, context, args, Value_callback());
 }
 
-Command::Result Command::cmd_recvresult(std::istream &input,
+Command::Result Command::cmd_recvresult(std::istream & /*input*/,
                                         Execution_context *context,
                                         const std::string &args,
                                         Value_callback value_callback,
@@ -745,7 +751,7 @@ Command::Result Command::cmd_recvresult(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_recvuntil(std::istream &input,
+Command::Result Command::cmd_recvuntil(std::istream & /*input*/,
                                        Execution_context *context,
                                        const std::string &args) {
   if (args.empty()) {
@@ -828,9 +834,9 @@ Command::Result Command::cmd_recvuntil(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_do_ssl_handshake(std::istream &input,
+Command::Result Command::cmd_do_ssl_handshake(std::istream & /*input*/,
                                               Execution_context *context,
-                                              const std::string &args) {
+                                              const std::string & /*args*/) {
   xcl::XError error =
       context->session()->get_protocol().get_connection().activate_tls();
   if (error) {
@@ -841,7 +847,17 @@ Command::Result Command::cmd_do_ssl_handshake(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_stmtsql(std::istream &input,
+Command::Result Command::cmd_eval(std::istream &input,
+                                  Execution_context *context,
+                                  const std::string &args) {
+  if (auto result = cmd_stmtsql(input, context, args);
+      Result::Continue != result)
+    return result;
+
+  return cmd_recvresult(input, context, "");
+}
+
+Command::Result Command::cmd_stmtsql(std::istream & /*input*/,
                                      Execution_context *context,
                                      const std::string &args) {
   if (args.empty()) {
@@ -864,7 +880,7 @@ Command::Result Command::cmd_stmtsql(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_stmtadmin(std::istream &input,
+Command::Result Command::cmd_stmtadmin(std::istream & /*input*/,
                                        Execution_context *context,
                                        const std::string &args) {
   if (args.empty()) {
@@ -903,7 +919,7 @@ Command::Result Command::cmd_stmtadmin(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_sleep(std::istream &input,
+Command::Result Command::cmd_sleep(std::istream & /*input*/,
                                    Execution_context *context,
                                    const std::string &args) {
   if (args.empty()) {
@@ -915,20 +931,20 @@ Command::Result Command::cmd_sleep(std::istream &input,
   context->m_variables->replace(&tmp);
   const double delay_in_seconds = std::stod(tmp);
 #ifdef _WIN32
-  const int delay_in_milliseconds = static_cast<int>(delay_in_seconds * 1000);
+  const int delay_in_milliseconds = static_cast<int>(delay_in_seconds * 1'000);
   Sleep(delay_in_milliseconds);
 #else
   const int delay_in_microseconds =
-      static_cast<int>(delay_in_seconds * 1000000);
+      static_cast<int>(delay_in_seconds * 1'000'000);
   usleep(delay_in_microseconds);
 #endif
   return Result::Continue;
 }
 
-Command::Result Command::cmd_login(std::istream &input,
+Command::Result Command::cmd_login(std::istream & /*input*/,
                                    Execution_context *context,
                                    const std::string &args) {
-  std::string user, pass, db, auth_meth = "MYSQL41";
+  std::string user, pass, db, auth_meth = "SHA256_MEMORY";
 
   if (args.empty()) {
     context->m_connection->get_credentials(&user, &pass);
@@ -1019,7 +1035,7 @@ Command::Result Command::cmd_repeat(std::istream &input,
 
 Command::Result Command::cmd_endrepeat(std::istream &input,
                                        Execution_context *context,
-                                       const std::string &args) {
+                                       const std::string & /*args*/) {
   while (m_loop_stack.size()) {
     Loop_do &ld = m_loop_stack.back();
 
@@ -1041,7 +1057,7 @@ Command::Result Command::cmd_endrepeat(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_loginerror(std::istream &input,
+Command::Result Command::cmd_loginerror(std::istream & /*input*/,
                                         Execution_context *context,
                                         const std::string &args) {
   std::string s = args;
@@ -1077,7 +1093,7 @@ Command::Result Command::cmd_loginerror(std::istream &input,
     aux::trim(expected);
     auto protocol = context->m_connection->active_xprotocol();
     expected_error_code = mysqlxtest::get_error_code_by_text(expected);
-    auto err = protocol->execute_authenticate(user, pass, db, "MYSQL41");
+    auto err = protocol->execute_authenticate(user, pass, db, "SHA256_MEMORY");
     context->m_connection->active_holder().remove_notice_handler();
     if (err) {
       if (err.error() == expected_error_code) {
@@ -1114,7 +1130,7 @@ static void replace_crlf_with_lf(char *buf) {
 }
 #endif
 
-Command::Result Command::cmd_system(std::istream &input,
+Command::Result Command::cmd_system(std::istream & /*input*/,
                                     Execution_context *context,
                                     const std::string &args) {
   const bool run_in_background =
@@ -1172,7 +1188,7 @@ Command::Result Command::cmd_system(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_recv_all_until_disc(std::istream &input,
+Command::Result Command::cmd_recv_all_until_disc(std::istream & /*input*/,
                                                  Execution_context *context,
                                                  const std::string &args) {
   xcl::XProtocol::Server_message_type_id msgid;
@@ -1228,7 +1244,7 @@ Command::Result Command::cmd_recv_all_until_disc(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_enable_compression(std::istream &input,
+Command::Result Command::cmd_enable_compression(std::istream & /*input*/,
                                                 Execution_context *context,
                                                 const std::string &args) {
   if (args.empty()) {
@@ -1274,7 +1290,7 @@ Command::Result Command::cmd_enable_compression(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_peerdisc(std::istream &input,
+Command::Result Command::cmd_peerdisc(std::istream & /*input*/,
                                       Execution_context *context,
                                       const std::string &args) {
   int expected_delta_time;
@@ -1342,7 +1358,7 @@ Command::Result Command::cmd_peerdisc(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_recv(std::istream &input,
+Command::Result Command::cmd_recv(std::istream & /*input*/,
                                   Execution_context *context,
                                   const std::string &args) {
   xcl::XProtocol::Server_message_type_id msgid;
@@ -1385,15 +1401,15 @@ Command::Result Command::cmd_recv(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_exit(std::istream &input,
-                                  Execution_context *context,
-                                  const std::string &args) {
+Command::Result Command::cmd_exit(std::istream & /*input*/,
+                                  Execution_context * /*context*/,
+                                  const std::string & /*args*/) {
   return Result::Stop_with_success;
 }
 
-Command::Result Command::cmd_abort(std::istream &input,
-                                   Execution_context *context,
-                                   const std::string &args) {
+Command::Result Command::cmd_abort(std::istream & /*input*/,
+                                   Execution_context * /*context*/,
+                                   const std::string & /*args*/) {
   exit(2);
   return Result::Stop_with_success;
 }
@@ -1469,7 +1485,7 @@ Command::Result Command::cmd_shutdown_server(std::istream &input,
 
 Command::Result Command::cmd_reconnect(std::istream &input,
                                        Execution_context *context,
-                                       const std::string &args) {
+                                       const std::string & /*args*/) {
   auto &holder = context->m_connection->active_holder();
   xcl::XError error;
   std::set<int> expected_errors{0,
@@ -1498,28 +1514,28 @@ Command::Result Command::cmd_reconnect(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_nowarnings(std::istream &input,
+Command::Result Command::cmd_nowarnings(std::istream & /*input*/,
                                         Execution_context *context,
-                                        const std::string &args) {
+                                        const std::string & /*args*/) {
   context->m_options.m_show_warnings = false;
   return Result::Continue;
 }
 
-Command::Result Command::cmd_yeswarnings(std::istream &input,
+Command::Result Command::cmd_yeswarnings(std::istream & /*input*/,
                                          Execution_context *context,
-                                         const std::string &args) {
+                                         const std::string & /*args*/) {
   context->m_options.m_show_warnings = true;
   return Result::Continue;
 }
 
-Command::Result Command::cmd_fatalerrors(std::istream &input,
+Command::Result Command::cmd_fatalerrors(std::istream & /*input*/,
                                          Execution_context *context,
-                                         const std::string &args) {
+                                         const std::string & /*args*/) {
   context->m_options.m_fatal_errors = true;
   return Result::Continue;
 }
 
-Command::Result Command::cmd_fatalwarnings(std::istream &input,
+Command::Result Command::cmd_fatalwarnings(std::istream & /*input*/,
                                            Execution_context *context,
                                            const std::string &args) {
   bool value = true;
@@ -1547,9 +1563,9 @@ Command::Result Command::cmd_fatalwarnings(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_nofatalerrors(std::istream &input,
+Command::Result Command::cmd_nofatalerrors(std::istream & /*input*/,
                                            Execution_context *context,
-                                           const std::string &args) {
+                                           const std::string & /*args*/) {
   context->m_options.m_fatal_errors = false;
   return Result::Continue;
 }
@@ -1579,8 +1595,8 @@ Command::Result Command::cmd_newsession(std::istream &input,
 }
 
 Command::Result Command::do_newsession(
-    std::istream &input, Execution_context *context, const std::string &args,
-    const std::vector<std::string> &auth_methods) {
+    std::istream & /*input*/, Execution_context *context,
+    const std::string &args, const std::vector<std::string> &auth_methods) {
   if (args.empty()) {
     context->print_error(
         "'newsession' command, requires at "
@@ -1634,7 +1650,7 @@ Command::Result Command::do_newsession(
   return Result::Continue;
 }
 
-Command::Result Command::cmd_setsession(std::istream &input,
+Command::Result Command::cmd_setsession(std::istream & /*input*/,
                                         Execution_context *context,
                                         const std::string &args) {
   std::string s = args;
@@ -1648,7 +1664,7 @@ Command::Result Command::cmd_setsession(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_closesession(std::istream &input,
+Command::Result Command::cmd_closesession(std::istream & /*input*/,
                                           Execution_context *context,
                                           const std::string &args) {
   try {
@@ -1668,7 +1684,7 @@ Command::Result Command::cmd_closesession(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_expecterror(std::istream &input,
+Command::Result Command::cmd_expecterror(std::istream & /*input*/,
                                          Execution_context *context,
                                          const std::string &args) {
   if (args.empty()) {
@@ -1701,14 +1717,14 @@ Command::Result Command::cmd_expecterror(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_measure(std::istream &input,
-                                     Execution_context *context,
-                                     const std::string &args) {
+Command::Result Command::cmd_measure(std::istream & /*input*/,
+                                     Execution_context * /*context*/,
+                                     const std::string & /*args*/) {
   m_start_measure = xpl::chrono::now();
   return Result::Continue;
 }
 
-Command::Result Command::cmd_endmeasure(std::istream &input,
+Command::Result Command::cmd_endmeasure(std::istream & /*input*/,
                                         Execution_context *context,
                                         const std::string &args) {
   if (!xpl::chrono::is_valid(m_start_measure)) {
@@ -1742,23 +1758,23 @@ Command::Result Command::cmd_endmeasure(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_quiet(std::istream &input,
+Command::Result Command::cmd_quiet(std::istream & /*input*/,
                                    Execution_context *context,
-                                   const std::string &args) {
+                                   const std::string & /*args*/) {
   context->m_options.m_quiet = true;
 
   return Result::Continue;
 }
 
-Command::Result Command::cmd_noquiet(std::istream &input,
+Command::Result Command::cmd_noquiet(std::istream & /*input*/,
                                      Execution_context *context,
-                                     const std::string &args) {
+                                     const std::string & /*args*/) {
   context->m_options.m_quiet = false;
 
   return Result::Continue;
 }
 
-Command::Result Command::cmd_varsub(std::istream &input,
+Command::Result Command::cmd_varsub(std::istream & /*input*/,
                                     Execution_context *context,
                                     const std::string &args) {
   if (args.empty()) {
@@ -1769,7 +1785,7 @@ Command::Result Command::cmd_varsub(std::istream &input,
   context->m_variables->push_unreplace(args);
   return Result::Continue;
 }
-Command::Result Command::cmd_varreplace(std::istream &input,
+Command::Result Command::cmd_varreplace(std::istream & /*input*/,
                                         Execution_context *context,
                                         const std::string &args) {
   std::vector<std::string> argl;
@@ -1791,7 +1807,7 @@ Command::Result Command::cmd_varreplace(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_varlet(std::istream &input,
+Command::Result Command::cmd_varlet(std::istream & /*input*/,
                                     Execution_context *context,
                                     const std::string &args) {
   if (args.empty()) {
@@ -1819,7 +1835,7 @@ Command::Result Command::cmd_varlet(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_varinc(std::istream &input,
+Command::Result Command::cmd_varinc(std::istream & /*input*/,
                                     Execution_context *context,
                                     const std::string &args) {
   std::vector<std::string> argl;
@@ -1849,7 +1865,7 @@ Command::Result Command::cmd_varinc(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_vargen(std::istream &input,
+Command::Result Command::cmd_vargen(std::istream & /*input*/,
                                     Execution_context *context,
                                     const std::string &args) {
   std::vector<std::string> argl;
@@ -1863,7 +1879,7 @@ Command::Result Command::cmd_vargen(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_varfile(std::istream &input,
+Command::Result Command::cmd_varfile(std::istream & /*input*/,
                                      Execution_context *context,
                                      const std::string &args) {
   std::vector<std::string> argl;
@@ -1895,7 +1911,7 @@ Command::Result Command::cmd_varfile(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_varescape(std::istream &input,
+Command::Result Command::cmd_varescape(std::istream & /*input*/,
                                        Execution_context *context,
                                        const std::string &args) {
   if (args.empty()) {
@@ -1919,7 +1935,7 @@ Command::Result Command::cmd_varescape(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_binsend(std::istream &input,
+Command::Result Command::cmd_binsend(std::istream & /*input*/,
                                      Execution_context *context,
                                      const std::string &args) {
   if (args.empty()) {
@@ -1939,7 +1955,7 @@ Command::Result Command::cmd_binsend(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_hexsend(std::istream &input,
+Command::Result Command::cmd_hexsend(std::istream & /*input*/,
                                      Execution_context *context,
                                      const std::string &args) {
   std::string args_copy = args;
@@ -1983,7 +1999,7 @@ size_t Command::value_to_offset(const std::string &data,
   return std::stoi(data);
 }
 
-Command::Result Command::cmd_binsendoffset(std::istream &input,
+Command::Result Command::cmd_binsendoffset(std::istream & /*input*/,
                                            Execution_context *context,
                                            const std::string &args) {
   if (args.empty()) {
@@ -2031,7 +2047,7 @@ Command::Result Command::cmd_binsendoffset(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_callmacro(std::istream &input,
+Command::Result Command::cmd_callmacro(std::istream & /*input*/,
                                        Execution_context *context,
                                        const std::string &args) {
   if (args.empty()) {
@@ -2046,7 +2062,8 @@ Command::Result Command::cmd_callmacro(std::istream &input,
 }
 
 Command::Result Command::cmd_macro_delimiter_compress(
-    std::istream &input, Execution_context *context, const std::string &args) {
+    std::istream & /*input*/, Execution_context *context,
+    const std::string &args) {
   if (args.empty()) {
     context->print_error(
         "'macro_delimiter_compress' command, requires one argument.\n");
@@ -2150,16 +2167,25 @@ Command::Result Command::cmd_assert(std::istream &input,
   return (this->*method)(input, context, vargs[0] + "\t" + vargs[2]);
 }
 
-Command::Result Command::cmd_query(std::istream &input,
+Command::Result Command::cmd_debug_stmt(std::istream & /*input*/,
+                                        Execution_context *context,
+                                        const std::string &args) {
+  context->m_debug_stmt.push_back(args);
+  context->m_debug += args + "\n";
+
+  return Result::Continue;
+}
+
+Command::Result Command::cmd_query(std::istream & /*input*/,
                                    Execution_context *context,
-                                   const std::string &args) {
+                                   const std::string & /*args*/) {
   context->m_options.m_show_query_result = true;
   return Result::Continue;
 }
 
-Command::Result Command::cmd_noquery(std::istream &input,
+Command::Result Command::cmd_noquery(std::istream & /*input*/,
                                      Execution_context *context,
-                                     const std::string &args) {
+                                     const std::string & /*args*/) {
   context->m_options.m_show_query_result = false;
   return Result::Continue;
 }
@@ -2226,15 +2252,15 @@ Command::Result Command::cmd_wait_for(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_clear_received(std::istream &input,
+Command::Result Command::cmd_clear_received(std::istream & /*input*/,
                                             Execution_context *context,
-                                            const std::string &args) {
+                                            const std::string & /*args*/) {
   context->m_connection->active_holder().clear_received_messages();
 
   return Result::Continue;
 }
 
-Command::Result Command::cmd_received(std::istream &input,
+Command::Result Command::cmd_received(std::istream & /*input*/,
                                       Execution_context *context,
                                       const std::string &args) {
   std::string cargs(args);
@@ -2257,7 +2283,7 @@ Command::Result Command::cmd_received(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_expectwarnings(std::istream &input,
+Command::Result Command::cmd_expectwarnings(std::istream & /*input*/,
                                             Execution_context *context,
                                             const std::string &args) {
   if (args.empty()) {
@@ -2313,7 +2339,7 @@ Command::Result Command::cmd_recv_with_stored_metadata(
                         Metadata_policy::Use_stored);
 }
 
-Command::Result Command::cmd_compress(std::istream &input,
+Command::Result Command::cmd_compress(std::istream & /*input*/,
                                       Execution_context *context,
                                       const std::string &args) {
   std::vector<std::string> argl;
@@ -2381,9 +2407,9 @@ Command::Result Command::cmd_compress(std::istream &input,
   return Result::Continue;
 }
 
-Command::Result Command::cmd_clear_stored_metadata(std::istream &input,
-                                                   Execution_context *context,
-                                                   const std::string &args) {
+Command::Result Command::cmd_clear_stored_metadata(
+    std::istream & /*input*/, Execution_context *context,
+    const std::string & /*args*/) {
   context->m_stored_metadata.clear();
   return Result::Continue;
 }
@@ -2412,7 +2438,7 @@ static bool try_open_file_on_different_paths(
   return stream.good();
 }
 
-Command::Result Command::cmd_import(std::istream &input,
+Command::Result Command::cmd_import(std::istream & /*input*/,
                                     Execution_context *context,
                                     const std::string &args) {
   if (args.empty()) {
@@ -2449,7 +2475,7 @@ Command::Result Command::cmd_import(std::istream &input,
   return r ? Result::Continue : Result::Stop_with_failure;
 }
 
-Command::Result Command::cmd_env(std::istream &input,
+Command::Result Command::cmd_env(std::istream & /*input*/,
                                  Execution_context *context,
                                  const std::string &args) {
   std::vector<std::string> argl;
@@ -2718,6 +2744,8 @@ void print_help_commands() {
                "error other than specified occurred\n";
   std::cout
       << "  Works for: newsession, closesession, recvresult, recvok, SQL\n";
+  std::cout << "  Note: '-->error' is an alias for '-->expecterror' for "
+               "compatibility with 'mysqltest' and works in the same way.\n";
   std::cout << "-->newsession <name>\t<user>\t<pass>\t<db>\n";
   std::cout << "  Create a new connection which is going to be authenticate"
                " using sequence of mechanisms (AUTO). Use '-' in place of"
@@ -2833,5 +2861,10 @@ void print_help_commands() {
   std::cout << "-->clear_stored_metadata\n";
   std::cout << "  Clear metadata information stored by the "
                "recvresult_store_metadata\n";
+  std::cout << "-->debug_stmt <STMT>\n";
+  std::cout << "  Specify MySQLxTEST statement to be executed at failed run\n";
+  std::cout << "-->eval SQL\n";
+  std::cout << "  Execute an SQL statement with variable substitution applied."
+               " Provided for compatibility with mysqltest.\n\n";
   std::cout << "# comment\n";
 }

@@ -1,15 +1,16 @@
-/* Copyright (c) 2017, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2017, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -27,8 +28,8 @@
 
 #include "sql/histograms/value_map.h"
 
-#include <assert.h>
 #include <algorithm>
+#include <cassert>
 #include <new>
 #include <string>  // std::string
 
@@ -61,10 +62,22 @@ bool Histogram_comparator::operator()(const String &lhs,
 }
 
 template <>
-bool Histogram_comparator::operator()(const MYSQL_TIME &lhs,
-                                      const MYSQL_TIME &rhs) const {
-  longlong lhs_packed = TIME_to_longlong_packed(lhs);
-  longlong rhs_packed = TIME_to_longlong_packed(rhs);
+bool Histogram_comparator::operator()(const Time_val &lhs,
+                                      const Time_val &rhs) const {
+  return lhs.for_comparison() < rhs.for_comparison();
+}
+
+template <>
+bool Histogram_comparator::operator()(const Date_val &lhs,
+                                      const Date_val &rhs) const {
+  return lhs.for_comparison() < rhs.for_comparison();
+}
+
+template <>
+bool Histogram_comparator::operator()(const Datetime_val &lhs,
+                                      const Datetime_val &rhs) const {
+  longlong const lhs_packed = TIME_to_longlong_packed(lhs);
+  longlong const rhs_packed = TIME_to_longlong_packed(rhs);
   return lhs_packed < rhs_packed;
 }
 
@@ -84,7 +97,7 @@ Value_map_base::Value_map_base(const CHARSET_INFO *charset,
 
 template <class T>
 bool Value_map_base::add_values(const T &value, const ha_rows count) {
-  Value_map<T> *value_map = down_cast<Value_map<T> *>(this);
+  auto *value_map = down_cast<Value_map<T> *>(this);
   return value_map->add_values(value, count);
 }
 
@@ -112,7 +125,7 @@ bool Value_map<String>::add_values(const String &value, const ha_rows count) {
     allocated in the MEM_ROOT of the Value_map, so that is is automatically
     reclaimed when the Value_map is destroyed.
   */
-  String substring = value.substr(0, HISTOGRAM_MAX_COMPARE_LENGTH);
+  String const substring = value.substr(0, HISTOGRAM_MAX_COMPARE_LENGTH);
   auto found = m_value_map.find(substring);
   if (found == m_value_map.end()) {
     // Not found, insert a new value.
@@ -120,7 +133,8 @@ bool Value_map<String>::add_values(const String &value, const ha_rows count) {
       char *string_data = substring.dup(&m_mem_root);
       if (string_data == nullptr) return true; /* purecov: deadcode */
 
-      String string_dup(string_data, substring.length(), substring.charset());
+      String const string_dup(string_data, substring.length(),
+                              substring.charset());
       m_value_map.emplace(string_dup, count);
     } catch (const std::bad_alloc &) {
       // Out of memory.
@@ -160,14 +174,18 @@ template class Value_map<double>;
 template class Value_map<String>;
 template class Value_map<ulonglong>;
 template class Value_map<longlong>;
-template class Value_map<MYSQL_TIME>;
+template class Value_map<Time_val>;
+template class Value_map<Date_val>;
+template class Value_map<Datetime_val>;
 template class Value_map<my_decimal>;
 
 template bool Value_map_base::add_values(const double &, const ha_rows);
 template bool Value_map_base::add_values(const String &, const ha_rows);
 template bool Value_map_base::add_values(const ulonglong &, const ha_rows);
 template bool Value_map_base::add_values(const longlong &, const ha_rows);
-template bool Value_map_base::add_values(const MYSQL_TIME &, const ha_rows);
+template bool Value_map_base::add_values(const Time_val &, const ha_rows);
+template bool Value_map_base::add_values(const Date_val &, const ha_rows);
+template bool Value_map_base::add_values(const Datetime_val &, const ha_rows);
 template bool Value_map_base::add_values(const my_decimal &, const ha_rows);
 
 }  // namespace histograms

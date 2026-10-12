@@ -9,6 +9,7 @@
 --disable_query_log
 call mtr.add_suppression("Tablespace innodb_temporary ran out of space. Please add another file or use 'autoextend' for the last file in setting innodb_temp_data_file_path.");
 call mtr.add_suppression("The table 't1' is full");
+call mtr.add_suppression("Failed to compress the gtid_executed table.");
 --enable_query_log
 
 ################################################################################
@@ -170,7 +171,6 @@ let SEARCH_PATTERN = innodb_temporary and innodb_system file names seem to be th
 --source ./include/search_pattern.inc
 --remove_file $SEARCH_FILE
 --echo "restarting server in normal mode"
---enable_reconnect
 let $restart_parameters = restart;
 --source include/start_mysqld.inc
 #

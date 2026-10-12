@@ -1,15 +1,16 @@
-/* Copyright (c) 2020, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2020, 2026, Oracle and/or its affiliates.
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License, version 2.0,
 as published by the Free Software Foundation.
 
-This program is also distributed with certain software (including
+This program is designed to work with certain software (including
 but not limited to OpenSSL) that is licensed under separate terms,
 as designated in a particular file or component or in included license
 documentation.  The authors of MySQL hereby grant you an additional
 permission to link the program and your derivative works with the
-separately licensed software that they have included with MySQL.
+separately licensed software that they have either included with
+the program or referenced in the documentation.
 
 This program is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -37,6 +38,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 #include "sql/sql_class.h"
 #include "sql/sql_lex.h"
 #include "sql/table.h"
+#include "sql/table_trigger_dispatcher.h"
 #include "sql/transaction.h"
 #include "thr_lock.h"
 
@@ -518,6 +520,9 @@ class Table_access_impl {
   int rollback();
   TABLE *get_table(size_t index);
 
+  bool binlog_get();
+  void binlog_set(bool binlog);
+
  private:
   /** Array of size m_max_count. */
   Table_ref *m_table_array;
@@ -527,6 +532,8 @@ class Table_access_impl {
   size_t m_max_count;
   bool m_write;
   bool m_in_tx;
+  /** true if the mysys thread state needs cleanup */
+  bool m_clear_mysys;
 
   THD *m_parent_thd;
   THD *m_child_thd;
@@ -583,7 +590,11 @@ void TA_key_impl::key_copy(uchar *record, uint key_length) {
 }
 
 Table_access_impl::Table_access_impl(THD *thd, size_t count)
-    : m_current_count(0), m_max_count(count), m_write(false), m_in_tx(false) {
+    : m_current_count(0),
+      m_max_count(count),
+      m_write(false),
+      m_in_tx(false),
+      m_clear_mysys{false} {
   m_parent_thd = thd;
 
   m_child_thd = new THD(true);
@@ -596,6 +607,7 @@ Table_access_impl::Table_access_impl(THD *thd, size_t count)
     m_child_thd->security_context()->assign_user(
         STRING_WITH_LEN("table_access"));
     m_child_thd->security_context()->skip_grants("", "");
+    this->m_clear_mysys = !my_thread_is_inited();
     my_thread_init();
   }
 
@@ -634,7 +646,6 @@ Table_access_impl::~Table_access_impl() {
   }
 
   m_child_thd->release_resources();
-  m_child_thd->restore_globals();
 
   if (m_parent_thd) m_parent_thd->store_globals();
 
@@ -645,7 +656,7 @@ Table_access_impl::~Table_access_impl() {
   delete[] m_table_array;
   delete[] m_table_state_array;
 
-  if (!m_parent_thd) my_thread_end();
+  if (m_clear_mysys && !m_parent_thd) my_thread_end();
 
   // FIXME : kill flag ?
   // FIXME : nested THD status variables ?
@@ -682,6 +693,11 @@ TA_field_type field_type_to_api(enum enum_field_types impl_field_type,
       break;
     case MYSQL_TYPE_JSON:
       result = TA_TYPE_JSON;
+      break;
+    case MYSQL_TYPE_STRING:
+    case MYSQL_TYPE_BLOB:
+      result = TA_TYPE_TEXT;
+      break;
     default:
       break;
   };
@@ -738,7 +754,50 @@ size_t Table_access_impl::add_table(const char *schema_name,
   return m_current_count++;
 }
 
+/**
+  @brief Checks if access to the specified tables is supported
+
+  Check if the table access service supports the requested operation
+  for the requested set of tables.
+  This currently includes:
+    * not writing to a table that has generated columns
+    * not writing to a table that has triggers
+  @warning This needs to be called after the tabes are opened.
+
+  @param table_array The list of tables accessed
+  @retval true operation can continue
+  @retval false we should stop
+ */
+static bool is_access_to_tables_supported(Table_ref *table_array) {
+  for (Table_ref *tables = table_array; tables; tables = tables->next_global) {
+    if (tables->lock_descriptor().type == TL_WRITE && tables->table) {
+      TABLE *tb = tables->table;
+      /* We do not support writing to generated columns yet */
+      if (tb->has_gcol()) return false;
+      /* We do not support writing to tables with triggers */
+      if (tb->triggers &&
+          (tb->triggers->has_update_triggers() ||
+           tb->triggers->has_delete_triggers() ||
+           tb->triggers->has_triggers(TRG_EVENT_INSERT, TRG_ACTION_BEFORE) ||
+           tb->triggers->has_triggers(TRG_EVENT_INSERT, TRG_ACTION_AFTER)))
+        return false;
+    }
+  }
+  return true;
+}
+
 int Table_access_impl::begin() {
+  /*
+    Read lock must be acquired during entire open_and_lock_tables function
+    call, because shutdown process can make its internals unavailable in the
+    middle of the call. If tables are acquired before the shutdown process, the
+    shutdown process will not deallocate internals until tables are closed.
+   */
+  rwlock_scoped_lock rdlock(&LOCK_server_shutting_down, false, __FILE__,
+                            __LINE__);
+
+  if (server_shutting_down) return TA_ERROR_OPEN;
+
   if (m_write && m_parent_thd != nullptr) {
     if (m_parent_thd->global_read_lock.is_acquired()) {
       /*
@@ -763,6 +822,11 @@ int Table_access_impl::begin() {
 
   assert(!m_in_tx);
   m_in_tx = true;
+
+  if (!is_access_to_tables_supported(m_table_array)) {
+    return TA_ERROR_OPEN;
+  }
+
   return 0;
 }
 
@@ -777,6 +841,19 @@ TABLE *Table_access_impl::get_table(size_t index) {
   }
 
   return nullptr;
+}
+
+bool Table_access_impl::binlog_get() {
+  assert(!m_in_tx);
+  return 0 != (m_child_thd->variables.option_bits & OPTION_BIN_LOG);
+}
+
+void Table_access_impl::binlog_set(bool binlog) {
+  assert(!m_in_tx);
+  if (binlog)
+    m_child_thd->variables.option_bits |= OPTION_BIN_LOG;
+  else
+    m_child_thd->variables.option_bits &= ~OPTION_BIN_LOG;
 }
 
 int Table_access_impl::commit() {
@@ -1333,6 +1410,17 @@ int impl_get_field_any_value(Table_access /* api_ta */, TA_table api_table,
   return 0;
 }
 
+static bool impl_ta_binlog_get(Table_access api_ta) {
+  Table_access_impl *ta = Table_access_impl::from_api(api_ta);
+  assert(ta != nullptr);
+  return ta->binlog_get();
+}
+static void impl_ta_binlog_set(Table_access api_ta, bool binlog) {
+  Table_access_impl *ta = Table_access_impl::from_api(api_ta);
+  assert(ta != nullptr);
+  ta->binlog_set(binlog);
+}
+
 SERVICE_TYPE(table_access_factory_v1)
 SERVICE_IMPLEMENTATION(mysql_server, table_access_factory_v1) = {
     impl_create_table_access, impl_destroy_table_access};
@@ -1370,3 +1458,7 @@ SERVICE_IMPLEMENTATION(mysql_server, field_varchar_access_v1) = {
 SERVICE_TYPE(field_any_access_v1)
 SERVICE_IMPLEMENTATION(mysql_server, field_any_access_v1) = {
     impl_set_field_any_value, impl_get_field_any_value};
+
+SERVICE_TYPE(table_access_binlog)
+SERVICE_IMPLEMENTATION(mysql_server, table_access_binlog) = {
+    impl_ta_binlog_get, impl_ta_binlog_set};

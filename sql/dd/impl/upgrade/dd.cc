@@ -1,15 +1,16 @@
-/* Copyright (c) 2019, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2019, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -48,11 +49,11 @@
 #include "sql/dd/impl/tables/tables.h"            // dd::tables::Tables
 #include "sql/dd/impl/tables/tablespaces.h"       // dd::tables::Tablespaces
 #include "sql/dd/impl/tables/triggers.h"          // dd::tables::Triggers
+#include "sql/dd/impl/upgrade/server.h"           // Routine_event_context_guard
 #include "sql/dd/object_id.h"
 #include "sql/dd/types/object_table.h"             // dd::Object_table
 #include "sql/dd/types/object_table_definition.h"  // dd::Object_table_definition
 #include "sql/dd/types/schema.h"
-#include "sql/dd/impl/upgrade/server.h" // Routine_event_context_guard
 #include "sql/sd_notify.h"  // sysd::notify
 #include "sql/sql_class.h"  // THD
 #include "sql/table.h"      // MYSQL_SCHEMA_NAME
@@ -593,6 +594,18 @@ bool update_meta_data(THD *thd) {
   }
 
   /*
+    8.3.0 introduced a new "auto-update" property for histograms.
+    We add this property to any existing histograms and set it to false.
+  */
+  if (bootstrap::DD_bootstrap_ctx::instance().is_dd_upgrade_from_before(
+          bootstrap::DD_VERSION_80300)) {
+    if (dd::execute_query(thd,
+                          "UPDATE mysql.column_statistics SET histogram = "
+                          "json_set(histogram, '$.\"auto-update\"', false)"))
+      return dd::end_transaction(thd, true);
+  }
+
+  /*
     Turn foreign key checks back on and commit explicitly.
   */
   if (dd::execute_query(thd, "SET FOREIGN_KEY_CHECKS= 1"))
@@ -882,7 +895,6 @@ bool migrate_meta_data(THD *thd, const std::set<String_type> &create_set,
          << MYSQL_SCHEMA_NAME.str << "." << (*it);
       if (dd::execute_query(thd, ss.str().c_str()))
         return dd::end_transaction(thd, true);
-
     }
   }
 
@@ -1176,7 +1188,7 @@ bool upgrade_tables(THD *thd) {
       update_object_ids(thd, create_set, remove_set, mysql_schema_id,
                         target_table_schema_id, target_table_schema_name,
                         actual_table_schema_id) ||
-      update_versions(thd, false))
+      update_versions(thd))
     return true;
 
   LogErr(SYSTEM_LEVEL, ER_DD_UPGRADE_COMPLETED,

@@ -165,8 +165,8 @@ CURRENT_ROLE()
 `engineering`@`%`,`role`@`%`
 SHOW GRANTS FOR current_user() USING `engineering`@`%`,`role`@`%`;
 Grants for root@localhost
-GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, RELOAD, SHUTDOWN, PROCESS, FILE, REFERENCES, INDEX, ALTER, SHOW DATABASES, SUPER, CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, REPLICATION SLAVE, REPLICATION CLIENT, CREATE VIEW, SHOW VIEW, CREATE ROUTINE, ALTER ROUTINE, CREATE USER, EVENT, TRIGGER, CREATE TABLESPACE, CREATE ROLE, DROP ROLE ON *.* TO `root`@`localhost` WITH GRANT OPTION
-GRANT ALLOW_NONEXISTENT_DEFINER,APPLICATION_PASSWORD_ADMIN,AUDIT_ABORT_EXEMPT,AUDIT_ADMIN,AUTHENTICATION_POLICY_ADMIN,BACKUP_ADMIN,BINLOG_ADMIN,BINLOG_ENCRYPTION_ADMIN,CLONE_ADMIN,CONNECTION_ADMIN,ENCRYPTION_KEY_ADMIN,FIREWALL_EXEMPT,FLUSH_OPTIMIZER_COSTS,FLUSH_STATUS,FLUSH_TABLES,FLUSH_USER_RESOURCES,GROUP_REPLICATION_ADMIN,GROUP_REPLICATION_STREAM,INNODB_REDO_LOG_ARCHIVE,INNODB_REDO_LOG_ENABLE,PASSWORDLESS_USER_ADMIN,PERSIST_RO_VARIABLES_ADMIN,REPLICATION_APPLIER,REPLICATION_SLAVE_ADMIN,RESOURCE_GROUP_ADMIN,RESOURCE_GROUP_USER,ROLE_ADMIN,SENSITIVE_VARIABLES_OBSERVER,SERVICE_CONNECTION_ADMIN,SESSION_VARIABLES_ADMIN,SET_ANY_DEFINER,SHOW_ROUTINE,SYSTEM_USER,SYSTEM_VARIABLES_ADMIN,TABLE_ENCRYPTION_ADMIN,TELEMETRY_LOG_ADMIN,XA_RECOVER_ADMIN ON *.* TO `root`@`localhost` WITH GRANT OPTION
+GRANT <ALL_STATIC_PRIVILEGES> ON *.* TO `root`@`localhost` WITH GRANT OPTION
+GRANT <ALL_DYNAMIC_PRIVILEGES> ON *.* TO `root`@`localhost` WITH GRANT OPTION
 GRANT PROXY ON ``@`` TO `root`@`localhost` WITH GRANT OPTION
 GRANT `engineering`@`%`,`role`@`%` TO `root`@`localhost`
 GRANT role1 TO current_user();
@@ -180,7 +180,7 @@ CURRENT_ROLE()
 `engineering`@`%`,`role`@`%`,`role1`@`%`
 SHOW STATUS LIKE '%acl_cache%';
 Variable_name	Value
-Acl_cache_items_count	3
+Acl_cache_items_count	4
 # REVOKE a FROM b
 # WL988.I-5
 REVOKE 'role' FROM role1;
@@ -229,7 +229,7 @@ Note	3162	Authorization ID 'role'@'%' does not exist.
 Note	3162	Authorization ID 'role'@'host' does not exist.
 # ...unless this is what we want:
 DROP ROLE 'role';
-ERROR HY000: Operation DROP ROLE failed for 'role'@'%'
+ERROR HY000: Operation DROP ROLE failed for 'role'@'%' (User account does not exist)
 # Dropping roles should update the in memory roles graph
 # WL988.R-1.10
 # only count nodes and edges as the sorting order is depending on platform
@@ -269,6 +269,8 @@ localhost	joe	%	wp_administrators
 ALTER USER CURRENT_USER() DEFAULT ROLE NONE;
 ++ Flushing and reloading privileges shouldn't break the server
 FLUSH PRIVILEGES;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 # Restart the server and verify that the role graph and default roles
 # are properly imported.
 # restart
@@ -628,8 +630,10 @@ Variable_name	Value
 Acl_cache_items_count	6
 ++ Flushing and reloading privileges shouldn't break the server
 FLUSH PRIVILEGES;
-ERROR 42000: Access denied; you need (at least one of) the RELOAD privilege(s) for this operation
+ERROR 42000: Access denied; you need (at least one of) the RELOAD or FLUSH_PRIVILEGES privilege(s) for this operation
 FLUSH PRIVILEGES;
+Warnings:
+Warning	1681	'FLUSH PRIVILEGES' is deprecated and will be removed in a future release.
 SELECT * FROM mysql.role_edges;
 FROM_HOST	FROM_USER	TO_HOST	TO_USER	WITH_ADMIN_OPTION
 %	backup_admin	%	db_admin	N
@@ -791,6 +795,7 @@ BINLOG_ADMIN	Server Admin
 BINLOG_ENCRYPTION_ADMIN	Server Admin	
 CLONE_ADMIN	Server Admin	
 CONNECTION_ADMIN	Server Admin	
+CREATE_SPATIAL_REFERENCE_SYSTEM	Server Admin	
 Create	Databases,Tables,Indexes	To create new databases and tables
 Create role	Server Admin	To create new roles
 Create routine	Databases	To use CREATE FUNCTION/PROCEDURE
@@ -806,6 +811,7 @@ Event	Server Admin	To create, alter, drop and execute events
 Execute	Functions,Procedures	To execute stored routines
 FIREWALL_EXEMPT	Server Admin	
 FLUSH_OPTIMIZER_COSTS	Server Admin	
+FLUSH_PRIVILEGES	Server Admin	
 FLUSH_STATUS	Server Admin	
 FLUSH_TABLES	Server Admin	
 FLUSH_USER_RESOURCES	Server Admin	
@@ -818,6 +824,8 @@ INNODB_REDO_LOG_ENABLE	Server Admin
 Index	Tables	To create or drop indexes
 Insert	Tables	To insert data into tables
 Lock tables	Databases	To use LOCK TABLES (together with SELECT privilege)
+MANAGE_DATA_MASKING_POLICY	Server Admin	
+OPTIMIZE_LOCAL_TABLE	Server Admin	
 PASSWORDLESS_USER_ADMIN	Server Admin	
 PERSIST_RO_VARIABLES_ADMIN	Server Admin	
 Process	Server Admin	To view the plain text of currently executing queries
@@ -835,7 +843,6 @@ SENSITIVE_VARIABLES_OBSERVER	Server Admin
 SERVICE_CONNECTION_ADMIN	Server Admin	
 SESSION_VARIABLES_ADMIN	Server Admin	
 SET_ANY_DEFINER	Server Admin	
-SET_USER_ID	Server Admin	
 SHOW_ROUTINE	Server Admin	
 SYSTEM_USER	Server Admin	
 SYSTEM_VARIABLES_ADMIN	Server Admin	
@@ -843,9 +850,10 @@ Select	Tables	To retrieve rows from table
 Show databases	Server Admin	To see all databases with SHOW DATABASES
 Show view	Tables	To see views with SHOW CREATE VIEW
 Shutdown	Server Admin	To shut down the server
-Super	Server Admin	To use KILL thread, SET GLOBAL, CHANGE MASTER, etc.
+Super	Server Admin	To use KILL thread, SET GLOBAL, CHANGE REPLICATION SOURCE, etc.
 TABLE_ENCRYPTION_ADMIN	Server Admin	
 TELEMETRY_LOG_ADMIN	Server Admin	
+TRANSACTION_GTID_TAG	Server Admin	
 Trigger	Tables	To use triggers
 Update	Tables	To update existing rows
 Usage	Server Admin	No privileges - allow connect only
@@ -884,7 +892,7 @@ GRANT `r1`@`%` TO `u1`@`localhost`
 SELECT CURRENT_ROLE();
 CURRENT_ROLE()
 `r1`@`%`
-++ charset should be utf8
+++ charset should be utf8mb3
 SELECT CHARSET(CURRENT_ROLE());
 CHARSET(CURRENT_ROLE())
 utf8mb3
@@ -1066,13 +1074,11 @@ Note	3162	Authorization ID 'admin1'@'%' does not exist.
 Note	3162	Authorization ID 'admin2'@'%' does not exist.
 Note	3162	Authorization ID 'r1'@'%' does not exist.
 Note	3162	Authorization ID 'r2'@'%' does not exist.
-CREATE USER baseuser IDENTIFIED WITH mysql_native_password,
-admin1 IDENTIFIED WITH mysql_native_password,
-admin2 IDENTIFIED WITH mysql_native_password;
+CREATE USER baseuser IDENTIFIED WITH caching_sha2_password,
+admin1 IDENTIFIED WITH caching_sha2_password,
+admin2 IDENTIFIED WITH caching_sha2_password;
 GRANT PROXY ON baseuser TO admin1;
 GRANT PROXY ON baseuser TO admin2;
-SET @@global.check_proxy_users = ON;
-SET @@global.mysql_native_password_proxy_users = ON;
 CREATE ROLE r1, r2;
 GRANT SELECT ON mysql.db to r1;
 GRANT SELECT ON mysql.user to r2;
@@ -1088,21 +1094,19 @@ CURRENT_USER()
 baseuser@%
 SELECT USER(), CURRENT_USER(), CURRENT_ROLE();
 USER()	CURRENT_USER()	CURRENT_ROLE()
-admin1@localhost	baseuser@%	`r2`@`%`
+admin1@localhost	admin1@%	NONE
 SET ROLE ALL;
 SELECT CURRENT_USER();
 CURRENT_USER()
-baseuser@%
+admin1@%
 SELECT USER(), CURRENT_USER(), CURRENT_ROLE();
 USER()	CURRENT_USER()	CURRENT_ROLE()
-admin2@localhost	baseuser@%	`r2`@`%`
+admin2@localhost	admin2@%	NONE
 SET ROLE ALL;
 SELECT CURRENT_USER();
 CURRENT_USER()
-baseuser@%
+admin2@%
 DROP USER baseuser, admin1, admin2, r1, r2;
-SET @@global.check_proxy_users = OFF;
-SET @@global.mysql_native_password_proxy_users = OFF;
 #
 # SHOW CREATE USER DOESN'T SHOW DEFAULT ROLE
 #
@@ -1112,7 +1116,7 @@ SHOW CREATE USER u1;
 CREATE USER for u1@%
 CREATE USER `u1`@`%` IDENTIFIED WITH 'caching_sha2_password' AS '<hash>' DEFAULT ROLE `a`@`%`,`a`@`a`,`a`@`localhost`,`aaa`@`%`,`b`@`%`,`b`@`local`,`c c`@`%` REQUIRE NONE PASSWORD EXPIRE DEFAULT ACCOUNT UNLOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT
 CREATE USER u1;
-ERROR HY000: Operation CREATE USER failed for 'u1'@'%'
+ERROR HY000: Operation CREATE USER failed for 'u1'@'%' (User account already exists)
 # Same as before and don't crash.
 SHOW CREATE USER u1;
 CREATE USER for u1@%

@@ -1,15 +1,16 @@
-/* Copyright (c) 2014, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2014, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,6 +26,14 @@
 #include "mysql/binlog/event/codecs/factory.h"
 #include "mysql/binlog/event/compression/base.h"
 #include "mysql/binlog/event/event_reader_macros.h"
+#include "mysql/serialization/read_archive_binary.h"
+#include "mysql/serialization/serialization_error_type.h"
+#include "mysql/serialization/serializer_default.h"
+#include "mysql/serialization/write_archive_binary.h"
+#include "mysql_com.h"  // net_field_length
+#include "sql/log.h"
+
+using mysql::serialization::Serialization_error_type;
 
 namespace mysql::binlog::event {
 
@@ -103,17 +112,19 @@ Format_description_event::Format_description_event(uint8_t binlog_ver,
           RAND_HEADER_LEN, USER_VAR_HEADER_LEN, FORMAT_DESCRIPTION_HEADER_LEN,
           XID_HEADER_LEN, BEGIN_LOAD_QUERY_HEADER_LEN,
           EXECUTE_LOAD_QUERY_HEADER_LEN, TABLE_MAP_HEADER_LEN, 0, 0, 0,
-          ROWS_HEADER_LEN_V1,     /* WRITE_ROWS_EVENT_V1*/
-          ROWS_HEADER_LEN_V1,     /* UPDATE_ROWS_EVENT_V1*/
-          ROWS_HEADER_LEN_V1,     /* DELETE_ROWS_EVENT_V1*/
-          INCIDENT_HEADER_LEN, 0, /* HEARTBEAT_LOG_EVENT*/
+          /*
+            First three values are unused as the code for V1 Rows events
+            were removed in 8.4.0
+          */
+          0, 0, 0, INCIDENT_HEADER_LEN, 0, /* HEARTBEAT_LOG_EVENT*/
           IGNORABLE_HEADER_LEN, IGNORABLE_HEADER_LEN, ROWS_HEADER_LEN_V2,
           ROWS_HEADER_LEN_V2, ROWS_HEADER_LEN_V2,
           Gtid_event::POST_HEADER_LENGTH, /*GTID_EVENT*/
           Gtid_event::POST_HEADER_LENGTH, /*ANONYMOUS_GTID_EVENT*/
           IGNORABLE_HEADER_LEN, TRANSACTION_CONTEXT_HEADER_LEN,
           VIEW_CHANGE_HEADER_LEN, XA_PREPARE_HEADER_LEN, ROWS_HEADER_LEN_V2,
-          TRANSACTION_PAYLOAD_EVENT, 0 /* HEARTBEAT_LOG_EVENT_V2*/
+          TRANSACTION_PAYLOAD_EVENT, 0 /* HEARTBEAT_LOG_EVENT_V2*/,
+          0 /* GTID_TAGGED_LOG_EVENT */
       };
       /*
         Allows us to sanity-check that all events initialized their
@@ -415,11 +426,33 @@ void Transaction_payload_event::print_long_info(std::ostream &os) {
 }
 #endif
 
+void Gtid_event::read_gtid_tagged_log_event(const char *buf,
+                                            std::size_t buf_size) {
+  Decoder_type serializer;
+  serializer.get_archive().set_stream(
+      reinterpret_cast<const unsigned char *>(buf), buf_size);
+  serializer >> *this;
+  may_have_sbr_stmts = (gtid_flags & FLAG_MAY_HAVE_SBR) != 0;
+  header()->set_is_valid(true);
+  if (serializer.is_error()) {
+    header()->set_decoding_error(Event_decoding_error::invalid_event);
+    if (serializer.get_error().get_type() ==
+        Serialization_error_type::unknown_field) {
+      header()->set_decoding_error(
+          Event_decoding_error::unknown_non_ignorable_fields);
+    }
+    reader().set_error("invalid event");
+    header()->set_is_valid(false);
+  }
+  reader().go_to(reader().position() + buf_size);
+}
+
 Gtid_event::Gtid_event(const char *buf, const Format_description_event *fde)
     : Binary_log_event(&buf, fde),
       last_committed(SEQ_UNINIT),
       sequence_number(SEQ_UNINIT),
       may_have_sbr_stmts(true),
+      gtid_flags(FLAG_MAY_HAVE_SBR),
       original_commit_timestamp(0),
       immediate_commit_timestamp(0),
       transaction_length(0),
@@ -479,14 +512,26 @@ Gtid_event::Gtid_event(const char *buf, const Format_description_event *fde)
   BAPI_ENTER("Gtid_event::Gtid_event(const char*, ...)");
   READER_TRY_INITIALIZATION;
   READER_ASSERT_POSITION(fde->common_header_len);
-  unsigned char gtid_flags;
-  READER_TRY_SET(gtid_flags, read<unsigned char>);
-  may_have_sbr_stmts = gtid_flags & FLAG_MAY_HAVE_SBR;
 
-  READER_TRY_CALL(memcpy<unsigned char *>, Uuid_parent_struct.bytes,
-                  Uuid_parent_struct.BYTE_LENGTH);
   // SIDNO is only generated if needed, in get_sidno().
   gtid_info_struct.rpl_gtid_sidno = -1;
+
+  if (header()->type_code == GTID_TAGGED_LOG_EVENT) {
+    auto data_event_len = header()->data_written - fde->common_header_len;
+    if (footer()->checksum_alg !=
+        mysql::binlog::event::BINLOG_CHECKSUM_ALG_OFF) {
+      data_event_len -= BINLOG_CHECKSUM_LEN;
+    }
+    read_gtid_tagged_log_event(buf + fde->common_header_len, data_event_len);
+    BAPI_VOID_RETURN;
+  }
+
+  READER_TRY_SET(gtid_flags, read<unsigned char>);
+  may_have_sbr_stmts = (gtid_flags & FLAG_MAY_HAVE_SBR) != 0;
+
+  READER_TRY_CALL(memcpy<unsigned char *>,
+                  tsid_parent_struct.get_uuid().bytes.data(),
+                  tsid_parent_struct.get_uuid().bytes.size());
 
   READER_TRY_SET(gtid_info_struct.rpl_gtid_gno, read<int64_t>);
   /* GNO sanity check */
@@ -573,6 +618,7 @@ Gtid_event::Gtid_event(const char *buf, const Format_description_event *fde)
 }
 
 int Gtid_event::get_commit_group_ticket_length() const {
+  assert(!is_tagged());
   if (kGroupTicketUnset != commit_group_ticket) {
     return COMMIT_GROUP_TICKET_LENGTH;
   }
@@ -586,10 +632,61 @@ void Gtid_event::set_commit_group_ticket_and_update_transaction_length(
     it was not yet considered.
   */
   assert(value > 0);
-  set_trx_length(transaction_length + (kGroupTicketUnset == commit_group_ticket
-                                           ? COMMIT_GROUP_TICKET_LENGTH
-                                           : 0));
-  commit_group_ticket = value;
+
+  if (is_tagged()) {
+    auto transaction_length_overhead =
+        transaction_length - Encoder_type::get_size(*this);
+    commit_group_ticket = value;
+    update_tagged_transaction_length(transaction_length_overhead);
+  } else {
+    // we will only recalculate bgc len
+    transaction_length -= net_length_size(transaction_length);
+    commit_group_ticket = value;
+    transaction_length += get_commit_group_ticket_length();
+    update_untagged_transaction_length();
+  }
+}
+
+bool Gtid_event::is_tagged() const {
+  if (header()->type_code == mysql::binlog::event::GTID_TAGGED_LOG_EVENT) {
+    return true;
+  }
+  return false;
+}
+
+void Gtid_event::update_untagged_transaction_length() {
+  /*
+    Notice that it is not possible to determine the transaction_length field
+    size using pack.cc:net_length_size() since the length of the field itself
+    must be added to the value.
+
+    Example: Suppose transaction_length is 250 without considering the
+    transaction_length field. Using net_length_size(250) would return 1, but
+    when adding the transaction_length field size to it (+1), the
+    transaction_length becomes 251, and the field must be represented using two
+    more bytes, so the correct transaction length must be in fact 253.
+  */
+  transaction_length = net_length_size_including_self(transaction_length);
+}
+
+void Gtid_event::update_tagged_transaction_length(
+    std::size_t trx_len_without_event_len) {
+  // transaction_length includes the size of the Gtid_event itself. Since the
+  // value of transaction_length  is stored in a variable-length integer
+  // in the event, we don't know the exact length of the Gtid_event until we
+  // have computed transaction_length. Therefore, we first compute an
+  // under-approximation of transaction_length which only includes the
+  // smallest possible value for transaction_length. Then we repeatedly
+  // compute the total event length based on the new approximation.
+  // This algorithm will reach a fixpoint
+  // (actually in at most one iteration using the current encoding, but we
+  // iterate just to be encoding-agnostic).
+
+  uint64_t current_length = trx_len_without_event_len;
+  do {
+    transaction_length = current_length;
+    current_length = trx_len_without_event_len + Encoder_type::get_size(*this);
+  } while (current_length != transaction_length);
 }
 
 Previous_gtids_event::Previous_gtids_event(const char *buffer,
@@ -713,7 +810,13 @@ Heartbeat_event::Heartbeat_event(const char *buf,
     READER_THROW("Invalid Heartbeat information");
 
   ident_len = READER_CALL(available_to_read);
+  if (ident_len == 0) READER_THROW("Event is smaller than expected");
+
   if (ident_len > FN_REFLEN - 1) ident_len = FN_REFLEN - 1;
+
+  READER_TRY_SET(log_ident, strndup<const char *>, ident_len);
+  if (log_ident == nullptr)
+    READER_THROW("Invalid binary log file name in Heartbeat event");
 
   READER_CATCH_ERROR;
   BAPI_VOID_RETURN;

@@ -1,15 +1,16 @@
-# Copyright (c) 2006, 2023, Oracle and/or its affiliates.
-# 
+# Copyright (c) 2006, 2026, Oracle and/or its affiliates.
+#
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License, version 2.0,
 # as published by the Free Software Foundation.
 #
-# This program is also distributed with certain software (including
+# This program is designed to work with certain software (including
 # but not limited to OpenSSL) that is licensed under separate terms,
 # as designated in a particular file or component or in included license
 # documentation.  The authors of MySQL hereby grant you an additional
 # permission to link the program and your derivative works with the
-# separately licensed software that they have included with MySQL.
+# separately licensed software that they have either included with
+# the program or referenced in the documentation.
 #
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -25,16 +26,8 @@ ADD_WSHADOW_WARNING()
 # We are not interesting in profiling clients.
 DISABLE_MISSING_PROFILE_WARNING()
 
-## Subdirectory with common client code.
-ADD_SUBDIRECTORY(base)
-## Subdirectory for mysqlpump code.
-ADD_SUBDIRECTORY(dump)
 ## Subdirectory for mysql_migrate_keyring code.
 ADD_SUBDIRECTORY(migrate_keyring)
-
-INCLUDE_DIRECTORIES(
-  ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
 
 MYSQL_ADD_EXECUTABLE(mysql
   ${CMAKE_SOURCE_DIR}/sql-common/net_ns.cc
@@ -46,15 +39,9 @@ MYSQL_ADD_EXECUTABLE(mysql
   multi_factor_passwordopt-vars.cc
   multi_option.cc
   ${CMAKE_CURRENT_SOURCE_DIR}/common/user_registration.cc
-  LINK_LIBRARIES perconaserverclient client_base ${EDITLINE_LIBRARY}
+  ${CMAKE_SOURCE_DIR}/sql-common/sql_string.cc
+  LINK_LIBRARIES perconaserverclient ${EDITLINE_LIBRARY}
   )
-
-IF(NOT WITHOUT_SERVER)
-  MYSQL_ADD_EXECUTABLE(mysql_upgrade
-    upgrade/program.cc
-    LINK_LIBRARIES perconaserverclient client_base
-    )
-ENDIF()
 
 MYSQL_ADD_EXECUTABLE(mysqltest
   mysqltest.cc
@@ -72,6 +59,9 @@ MYSQL_ADD_EXECUTABLE(mysqltest
   ENABLE_EXPORTS
   LINK_LIBRARIES perconaserverclient
   )
+
+DOWNGRADE_STRINGOP_WARNINGS(mysqltest)
+
 IF (WITH_COREDUMPER)
   TARGET_LINK_LIBRARIES(mysqltest coredumper)
 ENDIF()
@@ -142,7 +132,7 @@ ADD_SHARED_LIBRARY(json_binlog
   COMPILE_DEFINITIONS DISABLE_PSI_MUTEX EXPORT_JSON_FUNCTIONS
   DEPENDENCIES GenError
   ${INSTALL_JSON_BINLOG_LIBRARY}
-  LINK_LIBRARIES mysys extra::rapidjson ext::zlib decimal
+  LINK_LIBRARIES mysys extra::rapidjson ext::zlib ext::xxhash decimal
   LINUX_VERSION_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/json_binlog.ver"
   VERSION "${json_binlog_VERSION}"
   NO_UNDEFINED
@@ -151,11 +141,13 @@ ADD_SHARED_LIBRARY(json_binlog
 ADD_CONVENIENCE_LIBRARY(json_client_library
   ${CMAKE_SOURCE_DIR}/sql-common/json_binary.cc
   ${CMAKE_SOURCE_DIR}/sql-common/json_dom.cc
+  ${CMAKE_SOURCE_DIR}/sql-common/json_hash.cc
   ${CMAKE_SOURCE_DIR}/sql-common/json_path.cc
+  ${CMAKE_SOURCE_DIR}/sql-common/json_schema.cc
   ${CMAKE_SOURCE_DIR}/sql-common/json_syntax_check.cc
   ${CMAKE_SOURCE_DIR}/sql-common/sql_string.cc
 
-  LINK_LIBRARIES ext::zlib
+  LINK_LIBRARIES ext::zlib ext::xxhash decimal
   COMPILE_DEFINITIONS
     DISABLE_PSI_MUTEX
     $<TARGET_PROPERTY:extra::rapidjson,INTERFACE_COMPILE_DEFINITIONS>
@@ -190,6 +182,7 @@ MYSQL_ADD_EXECUTABLE(json_client_library_main
   LINK_LIBRARIES json_client_library  strings mysys decimal
   SKIP_INSTALL
   )
+DOWNGRADE_STRINGOP_WARNINGS(json_client_library_main)
 
 # A test executable which does nothing, except verify that symbols are visible.
 # To test standalone build:
@@ -201,7 +194,7 @@ MYSQL_ADD_EXECUTABLE(json_client_library_main
 MYSQL_ADD_EXECUTABLE(json_binlog_main
   json_binlog_main.cc
   INCLUDE_DIRECTORIES ../sql ../sql-common
-  LINK_LIBRARIES json_binlog
+  LINK_LIBRARIES ext::xxhash json_binlog
   SKIP_INSTALL
   )
 
@@ -213,7 +206,7 @@ MYSQL_ADD_EXECUTABLE(json_binlog_main
 MYSQL_ADD_EXECUTABLE(json_binlog_main_static
   json_binlog_main.cc
   INCLUDE_DIRECTORIES ../sql ../sql-common
-  LINK_LIBRARIES json_binlog_static
+  LINK_LIBRARIES ext::xxhash json_binlog_static
   SKIP_INSTALL
   )
 
@@ -232,7 +225,7 @@ SET(MYSQLBINLOG_SOURCES
   mysqlbinlog.cc
   ${CMAKE_SOURCE_DIR}/sql/log_event.cc
   ${CMAKE_SOURCE_DIR}/sql/rpl_utility.cc
-  ${CMAKE_SOURCE_DIR}/sql/rpl_gtid_sid_map.cc
+  ${CMAKE_SOURCE_DIR}/sql/rpl_gtid_tsid_map.cc
   ${CMAKE_SOURCE_DIR}/sql/rpl_gtid_misc.cc
   ${CMAKE_SOURCE_DIR}/sql/rpl_gtid_set.cc
   ${CMAKE_SOURCE_DIR}/sql/rpl_gtid_specification.cc
@@ -240,9 +233,18 @@ SET(MYSQLBINLOG_SOURCES
   ${CMAKE_SOURCE_DIR}/sql/basic_istream.cc
   ${CMAKE_SOURCE_DIR}/sql/binlog_istream.cc
   ${CMAKE_SOURCE_DIR}/sql/binlog_reader.cc
-  ${CMAKE_SOURCE_DIR}/sql/stream_cipher.cc
   ${CMAKE_SOURCE_DIR}/sql/rpl_log_encryption.cc
   )
+
+# The client version of log_event.cc has false positives.
+# Downgrade from error to warning:
+IF(MY_COMPILER_IS_GNU AND CMAKE_BUILD_TYPE_UPPER STREQUAL "RELWITHDEBINFO")
+  ADD_COMPILE_FLAGS(${CMAKE_SOURCE_DIR}/sql/log_event.cc
+    COMPILE_FLAGS
+    " -Wno-error=uninitialized"
+    " -Wno-error=maybe-uninitialized"
+    )
+ENDIF()
 
 # duplicate explicit instantiation of 'net_field_length_checked'
 # ignored as a Microsoft extension
@@ -253,7 +255,6 @@ ENDIF()
 
 SET(MYSQLBINLOG_LIBRARIES
   mysql_binlog_event
-  client_base
   perconaserverclient
   )
 
@@ -263,18 +264,27 @@ ELSE()
   LIST(APPEND MYSQLBINLOG_LIBRARIES json_binlog_static)
 ENDIF()
 
-MYSQL_ADD_EXECUTABLE(mysqlbinlog
-  ${MYSQLBINLOG_SOURCES}
-  DEPENDENCIES GenError
-  LINK_LIBRARIES ${MYSQLBINLOG_LIBRARIES}
-  )
+IF(VS2019 AND WITHOUT_SERVER)
+  # MSVC 19.29 (VS16.11) has bugs, apparently, which make it incapable of
+  # building libs/mysql/sets. We don't need to build server, mysqlbinlog, or
+  # libchangestreams with that version, so in regression runs with this compiler
+  # we enable WITHOUT_SERVER and rely on the condition above to not build
+  # mysqlbinlog. The condition can be removed when we remove support for
+  # the platform. See also [**] below and in ../CMakeLists.txt
+ELSE()
+  MYSQL_ADD_EXECUTABLE(mysqlbinlog
+    ${MYSQLBINLOG_SOURCES}
+    DEPENDENCIES GenError
+    LINK_LIBRARIES ext::xxhash ${MYSQLBINLOG_LIBRARIES}
+    )
+ENDIF()
 
 # __builtin_strncpy specified bound depends on the length of the source argument
 # mysqlbinlog.cc:2169:22: note: length computed here
 IF((WITH_LTO OR CMAKE_COMPILER_FLAG_WITH_LTO) AND
     MY_COMPILER_IS_GNU AND
     CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 11)
-  MY_TARGET_LINK_OPTIONS(mysqlbinlog "-Wno-stringop-truncation")
+  TARGET_LINK_OPTIONS(mysqlbinlog PRIVATE -Wno-stringop-truncation)
 ENDIF()
 
 IF(WITH_JSON_BINLOG_LIBRARY)
@@ -290,8 +300,12 @@ IF(WITH_JSON_BINLOG_LIBRARY)
   ENDIF()
 ENDIF()
 
-TARGET_COMPILE_DEFINITIONS(mysqlbinlog PRIVATE DISABLE_PSI_MUTEX)
-TARGET_INCLUDE_DIRECTORIES(mysqlbinlog PRIVATE ${CMAKE_SOURCE_DIR}/sql)
+IF(VS2019 AND WITHOUT_SERVER)
+  # See [**] above.
+ELSE()
+  TARGET_COMPILE_DEFINITIONS(mysqlbinlog PRIVATE DISABLE_PSI_MUTEX)
+  TARGET_INCLUDE_DIRECTORIES(mysqlbinlog PRIVATE ${CMAKE_SOURCE_DIR}/sql)
+ENDIF()
 
 MYSQL_ADD_EXECUTABLE(mysqladmin
   mysqladmin.cc
@@ -310,12 +324,6 @@ MYSQL_ADD_EXECUTABLE(mysql_config_editor
 MYSQL_ADD_EXECUTABLE(mysql_secure_installation
   mysql_secure_installation.cc
   LINK_LIBRARIES perconaserverclient
-  )
-MYSQL_ADD_EXECUTABLE(mysql_ssl_rsa_setup
-  logger.cc
-  mysql_ssl_rsa_setup.cc
-  path.cc
-  LINK_LIBRARIES mysys
   )
 
 # "WIN32" also covers 64 bit. "echo" is used in some files below "mysql-test/".

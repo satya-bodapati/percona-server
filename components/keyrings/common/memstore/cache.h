@@ -1,15 +1,16 @@
-/* Copyright (c) 2021, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2021, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -24,13 +25,12 @@
 #define CACHE_INCLUDED
 
 #include <unordered_map>
+#include <utility>
 
 #include "components/keyrings/common/data/data.h" /* data::Data */
 #include "components/keyrings/common/data/meta.h" /* meta::Metadata */
 
-namespace keyring_common {
-
-namespace cache {
+namespace keyring_common::cache {
 
 template <typename Data_extension>
 using Cache =
@@ -50,6 +50,17 @@ class Datacache final {
 
   /** Destructor */
   ~Datacache() = default;
+
+  /**
+    Swap content of two caches.
+
+    @param [in, out] a   first cache to be swapped
+    @param [in, out] b   second cache to be swapped
+  */
+  static void swap(Datacache &a, Datacache &b) {
+    std::swap(a.version_, b.version_);
+    std::swap(a.cache_, b.cache_);
+  }
 
   /**
     Retrieve an element from cache
@@ -132,7 +143,6 @@ class Datacache final {
   size_t version_{0};
 };
 
-}  // namespace cache
-}  // namespace keyring_common
+}  // namespace keyring_common::cache
 
 #endif  // !CACHE_INCLUDED

@@ -1,15 +1,16 @@
-/* Copyright (c) 2005, 2023, Oracle and/or its affiliates.
+/* Copyright (c) 2005, 2026, Oracle and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
    as published by the Free Software Foundation.
 
-   This program is also distributed with certain software (including
+   This program is designed to work with certain software (including
    but not limited to OpenSSL) that is licensed under separate terms,
    as designated in a particular file or component or in included license
    documentation.  The authors of MySQL hereby grant you an additional
    permission to link the program and your derivative works with the
-   separately licensed software that they have included with MySQL.
+   separately licensed software that they have either included with
+   the program or referenced in the documentation.
 
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -212,16 +213,25 @@ static uint32 get_list_array_idx_for_endpoint(partition_info *part_info,
 
 Item *convert_charset_partition_constant(Item *item, const CHARSET_INFO *cs) {
   THD *thd = current_thd;
-  Name_resolution_context *context = &thd->lex->current_query_block()->context;
-  Table_ref *save_list = context->table_list;
+  Query_block *qb = thd->lex->current_query_block();
+  Name_resolution_context *context = nullptr;
+  Table_ref *save_list = nullptr;
   const char *save_where = thd->where;
 
-  item = item->safe_charset_converter(thd, cs);
-  context->table_list = nullptr;
+  item = item->convert_charset(thd, cs);
+  if (item == nullptr) return nullptr;
+
+  if (qb != nullptr) {
+    context = &qb->context;
+    save_list = context->table_list;
+    context->table_list = nullptr;
+  }
   thd->where = "convert character set partition constant";
-  if (!item || item->fix_fields(thd, (Item **)nullptr)) item = nullptr;
+  if (item->fix_fields(thd, nullptr)) return nullptr;
   thd->where = save_where;
-  context->table_list = save_list;
+  if (qb != nullptr) {
+    context->table_list = save_list;
+  }
   return item;
 }
 
@@ -264,7 +274,7 @@ static bool is_name_in_list(const char *name, List<String> list_names) {
     false                         Success
 */
 
-MY_NODISCARD
+[[nodiscard]]
 static bool partition_default_handling(Partition_handler *part_handler,
                                        partition_info *part_info,
                                        bool is_create_table_ind,
@@ -432,7 +442,7 @@ static bool set_up_field_array(TABLE *table, bool is_sub_part) {
   uint i = 0;
   uint inx;
   partition_info *part_info = table->part_info;
-  int result = false;
+  bool result = false;
   DBUG_TRACE;
 
   ptr = table->field;
@@ -503,8 +513,22 @@ static bool set_up_field_array(TABLE *table, bool is_sub_part) {
             performance reasons.
         */
 
+        if (field->real_type() == MYSQL_TYPE_VECTOR) {
+          /* vector column as partition key is not supported */
+          my_error(ER_FIELD_TYPE_NOT_ALLOWED_AS_PARTITION_FIELD, MYF(0),
+                   field->field_name);
+          result = true;
+        }
+
         if (field->is_flag_set(BLOB_FLAG)) {
           my_error(ER_BLOB_FIELD_IN_PART_FUNC_ERROR, MYF(0));
+          result = true;
+        }
+
+        if (field->has_masking_policy()) {
+          my_error(ER_MASKING_POLICY_INCOMPATIBLE_COLUMN_FEATURE, MYF(0),
+                   field->field_name,
+                   "be referenced by a partitioning function");
           result = true;
         }
       }
@@ -761,6 +785,11 @@ static bool handle_list_of_fields(List_iterator<char> it, TABLE *table,
       */
       for (i = 0; i < num_key_parts; i++) {
         Field *field = table->key_info[primary_key].key_part[i].field;
+        // BLOB/TEXT columns are not allowed in partitioning keys.
+        if (field->is_flag_set(BLOB_FLAG)) {
+          my_error(ER_BLOB_FIELD_IN_PART_FUNC_ERROR, MYF(0));
+          return true;
+        }
         field->set_flag(GET_FIXED_FIELDS_FLAG);
       }
     } else {
@@ -1472,7 +1501,7 @@ bool fix_partition_func(THD *thd, TABLE *table, bool is_create_table_ind) {
   partition_info *part_info = table->part_info;
   const enum_mark_columns save_mark_used_columns = thd->mark_used_columns;
   Partition_handler *part_handler;
-  const ulong save_want_privilege = thd->want_privilege;
+  const Access_bitmask save_want_privilege = thd->want_privilege;
   DBUG_TRACE;
 
   if (part_info->fixed) {
@@ -1949,6 +1978,13 @@ static int check_part_field(enum_field_types sql_type, const char *field_name,
   if (sql_type >= MYSQL_TYPE_TINY_BLOB && sql_type <= MYSQL_TYPE_BLOB) {
     my_error(ER_BLOB_FIELD_IN_PART_FUNC_ERROR, MYF(0));
     return true;
+  }
+  if (sql_type == MYSQL_TYPE_VECTOR) {
+    /* vector column as partition key is not supported */
+    /* LCOV_EXCL_START */
+    my_error(ER_FIELD_TYPE_NOT_ALLOWED_AS_PARTITION_FIELD, MYF(0), field_name);
+    return true;
+    /* LCOV_EXCL_STOP */
   }
   switch (sql_type) {
     case MYSQL_TYPE_TINY:
@@ -3677,7 +3713,6 @@ void get_partition_set(const TABLE *table, uchar *buf, const uint index,
                        const key_range *key_spec, part_id_range *part_spec) {
   partition_info *part_info = table->part_info;
   const uint num_parts = part_info->get_tot_partitions();
-  uint i, part_id;
   uint sub_part = num_parts;
   uint32 part_part = num_parts;
   KEY *key_info = nullptr;
@@ -3805,9 +3840,8 @@ void get_partition_set(const TABLE *table, uchar *buf, const uint index,
       part_spec->start_part = sub_part;
       part_spec->end_part =
           sub_part + (part_info->num_subparts * (part_info->num_parts - 1));
-      for (i = 0, part_id = sub_part; i < part_info->num_parts;
-           i++, part_id += part_info->num_subparts)
-        ;  // Set bit part_id in bit array
+      // TODO: Set bit part_id in bit array (loop removed because it was a
+      // no-op; placeholder for future bit-array support).
     }
   }
   if (found_part_field) clear_indicator_in_key_fields(key_info);
@@ -5803,7 +5837,7 @@ static int get_part_iter_for_interval_via_mapping(
   get_endpoint_func get_endpoint = nullptr;
   bool can_match_multiple_values; /* is not '=' */
   const uint field_len = field->pack_length_in_rec();
-  MYSQL_TIME start_date;
+  Datetime_val start_date;
   bool check_zero_dates = false;
   bool zero_in_start_date = true;
   DBUG_TRACE;
@@ -5896,7 +5930,7 @@ static int get_part_iter_for_interval_via_mapping(
         if (!(flags & NO_MAX_RANGE) && (field->type() == MYSQL_TYPE_DATE ||
                                         field->type() == MYSQL_TYPE_DATETIME)) {
           /* Monotonic, but return NULL for dates with zeros in month/day. */
-          zero_in_start_date = field->get_date(&start_date, 0);
+          zero_in_start_date = field->val_datetime(&start_date, 0);
           DBUG_PRINT("info",
                      ("zero start %u %04d-%02d-%02d", zero_in_start_date,
                       start_date.year, start_date.month, start_date.day));
@@ -5916,8 +5950,8 @@ static int get_part_iter_for_interval_via_mapping(
     part_iter->part_nums.end = get_endpoint(part_info, false, include_endp);
     if (check_zero_dates && !zero_in_start_date &&
         !part_info->part_expr->null_value) {
-      MYSQL_TIME end_date;
-      const bool zero_in_end_date = field->get_date(&end_date, 0);
+      Datetime_val end_date;
+      const bool zero_in_end_date = field->val_datetime(&end_date, 0);
       /*
         This is an optimization for TO_DAYS()/TO_SECONDS() to avoid scanning
         the NULL partition for ranges that cannot include a date with 0 as
