@@ -153,6 +153,12 @@ CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY,
 SELECT id FROM t ORDER BY DISTANCE(v, STRING_TO_VECTOR('[1,0,0,0]'), 'EUCLIDEAN') LIMIT 5;
 ```
 
+The default construction metric is Euclidean (L2). For cosine similarity search, set
+`metric = cosine` on the index and query with `'COSINE'` — the optimizer matches them
+(§10, §19); mixing the two falls back to scan-plus-sort.
+
+Cosine is undefined on a zero vector, so INSERT, UPDATE and building the index refuse an all-zero value with `ER_VECTOR_INDEX_WRONG_VALUE`.
+
 ### DDL
 
 | Operation | Effect on the index |
@@ -180,6 +186,7 @@ Each of these is refused because the alternative is an index that is silently wr
 | A vector index on a virtual column, a partitioned table, or a temporary table | refused above InnoDB, by the server |
 | A nullable vector column | rejected at DDL, so an indexed vector always has a value |
 | A vector whose length is not the column's, on a column with a vector index | InnoDB refuses the row with `ER_VECTOR_INDEX_WRONG_DIMENSIONS`: the graph compares vectors of one length |
+| A zero vector on a cosine index (`metric = cosine`) | InnoDB refuses the row (or the index build) with `ER_VECTOR_INDEX_WRONG_VALUE`: cosine distance is undefined on a zero-norm vector, and letting one into the graph would poison neighbour selection |
 
 Nothing about the aux table's name is reserved from users: a table that merely begins with
 `percona_vec_` is not mistaken for one, because the name is recognised by parsing its whole
@@ -525,17 +532,20 @@ explicitly accepted approximation, and that shape is `ORDER BY <distance> LIMIT 
 
 > a single-table query block, one **ascending** `ORDER BY` expression that is a distance call over
 > the indexed vector column, with a **constant** query vector, a **finite `LIMIT`**, and a metric
-> the graph can serve.
+> that matches the index's construction metric (`EUCLIDEAN` / `EUCLIDEAN_SQUARED` on the default
+> L2 index, or `COSINE` on `metric = cosine`).
 
 | query | plan | why |
 |---|---|---|
-| `ORDER BY DISTANCE(v, <const>, 'EUCLIDEAN') LIMIT 3` | **`vector_ann`** | the canonical shape |
-| `... 'EUCLIDEAN_SQUARED' LIMIT 3` | **`vector_ann`** | monotonic transform of the graph's own metric — same ordering |
+| `ORDER BY DISTANCE(v, <const>, 'EUCLIDEAN') LIMIT 3` on an L2 index | **`vector_ann`** | the canonical shape |
+| `... 'EUCLIDEAN_SQUARED' LIMIT 3` on an L2 index | **`vector_ann`** | monotonic transform of the graph's squared L2 — same ordering |
+| `ORDER BY DISTANCE(v, <const>, 'COSINE') LIMIT 3` on a cosine index (`metric = cosine`) | **`vector_ann`** | query metric must match the index's construction metric |
 | `ORDER BY DISTANCE(<const>, v, ...) LIMIT 3` | **`vector_ann`** | argument order does not matter |
 | `WHERE k = 1 ORDER BY DISTANCE(...) LIMIT 3` | **`vector_ann`** | the filter sits *above* the scan, which simply continues |
 | `ORDER BY DISTANCE(...)` — no `LIMIT` | `ALL` + filesort | asks for a total ordering; an approximate index cannot give one |
 | `... LIMIT 3` but `DESC` | `ALL` + filesort | farthest-first is not a question HNSW answers |
-| `... 'MANHATTAN' LIMIT 3` | `ALL` + filesort | the graph was built under L2; another metric would rank by a distance it does not hold |
+| `... 'COSINE' LIMIT 3` on an L2 index (or `'EUCLIDEAN'` on a cosine index) | `ALL` + filesort | construction metric and query metric disagree — using the graph would rank by the wrong distance |
+| `... 'MANHATTAN' LIMIT 3` | `ALL` + filesort | Manhattan (and other unsupported metrics) never match a built index |
 | `WHERE DISTANCE(...) <= 2` | `ALL` + filesort | **the important one**: a predicate needs every qualifying row, and approximation would drop some silently |
 | `ORDER BY DISTANCE(v, v, ...) LIMIT 3` | `ALL` + filesort | query vector is not constant — nothing to search the graph *for* |
 | `IGNORE INDEX (vk)` | `ALL` + filesort | the user asked for the exact path |
@@ -543,7 +553,8 @@ explicitly accepted approximation, and that shape is `ORDER BY <distance> LIMIT 
 | a NULL or non-finite query vector | exact path | NULL imposes no order; NaN or infinity is refused with `ER_DATA_OUT_OF_RANGE`, as without the index |
 | `GROUP BY`, `DISTINCT`, a window function, or a `MATCH()` in the block | exact path | the `ORDER BY` sorts groups or needs every row, or the full-text scan must own the table access |
 
-The rows are asserted in `percona_vector.search`, `percona_vector.ann_order_by_alias`,
+The rows are asserted in `percona_vector.search`, `percona_vector.cosine`,
+`percona_vector.ann_order_by_alias`,
 `percona_vector.ann_null_query_vector`, `percona_vector.ann_nonfinite_query_vector` and
 `percona_vector.ann_grouped`. The exact path is always available
 and always correct; the index path is the opt-in.
@@ -561,9 +572,19 @@ pushed into the access path and the now-redundant sort is elided.
 
 | handler method | what it does |
 |---|---|
-| `vec_init()` | `rnd_init()`: sets up the clustered-index positioning the row fetch needs |
+| `vec_init()` | `rnd_init()` for the clustered-index positioning the row fetch needs; leaves `active_index` on the vector key |
 | `vec_read_first(item, buf, limit)` | evaluates the query vector, runs the first search with `k = LIMIT`, returns the first row |
 | `vec_read_next(buf)` | returns the next row, taking the next candidate from the open scan |
+
+`VectorSearchIterator::DoInit()` calls `ha_index_init()` on the vector key, unless the handler is
+already initialised from an earlier run of the iterator, and then `vec_init()` on every run: the
+same two steps `FullTextSearchIterator::DoInit()` takes with `ft_init()`. `ha_index_init()`
+marks the handler `inited = INDEX`, and InnoDB's `index_init()` → `change_active_index()` refuses a
+vector index newer than the snapshot, or a corrupt one, as it does for any index. The scan is then
+an ordinary index scan to the rest of the server: the iterator's `ha_index_or_rnd_end()` reaches
+`index_end()`, which closes the scan and releases the aux table, and the "handler already
+initialised" assertions in `ha_index_init()`, `ha_rnd_init()` and `ha_reset()` catch any other
+access started on the handler while the scan is open.
 
 They exist because the ordinary index API **cannot express the question**. `index_read` takes a
 key and a comparison operator; `index_next` walks in key order; `records_in_range` estimates a
@@ -1277,6 +1298,14 @@ Only `M` and `metric` are actually settable. `ef_construction` and `max_elements
 An option value is a bare identifier or a number, never a quoted string — the grammar rule is
 `ident EQ ident | ident EQ NUM`. So it is `metric = euclidean`, and `metric = 'euclidean'` is a
 parse error.
+
+`metric` accepts `euclidean` (default) and `cosine`. The parser resolves each to a distance
+kernel on `HnswParam::dist` (squared L2 for euclidean, cosine distance for cosine). Other
+named metrics (`euclidean_squared`, `dot`, `manhattan`) are refused with
+`ER_NOT_SUPPORTED_YET`. The optimizer uses `KEY::vector_index_metric` (filled at share open
+from the same option) so a cosine-built index serves only `DISTANCE(..., 'COSINE')` ANN
+queries, and an L2 index serves `EUCLIDEAN` / `EUCLIDEAN_SQUARED` — never the cross product
+(§10).
 
 One rule keeps the seam honest: **implementations are stateless.** All per-index state lives in
 the runtime, so there is no object lifetime to manage and no per-index singleton. The HNSW class
