@@ -1,0 +1,71 @@
+--echo #
+--echo # PS-11827: a cross-schema RENAME TABLE must hold an exclusive MDL on
+--echo # the FTS aux tables before it opens them.
+--echo #
+--echo # The aux tables are hidden, so the server took no metadata lock on
+--echo # them when it locked the parent. A cross-schema rename also renames
+--echo # each aux table, and row_rename_table_for_mysql() opens it by name.
+--echo # After a restart the aux table is not in the InnoDB dictionary cache,
+--echo # so it is loaded from the data dictionary, which needs the MDL.
+--echo #
+
+CREATE DATABASE d1;
+CREATE DATABASE d2;
+
+CREATE TABLE d1.t_fts (id INT PRIMARY KEY,
+                       s VARCHAR(64),
+                       FULLTEXT KEY fk (s));
+CREATE TABLE d1.t_empty LIKE d1.t_fts;
+--echo # FULLTEXT index dropped: the hidden FTS_DOC_ID and the common aux
+--echo # tables stay.
+CREATE TABLE d1.t_doc_id LIKE d1.t_fts;
+ALTER TABLE d1.t_doc_id DROP INDEX fk;
+CREATE TABLE d1.t_multi1 LIKE d1.t_fts;
+CREATE TABLE d1.t_multi2 LIKE d1.t_fts;
+CREATE TABLE d1.t_alter LIKE d1.t_fts;
+CREATE TABLE d1.t_locked LIKE d1.t_fts;
+
+INSERT INTO d1.t_fts VALUES (1, 'hello world');
+INSERT INTO d1.t_doc_id SELECT * FROM d1.t_fts;
+INSERT INTO d1.t_multi1 SELECT * FROM d1.t_fts;
+INSERT INTO d1.t_multi2 SELECT * FROM d1.t_fts;
+INSERT INTO d1.t_alter SELECT * FROM d1.t_fts;
+INSERT INTO d1.t_locked SELECT * FROM d1.t_fts;
+
+--source include/restart_mysqld.inc
+
+RENAME TABLE d1.t_fts TO d2.t_fts;
+RENAME TABLE d1.t_empty TO d2.t_empty;
+RENAME TABLE d1.t_doc_id TO d2.t_doc_id;
+RENAME TABLE d1.t_multi1 TO d2.t_multi1, d1.t_multi2 TO d2.t_multi2;
+ALTER TABLE d1.t_alter RENAME TO d2.t_alter;
+LOCK TABLES d1.t_locked WRITE;
+ALTER TABLE d1.t_locked RENAME TO d2.t_locked;
+--echo # The aux locks are transactional: released when the statement ends,
+--echo # also under LOCK TABLES.
+SELECT COUNT(*) AS aux_locks FROM performance_schema.metadata_locks
+WHERE object_name LIKE 'fts\_%';
+UNLOCK TABLES;
+SELECT COUNT(*) AS aux_locks FROM performance_schema.metadata_locks
+WHERE object_name LIKE 'fts\_%';
+
+--echo # The aux tables moved along with their parents.
+SELECT COUNT(*) FROM information_schema.innodb_tables
+WHERE name LIKE 'd1/fts\_%';
+SELECT COUNT(*) FROM information_schema.innodb_tables
+WHERE name LIKE 'd2/fts\_%';
+
+SELECT id FROM d2.t_fts WHERE MATCH(s) AGAINST('hello');
+SELECT COUNT(*) FROM d2.t_empty;
+SELECT id, s FROM d2.t_doc_id;
+SELECT id FROM d2.t_multi1 WHERE MATCH(s) AGAINST('hello');
+SELECT id FROM d2.t_multi2 WHERE MATCH(s) AGAINST('hello');
+SELECT id FROM d2.t_alter WHERE MATCH(s) AGAINST('hello');
+SELECT id FROM d2.t_locked WHERE MATCH(s) AGAINST('hello');
+
+--echo # Same results after another restart.
+--source include/restart_mysqld.inc
+SELECT id FROM d2.t_fts WHERE MATCH(s) AGAINST('hello');
+
+DROP DATABASE d1;
+DROP DATABASE d2;
