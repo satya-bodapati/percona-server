@@ -134,6 +134,21 @@ bool expand_pattern(THD *thd, const MYSQL_LEX_STRING &pattern,
                     Paths_type *paths);
 
 /**
+  Expand a pattern of InnoDB tablespace files (*.ibd) given to IMPORT TABLE.
+  Unlike SDI files, these are not checked against secure_file_priv: they
+  must already be in the place the imported table keeps its tablespace.
+
+  @param thd      thread context
+  @param pattern  file pattern, relative to the datadir or absolute
+  @param paths    matching files are appended here
+
+  @retval true on error, reported with my_error()
+  @retval false otherwise
+*/
+bool expand_ibd_pattern(THD *thd, const MYSQL_LEX_STRING &pattern,
+                        Paths_type *paths);
+
+/**
   Check that the MYD and MYI files for table exists.
 
   @param schema_name schema name

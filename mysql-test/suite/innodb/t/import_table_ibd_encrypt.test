@@ -1,0 +1,47 @@
+--echo #
+--echo # IMPORT TABLE FROM '<file>.ibd' of an encrypted table: the key comes
+--echo # from the .cfp file next to the .ibd.
+--echo #
+
+--source include/have_innodb_16k.inc
+--source include/have_component_keyring_file.inc
+--source include/not_parallel.inc
+
+let $MYSQLD_DATADIR = `SELECT @@datadir`;
+
+--source suite/component_keyring_file/inc/setup_component_customized.inc
+
+CREATE TABLE te (id INT PRIMARY KEY, a VARCHAR(100), KEY (a))
+  ENCRYPTION = 'Y';
+INSERT INTO te VALUES (1, 'secret one'), (2, 'secret two');
+FLUSH TABLES te FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/te.ibd $MYSQL_TMP_DIR/te.ibd
+--copy_file $MYSQLD_DATADIR/test/te.cfp $MYSQL_TMP_DIR/te.cfp
+UNLOCK TABLES;
+DROP TABLE te;
+
+--echo # Without the .cfp the table definition cannot even be read.
+--copy_file $MYSQL_TMP_DIR/te.ibd $MYSQLD_DATADIR/test/te.ibd
+--replace_regex /'.*te.cfp'/'te.cfp'/
+--error ER_TABLE_SCHEMA_MISMATCH
+IMPORT TABLE FROM 'test/te.ibd';
+
+--echo # With it, the table is imported and re-encrypted with this server's
+--echo # master key.
+--copy_file $MYSQL_TMP_DIR/te.cfp $MYSQLD_DATADIR/test/te.cfp
+IMPORT TABLE FROM 'test/te.ibd';
+SHOW CREATE TABLE te;
+SELECT * FROM te ORDER BY id;
+CHECK TABLE te;
+--remove_file $MYSQLD_DATADIR/test/te.cfp
+
+--source include/restart_mysqld.inc
+SELECT * FROM te ORDER BY id;
+ALTER INSTANCE ROTATE INNODB MASTER KEY;
+SELECT * FROM te ORDER BY id;
+DROP TABLE te;
+
+--remove_file $MYSQL_TMP_DIR/te.ibd
+--remove_file $MYSQL_TMP_DIR/te.cfp
+
+--source suite/component_keyring_file/inc/teardown_component_customized.inc

@@ -1,0 +1,43 @@
+#
+# IMPORT TABLE FROM '<file>.ibd' of a table created with DATA DIRECTORY:
+# the file is named by its full path, in the schema directory under the
+# DATA DIRECTORY, which must be a known directory.
+#
+# restart: --innodb-directories=EXT
+CREATE TABLE td (id INT PRIMARY KEY, a VARCHAR(20)) DATA DIRECTORY = 'EXT';
+INSERT INTO td VALUES (1, 'one'), (2, 'two');
+FLUSH TABLES td FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE td;
+IMPORT TABLE FROM 'EXT/test/td.ibd';
+SHOW CREATE TABLE td;
+Table	Create Table
+td	CREATE TABLE `td` (
+  `id` int NOT NULL,
+  `a` varchar(20) DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci DATA DIRECTORY='EXT/'
+SELECT * FROM td ORDER BY id;
+id	a
+1	one
+2	two
+CHECK TABLE td;
+Table	Op	Msg_type	Msg_text
+test.td	check	status	OK
+SELECT PATH FROM INFORMATION_SCHEMA.INNODB_DATAFILES
+WHERE PATH LIKE '%td.ibd';
+PATH
+EXT/test/td.ibd
+# restart: --innodb-directories=EXT
+SELECT * FROM td ORDER BY id;
+id	a
+1	one
+2	two
+DROP TABLE td;
+# A directory InnoDB does not know is refused, as for CREATE TABLE.
+call mtr.add_suppression("\\[ERROR\\] .* The DATA DIRECTORY location must be in a known directory");
+# restart:
+IMPORT TABLE FROM 'EXT/test/td.ibd';
+Got one of the listed errors
+SELECT * FROM td;
+ERROR 42S02: Table 'test.td' doesn't exist

@@ -1,0 +1,162 @@
+--echo #
+--echo # IMPORT TABLE FROM '<file>.ibd' with partitions, ROW_FORMAT=COMPRESSED,
+--echo # INSTANT columns, FULLTEXT indexes and foreign keys.
+--echo #
+
+--source include/have_innodb_16k.inc
+
+let $MYSQLD_DATADIR = `SELECT @@datadir`;
+--mkdir $MYSQL_TMP_DIR/import_backup
+
+--echo #
+--echo # A partitioned table: all partition files are named, with a pattern.
+--echo #
+CREATE TABLE tp (id INT PRIMARY KEY, a VARCHAR(20))
+  PARTITION BY HASH (id) PARTITIONS 4;
+INSERT INTO tp VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e');
+FLUSH TABLES tp FOR EXPORT;
+--copy_files_wildcard $MYSQLD_DATADIR/test $MYSQL_TMP_DIR/import_backup tp#p#*.ibd
+UNLOCK TABLES;
+DROP TABLE tp;
+
+--echo # A missing partition file is an error.
+--copy_file $MYSQL_TMP_DIR/import_backup/tp#p#p0.ibd $MYSQLD_DATADIR/test/tp#p#p0.ibd
+--copy_file $MYSQL_TMP_DIR/import_backup/tp#p#p1.ibd $MYSQLD_DATADIR/test/tp#p#p1.ibd
+--copy_file $MYSQL_TMP_DIR/import_backup/tp#p#p2.ibd $MYSQLD_DATADIR/test/tp#p#p2.ibd
+--error ER_TABLE_SCHEMA_MISMATCH
+IMPORT TABLE FROM 'test/tp#p#*.ibd';
+
+--copy_file $MYSQL_TMP_DIR/import_backup/tp#p#p3.ibd $MYSQLD_DATADIR/test/tp#p#p3.ibd
+IMPORT TABLE FROM 'test/tp#p#*.ibd';
+SHOW CREATE TABLE tp;
+SELECT * FROM tp ORDER BY id;
+SELECT * FROM tp PARTITION (p1) ORDER BY id;
+CHECK TABLE tp;
+DROP TABLE tp;
+
+--echo #
+--echo # Subpartitions.
+--echo #
+CREATE TABLE tsp (id INT, d INT, PRIMARY KEY (id, d))
+  PARTITION BY RANGE (id) SUBPARTITION BY HASH (d) SUBPARTITIONS 2
+  (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO tsp VALUES (1, 1), (2, 2), (11, 1), (12, 2);
+FLUSH TABLES tsp FOR EXPORT;
+--copy_files_wildcard $MYSQLD_DATADIR/test $MYSQL_TMP_DIR/import_backup tsp#p#*.ibd
+UNLOCK TABLES;
+DROP TABLE tsp;
+--copy_files_wildcard $MYSQL_TMP_DIR/import_backup $MYSQLD_DATADIR/test tsp#p#*.ibd
+IMPORT TABLE FROM 'test/tsp#p#*.ibd';
+SELECT * FROM tsp ORDER BY id, d;
+CHECK TABLE tsp;
+DROP TABLE tsp;
+
+--echo #
+--echo # ROW_FORMAT=COMPRESSED, with a BLOB stored off-page.
+--echo #
+CREATE TABLE tz (id INT PRIMARY KEY, b LONGBLOB)
+  ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=8;
+INSERT INTO tz VALUES (1, REPEAT('z', 50000)), (2, 'short');
+FLUSH TABLES tz FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/tz.ibd $MYSQL_TMP_DIR/import_backup/tz.ibd
+UNLOCK TABLES;
+DROP TABLE tz;
+--copy_file $MYSQL_TMP_DIR/import_backup/tz.ibd $MYSQLD_DATADIR/test/tz.ibd
+IMPORT TABLE FROM 'test/tz.ibd';
+SHOW CREATE TABLE tz;
+SELECT id, LENGTH(b) FROM tz ORDER BY id;
+CHECK TABLE tz;
+DROP TABLE tz;
+
+--echo #
+--echo # Columns added and dropped with ALGORITHM=INSTANT (row versions).
+--echo #
+CREATE TABLE ti (id INT PRIMARY KEY, a INT, b INT);
+INSERT INTO ti VALUES (1, 1, 1);
+ALTER TABLE ti ADD COLUMN c INT DEFAULT 5, ALGORITHM=INSTANT;
+INSERT INTO ti VALUES (2, 2, 2, 2);
+ALTER TABLE ti DROP COLUMN a, ALGORITHM=INSTANT;
+INSERT INTO ti VALUES (3, 3, 3);
+SELECT TOTAL_ROW_VERSIONS FROM INFORMATION_SCHEMA.INNODB_TABLES
+  WHERE NAME = 'test/ti';
+FLUSH TABLES ti FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/ti.ibd $MYSQL_TMP_DIR/import_backup/ti.ibd
+UNLOCK TABLES;
+DROP TABLE ti;
+--copy_file $MYSQL_TMP_DIR/import_backup/ti.ibd $MYSQLD_DATADIR/test/ti.ibd
+IMPORT TABLE FROM 'test/ti.ibd';
+SHOW CREATE TABLE ti;
+SELECT * FROM ti ORDER BY id;
+SELECT TOTAL_ROW_VERSIONS FROM INFORMATION_SCHEMA.INNODB_TABLES
+  WHERE NAME = 'test/ti';
+CHECK TABLE ti;
+INSERT INTO ti VALUES (4, 4, 4);
+--source include/restart_mysqld.inc
+SELECT * FROM ti ORDER BY id;
+CHECK TABLE ti;
+DROP TABLE ti;
+
+--echo #
+--echo # A FULLTEXT index is not imported: it is marked corrupted and is
+--echo # rebuilt with ALTER TABLE.
+--echo #
+call mtr.add_suppression("\\[Warning\\] .* Skip adjustment of root pages for index `ft`");
+CREATE TABLE tf (id INT PRIMARY KEY, txt TEXT, FULLTEXT KEY ft (txt));
+INSERT INTO tf VALUES (1, 'hello world'), (2, 'goodbye moon');
+FLUSH TABLES tf FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/tf.ibd $MYSQL_TMP_DIR/import_backup/tf.ibd
+UNLOCK TABLES;
+DROP TABLE tf;
+--copy_file $MYSQL_TMP_DIR/import_backup/tf.ibd $MYSQLD_DATADIR/test/tf.ibd
+IMPORT TABLE FROM 'test/tf.ibd';
+SELECT * FROM tf ORDER BY id;
+--error ER_TABLE_HAS_NO_FT
+SELECT id FROM tf WHERE MATCH (txt) AGAINST ('hello');
+--echo # One statement that drops and adds the same index keeps it unusable;
+--echo # rebuild it with two.
+ALTER TABLE tf DROP INDEX ft;
+ALTER TABLE tf ADD FULLTEXT INDEX ft (txt);
+SELECT id FROM tf WHERE MATCH (txt) AGAINST ('hello');
+CHECK TABLE tf;
+DROP TABLE tf;
+
+--echo #
+--echo # Foreign keys are kept. With foreign_key_checks on, the parent must
+--echo # exist; with it off, a missing parent is allowed, as for CREATE TABLE.
+--echo #
+CREATE TABLE parent (id INT PRIMARY KEY);
+CREATE TABLE child (id INT PRIMARY KEY, pid INT,
+                    FOREIGN KEY fk (pid) REFERENCES parent (id));
+INSERT INTO parent VALUES (1);
+INSERT INTO child VALUES (1, 1);
+FLUSH TABLES child FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/child.ibd $MYSQL_TMP_DIR/import_backup/child.ibd
+UNLOCK TABLES;
+DROP TABLE child;
+--copy_file $MYSQL_TMP_DIR/import_backup/child.ibd $MYSQLD_DATADIR/test/child.ibd
+IMPORT TABLE FROM 'test/child.ibd';
+SHOW CREATE TABLE child;
+SELECT * FROM child;
+--error ER_NO_REFERENCED_ROW_2
+INSERT INTO child VALUES (2, 99);
+--error ER_ROW_IS_REFERENCED_2
+DELETE FROM parent;
+DROP TABLE child;
+DROP TABLE parent;
+
+--copy_file $MYSQL_TMP_DIR/import_backup/child.ibd $MYSQLD_DATADIR/test/child.ibd
+--error ER_FK_CANNOT_OPEN_PARENT
+IMPORT TABLE FROM 'test/child.ibd';
+SET foreign_key_checks = 0;
+IMPORT TABLE FROM 'test/child.ibd';
+SET foreign_key_checks = 1;
+CREATE TABLE parent (id INT PRIMARY KEY);
+INSERT INTO parent VALUES (1);
+--error ER_NO_REFERENCED_ROW_2
+INSERT INTO child VALUES (3, 42);
+INSERT INTO child VALUES (3, 1);
+SELECT * FROM child ORDER BY id;
+DROP TABLE child;
+DROP TABLE parent;
+
+--force-rmdir $MYSQL_TMP_DIR/import_backup

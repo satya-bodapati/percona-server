@@ -60,6 +60,18 @@ class Sql_cmd_import_table : public Sql_cmd {
  */
   bool execute(THD *thd) override;
 
+ private:
+  /**
+    Import tables from InnoDB tablespace files (*.ibd) that are already in
+    the place the tables keep their tablespaces. The table definitions are
+    read from the SDI in the files.
+    @param thd - thread handle
+    @retval true on error
+    @retval false otherwise
+  */
+  bool execute_ibd(THD *thd);
+
+ public:
   /**
     Provide access to the command code enum value.
     @return command code enum value

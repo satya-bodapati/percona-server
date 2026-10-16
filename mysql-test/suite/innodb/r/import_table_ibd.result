@@ -1,0 +1,142 @@
+#
+# IMPORT TABLE FROM '<file>.ibd' creates a table from the table
+# definition (SDI) stored in its InnoDB tablespace file.
+#
+# A table with a secondary index, an externally stored BLOB and an
+# AUTO_INCREMENT column.
+CREATE TABLE t1 (id INT AUTO_INCREMENT PRIMARY KEY, a VARCHAR(100),
+b LONGBLOB, KEY k_a (a)) ENGINE=InnoDB;
+INSERT INTO t1 (a, b) VALUES ('one', REPEAT('x', 100)),
+('two', REPEAT('y', 40000)),
+('three', NULL);
+DELETE FROM t1 WHERE a = 'three';
+# Keep a consistent copy of the tablespace file, then drop the table.
+FLUSH TABLES t1 FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE t1;
+# Put the file back where the table keeps it and import it.
+IMPORT TABLE FROM 'test/t1.ibd';
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `a` varchar(100) DEFAULT NULL,
+  `b` longblob,
+  PRIMARY KEY (`id`),
+  KEY `k_a` (`a`)
+) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT id, a, LENGTH(b) FROM t1 ORDER BY id;
+id	a	LENGTH(b)
+1	one	100
+2	two	40000
+SELECT id, a FROM t1 FORCE INDEX (k_a) ORDER BY a;
+id	a
+1	one
+2	two
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# AUTO_INCREMENT continues after the highest value, also after a
+# restart.
+INSERT INTO t1 (a) VALUES ('four');
+# restart
+INSERT INTO t1 (a) VALUES ('five');
+SELECT id, a FROM t1 ORDER BY id;
+id	a
+1	one
+2	two
+3	four
+4	five
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The table is an ordinary table: DDL and DML work.
+ALTER TABLE t1 ADD COLUMN c INT DEFAULT 7, ALGORITHM=INSTANT;
+UPDATE t1 SET c = id;
+SELECT id, a, c FROM t1 ORDER BY id;
+id	a	c
+1	one	1
+2	two	2
+3	four	3
+4	five	4
+DROP TABLE t1;
+#
+# A table that exists is not replaced.
+#
+CREATE TABLE t1 (id INT PRIMARY KEY) ENGINE=InnoDB;
+# The file of a live table is refused before it is read.
+IMPORT TABLE FROM 'test/t1.ibd';
+ERROR HY000: Table 'test.t1', referenced in SDI, already exists.
+DROP TABLE t1;
+#
+# The file must be in the directory of the table's schema, named after
+# the table.
+#
+CREATE DATABASE test2;
+IMPORT TABLE FROM 'test2/t1.ibd';
+ERROR HY000: Schema mismatch ('DATADIR/test2/t1.ibd' is not in the directory of the table's schema)
+DROP DATABASE test2;
+IMPORT TABLE FROM 'test/other.ibd';
+ERROR HY000: Schema mismatch ('DATADIR/test/other.ibd' is not named after its table)
+#
+# The schema must exist.
+#
+CREATE DATABASE db1;
+CREATE TABLE db1.t1 (id INT PRIMARY KEY) ENGINE=InnoDB;
+FLUSH TABLES db1.t1 FOR EXPORT;
+UNLOCK TABLES;
+DROP DATABASE db1;
+IMPORT TABLE FROM 'db1/t1.ibd';
+ERROR HY000: Schema 'db1', referenced in SDI, does not exist.
+#
+# .sdi and .ibd files cannot be mixed, and a pattern must match.
+#
+IMPORT TABLE FROM 'test/t1.ibd', 'test/t1.sdi';
+ERROR HY000: Incorrect arguments to IMPORT TABLE (.sdi and .ibd files in one statement)
+IMPORT TABLE FROM 'test/no_such_table.ibd';
+ERROR HY000: No SDI files matched the pattern 'no_such_table.ibd'
+#
+# A general tablespace cannot be imported.
+#
+CREATE TABLESPACE ts1 ADD DATAFILE 'ts1.ibd' ENGINE=InnoDB;
+CREATE TABLE t2 (id INT PRIMARY KEY) TABLESPACE ts1;
+FLUSH TABLES t2 FOR EXPORT;
+Warnings:
+Warning	1235	InnoDB: This version of MySQL doesn't yet support 'FLUSH TABLES FOR EXPORT on table `test`.`t2` in a general tablespace.'
+UNLOCK TABLES;
+IMPORT TABLE FROM 'DATADIR/ts1.ibd';
+ERROR 42000: This version of MySQL doesn't yet support 'IMPORT TABLE from a general tablespace'
+DROP TABLE t2;
+DROP TABLESPACE ts1;
+#
+# Privileges: CREATE and ALTER on the table; FILE is not needed.
+#
+CREATE USER importer@localhost;
+GRANT CREATE ON test.* TO importer@localhost;
+IMPORT TABLE FROM 'test/t1.ibd';
+ERROR 42000: ALTER command denied to user 'importer'@'localhost' for table 't1'
+GRANT ALTER ON test.* TO importer@localhost;
+IMPORT TABLE FROM 'test/t1.ibd';
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+2
+DROP TABLE t1;
+DROP USER importer@localhost;
+#
+# With innodb_file_per_table off, the table still gets its own
+# tablespace: the file being imported.
+#
+SET @saved_file_per_table = @@GLOBAL.innodb_file_per_table;
+SET GLOBAL innodb_file_per_table = OFF;
+IMPORT TABLE FROM 'test/t1.ibd';
+SELECT SPACE_TYPE FROM INFORMATION_SCHEMA.INNODB_TABLES WHERE NAME = 'test/t1';
+SPACE_TYPE
+Single
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+2
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+SET GLOBAL innodb_file_per_table = @saved_file_per_table;

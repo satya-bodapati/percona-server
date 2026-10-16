@@ -182,11 +182,25 @@ Dir_pat_tuple make_dir_pattern_tuple(const LEX_STRING &path,
   return {std::move(data_dir), std::move(fpat), true};
 }
 
-bool expand_sdi_pattern(const Dir_pat_tuple &dpt,
-                        dd::sdi_file::Paths_type *paths) {
-  const char *dir_beg = dpt.dir.c_str();
+/**
+  Expand a file pattern of IMPORT TABLE into the matching files.
 
-  if (!is_secure_file_path(dir_beg)) {
+  @param dpt           directory and pattern
+  @param paths         matching files are appended here
+  @param ext           extension every matching file must have
+  @param check_secure  true if the directory must be allowed by
+                       secure_file_priv
+
+  @retval true on error, reported with my_error()
+  @retval false otherwise
+*/
+bool expand_import_pattern(const Dir_pat_tuple &dpt,
+                           dd::sdi_file::Paths_type *paths, const char *ext,
+                           bool check_secure) {
+  const char *dir_beg = dpt.dir.c_str();
+  const size_t ext_len = strlen(ext);
+
+  if (check_secure && !is_secure_file_path(dir_beg)) {
     dd::String_type x = "--secure-file-priv='";
     x.append(opt_secure_file_priv);
     x.append("'");
@@ -224,8 +238,8 @@ bool expand_sdi_pattern(const Dir_pat_tuple &dpt,
                       pat_beg, pat_end, '\\', '?', '*') == 0);
     if (match) {
       size_t len = strlen(dir->dir_entry[i].name);
-      const char *tail = dir->dir_entry[i].name + len - 4;
-      if (len < 4 || my_strcasecmp(files_charset_info, tail, ".sdi") != 0) {
+      const char *tail = dir->dir_entry[i].name + len - ext_len;
+      if (len < ext_len || my_strcasecmp(files_charset_info, tail, ext) != 0) {
         my_error(ER_WRONG_FILE_NAME, MYF(0), dir->dir_entry[i].name);
         return true;
       }
@@ -339,10 +353,19 @@ bool load(THD *, const dd::String_type &fname, dd::String_type *buf) {
 
 bool expand_pattern(THD *thd, const LEX_STRING &pattern, Paths_type *paths) {
   auto dpt = make_dir_pattern_tuple(pattern, thd->db());
-  if (expand_sdi_pattern(dpt, paths)) {
+  if (expand_import_pattern(dpt, paths, ".sdi", true)) {
     return true;
   }
   return false;
+}
+
+bool expand_ibd_pattern(THD *thd, const LEX_STRING &pattern,
+                        Paths_type *paths) {
+  auto dpt = make_dir_pattern_tuple(pattern, thd->db());
+  /* The files of IMPORT TABLE FROM '<file>.ibd' must already be where
+  the table keeps its tablespace, as for ALTER TABLE ... IMPORT TABLESPACE,
+  which does not consult secure_file_priv either. */
+  return expand_import_pattern(dpt, paths, ".ibd", false);
 }
 
 template <typename CLOS>

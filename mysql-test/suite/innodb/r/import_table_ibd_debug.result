@@ -1,0 +1,34 @@
+#
+# IMPORT TABLE FROM '<file>.ibd' consumes the file: if the statement
+# fails or the server stops during it, the file is deleted and no table
+# is left.
+#
+CREATE TABLE t1 (id INT PRIMARY KEY, a VARCHAR(20), KEY (a));
+INSERT INTO t1 VALUES (1, 'one'), (2, 'two');
+FLUSH TABLES t1 FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE t1;
+# A failure after the file was converted rolls the statement back.
+SET SESSION debug = '+d,ib_import_internal_error';
+IMPORT TABLE FROM 'test/t1.ibd';
+ERROR HY000: Internal error: While importing table test/t1
+SET SESSION debug = '-d,ib_import_internal_error';
+SELECT * FROM t1;
+ERROR 42S02: Table 'test.t1' doesn't exist
+# A crash during the import: recovery deletes the file.
+SET SESSION debug = '+d,ib_import_before_commit_crash';
+IMPORT TABLE FROM 'test/t1.ibd';
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+SELECT * FROM t1;
+ERROR 42S02: Table 'test.t1' doesn't exist
+# The file can be imported again from the copy.
+IMPORT TABLE FROM 'test/t1.ibd';
+SELECT * FROM t1 ORDER BY id;
+id	a
+1	one
+2	two
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;

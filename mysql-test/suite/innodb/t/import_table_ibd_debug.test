@@ -1,0 +1,50 @@
+--echo #
+--echo # IMPORT TABLE FROM '<file>.ibd' consumes the file: if the statement
+--echo # fails or the server stops during it, the file is deleted and no table
+--echo # is left.
+--echo #
+
+--source include/have_debug.inc
+--source include/have_innodb_16k.inc
+--source include/not_valgrind.inc
+
+let $MYSQLD_DATADIR = `SELECT @@datadir`;
+
+CREATE TABLE t1 (id INT PRIMARY KEY, a VARCHAR(20), KEY (a));
+INSERT INTO t1 VALUES (1, 'one'), (2, 'two');
+FLUSH TABLES t1 FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/t1.ibd $MYSQL_TMP_DIR/t1.ibd
+UNLOCK TABLES;
+DROP TABLE t1;
+
+--echo # A failure after the file was converted rolls the statement back.
+--copy_file $MYSQL_TMP_DIR/t1.ibd $MYSQLD_DATADIR/test/t1.ibd
+SET SESSION debug = '+d,ib_import_internal_error';
+--error ER_INTERNAL_ERROR
+IMPORT TABLE FROM 'test/t1.ibd';
+SET SESSION debug = '-d,ib_import_internal_error';
+--error ER_NO_SUCH_TABLE
+SELECT * FROM t1;
+--error 1
+--file_exists $MYSQLD_DATADIR/test/t1.ibd
+
+--echo # A crash during the import: recovery deletes the file.
+--copy_file $MYSQL_TMP_DIR/t1.ibd $MYSQLD_DATADIR/test/t1.ibd
+--source include/expect_crash.inc
+SET SESSION debug = '+d,ib_import_before_commit_crash';
+--error CR_SERVER_LOST
+IMPORT TABLE FROM 'test/t1.ibd';
+--source include/start_mysqld.inc
+--error ER_NO_SUCH_TABLE
+SELECT * FROM t1;
+--error 1
+--file_exists $MYSQLD_DATADIR/test/t1.ibd
+
+--echo # The file can be imported again from the copy.
+--copy_file $MYSQL_TMP_DIR/t1.ibd $MYSQLD_DATADIR/test/t1.ibd
+IMPORT TABLE FROM 'test/t1.ibd';
+SELECT * FROM t1 ORDER BY id;
+CHECK TABLE t1;
+DROP TABLE t1;
+
+--remove_file $MYSQL_TMP_DIR/t1.ibd
