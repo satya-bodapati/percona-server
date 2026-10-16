@@ -283,13 +283,25 @@ dberr_t dict_build_tablespace_for_table(dict_table_t *table,
       filepath = Fil_path::make_ibd_from_table_name(table->name.m_name);
     }
 
-    /* If file already exists we cannot write delete space to ddl log. */
+    /* IMPORT TABLE FROM '<file>.ibd' creates the table on top of a
+    tablespace file that is already in place. */
+    const bool attach =
+        create_info != nullptr && create_info->m_import_source != nullptr;
+
+    /* If file already exists we cannot write delete space to ddl log,
+    unless it is the file being imported, which the import consumes. */
     os_file_type_t type;
     bool exists;
     if (os_file_status(filepath, &exists, &type)) {
-      if (exists) {
+      if (exists && !attach) {
         ut::free(filepath);
         return DB_TABLESPACE_EXISTS;
+      }
+      if (!exists && attach) {
+        my_error(ER_FILE_NOT_FOUND, MYF(0), filepath, ENOENT,
+                 "the tablespace file to import is not in place");
+        ut::free(filepath);
+        return DB_TABLESPACE_NOT_FOUND;
       }
     } else {
       ut::free(filepath);
@@ -301,6 +313,17 @@ dberr_t dict_build_tablespace_for_table(dict_table_t *table,
     if (err != DB_SUCCESS) {
       ut::free(filepath);
       return err;
+    }
+
+    if (attach) {
+      /* The file is converted and attached once the table and its
+      indexes exist, by row_import_attach(). Until then the table has no
+      tablespace, like a discarded one, so no index tree is created. If
+      the statement fails, the DDL log deletes the file. */
+      ut::free(filepath);
+      table->ibd_file_missing = true;
+      table->flags2 |= DICT_TF2_DISCARDED;
+      return DB_SUCCESS;
     }
 
     /* We create a new single-table tablespace for the table.

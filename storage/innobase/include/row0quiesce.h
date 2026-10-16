@@ -36,8 +36,14 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #define row0quiesce_h
 
 #include "dict0types.h"
+#include "fil0types.h"
+#include "os0file.h"
 #include "univ.i"
 
+class THD;
+namespace dd {
+class Table;
+}
 struct trx_t;
 
 /** The version number of the export meta-data text file. */
@@ -74,5 +80,38 @@ void row_quiesce_table_start(dict_table_t *table, trx_t *trx);
 @param[in] table Quiesce this table
 @param[in,out] trx Transaction/session */
 void row_quiesce_table_complete(dict_table_t *table, trx_t *trx);
+
+/** Facts about a table's tablespace and definition that the .cfg writer
+needs. FLUSH TABLES ... FOR EXPORT takes them from the attached tablespace
+and the data dictionary; a caller holding a table whose tablespace is not
+attached to this server passes them explicitly. */
+struct Cfg_write_source {
+  /** Tablespace (FSP) flags */
+  uint32_t space_flags{UINT32_UNDEFINED};
+
+  /** Transparent page compression of the tablespace */
+  Compression::Type compression{Compression::NONE};
+
+  /** SDI index of the tablespace, or nullptr if it has none */
+  const dict_index_t *sdi_index{nullptr};
+
+  /** Root page of the SDI index in the tablespace */
+  page_no_t sdi_root{FIL_NULL};
+
+  /** Table definition holding INSTANT dropped columns, or nullptr to look
+  the table up in the data dictionary by name */
+  const dd::Table *dd_table{nullptr};
+};
+
+/** Write the .cfg contents of a table to an open file, in the format read
+by ALTER TABLE ... IMPORT TABLESPACE.
+@param[in]      table   table, with its index roots set
+@param[in]      src     tablespace facts
+@param[in,out]  file    file to write to
+@param[in,out]  thd     session
+@return DB_SUCCESS or error code */
+[[nodiscard]] dberr_t row_quiesce_write_cfg_to_file(const dict_table_t *table,
+                                                    const Cfg_write_source &src,
+                                                    FILE *file, THD *thd);
 
 #endif /* row0quiesce_h */

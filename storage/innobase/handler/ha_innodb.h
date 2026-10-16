@@ -925,6 +925,15 @@ class create_table_info_t {
   /** Update the internal data dictionary. */
   int create_table_update_dict();
 
+  /** IMPORT TABLE FROM '<file>.ibd': convert and attach the tablespace file
+  of the table or partition just created, which has no tablespace yet, and
+  record its state in the data dictionary.
+  @param[in,out]  dd_tab  dd::Table or dd::Partition of the new table
+  @retval 0 on success
+  @retval error number on failure */
+  template <typename Table>
+  int attach_tablespace(Table *dd_tab);
+
   /** Update the global data dictionary.
   @param[in]            dd_table        dd::Table or dd::Partition
   @retval       0               On success

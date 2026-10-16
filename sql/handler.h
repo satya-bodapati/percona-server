@@ -3420,6 +3420,14 @@ struct HA_CREATE_INFO {
   void init_create_options_from_share(const TABLE_SHARE *share,
                                       uint64_t used_fields);
   Item *zip_dict_name{nullptr};
+
+  /**
+    Set by IMPORT TABLE FROM '<file>.ibd'. The engine creates the table on
+    top of its existing tablespace files, at the paths the table would use,
+    instead of creating new ones, and imports them. Points to the table
+    definition read from the SDI of those files.
+  */
+  const dd::Table *m_import_source{nullptr};
 };
 
 /**

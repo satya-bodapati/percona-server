@@ -80,4 +80,23 @@ encrypted, the key is read from the .cfp file next to it.
     THD *thd, const char *path, std::vector<Sdi_file_record> &records,
     uint32_t *space_flags);
 
+/** Attach the tablespace file of a table or partition created by IMPORT
+TABLE FROM '<file>.ibd'. The table was created without a tablespace, like a
+discarded one, and the file is already at the path the table uses. Its
+definition is read from the SDI of the file, then the file is converted in
+place and attached as for ALTER TABLE ... IMPORT TABLESPACE.
+@param[in]      thd                 session
+@param[in,out]  table               the new table or partition
+@param[in,out]  table_def           definition of the new table
+@param[in]      source_def          table definition read from the SDI
+@param[in]      source_part         partition of source_def that table is,
+                                    or nullptr
+@param[in]      compression_option  COMPRESSION= option of the table
+@return DB_SUCCESS or error code; errors are reported to thd */
+[[nodiscard]] dberr_t row_import_attach(THD *thd, dict_table_t *table,
+                                        dd::Table *table_def,
+                                        const dd::Table &source_def,
+                                        const dd::Partition *source_part,
+                                        const char *compression_option);
+
 #endif /* row0import_h */

@@ -4040,9 +4040,10 @@ bool dd_create_tablespace(dd::cache::Dictionary_client *dd_client,
                           const char *dd_space_name, space_id_t space_id,
                           uint32_t flags, const char *filename, bool discarded,
                           dd::Object_id &dd_space_id) {
-  /* Get the autoextend_size attribute for the tablespace */
+  /* Get the autoextend_size attribute for the tablespace. A discarded
+  tablespace, or one whose file is not attached yet, is not in the cache. */
   fil_space_t *space = fil_space_get(space_id);
-  ut_ad(space != nullptr);
+  ut_ad(space != nullptr || discarded);
 
   std::unique_ptr<dd::Tablespace> dd_space(dd::create_object<dd::Tablespace>());
 
@@ -4083,7 +4084,8 @@ bool dd_create_tablespace(dd::cache::Dictionary_client *dd_client,
     toptions.set("encryption", "Y");
   }
 
-  toptions.set(autoextend_size_str, space->autoextend_size_in_bytes);
+  toptions.set(autoextend_size_str,
+               space != nullptr ? space->autoextend_size_in_bytes : 0);
 
   if (dd_client->store(dd_space.get())) {
     return true;
@@ -4099,8 +4101,16 @@ bool dd_create_implicit_tablespace(dd::cache::Dictionary_client *dd_client,
                                    const char *filename, bool discarded,
                                    dd::Object_id &dd_space_id) {
   fil_space_t *space = fil_space_get(space_id);
-  uint32_t flags = space->flags;
 
+  return dd_create_implicit_tablespace(dd_client, space_id, space_name,
+                                       filename, discarded, space->flags,
+                                       dd_space_id);
+}
+
+bool dd_create_implicit_tablespace(dd::cache::Dictionary_client *dd_client,
+                                   space_id_t space_id, const char *space_name,
+                                   const char *filename, bool discarded,
+                                   uint32_t flags, dd::Object_id &dd_space_id) {
   std::string tsn(space_name);
   dict_name::convert_to_space(tsn);
 
@@ -5435,6 +5445,105 @@ dict_table_t *dd_open_table(dd::cache::Dictionary_client *client,
   return m_table;
 }
 MY_COMPILER_DIAGNOSTIC_POP()
+
+template <typename Table>
+dict_table_t *dd_build_uncached_table(const Table *dd_table, const TABLE *table,
+                                      const char *norm_name, space_id_t space,
+                                      THD *thd) {
+  ut_ad(dd_table != nullptr);
+  ut_ad(!dict_sys_mutex_own());
+
+  const bool zip_allowed = srv_page_size <= UNIV_ZIP_SIZE_MAX;
+
+  dict_table_t *m_table =
+      dd_fill_dict_table(dd_table, table, norm_name, nullptr, zip_allowed,
+                         false, thd, true /* implicit tablespace */);
+
+  if (m_table == nullptr) {
+    return nullptr;
+  }
+
+  bool fail = dd_fill_dict_index(dd_table->table(), table, m_table, thd) != 0;
+
+  if (!fail && table->s->found_next_number_field != nullptr) {
+    const dd::Properties &p = dd_table->table().se_private_data();
+    uint64_t autoinc = 0;
+
+    dict_table_autoinc_set_col_pos(
+        m_table, (*table->s->found_next_number_field)->field_index());
+
+    if (p.exists(dd_table_key_strings[DD_TABLE_AUTOINC])) {
+      p.get(dd_table_key_strings[DD_TABLE_AUTOINC], &autoinc);
+    }
+
+    dict_table_autoinc_lock(m_table);
+    dict_table_autoinc_initialize(m_table, autoinc + 1);
+    dict_table_autoinc_unlock(m_table);
+    m_table->autoinc_persisted = autoinc;
+  }
+
+  m_table->space = space;
+
+  /* The index ids and root pages are those of the server that wrote the
+  definition; they describe the tablespace file, not this server. */
+  dict_index_t *index = fail ? nullptr : m_table->first_index();
+
+  for (const auto dd_index : dd_table->indexes()) {
+    if (index == nullptr) {
+      fail = true;
+      break;
+    }
+
+    const dd::Properties &se_private_data = dd_index->se_private_data();
+    uint64_t id = 0;
+    uint32_t root = 0;
+    uint64_t trx_id = 0;
+
+    if (se_private_data.get(dd_index_key_strings[DD_INDEX_ID], &id) ||
+        se_private_data.get(dd_index_key_strings[DD_INDEX_ROOT], &root) ||
+        se_private_data.get(dd_index_key_strings[DD_INDEX_TRX_ID], &trx_id)) {
+      fail = true;
+      break;
+    }
+
+    index->page = root;
+    index->space = space;
+    index->id = id;
+    index->trx_id = trx_id;
+
+    index = index->next();
+  }
+
+  if (fail) {
+    my_error(ER_TABLE_SCHEMA_MISMATCH, MYF(0),
+             "the table definition read from the tablespace file is not "
+             "valid");
+    dd_free_uncached_table(m_table);
+    return nullptr;
+  }
+
+  return m_table;
+}
+
+template dict_table_t *dd_build_uncached_table<dd::Table>(const dd::Table *,
+                                                          const TABLE *,
+                                                          const char *,
+                                                          space_id_t, THD *);
+template dict_table_t *dd_build_uncached_table<dd::Partition>(
+    const dd::Partition *, const TABLE *, const char *, space_id_t, THD *);
+
+void dd_free_uncached_table(dict_table_t *table) {
+  dict_sys_mutex_enter();
+
+  for (dict_index_t *index = UT_LIST_GET_LAST(table->indexes); index != nullptr;
+       index = UT_LIST_GET_LAST(table->indexes)) {
+    dict_index_remove_from_cache(table, index);
+  }
+
+  dict_mem_table_free(table);
+
+  dict_sys_mutex_exit();
+}
 
 template dict_table_t *dd_open_table<dd::Table>(dd::cache::Dictionary_client *,
                                                 const TABLE *, const char *,
@@ -6873,6 +6982,58 @@ void dd_tablespace_set_state(THD *thd, dd::Object_id dd_space_id,
     ut_d(ut_error);
   }
 }
+
+template <typename Table>
+void dd_attach_tablespace_done(THD *thd, const dict_table_t *table,
+                               Table *dd_table) {
+  using Client = dd::cache::Dictionary_client;
+  using Releaser = dd::cache::Dictionary_client::Auto_releaser;
+
+  for (auto dd_index : *dd_table->indexes()) {
+    const dict_index_t *index = dd_find_index(table, dd_index);
+    ut_ad(index != nullptr);
+
+    dd_index->se_private_data().set(dd_index_key_strings[DD_INDEX_ROOT],
+                                    index->page);
+  }
+
+  dd_set_discarded(*dd_table, false);
+
+  /* The tablespace was recorded as discarded, with the flags the new
+  table implies; now it is attached, record the flags of the file. */
+  dd::Object_id dd_space_id = (*dd_table->indexes()->begin())->tablespace_id();
+  std::string space_name(table->name.m_name);
+  dict_name::convert_to_space(space_name);
+
+  dd::Tablespace *dd_space = nullptr;
+  Client *client = dd::get_dd_client(thd);
+  Releaser releaser{client};
+
+  if (dd_tablespace_get_mdl(space_name.c_str())) {
+    ut_error;
+  }
+
+  if (client->acquire_for_modification(dd_space_id, &dd_space) ||
+      dd_space == nullptr) {
+    ut_error;
+  }
+
+  dd_space->se_private_data().set(
+      dd_space_key_strings[DD_SPACE_FLAGS],
+      static_cast<uint32>(fil_space_get_flags(table->space)));
+
+  dd_tablespace_set_state(dd_space, DD_SPACE_STATE_NORMAL);
+
+  if (client->update(dd_space)) {
+    ut_d(ut_error);
+  }
+}
+
+template void dd_attach_tablespace_done<dd::Table>(THD *, const dict_table_t *,
+                                                   dd::Table *);
+template void dd_attach_tablespace_done<dd::Partition>(THD *,
+                                                       const dict_table_t *,
+                                                       dd::Partition *);
 
 void dd_tablespace_set_state(dd::Tablespace *dd_space, dd_space_states state) {
   dd::Properties &p = dd_space->se_private_data();

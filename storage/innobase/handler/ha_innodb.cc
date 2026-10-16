@@ -14455,10 +14455,13 @@ void create_table_info_t::set_tablespace_type(
   /** Allow file_per_table for this table either because:
   1) the setting innodb_file_per_table=on,
   2) the table being altered is currently file_per_table
-  3) explicitly requested by tablespace=innodb_file_per_table. */
+  3) explicitly requested by tablespace=innodb_file_per_table
+  4) IMPORT TABLE FROM '<file>.ibd': the file being imported is the
+     table's own tablespace. */
   m_allow_file_per_table = m_innodb_file_per_table ||
                            table_being_altered_is_file_per_table ||
-                           tablespace_is_file_per_table(m_create_info);
+                           tablespace_is_file_per_table(m_create_info) ||
+                           m_create_info->m_import_source != nullptr;
 
   bool is_temp = m_create_info->options & HA_LEX_CREATE_TMP_TABLE;
 
@@ -14970,6 +14973,29 @@ int create_table_info_t::create_table_update_global_dd(Table *dd_table) {
     dd_space_id = dict_sys_t::s_dd_dict_space_id;
   } else if (m_table->space == TRX_SYS_SPACE) {
     dd_space_id = dict_sys_t::s_dd_sys_space_id;
+  } else if (file_per_table && m_create_info != nullptr &&
+             m_create_info->m_import_source != nullptr) {
+    /* IMPORT TABLE FROM '<file>.ibd': the tablespace file is not attached
+    yet, so record the tablespace as discarded, with the flags the new
+    table implies. attach_tablespace() records the actual state. */
+    char *filename = Fil_path::make(dict_table_get_datadir(m_table),
+                                    m_table->name.m_name, IBD, true);
+    uint32_t fsp_flags = dict_tf_to_fsp_flags(m_table->flags);
+
+    if (DICT_TF2_FLAG_IS_SET(m_table, DICT_TF2_ENCRYPTION_FILE_PER_TABLE)) {
+      fsp_flags_set_encryption(fsp_flags);
+    }
+    fsp_flags_set_sdi(fsp_flags);
+
+    if (filename == nullptr || dd_create_implicit_tablespace(
+                                   client, m_table->space, m_table->name.m_name,
+                                   filename, true, fsp_flags, dd_space_id)) {
+      ut::free(filename);
+      return HA_ERR_GENERIC;
+    }
+
+    ut_ad(dd_space_id != dd::INVALID_OBJECT_ID);
+    ut::free(filename);
   } else if (file_per_table) {
     char *filename = fil_space_get_first_path(m_table->space);
 
@@ -15029,6 +15055,104 @@ template int create_table_info_t::create_table_update_global_dd<dd::Table>(
 template int create_table_info_t::create_table_update_global_dd<dd::Partition>(
     dd::Partition *);
 
+/** Find the partition of the source definition that a partition of the new
+table is, by name and, for a subpartition, by the name of its partition.
+@param[in]      source  table definition read from the SDI
+@param[in]      part    partition of the new table
+@return the source partition, or nullptr if there is none */
+static const dd::Partition *find_source_partition(const dd::Table &source,
+                                                  const dd::Partition &part) {
+  for (const dd::Partition *candidate : source.leaf_partitions()) {
+    if (candidate->name() != part.name()) {
+      continue;
+    }
+
+    if ((candidate->parent() == nullptr) != (part.parent() == nullptr)) {
+      continue;
+    }
+
+    if (part.parent() != nullptr &&
+        candidate->parent()->name() != part.parent()->name()) {
+      continue;
+    }
+
+    return candidate;
+  }
+
+  return nullptr;
+}
+
+template <typename Table>
+int create_table_info_t::attach_tablespace(Table *dd_tab) {
+  const dd::Table &source = *m_create_info->m_import_source;
+  const dd::Partition *source_part = nullptr;
+
+  if (!m_table->ibd_file_missing) {
+    /* The table did not get a tablespace of its own. */
+    my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+             "IMPORT TABLE into a shared tablespace");
+    return HA_ERR_UNSUPPORTED;
+  }
+
+  if constexpr (std::is_same_v<Table, dd::Partition>) {
+    source_part = find_source_partition(source, *dd_tab);
+
+    if (source_part == nullptr) {
+      my_error(ER_TABLE_SCHEMA_MISMATCH, MYF(0),
+               "the tablespace files do not define all partitions");
+      return HA_ERR_GENERIC;
+    }
+  }
+
+  dberr_t err = row_import_attach(m_thd, m_table, &dd_tab->table(), source,
+                                  source_part, m_create_info->compress.str);
+
+  if (err != DB_SUCCESS) {
+    return convert_error_code_to_mysql(err, m_table->flags, m_thd);
+  }
+
+  dd_attach_tablespace_done(m_thd, m_table, dd_tab);
+
+  /* The AUTO_INCREMENT value in the SDI is from the last DDL. Continue
+  after the highest value in the data, and persist that, so that it also
+  holds after a restart. */
+  const Field *field = m_form->found_next_number_field;
+
+  if (field != nullptr) {
+    const KEY &key = m_form->key_info[m_form->s->next_number_index];
+    dict_index_t *index = dict_table_get_index_on_name(m_table, key.name);
+    uint64_t max_value = 0;
+
+    if (index == nullptr || row_search_max_autoinc(index, field->field_name,
+                                                   &max_value) != DB_SUCCESS) {
+      my_error(ER_AUTOINC_READ_FAILED, MYF(0));
+      return HA_ERR_AUTOINC_READ_FAILED;
+    }
+
+    /* For a partitioned table, the table's value is the highest of all
+    its partitions. dd_set_autoinc() stores the value before the next. */
+    dd::Properties &p = dd_tab->table().se_private_data();
+    uint64_t persisted = 0;
+
+    if (!p.exists(dd_table_key_strings[DD_TABLE_AUTOINC]) ||
+        p.get(dd_table_key_strings[DD_TABLE_AUTOINC], &persisted) ||
+        max_value > persisted) {
+      dd_set_autoinc(p, max_value + 1);
+    }
+
+    dict_table_autoinc_lock(m_table);
+    dict_table_autoinc_initialize(m_table, max_value + 1);
+    dict_table_autoinc_unlock(m_table);
+    m_table->autoinc_persisted = max_value;
+  }
+
+  return 0;
+}
+
+template int create_table_info_t::attach_tablespace<dd::Table>(dd::Table *);
+template int create_table_info_t::attach_tablespace<dd::Partition>(
+    dd::Partition *);
+
 template <typename Table>
 int innobase_basic_ddl::create_impl(THD *thd, const char *name, TABLE *form,
                                     HA_CREATE_INFO *create_info, Table *dd_tab,
@@ -15084,6 +15208,11 @@ int innobase_basic_ddl::create_impl(THD *thd, const char *name, TABLE *form,
   }
 
   error = info.create_table_update_dict();
+
+  if (error == 0 && dd_tab != nullptr &&
+      create_info->m_import_source != nullptr) {
+    error = info.attach_tablespace(dd_tab);
+  }
 
   if (evictable && !(info.is_temp_table() || info.is_intrinsic_temp_table())) {
     info.detach();

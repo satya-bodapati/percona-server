@@ -1191,6 +1191,27 @@ void dd_table_close(dict_table_t *table, THD *thd, MDL_ticket **mdl,
 bool dd_table_discard_tablespace(THD *thd, const dict_table_t *table,
                                  dd::Table *table_def, bool discard);
 
+/** Build an InnoDB table object from a table definition that does not
+belong to this server, such as one read from the SDI of a tablespace file
+being imported. The object is not added to the dictionary cache, so its name
+and ids cannot clash with tables of this server. Index ids and root pages are
+taken from the definition as they are.
+@param[in]      dd_table        table or partition definition
+@param[in]      table           MySQL table built from the same definition
+@param[in]      norm_name       InnoDB name of the table or partition
+@param[in]      space           tablespace id to record in the object
+@param[in]      thd             session
+@return the table object, to be freed with dd_free_uncached_table(), or
+nullptr on error (reported with my_error()) */
+template <typename Table>
+dict_table_t *dd_build_uncached_table(const Table *dd_table, const TABLE *table,
+                                      const char *norm_name, space_id_t space,
+                                      THD *thd);
+
+/** Free a table object built by dd_build_uncached_table().
+@param[in,out]  table   table object */
+void dd_free_uncached_table(dict_table_t *table);
+
 /** Open an internal handle to a persistent InnoDB table by name.
 @param[in,out]  thd             current thread
 @param[out]     mdl             metadata lock
@@ -1297,6 +1318,34 @@ bool dd_create_implicit_tablespace(dd::cache::Dictionary_client *dd_client,
                                    space_id_t space_id, const char *space_name,
                                    const char *filename, bool discarded,
                                    dd::Object_id &dd_space_id);
+
+/** Create metadata for the implicit tablespace of a table whose tablespace
+file is not attached to the server yet, as for IMPORT TABLE FROM
+'<file>.ibd'.
+@param[in,out]  dd_client       data dictionary client
+@param[in]      space_id        InnoDB tablespace ID
+@param[in]      space_name      tablespace name to be set for the
+                                newly created tablespace
+@param[in]      filename        tablespace filename
+@param[in]      discarded       true if this tablespace is discarded
+@param[in]      flags           tablespace flags
+@param[in,out]  dd_space_id     dd tablespace id
+@retval false   on success
+@retval true    on failure */
+bool dd_create_implicit_tablespace(dd::cache::Dictionary_client *dd_client,
+                                   space_id_t space_id, const char *space_name,
+                                   const char *filename, bool discarded,
+                                   uint32_t flags, dd::Object_id &dd_space_id);
+
+/** Record in the data dictionary that the tablespace file of a table or
+partition created by IMPORT TABLE FROM '<file>.ibd' is attached: the index
+root pages, the discard flag, and the state and flags of the tablespace.
+@param[in,out]  thd             session
+@param[in]      table           InnoDB table or partition
+@param[in,out]  dd_table        its definition */
+template <typename Table>
+void dd_attach_tablespace_done(THD *thd, const dict_table_t *table,
+                               Table *dd_table);
 
 /** Get the autoextend_size attribute for a tablespace.
 @param[in]      dd_client       Data dictionary client

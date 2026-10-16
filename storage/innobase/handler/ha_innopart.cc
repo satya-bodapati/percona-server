@@ -2624,6 +2624,13 @@ int ha_innopart::create(const char *name, TABLE *form,
       break;
     }
 
+    /* IMPORT TABLE FROM '<file>.ibd': attach the partition's file. */
+    if (create_info->m_import_source != nullptr &&
+        (error = info.attach_tablespace(
+             const_cast<dd::Partition *>(dd_part))) != 0) {
+      break;
+    }
+
     info.detach();
 
     ++created;

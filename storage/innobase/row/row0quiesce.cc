@@ -108,11 +108,12 @@ this program; if not, write to the Free Software Foundation, Inc.,
 }
 /** Write the meta data config file index information
 @param[in]      index   write metadata for this index
+@param[in]      root    root page number of the index to write
 @param[in,out]  file    file to write to
 @param[in,out]  thd     session
 @return DB_SUCCESS or error code. */
 [[nodiscard]] static dberr_t row_quiesce_write_one_index(
-    const dict_index_t *index, FILE *file, THD *thd) {
+    const dict_index_t *index, page_no_t root, FILE *file, THD *thd) {
   dberr_t err;
   byte *ptr;
   byte row[sizeof(space_index_t) + sizeof(uint32_t) * 8];
@@ -126,7 +127,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
   mach_write_to_4(ptr, index->space);
   ptr += sizeof(uint32_t);
 
-  mach_write_to_4(ptr, index->page);
+  mach_write_to_4(ptr, root);
   ptr += sizeof(uint32_t);
 
   mach_write_to_4(ptr, index->type);
@@ -177,18 +178,17 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 /** Write the meta data config file index information.
  @return DB_SUCCESS or error code. */
-[[nodiscard]] static MY_ATTRIBUTE((nonnull)) dberr_t
-    row_quiesce_write_indexes(const dict_table_t *table, /*!< in: write the meta
-                                                         data for this table */
-                              FILE *file, /*!< in: file to write to */
-                              THD *thd)   /*!< in/out: session */
+[[nodiscard]] static dberr_t row_quiesce_write_indexes(
+    const dict_table_t *table,   /*!< in: write the meta data for this table */
+    const Cfg_write_source &src, /*!< in: tablespace facts */
+    FILE *file,                  /*!< in: file to write to */
+    THD *thd)                    /*!< in/out: session */
 {
   byte row[sizeof(uint32_t)];
 
   /* Write the number of indexes in the table. */
   uint32_t num_indexes = 0;
-  uint32_t flags = fil_space_get_flags(table->space);
-  bool has_sdi = FSP_FLAGS_HAS_SDI(flags);
+  bool has_sdi = src.sdi_index != nullptr;
 
   if (has_sdi) {
     num_indexes += 1;
@@ -209,14 +209,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
   /* Write SDI Index */
   if (has_sdi) {
-    dict_mutex_enter_for_mysql();
-
-    dict_index_t *index = dict_sdi_get_index(table->space);
-
-    dict_mutex_exit_for_mysql();
-
-    ut_ad(index != nullptr);
-    const auto err = row_quiesce_write_one_index(index, file, thd);
+    const auto err =
+        row_quiesce_write_one_index(src.sdi_index, src.sdi_root, file, thd);
     if (err != DB_SUCCESS) {
       return err;
     }
@@ -224,7 +218,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
   /* Write the table indexes meta data. */
   for (const dict_index_t *index : table->indexes) {
-    const auto err = row_quiesce_write_one_index(index, file, thd);
+    const auto err = row_quiesce_write_one_index(index, index->page, file, thd);
     if (err != DB_SUCCESS) {
       return err;
     }
@@ -239,11 +233,13 @@ of dict_col_t default value part if exists.
 @param[in]  col_name    column name
 @param[in,out]  file        file to write to
 @param[in]  dict_table  InnoDB table cache
+@param[in]  given_dd_table  table definition holding the dropped column, or
+                            nullptr to look it up in the data dictionary
 @param[in]  thd         THD
 @return DB_SUCCESS or DB_IO_ERROR. */
 static dberr_t row_quiesce_write_dropped_col_metadata(
     const dict_col_t *col, const char *col_name, FILE *file,
-    const dict_table_t *dict_table, THD *thd) {
+    const dict_table_t *dict_table, const dd::Table *given_dd_table, THD *thd) {
   /* Total metadata to be written
     1 byte for is NULLABLE
     1 byte for is_unsigned
@@ -257,38 +253,40 @@ static dberr_t row_quiesce_write_dropped_col_metadata(
 
   ut_ad(col->is_instant_dropped());
 
-  const dd::Table *dd_table = nullptr;
+  const dd::Table *dd_table = given_dd_table;
   dd::cache::Dictionary_client *client = dd::get_dd_client(thd);
   dd::cache::Dictionary_client::Auto_releaser releaser(client);
 
-  /* Find schema and table name */
-  std::string dict_name(dict_table->name.m_name);
-  std::string schema_name;
-  std::string table_name;
-  size_t table_begin = dict_name.find(dict_name::SCHEMA_SEPARATOR);
-  /* schema name must be part of table name */
-  ut_ad(table_begin != std::string::npos);
-
-  schema_name.assign(dict_name.substr(0, table_begin));
-  table_begin += dict_name::SCHEMA_SEPARATOR_LEN;
-
-  /* If partition table, skip partition name. */
-  size_t part_name_begin = dict_name.find(dict_name::PART_SEPARATOR);
-  if (part_name_begin != std::string::npos) {
-    table_name.assign(dict_name, table_begin, part_name_begin - table_begin);
-  } else {
-    table_name.assign(dict_name.substr(table_begin));
-  }
-
-  if (client->acquire(dd::String_type(schema_name.c_str()),
-                      dd::String_type(table_name.c_str()), &dd_table)) {
-    ut_ad(false);
-    return (DB_ERROR);
-  }
-
   if (dd_table == nullptr) {
-    ut_ad(false);
-    return DB_ERROR;
+    /* Find schema and table name */
+    std::string dict_name(dict_table->name.m_name);
+    std::string schema_name;
+    std::string table_name;
+    size_t table_begin = dict_name.find(dict_name::SCHEMA_SEPARATOR);
+    /* schema name must be part of table name */
+    ut_ad(table_begin != std::string::npos);
+
+    schema_name.assign(dict_name.substr(0, table_begin));
+    table_begin += dict_name::SCHEMA_SEPARATOR_LEN;
+
+    /* If partition table, skip partition name. */
+    size_t part_name_begin = dict_name.find(dict_name::PART_SEPARATOR);
+    if (part_name_begin != std::string::npos) {
+      table_name.assign(dict_name, table_begin, part_name_begin - table_begin);
+    } else {
+      table_name.assign(dict_name.substr(table_begin));
+    }
+
+    if (client->acquire(dd::String_type(schema_name.c_str()),
+                        dd::String_type(table_name.c_str()), &dd_table)) {
+      ut_ad(false);
+      return (DB_ERROR);
+    }
+
+    if (dd_table == nullptr) {
+      ut_ad(false);
+      return DB_ERROR;
+    }
   }
 
   const dd::Column *column = dd_find_column(dd_table, col_name);
@@ -414,10 +412,11 @@ of dict_col_t default value part if exists.
  as uint32_t.
  @return DB_SUCCESS or error code. */
 [[nodiscard]] static dberr_t row_quiesce_write_table(
-    const dict_table_t *table, /*!< in: write the meta
-                               data for this table */
-    FILE *file,                /*!< in: file to write to */
-    THD *thd)                  /*!< in/out: session */
+    const dict_table_t *table,   /*!< in: write the meta
+                                 data for this table */
+    const Cfg_write_source &src, /*!< in: table definition source */
+    FILE *file,                  /*!< in: file to write to */
+    THD *thd)                    /*!< in/out: session */
 {
   dict_col_t *col;
   byte row[sizeof(uint32_t) * 7];
@@ -513,8 +512,8 @@ of dict_col_t default value part if exists.
       /* Write DD::Column specific info for dropped columns */
       if (col->is_instant_dropped()) {
         const char *col_name = table->get_col_name(dict_col_get_no(col));
-        if (row_quiesce_write_dropped_col_metadata(col, col_name, file, table,
-                                                   thd) != DB_SUCCESS) {
+        if (row_quiesce_write_dropped_col_metadata(
+                col, col_name, file, table, src.dd_table, thd) != DB_SUCCESS) {
           ib::send_errno_warn(thd, ER_IO_WRITE_ERROR,
                               "while writing dropped column metadata.");
 
@@ -539,8 +538,9 @@ of dict_col_t default value part if exists.
 @param[in]      file    file to write to
 @param[in,out]  thd     session
 @return DB_SUCCESS or error code. */
-[[nodiscard]] static dberr_t row_quiesce_write_header(const dict_table_t *table,
-                                                      FILE *file, THD *thd) {
+[[nodiscard]] static dberr_t row_quiesce_write_header(
+    const dict_table_t *table, const Cfg_write_source &src, FILE *file,
+    THD *thd) {
   byte value[sizeof(uint32_t)];
 
   /* Write the current meta-data version number. */
@@ -683,7 +683,7 @@ of dict_col_t default value part if exists.
   }
 
   /* Write the space flags */
-  uint32_t space_flags = fil_space_get_flags(table->space);
+  uint32_t space_flags = src.space_flags;
   ut_ad(space_flags != UINT32_UNDEFINED);
   mach_write_to_4(value, space_flags);
 
@@ -695,8 +695,7 @@ of dict_col_t default value part if exists.
 
   if (cfg_version >= IB_EXPORT_CFG_VERSION_V6) {
     /* Write compression type info. */
-    uint8_t compression_type =
-        static_cast<uint8_t>(fil_get_compression(table->space));
+    uint8_t compression_type = static_cast<uint8_t>(src.compression);
     mach_write_to_1(value, compression_type);
 
     if (fwrite(&value, 1, sizeof(uint8_t), file) != sizeof(uint8_t)) {
@@ -708,6 +707,22 @@ of dict_col_t default value part if exists.
   }
 
   return (DB_SUCCESS);
+}
+
+dberr_t row_quiesce_write_cfg_to_file(const dict_table_t *table,
+                                      const Cfg_write_source &src, FILE *file,
+                                      THD *thd) {
+  dberr_t err = row_quiesce_write_header(table, src, file, thd);
+
+  if (err == DB_SUCCESS) {
+    err = row_quiesce_write_table(table, src, file, thd);
+  }
+
+  if (err == DB_SUCCESS) {
+    err = row_quiesce_write_indexes(table, src, file, thd);
+  }
+
+  return err;
 }
 
 /** Write the table meta data after quiesce.
@@ -731,15 +746,21 @@ of dict_col_t default value part if exists.
 
     err = DB_IO_ERROR;
   } else {
-    err = row_quiesce_write_header(table, file, thd);
+    Cfg_write_source src;
 
-    if (err == DB_SUCCESS) {
-      err = row_quiesce_write_table(table, file, thd);
+    src.space_flags = fil_space_get_flags(table->space);
+    src.compression = fil_get_compression(table->space);
+
+    if (FSP_FLAGS_HAS_SDI(src.space_flags)) {
+      dict_mutex_enter_for_mysql();
+      src.sdi_index = dict_sdi_get_index(table->space);
+      dict_mutex_exit_for_mysql();
+
+      ut_ad(src.sdi_index != nullptr);
+      src.sdi_root = src.sdi_index->page;
     }
 
-    if (err == DB_SUCCESS) {
-      err = row_quiesce_write_indexes(table, file, thd);
-    }
+    err = row_quiesce_write_cfg_to_file(table, src, file, thd);
 
     if (fflush(file) != 0) {
       std::ostringstream msg;

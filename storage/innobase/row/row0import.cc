@@ -4520,6 +4520,42 @@ class Import_cfg_file_source final : public Import_metadata_source {
   [[nodiscard]] Import_status read(Import_ctx &ctx, row_import &cfg) override;
 };
 
+/** Read the encryption key of the tablespace file of an encrypted table
+from the .cfp file next to it.
+@param[in,out]  ctx     import context
+@param[in,out]  cfg     metadata; receives the key
+@return outcome */
+[[nodiscard]] static Import_status row_import_read_key(Import_ctx &ctx,
+                                                       row_import &cfg) {
+  dict_table_t *table = ctx.table;
+  trx_t *trx = ctx.trx;
+
+  if (!dd_is_table_in_encrypted_tablespace(table)) {
+    return Import_status{};
+  }
+
+  /* First try to read CFP file here. */
+  dberr_t err = row_import_read_cfp(table, trx->mysql_thd, cfg);
+  ut_ad(cfg.m_cfp_missing || err == DB_SUCCESS);
+
+  if (err != DB_SUCCESS) {
+    return Import_status{err, true};
+  }
+
+  /* If table is encrypted, but can't find cfp file, return error. */
+  if (cfg.m_cfp_missing) {
+    ib_errf(trx->mysql_thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
+            "Table is in an encrypted tablespace, but the encryption"
+            " meta-data file cannot be found while importing.");
+    return Import_status{DB_ERROR, true};
+  }
+
+  /* If CFP file is read, encryption_key must have been populted. */
+  ut_ad(cfg.m_encryption_metadata.can_encrypt());
+
+  return Import_status{};
+}
+
 Import_status Import_cfg_file_source::read(Import_ctx &ctx, row_import &cfg) {
   dict_table_t *table = ctx.table;
   trx_t *trx = ctx.trx;
@@ -4531,28 +4567,11 @@ Import_status Import_cfg_file_source::read(Import_ctx &ctx, row_import &cfg) {
   rw_lock_s_lock_func(dict_operation_lock, 0, UT_LOCATION_HERE);
 
   /* Read CFP file */
-  if (dd_is_table_in_encrypted_tablespace(table)) {
-    /* First try to read CFP file here. */
-    err = row_import_read_cfp(table, trx->mysql_thd, cfg);
-    ut_ad(cfg.m_cfp_missing || err == DB_SUCCESS);
+  const Import_status key_status = row_import_read_key(ctx, cfg);
 
-    if (err != DB_SUCCESS) {
-      rw_lock_s_unlock_gen(dict_operation_lock, 0);
-      return Import_status{err, true};
-    }
-
-    /* If table is encrypted, but can't find cfp file, return error. */
-    if (cfg.m_cfp_missing) {
-      ib_errf(trx->mysql_thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
-              "Table is in an encrypted tablespace, but the encryption"
-              " meta-data file cannot be found while importing.");
-      err = DB_ERROR;
-      rw_lock_s_unlock_gen(dict_operation_lock, 0);
-      return Import_status{err, true};
-    } else {
-      /* If CFP file is read, encryption_key must have been populted. */
-      ut_ad(cfg.m_encryption_metadata.can_encrypt());
-    }
+  if (key_status.err != DB_SUCCESS) {
+    rw_lock_s_unlock_gen(dict_operation_lock, 0);
+    return key_status;
   }
 
   /* Read CFG file */
@@ -5668,4 +5687,222 @@ dberr_t row_import_read_sdi_from_file(THD *thd, const char *path,
   }
 
   return err;
+}
+
+/** Metadata from the SDI of the tablespace file attached by IMPORT TABLE
+FROM '<file>.ibd'. The definition read from the SDI is turned into an InnoDB
+table object outside the dictionary cache, written in .cfg format to an
+anonymous temporary file and read back with the .cfg reader. Both import
+paths so share one parser and one set of schema checks. */
+class Import_sdi_source final : public Import_metadata_source {
+ public:
+  /** @param[in] source       the table or partition as written in the SDI
+  @param[in] source_def   table definition read from the SDI
+  @param[in] space_flags  tablespace flags of the file
+  @param[in] sdi_root     root page of the SDI index in the file */
+  Import_sdi_source(const dict_table_t *source, const dd::Table *source_def,
+                    uint32_t space_flags, page_no_t sdi_root)
+      : m_source(source),
+        m_source_def(source_def),
+        m_space_flags(space_flags),
+        m_sdi_root(sdi_root) {}
+
+  [[nodiscard]] Import_status read(Import_ctx &ctx, row_import &cfg) override;
+
+ private:
+  /** The table or partition as written in the SDI */
+  const dict_table_t *m_source;
+
+  /** Table definition read from the SDI */
+  const dd::Table *m_source_def;
+
+  /** Tablespace flags of the file */
+  uint32_t m_space_flags;
+
+  /** Root page of the SDI index in the file */
+  page_no_t m_sdi_root;
+};
+
+Import_status Import_sdi_source::read(Import_ctx &ctx, row_import &cfg) {
+  THD *thd = ctx.thd();
+  dict_table_t *table = ctx.table;
+
+  ctx.parent_trx->op_info = "read meta-data from the tablespace file";
+
+  /* INSTANT ADD COLUMN done before 8.0.29 left instant columns without row
+  versions. That metadata is not carried over correctly by the .cfg reader
+  yet (PS-9459), and a wrong import would corrupt the table, so refuse it. */
+  if (m_source->has_instant_cols() && !m_source->has_row_versions()) {
+    ib_errf(thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
+            "Table %s has columns added with ALGORITHM=INSTANT before "
+            "MySQL 8.0.29, which IMPORT TABLE cannot import yet. Rebuild "
+            "the table with ALTER TABLE ... FORCE before taking the backup.",
+            table->name.m_name);
+    return Import_status{DB_ERROR, false};
+  }
+
+  /* Prevent DDL operations while we are checking. */
+  rw_lock_s_lock_func(dict_operation_lock, 0, UT_LOCATION_HERE);
+
+  Import_status status = row_import_read_key(ctx, cfg);
+
+  if (status.err != DB_SUCCESS) {
+    rw_lock_s_unlock_gen(dict_operation_lock, 0);
+    return status;
+  }
+
+  Cfg_write_source src;
+  src.space_flags = m_space_flags;
+  src.dd_table = m_source_def;
+
+  Compression compression;
+  if (Compression::check(ctx.compression_option, &compression) == DB_SUCCESS) {
+    src.compression = compression.m_type;
+  }
+
+  if (FSP_FLAGS_HAS_SDI(m_space_flags)) {
+    /* The SDI index has the same definition in every tablespace; the
+    target's in-memory one stands in for the file's, with the file's
+    root page. */
+    dict_mutex_enter_for_mysql();
+
+    const dict_index_t *sdi_index = dict_sdi_get_index(table->space);
+
+    if (sdi_index == nullptr) {
+      dict_sdi_create_idx_in_mem(table->space, true, m_space_flags, false);
+      sdi_index = dict_sdi_get_index(table->space);
+    }
+
+    dict_mutex_exit_for_mysql();
+
+    ut_ad(sdi_index != nullptr);
+    src.sdi_index = sdi_index;
+    src.sdi_root = m_sdi_root;
+  }
+
+  dberr_t err = DB_SUCCESS;
+  FILE *file = os_file_create_tmpfile();
+
+  if (file == nullptr) {
+    ib::send_errno_warn(thd, ER_CANT_CREATE_FILE, "a temporary file");
+    err = DB_IO_ERROR;
+  } else {
+    err = row_quiesce_write_cfg_to_file(m_source, src, file, thd);
+
+    if (err == DB_SUCCESS && (fflush(file) != 0 || fseek(file, 0, SEEK_SET))) {
+      ib::send_errno_warn(thd, ER_IO_WRITE_ERROR, "a temporary file");
+      err = DB_IO_ERROR;
+    }
+
+    if (err == DB_SUCCESS) {
+      cfg.m_table = table;
+      cfg.m_missing = false;
+      err = row_import_read_meta_data(table, ctx.table_def, file, thd, cfg);
+    }
+
+    fclose(file);
+  }
+
+  if (err == DB_SUCCESS) {
+    err = cfg.match_schema(thd, ctx.table_def);
+  }
+
+  if (err == DB_SUCCESS) {
+    cfg.set_root_by_name();
+
+    /* The counter stored in the SDI is from the last DDL. Leave it unset;
+    it is computed from the data when the table is first opened. */
+    cfg.m_autoinc = 0;
+  }
+
+  rw_lock_s_unlock_gen(dict_operation_lock, 0);
+
+  if (err == DB_IO_NO_ENCRYPT_TABLESPACE) {
+    ib_errf(thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
+            "Encryption attribute in the file does not match the dictionary.");
+    return Import_status{err, false};
+  }
+
+  return Import_status{err, err != DB_SUCCESS};
+}
+
+dberr_t row_import_attach(THD *thd, dict_table_t *table, dd::Table *table_def,
+                          const dd::Table &source_def,
+                          const dd::Partition *source_part,
+                          const char *compression_option) {
+  ut_ad(!srv_read_only_mode);
+  ut_ad(!table->is_temporary());
+  ut_a(table->ibd_file_missing);
+
+  char *filepath = Fil_path::make(dict_table_get_datadir(table),
+                                  table->name.m_name, IBD, true);
+
+  if (filepath == nullptr) {
+    return DB_OUT_OF_MEMORY;
+  }
+
+  Ibd_sdi_reader reader(thd);
+  dberr_t err = reader.open(filepath);
+  ut::free(filepath);
+
+  if (err != DB_SUCCESS) {
+    return err;
+  }
+
+  /* Build the source table, as the server that wrote the file saw it. */
+  dd::cache::Dictionary_client *client = dd::get_dd_client(thd);
+  dd::cache::Dictionary_client::Auto_releaser releaser(client);
+  TABLE_SHARE ts;
+  TABLE td;
+
+  if (acquire_uncached_table(thd, client, &source_def, nullptr, &ts, &td) !=
+      0) {
+    return DB_ERROR;
+  }
+
+  dict_table_t *source =
+      source_part != nullptr
+          ? dd_build_uncached_table(source_part, &td, table->name.m_name,
+                                    reader.space_id(), thd)
+          : dd_build_uncached_table(&source_def, &td, table->name.m_name,
+                                    reader.space_id(), thd);
+
+  release_uncached_table(&ts, &td);
+
+  if (source == nullptr) {
+    return DB_ERROR;
+  }
+
+  Import_ctx ctx;
+  ctx.table = table;
+  ctx.table_def = table_def;
+  ctx.parent_trx = check_trx_exists(thd);
+  ctx.compression_option = compression_option;
+  ctx.clust_index_was_generated =
+      dict_index_is_auto_gen_clust(table->first_index());
+
+  err = row_import_start_trx(ctx);
+
+  if (err != DB_SUCCESS) {
+    dd_free_uncached_table(source);
+    return row_import_cleanup(ctx, err);
+  }
+
+  row_import cfg{};
+  Import_sdi_source sdi_source(source, &source_def, reader.space_flags(),
+                               reader.sdi_root());
+
+  Import_status status = sdi_source.read(ctx, cfg);
+
+  dd_free_uncached_table(source);
+
+  if (status.err == DB_SUCCESS) {
+    status = row_import_convert(ctx, cfg);
+  }
+
+  if (status.err == DB_SUCCESS) {
+    status = row_import_complete(ctx, cfg);
+  }
+
+  return row_import_end(ctx, status);
 }
