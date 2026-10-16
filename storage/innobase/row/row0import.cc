@@ -2814,22 +2814,63 @@ dberr_t PageConverter::operator()(os_offset_t offset,
   return (err);
 }
 
+/** What one import needs to know about its caller. ALTER TABLE ... IMPORT
+TABLESPACE fills it from the handler's prebuilt struct; a caller without a
+handler fills it directly. */
+struct Import_ctx {
+  /** Target table. It is in the dictionary cache and its tablespace file is
+  the one being imported. */
+  dict_table_t *table{};
+
+  /** Data dictionary definition of the target table. */
+  dd::Table *table_def{};
+
+  /** The caller's transaction. Used for the session, op_info and
+  error_index, never for the import itself. */
+  trx_t *parent_trx{};
+
+  /** The internal transaction the import runs in, started by
+  row_import_start_trx(). */
+  trx_t *trx{};
+
+  /** COMPRESSION= option of the target table, or nullptr. Used only when
+  the metadata has to be discovered from the tablespace file. */
+  const char *compression_option{};
+
+  /** true if the clustered index of the target table is the generated
+  GEN_CLUST_INDEX, so that dict_sys->row_id has to be adjusted. */
+  bool clust_index_was_generated{};
+
+  /** @return the session of the caller */
+  THD *thd() const { return parent_trx->mysql_thd; }
+};
+
+/** Outcome of one import step. */
+struct Import_status {
+  /** DB_SUCCESS or the error that stopped the import. */
+  dberr_t err{DB_SUCCESS};
+
+  /** true if the caller still has to report err to the client as
+  ER_INNODB_IMPORT_ERROR; false if the step already reported it, or if it
+  is DB_SUCCESS. */
+  bool report{false};
+};
+
 /** Clean up after import tablespace failure, this function will acquire
  the dictionary latches on behalf of the transaction if the transaction
- hasn't already acquired them. */
-static void row_import_discard_changes(
-    row_prebuilt_t *prebuilt, /*!< in/out: prebuilt from handler */
-    trx_t *trx,               /*!< in/out: transaction for import */
-    dberr_t err)              /*!< in: error code */
-{
-  dict_table_t *table = prebuilt->table;
+ hasn't already acquired them.
+@param[in,out]  ctx     import context
+@param[in]      err     error code */
+static void row_import_discard_changes(Import_ctx &ctx, dberr_t err) {
+  dict_table_t *table = ctx.table;
+  trx_t *trx = ctx.trx;
 
   ut_a(err != DB_SUCCESS);
 
-  prebuilt->trx->error_index = nullptr;
+  ctx.parent_trx->error_index = nullptr;
 
   ib::info(ER_IB_MSG_945) << "Failed to import tablespace of table '"
-                          << prebuilt->table->name.m_name
+                          << table->name.m_name
                           << (err == DB_UNSUPPORTED
                                   ? "': the CFG file version is "
                                   : "': ")
@@ -2859,16 +2900,17 @@ static void row_import_discard_changes(
   ut_a(err == DB_SUCCESS || err == DB_TABLESPACE_NOT_FOUND);
 }
 
-/** Clean up after import tablespace. */
-[[nodiscard]] static dberr_t row_import_cleanup(
-    row_prebuilt_t *prebuilt, /*!< in/out: prebuilt from handler */
-    trx_t *trx,               /*!< in/out: transaction for import */
-    dberr_t err)              /*!< in: error code */
-{
-  ut_a(prebuilt->trx != trx);
+/** Clean up after import tablespace.
+@param[in,out]  ctx     import context
+@param[in]      err     error code
+@return err */
+[[nodiscard]] static dberr_t row_import_cleanup(Import_ctx &ctx, dberr_t err) {
+  trx_t *trx = ctx.trx;
+
+  ut_a(ctx.parent_trx != trx);
 
   if (err != DB_SUCCESS) {
-    row_import_discard_changes(prebuilt, trx, err);
+    row_import_discard_changes(ctx, err);
   }
 
   ut_a(trx->dict_operation_lock_mode == RW_X_LATCH);
@@ -2880,8 +2922,9 @@ static void row_import_discard_changes(
   row_mysql_unlock_data_dictionary(trx);
 
   trx_free_for_mysql(trx);
+  ctx.trx = nullptr;
 
-  prebuilt->trx->op_info = "";
+  ctx.parent_trx->op_info = "";
 
   DBUG_EXECUTE_IF("ib_import_before_checkpoint_crash", DBUG_SUICIDE(););
 
@@ -2890,23 +2933,37 @@ static void row_import_discard_changes(
   return (err);
 }
 
-/** Report error during tablespace import. */
-[[nodiscard]] static dberr_t row_import_error(
-    row_prebuilt_t *prebuilt, /*!< in/out: prebuilt from handler */
-    trx_t *trx,               /*!< in/out: transaction for import */
-    dberr_t err)              /*!< in: error code */
-{
+/** Report error during tablespace import.
+@param[in,out]  ctx     import context
+@param[in]      err     error code
+@return err */
+[[nodiscard]] static dberr_t row_import_error(Import_ctx &ctx, dberr_t err) {
+  trx_t *trx = ctx.trx;
+
   if (!trx_is_interrupted(trx)) {
     char table_name[MAX_FULL_NAME_LEN + 1];
 
     innobase_format_name(table_name, sizeof(table_name),
-                         prebuilt->table->name.m_name);
+                         ctx.table->name.m_name);
 
     ib_senderrf(trx->mysql_thd, IB_LOG_LEVEL_WARN, ER_INNODB_IMPORT_ERROR,
                 table_name, (ulong)err, ut_strerr(err));
   }
 
-  return (row_import_cleanup(prebuilt, trx, err));
+  return (row_import_cleanup(ctx, err));
+}
+
+/** Finish an import: report the error if the failing step left that to
+the caller, then clean up and commit.
+@param[in,out]  ctx     import context
+@param[in]      status  outcome of the import steps
+@return status.err */
+[[nodiscard]] static dberr_t row_import_end(Import_ctx &ctx,
+                                            const Import_status &status) {
+  if (status.err != DB_SUCCESS && status.report) {
+    return row_import_error(ctx, status.err);
+  }
+  return row_import_cleanup(ctx, status.err);
 }
 
 /** Adjust the root page index node and leaf node segment headers, update
@@ -3004,12 +3061,11 @@ static void row_import_discard_changes(
 }
 
 /** Ensure that dict_sys->row_id exceeds SELECT MAX(DB_ROW_ID).
- @return error code */
+@param[in]      thd     session, for error reporting
+@param[in]      table   table to import
+@return error code */
 [[nodiscard]] static dberr_t row_import_set_sys_max_row_id(
-    row_prebuilt_t *prebuilt, /*!< in/out: prebuilt from
-                              handler */
-    dict_table_t *table)      /*!< in: table to import */
-{
+    THD *thd, dict_table_t *table) {
   dberr_t err;
   const rec_t *rec;
   mtr_t mtr;
@@ -3070,8 +3126,7 @@ static void row_import_discard_changes(
   DBUG_EXECUTE_IF("ib_import_set_max_rowid_failure", err = DB_CORRUPTION;);
 
   if (err != DB_SUCCESS) {
-    ib_errf(prebuilt->trx->mysql_thd, IB_LOG_LEVEL_WARN,
-            ER_INNODB_INDEX_CORRUPT,
+    ib_errf(thd, IB_LOG_LEVEL_WARN, ER_INNODB_INDEX_CORRUPT,
             "Index `%s` corruption detected, invalid DB_ROW_ID"
             " in index.",
             index->name());
@@ -4404,33 +4459,14 @@ dberr_t row_import_check_corruption(dict_table_t *table, THD *thd,
   return DB_SUCCESS;
 }
 
-/** Imports a tablespace. The space id in the .ibd file must match the space id
-of the table in the data dictionary.
-@param[in]      table           table
-@param[in]      table_def       dd table
-@param[in]      prebuilt        prebuilt struct in MySQL
-@return error code or DB_SUCCESS */
-dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
-                             row_prebuilt_t *prebuilt) {
-  dberr_t err;
-  trx_t *trx;
-  uint64_t autoinc = 0;
-  char *filepath = nullptr;
-
-  /* The caller assured that this is not read_only_mode and that no
-  temporary tablespace is being imported. */
-  ut_ad(!srv_read_only_mode);
-  ut_ad(!table->is_temporary());
-
-  ut_a(table->space);
-  ut_ad(prebuilt->trx);
-  ut_a(table->ibd_file_missing);
-
-  ibuf_delete_for_discarded_space(table->space);
-
-  trx_start_if_not_started(prebuilt->trx, true, UT_LOCATION_HERE);
-
-  trx = trx_allocate_for_mysql();
+/** Start the internal transaction an import runs in, with an undo segment so
+that it is recovered after a crash. On success ctx.trx is set; on failure it
+is also set, so that row_import_cleanup() can release it.
+@param[in,out]  ctx     import context
+@return DB_SUCCESS or error code */
+[[nodiscard]] static dberr_t row_import_start_trx(Import_ctx &ctx) {
+  trx_t *trx = trx_allocate_for_mysql();
+  ctx.trx = trx;
 
   /* So that the table is not DROPped during recovery. */
   trx_set_dict_operation(trx, TRX_DICT_OP_INDEX);
@@ -4438,7 +4474,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
   trx_start_if_not_started(trx, true, UT_LOCATION_HERE);
 
   /* So that we can send error messages to the user. */
-  trx->mysql_thd = prebuilt->trx->mysql_thd;
+  trx->mysql_thd = ctx.thd();
 
   /* Assign an undo segment for the transaction, so that the
   transaction will be recovered after a crash. */
@@ -4447,26 +4483,52 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
 
   /* IMPORT tablespace is blocked for temp-tables and so we don't
   need to assign temporary rollback segment for this trx. */
-  err = trx_undo_assign_undo(trx, &trx->rsegs.m_redo, TRX_UNDO_UPDATE);
+  dberr_t err = trx_undo_assign_undo(trx, &trx->rsegs.m_redo, TRX_UNDO_UPDATE);
 
   mutex_exit(&trx->undo_mutex);
 
-  if (err != DB_SUCCESS) {
-    return (row_import_cleanup(prebuilt, trx, err));
-
-  } else if (trx->rsegs.m_redo.update_undo == nullptr) {
+  if (err == DB_SUCCESS && trx->rsegs.m_redo.update_undo == nullptr) {
     err = DB_TOO_MANY_CONCURRENT_TRXS;
-    return (row_import_cleanup(prebuilt, trx, err));
   }
 
-  ut_a(err == DB_SUCCESS);
+  return err;
+}
 
-  prebuilt->trx->op_info = "read meta-data file";
+/** Source of the metadata an import needs about the tablespace file: page
+size, compression, encryption key, the index root pages and ids, the column
+definitions including INSTANT ADD/DROP metadata, and the next AUTO_INCREMENT
+value. ALTER TABLE ... IMPORT TABLESPACE reads it from the .cfp and .cfg
+files next to the tablespace; other sources can fill the same row_import. */
+class Import_metadata_source {
+ public:
+  virtual ~Import_metadata_source() = default;
+
+  /** Fill cfg for the table in ctx, and point the in-memory indexes of the
+  target table at the matching root pages of the file.
+  @param[in,out]  ctx     import context
+  @param[in,out]  cfg     metadata to fill
+  @return outcome; if it is an error, the caller ends the import */
+  [[nodiscard]] virtual Import_status read(Import_ctx &ctx,
+                                           row_import &cfg) = 0;
+};
+
+/** Metadata from the .cfp and .cfg files written by FLUSH TABLES ... FOR
+EXPORT or xtrabackup --export. Without a .cfg file the index root pages are
+discovered from the tablespace file and schema matching is skipped. */
+class Import_cfg_file_source final : public Import_metadata_source {
+ public:
+  [[nodiscard]] Import_status read(Import_ctx &ctx, row_import &cfg) override;
+};
+
+Import_status Import_cfg_file_source::read(Import_ctx &ctx, row_import &cfg) {
+  dict_table_t *table = ctx.table;
+  trx_t *trx = ctx.trx;
+  dberr_t err;
+
+  ctx.parent_trx->op_info = "read meta-data file";
 
   /* Prevent DDL operations while we are checking. */
   rw_lock_s_lock_func(dict_operation_lock, 0, UT_LOCATION_HERE);
-
-  row_import cfg{};
 
   /* Read CFP file */
   if (dd_is_table_in_encrypted_tablespace(table)) {
@@ -4476,7 +4538,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
 
     if (err != DB_SUCCESS) {
       rw_lock_s_unlock_gen(dict_operation_lock, 0);
-      return (row_import_error(prebuilt, trx, err));
+      return Import_status{err, true};
     }
 
     /* If table is encrypted, but can't find cfp file, return error. */
@@ -4486,7 +4548,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
               " meta-data file cannot be found while importing.");
       err = DB_ERROR;
       rw_lock_s_unlock_gen(dict_operation_lock, 0);
-      return (row_import_error(prebuilt, trx, err));
+      return Import_status{err, true};
     } else {
       /* If CFP file is read, encryption_key must have been populted. */
       ut_ad(cfg.m_encryption_metadata.can_encrypt());
@@ -4494,7 +4556,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
   }
 
   /* Read CFG file */
-  err = row_import_read_cfg(table, table_def, trx->mysql_thd, cfg);
+  err = row_import_read_cfg(table, ctx.table_def, trx->mysql_thd, cfg);
 
   /* Check if the table column definitions match the contents
   of the config file. */
@@ -4504,7 +4566,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
     data dictionary. */
 
     if (err == DB_SUCCESS) {
-      err = cfg.match_schema(trx->mysql_thd, table_def);
+      err = cfg.match_schema(trx->mysql_thd, ctx.table_def);
     }
 
     /* Update index->page and SYS_INDEXES.PAGE_NO to match the
@@ -4513,7 +4575,6 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
 
     if (err == DB_SUCCESS) {
       cfg.set_root_by_name();
-      autoinc = cfg.m_autoinc;
     }
 
     rw_lock_s_unlock_gen(dict_operation_lock, 0);
@@ -4532,8 +4593,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
     /* Check and store compression type. */
     Compression compression;
 
-    err = Compression::check(prebuilt->m_mysql_table->s->compress.str,
-                             &compression);
+    err = Compression::check(ctx.compression_option, &compression);
 
     ut_a(err == DB_SUCCESS);
     cfg.m_compression_type = compression.m_type;
@@ -4549,7 +4609,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
       ib_errf(trx->mysql_thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
               "CFG file is missing and source table is found to have row "
               "versions. CFG file is must to IMPORT tables with row versions.");
-      return (row_import_cleanup(prebuilt, trx, err));
+      return Import_status{err, false};
     }
 
     if (err == DB_SUCCESS) {
@@ -4574,14 +4634,29 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
           trx->mysql_thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
           "Encryption attribute in the file does not match the dictionary.");
 
-      return (row_import_cleanup(prebuilt, trx, err));
+      return Import_status{err, false};
     }
-    return (row_import_error(prebuilt, trx, err));
+    return Import_status{err, true};
   }
+
+  return Import_status{};
+}
+
+/** Phase I of an import: walk every page of the tablespace file outside
+the buffer pool, check it and convert it in place to the target table: space
+id, index ids, transaction ids, BLOB references, LSN and checksum.
+Delete-marked records are purged where possible.
+@param[in,out]  ctx     import context
+@param[in,out]  cfg     metadata of the tablespace file
+@return outcome; errors are already reported */
+[[nodiscard]] static Import_status row_import_convert(Import_ctx &ctx,
+                                                      row_import &cfg) {
+  dict_table_t *table = ctx.table;
+  trx_t *trx = ctx.trx;
 
   /* At this point, all required information has been collected for IMPORT. */
 
-  prebuilt->trx->op_info = "importing tablespace";
+  ctx.parent_trx->op_info = "importing tablespace";
 
   ib::info(ER_IB_MSG_949) << "Phase I - Update all pages";
 
@@ -4592,7 +4667,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
 
   /* Set the IO buffer size in pages. */
 
-  err = fil_tablespace_iterate(
+  dberr_t err = fil_tablespace_iterate(
       cfg.m_encryption_metadata, table,
       IO_BUFFER_SIZE(cfg.m_page_size.physical(), cfg.m_page_size.physical()),
       cfg.m_compression_type, converter);
@@ -4601,7 +4676,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
     ib_errf(trx->mysql_thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
             "CFG file is missing and source table is found to have row "
             "versions. CFG file is must to IMPORT tables with row versions.");
-    return (row_import_cleanup(prebuilt, trx, err));
+    return Import_status{err, false};
   }
 
   DBUG_EXECUTE_IF("ib_import_reset_space_and_lsn_failure",
@@ -4611,7 +4686,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
     ib_errf(trx->mysql_thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
             "Encryption attribute in the file does not match the dictionary.");
 
-    return (row_import_cleanup(prebuilt, trx, err));
+    return Import_status{err, false};
   }
 
   if (err != DB_SUCCESS) {
@@ -4622,8 +4697,28 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
     ib_errf(trx->mysql_thd, IB_LOG_LEVEL_ERROR, ER_INTERNAL_ERROR,
             "Cannot reset LSNs in table %s : %s", table_name, ut_strerr(err));
 
-    return (row_import_cleanup(prebuilt, trx, err));
+    return Import_status{err, false};
   }
+
+  return Import_status{};
+}
+
+/** Phases II to IV of an import: record the INSTANT metadata, open the
+converted file as the table's tablespace, fix the B-tree root pages, purge
+what Phase I could not, adjust the row id and the SDI root, flush, declare
+the tablespace imported, rotate the encryption key, set the AUTO_INCREMENT
+counter and validate the indexes. On success the dictionary latch is held,
+as row_import_cleanup() expects.
+@param[in,out]  ctx     import context
+@param[in,out]  cfg     metadata of the tablespace file
+@return outcome */
+[[nodiscard]] static Import_status row_import_complete(Import_ctx &ctx,
+                                                       row_import &cfg) {
+  dict_table_t *table = ctx.table;
+  dd::Table *table_def = ctx.table_def;
+  trx_t *trx = ctx.trx;
+  char *filepath = nullptr;
+  dberr_t err = DB_SUCCESS;
 
   row_mysql_lock_data_dictionary(trx, UT_LOCATION_HERE);
 
@@ -4650,7 +4745,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
 
   if (filepath == nullptr) {
     row_mysql_unlock_data_dictionary(trx);
-    return (row_import_cleanup(prebuilt, trx, DB_OUT_OF_MEMORY));
+    return Import_status{DB_OUT_OF_MEMORY, false};
   }
 
   /* Open the tablespace so that we can access via the buffer pool.
@@ -4680,7 +4775,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
 
     ut::free(filepath);
 
-    return row_import_cleanup(prebuilt, trx, err);
+    return Import_status{err, false};
   }
 
   /* For encrypted tablespace, set encryption information. */
@@ -4701,7 +4796,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
   row_mysql_unlock_data_dictionary(trx);
 
   if (err != DB_SUCCESS) {
-    return row_import_cleanup(prebuilt, trx, err);
+    return Import_status{err, false};
   }
 
   /* Set the autoextend_size attribute. */
@@ -4724,7 +4819,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
   DBUG_EXECUTE_IF("ib_import_check_bitmap_failure", err = DB_CORRUPTION;);
 
   if (err != DB_SUCCESS) {
-    return (row_import_cleanup(prebuilt, trx, err));
+    return Import_status{err, false};
   }
 
   /* The first index must always be the clustered index. */
@@ -4732,7 +4827,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
   dict_index_t *index = table->first_index();
 
   if (!index->is_clustered()) {
-    return (row_import_error(prebuilt, trx, DB_CORRUPTION));
+    return Import_status{DB_CORRUPTION, true};
   }
 
   /* Update the Btree segment headers for index node and
@@ -4744,7 +4839,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
                   err = DB_CORRUPTION;);
 
   if (err != DB_SUCCESS) {
-    return (row_import_error(prebuilt, trx, err));
+    return Import_status{err, true};
   }
 
   DBUG_EXECUTE_IF("ib_import_page_corrupt",
@@ -4752,7 +4847,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
                   ++i_index->m_stats.m_n_purge_failed;);
 
   if (err != DB_SUCCESS) {
-    return (row_import_error(prebuilt, trx, err));
+    return Import_status{err, true};
   } else if (cfg.requires_purge(index->name)) {
     /* Purge any delete-marked records that couldn't be
     purged during the page conversion phase from the
@@ -4770,7 +4865,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
   DBUG_EXECUTE_IF("ib_import_cluster_failure", err = DB_CORRUPTION;);
 
   if (err != DB_SUCCESS) {
-    return (row_import_error(prebuilt, trx, err));
+    return Import_status{err, true};
   }
 
   /* For secondary indexes, purge any records that couldn't be purged
@@ -4781,17 +4876,17 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
   DBUG_EXECUTE_IF("ib_import_sec_root_adjust_failure", err = DB_CORRUPTION;);
 
   if (err != DB_SUCCESS) {
-    return (row_import_error(prebuilt, trx, err));
+    return Import_status{err, true};
   }
 
   /* Ensure that the next available DB_ROW_ID is not smaller than
   any DB_ROW_ID stored in the table. */
 
-  if (prebuilt->clust_index_was_generated) {
-    err = row_import_set_sys_max_row_id(prebuilt, table);
+  if (ctx.clust_index_was_generated) {
+    err = row_import_set_sys_max_row_id(ctx.thd(), table);
 
     if (err != DB_SUCCESS) {
-      return (row_import_error(prebuilt, trx, err));
+      return Import_status{err, true};
     }
   }
 
@@ -4807,7 +4902,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
 
     if (err != DB_SUCCESS) {
       fil_space_release(space);
-      return (row_import_error(prebuilt, trx, err));
+      return Import_status{err, true};
     }
   }
   fil_space_release(space);
@@ -4818,16 +4913,15 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
   The only dirty pages generated should be from the pessimistic purge
   of delete marked records that couldn't be purged in Phase I. */
 
-  buf_LRU_flush_or_remove_pages(prebuilt->table->space, BUF_REMOVE_FLUSH_WRITE,
-                                trx);
+  buf_LRU_flush_or_remove_pages(table->space, BUF_REMOVE_FLUSH_WRITE, trx);
 
   if (trx_is_interrupted(trx)) {
     ib::info(ER_IB_MSG_951) << "Phase III - Flush interrupted";
-    return (row_import_error(prebuilt, trx, DB_INTERRUPTED));
+    return Import_status{DB_INTERRUPTED, true};
   }
 
   ib::info(ER_IB_MSG_952) << "Phase IV - Flush complete";
-  fil_space_set_imported(prebuilt->table->space);
+  fil_space_set_imported(table->space);
 
   /* Check if the on-disk .ibd file doesn't have SDI index.
   If it doesn't exist, create SDI Index page now. */
@@ -4852,7 +4946,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
     dict_mutex_exit_for_mysql();
     /* Update server and space version number in the page 0 of tablespace */
     if (upgrade_space_version(table->space, false)) {
-      return (row_import_error(prebuilt, trx, DB_TABLESPACE_NOT_FOUND));
+      return Import_status{DB_TABLESPACE_NOT_FOUND, true};
     }
   } else {
     ut_ad((space->flags & ~FSP_FLAGS_MASK_DATA_DIR) ==
@@ -4873,7 +4967,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
 
     if (!fsp_header_rotate_encryption(space, encrypt_info, &mtr)) {
       mtr_commit(&mtr);
-      return (row_import_cleanup(prebuilt, trx, DB_ERROR));
+      return Import_status{DB_ERROR, false};
     }
 
     mtr_commit(&mtr);
@@ -4888,7 +4982,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
                   err = DB_ERROR;
                   ib_errf(trx->mysql_thd, IB_LOG_LEVEL_ERROR, ER_INTERNAL_ERROR,
                           "While importing table %s", table->name.m_name);
-                  return (row_import_error(prebuilt, trx, err)););
+                  return (Import_status{err, true}););
 
   table->ibd_file_missing = false;
   table->flags2 &= ~DICT_TF2_DISCARDED;
@@ -4896,6 +4990,8 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
   /* Set autoinc value read from cfg file. The value is set to zero
   if the cfg file is missing and is initialized later from table
   column value. */
+  const uint64_t autoinc = cfg.m_missing ? 0 : cfg.m_autoinc;
+
   ib::info(ER_IB_MSG_953) << table->name << " autoinc value set to " << autoinc;
 
   dict_table_autoinc_lock(table);
@@ -4921,5 +5017,55 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
 
   row_mysql_lock_data_dictionary(trx, UT_LOCATION_HERE);
 
-  return (row_import_cleanup(prebuilt, trx, err));
+  return Import_status{err, false};
+}
+
+/** Imports a tablespace. The space id in the .ibd file must match the space id
+of the table in the data dictionary.
+@param[in]      table           table
+@param[in]      table_def       dd table
+@param[in]      prebuilt        prebuilt struct in MySQL
+@return error code or DB_SUCCESS */
+dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
+                             row_prebuilt_t *prebuilt) {
+  /* The caller assured that this is not read_only_mode and that no
+  temporary tablespace is being imported. */
+  ut_ad(!srv_read_only_mode);
+  ut_ad(!table->is_temporary());
+
+  ut_a(table->space);
+  ut_ad(prebuilt->trx);
+  ut_a(table->ibd_file_missing);
+
+  Import_ctx ctx;
+  ctx.table = table;
+  ctx.table_def = table_def;
+  ctx.parent_trx = prebuilt->trx;
+  ctx.compression_option = prebuilt->m_mysql_table->s->compress.str;
+  ctx.clust_index_was_generated = prebuilt->clust_index_was_generated;
+
+  ibuf_delete_for_discarded_space(table->space);
+
+  trx_start_if_not_started(prebuilt->trx, true, UT_LOCATION_HERE);
+
+  dberr_t err = row_import_start_trx(ctx);
+
+  if (err != DB_SUCCESS) {
+    return row_import_cleanup(ctx, err);
+  }
+
+  row_import cfg{};
+  Import_cfg_file_source source;
+
+  Import_status status = source.read(ctx, cfg);
+
+  if (status.err == DB_SUCCESS) {
+    status = row_import_convert(ctx, cfg);
+  }
+
+  if (status.err == DB_SUCCESS) {
+    status = row_import_complete(ctx, cfg);
+  }
+
+  return row_import_end(ctx, status);
 }
