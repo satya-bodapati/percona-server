@@ -5763,6 +5763,38 @@ static PSI_meter_info_v1 inno_meter[] = {
 @param[in,out]  p       InnoDB handlerton
 @return error code
 @retval 0 on success */
+/** Read the SDI of a tablespace file that is not attached to the server.
+Implements handlerton::sdi_get_from_file for IMPORT TABLE FROM '<file>.ibd'.
+@param[in]   thd   session
+@param[in]   path  path of the tablespace file
+@param[out]  sdi   table SDIs of the file
+@retval false on success
+@retval true on failure, the error is reported */
+static bool innobase_sdi_get_from_file(THD *thd, const char *path,
+                                       Sdi_from_file *sdi) {
+  std::vector<Sdi_file_record> records;
+  uint32_t space_flags = 0;
+
+  dberr_t err = row_import_read_sdi_from_file(thd, path, records, &space_flags);
+
+  if (err != DB_SUCCESS) {
+    if (!thd->is_error()) {
+      my_error(ER_INTERNAL_ERROR, MYF(0), ut_strerr(err));
+    }
+    return true;
+  }
+
+  sdi->shared_tablespace = FSP_FLAGS_GET_SHARED(space_flags);
+
+  for (auto &record : records) {
+    if (record.type == SDI_TYPE_TABLE) {
+      sdi->tables.push_back(std::move(record.json));
+    }
+  }
+
+  return false;
+}
+
 static int innodb_init(void *p) {
   DBUG_TRACE;
 
@@ -5864,6 +5896,7 @@ static int innodb_init(void *p) {
   innobase_hton->sdi_get = dict_sdi_get;
   innobase_hton->sdi_set = dict_sdi_set;
   innobase_hton->sdi_delete = dict_sdi_delete;
+  innobase_hton->sdi_get_from_file = innobase_sdi_get_from_file;
 
   innobase_hton->rotate_encryption_master_key =
       innobase_encryption_key_rotation;

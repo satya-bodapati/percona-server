@@ -5069,3 +5069,603 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
 
   return row_import_end(ctx, status);
 }
+
+/** Reads the SDI B-tree of a tablespace file that is not attached to this
+server. Pages are read directly from the file, outside the buffer pool, the
+way fil_tablespace_iterate() reads them: os_file_read() decrypts pages of an
+encrypted tablespace with the key from the .cfp file next to it, and
+ROW_FORMAT=COMPRESSED index pages are decompressed here. The space id stored
+in the file is never registered, so it cannot clash with a tablespace of
+this server. */
+class Ibd_sdi_reader {
+ public:
+  /** @param[in] thd   session, for error messages */
+  explicit Ibd_sdi_reader(THD *thd) : m_thd(thd) {}
+
+  ~Ibd_sdi_reader() {
+    if (m_file_open) {
+      os_file_close(m_file);
+    }
+    ut::aligned_free(m_raw);
+    ut::aligned_free(m_frame);
+  }
+
+  Ibd_sdi_reader(const Ibd_sdi_reader &) = delete;
+  Ibd_sdi_reader &operator=(const Ibd_sdi_reader &) = delete;
+
+  /** Open the file, read its first page, and load the encryption key if
+  the tablespace is encrypted.
+  @param[in]  path  path of the .ibd file
+  @return DB_SUCCESS or error code; errors are reported */
+  [[nodiscard]] dberr_t open(const char *path);
+
+  /** Read every live SDI record of the file.
+  @param[out]  records  SDI records, in key order
+  @return DB_SUCCESS or error code; errors are reported */
+  [[nodiscard]] dberr_t read_all(std::vector<Sdi_file_record> &records);
+
+  /** @return the tablespace (FSP) flags from page 0 */
+  uint32_t space_flags() const { return m_flags; }
+
+  /** @return the root page of the SDI index, from page 0 */
+  page_no_t sdi_root() const { return m_sdi_root; }
+
+  /** @return the space id stored in the file */
+  space_id_t space_id() const { return m_space_id; }
+
+ private:
+  /** Read one page. Index pages of a compressed tablespace are returned
+  decompressed in m_frame; other pages are returned as stored in m_raw.
+  @param[in]   page_no  page number
+  @param[out]  page     page frame, valid until the next call
+  @return DB_SUCCESS or error code; errors are reported */
+  [[nodiscard]] dberr_t read_page(page_no_t page_no, const byte *&page);
+
+  /** Copy a field stored externally on SDI BLOB pages.
+  @param[in]   first_page  first BLOB page
+  @param[in]   len         number of bytes stored off-page
+  @param[out]  dest        destination, at least len bytes
+  @return DB_SUCCESS or error code; errors are reported */
+  [[nodiscard]] dberr_t copy_blob(page_no_t first_page, ulint len, byte *dest);
+
+  /** Read bytes of the file into m_raw. Unlike os_file_read(), an I/O
+  error or a short read is reported, not fatal: the file comes from the user.
+  @param[in,out]  request  I/O request
+  @param[in]      offset   offset in the file
+  @param[in]      n        number of bytes
+  @param[in]      what     what is being read, for the error message
+  @return DB_SUCCESS or error code; errors are reported */
+  [[nodiscard]] dberr_t read_bytes(IORequest &request, os_offset_t offset,
+                                   ulint n, const char *what);
+
+  /** Report that the file is not a valid tablespace file.
+  @param[in]  what  what is wrong
+  @return DB_CORRUPTION */
+  dberr_t corrupt(const char *what) const;
+
+  /** Session, for error messages. */
+  THD *m_thd;
+
+  /** Path of the file. */
+  std::string m_path;
+
+  /** The open file. */
+  pfs_os_file_t m_file{};
+
+  /** true if m_file is open. */
+  bool m_file_open{false};
+
+  /** File system block size, for decryption. */
+  size_t m_block_size{};
+
+  /** Number of pages in the file. */
+  page_no_t m_n_pages{};
+
+  /** Tablespace flags from page 0. */
+  uint32_t m_flags{};
+
+  /** Root page of the SDI index, from page 0. */
+  page_no_t m_sdi_root{FIL_NULL};
+
+  /** Space id stored in the file. */
+  space_id_t m_space_id{SPACE_UNKNOWN};
+
+  /** Page size of the tablespace. */
+  page_size_t m_page_size{0, 0, false};
+
+  /** Encryption key, if the tablespace is encrypted. */
+  Encryption_metadata m_encryption{};
+
+  /** Buffer for the page as stored in the file. */
+  byte *m_raw{};
+
+  /** Buffer for a decompressed page. */
+  byte *m_frame{};
+};
+
+dberr_t Ibd_sdi_reader::corrupt(const char *what) const {
+  ib_errf(m_thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
+          "Cannot read the table definition (SDI) from '%s': %s.",
+          m_path.c_str(), what);
+  return DB_CORRUPTION;
+}
+
+dberr_t Ibd_sdi_reader::read_bytes(IORequest &request, os_offset_t offset,
+                                   ulint n, const char *what) {
+  ulint n_read = 0;
+
+  dberr_t err = os_file_read_no_error_handling(request, m_path.c_str(), m_file,
+                                               m_raw, offset, n, &n_read);
+
+  if (err != DB_SUCCESS || n_read != n) {
+    std::string msg("while reading ");
+    msg.append(what);
+    ib_senderrf(m_thd, IB_LOG_LEVEL_ERROR, ER_IO_READ_ERROR, errno,
+                strerror(errno), msg.c_str());
+    return DB_IO_ERROR;
+  }
+
+  return DB_SUCCESS;
+}
+
+dberr_t Ibd_sdi_reader::open(const char *path) {
+  bool success;
+
+  m_path.assign(path);
+
+  m_file = os_file_create_simple_no_error_handling(
+      innodb_data_file_key, path, OS_FILE_OPEN, OS_FILE_READ_ONLY,
+      srv_read_only_mode, &success);
+
+  if (!success) {
+    ib_senderrf(m_thd, IB_LOG_LEVEL_ERROR, ER_FILE_NOT_FOUND, path, errno,
+                strerror(errno));
+    return DB_TABLESPACE_NOT_FOUND;
+  }
+  m_file_open = true;
+
+  os_file_stat_t stat_info;
+  if (os_file_get_status(path, &stat_info, false, false) != DB_SUCCESS) {
+    ib_senderrf(m_thd, IB_LOG_LEVEL_ERROR, ER_FILE_NOT_FOUND, path, errno,
+                strerror(errno));
+    return DB_IO_ERROR;
+  }
+  m_block_size = stat_info.block_size;
+
+  /* Both buffers hold a whole uncompressed page of any supported size;
+  m_frame is aligned for page_zip_decompress_low(). */
+  m_raw = static_cast<byte *>(
+      ut::aligned_alloc(UNIV_PAGE_SIZE_MAX, UNIV_PAGE_SIZE_MAX));
+  m_frame = static_cast<byte *>(
+      ut::aligned_alloc(UNIV_PAGE_SIZE_MAX, UNIV_PAGE_SIZE_MAX));
+
+  if (m_raw == nullptr || m_frame == nullptr) {
+    return DB_OUT_OF_MEMORY;
+  }
+
+  IORequest request(IORequest::READ);
+  dberr_t err = read_bytes(request, 0, UNIV_ZIP_SIZE_MIN, "the first page");
+  if (err != DB_SUCCESS) {
+    return err;
+  }
+
+  m_flags = fsp_header_get_flags(m_raw);
+
+  if (!fsp_flags_is_valid(m_flags)) {
+    return corrupt("the tablespace flags on page 0 are not valid");
+  }
+
+  m_page_size.copy_from(page_size_t(m_flags));
+
+  if (m_page_size.logical() != UNIV_PAGE_SIZE) {
+    ib_errf(m_thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
+            "Cannot import '%s': its page size is %lu, the server page size "
+            "is %lu.",
+            path, ulong{m_page_size.logical()}, ulong{UNIV_PAGE_SIZE});
+    return DB_ERROR;
+  }
+
+  if (FSP_FLAGS_GET_SHARED(m_flags)) {
+    /* A general tablespace: the caller refuses it, nothing more to read. */
+    return DB_SUCCESS;
+  }
+
+  if (!FSP_FLAGS_HAS_SDI(m_flags)) {
+    return corrupt(
+        "the tablespace has no SDI; it was not created by MySQL 8.0 or "
+        "later");
+  }
+
+  const os_offset_t file_size = os_file_get_size(m_file);
+  if (file_size == static_cast<os_offset_t>(-1) ||
+      file_size < m_page_size.physical() * FIL_IBD_FILE_INITIAL_SIZE) {
+    return corrupt("the file is too small");
+  }
+  m_n_pages = static_cast<page_no_t>(file_size / m_page_size.physical());
+
+  /* Page 0 is never encrypted. The SDI root page number is stored right
+  after the extent descriptor array. */
+  err = read_bytes(request, 0, m_page_size.physical(), "the first page");
+  if (err != DB_SUCCESS) {
+    return err;
+  }
+
+  m_space_id = mach_read_from_4(m_raw + FIL_PAGE_SPACE_ID);
+
+  const ulint sdi_offset = fsp_header_get_sdi_offset(m_page_size);
+
+  if (mach_read_from_4(m_raw + sdi_offset) != SDI_VERSION) {
+    return corrupt("the SDI root page is not recorded on page 0");
+  }
+
+  m_sdi_root = mach_read_from_4(m_raw + sdi_offset + 4);
+
+  if (m_sdi_root == 0 || m_sdi_root == FIL_NULL || m_sdi_root >= m_n_pages) {
+    return corrupt("the SDI root page is not recorded on page 0");
+  }
+
+  if (FSP_FLAGS_GET_ENCRYPTION(m_flags)) {
+    /* The key comes from the .cfp file next to the .ibd file, in the format
+    written by FLUSH TABLES ... FOR EXPORT and xtrabackup --export. */
+    std::string cfp_path(m_path);
+    const size_t ext_len = strlen(dot_ext[IBD]);
+
+    if (cfp_path.size() > ext_len &&
+        cfp_path.compare(cfp_path.size() - ext_len, ext_len, dot_ext[IBD]) ==
+            0) {
+      cfp_path.resize(cfp_path.size() - ext_len);
+    }
+    cfp_path.append(dot_ext[CFP]);
+
+    FILE *cfp = fopen(cfp_path.c_str(), "rb");
+
+    if (cfp == nullptr) {
+      ib_errf(m_thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
+              "Table is in an encrypted tablespace, but the encryption"
+              " meta-data file '%s' cannot be found while importing.",
+              cfp_path.c_str());
+      return DB_ERROR;
+    }
+
+    row_import cfg{};
+    err = row_import_read_encryption_data(cfg, cfp, m_thd);
+    fclose(cfp);
+
+    if (err != DB_SUCCESS) {
+      return err;
+    }
+
+    m_encryption = cfg.m_encryption_metadata;
+  }
+
+  return DB_SUCCESS;
+}
+
+dberr_t Ibd_sdi_reader::read_page(page_no_t page_no, const byte *&page) {
+  if (page_no == 0 || page_no >= m_n_pages) {
+    return corrupt("an SDI page number is outside the file");
+  }
+
+  IORequest request(IORequest::READ);
+  request.block_size(m_block_size);
+
+  if (m_encryption.can_encrypt()) {
+    request.get_encryption_info().set(m_encryption);
+  }
+
+  const os_offset_t offset =
+      static_cast<os_offset_t>(page_no) * m_page_size.physical();
+
+  dberr_t err =
+      read_bytes(request, offset, m_page_size.physical(), "an SDI page");
+
+  if (err != DB_SUCCESS) {
+    return err;
+  }
+
+  if (mach_read_from_4(m_raw + FIL_PAGE_OFFSET) != page_no) {
+    return corrupt("a page has the wrong page number");
+  }
+
+  if (m_page_size.is_compressed() && fil_page_get_type(m_raw) == FIL_PAGE_SDI) {
+    page_zip_des_t page_zip;
+
+    page_zip_des_init(&page_zip);
+    page_zip.data = m_raw;
+    page_zip.ssize = page_size_to_ssize(m_page_size.physical());
+
+    if (!page_zip_decompress_low(&page_zip, m_frame, true)) {
+      return corrupt("a compressed SDI page cannot be decompressed");
+    }
+    page = m_frame;
+  } else {
+    page = m_raw;
+  }
+
+  return DB_SUCCESS;
+}
+
+dberr_t Ibd_sdi_reader::copy_blob(page_no_t first_page, ulint len, byte *dest) {
+  const byte *page;
+  page_no_t page_no = first_page;
+  ulint copied = 0;
+
+  if (!m_page_size.is_compressed()) {
+    /* Each FIL_PAGE_SDI_BLOB page holds a part of the field and the
+    number of the next page. */
+    while (page_no != FIL_NULL) {
+      dberr_t err = read_page(page_no, page);
+      if (err != DB_SUCCESS) {
+        return err;
+      }
+
+      if (fil_page_get_type(page) != FIL_PAGE_SDI_BLOB) {
+        return corrupt("an SDI BLOB page has the wrong page type");
+      }
+
+      const ulint part_len =
+          mach_read_from_4(page + FIL_PAGE_DATA + lob::LOB_HDR_PART_LEN);
+
+      if (part_len > len - copied ||
+          part_len > m_page_size.physical() - FIL_PAGE_DATA -
+                         lob::LOB_HDR_SIZE - FIL_PAGE_DATA_END) {
+        return corrupt("an SDI BLOB page has a wrong length");
+      }
+
+      memcpy(dest + copied, page + FIL_PAGE_DATA + lob::LOB_HDR_SIZE, part_len);
+      copied += part_len;
+
+      page_no =
+          mach_read_from_4(page + FIL_PAGE_DATA + lob::LOB_HDR_NEXT_PAGE_NO);
+    }
+  } else {
+    /* The field is one zlib stream over a chain of FIL_PAGE_SDI_ZBLOB
+    pages. */
+    z_stream d_stream;
+    mem_heap_t *heap = mem_heap_create(40000, UT_LOCATION_HERE);
+
+    memset(&d_stream, 0, sizeof(d_stream));
+    d_stream.next_out = dest;
+    d_stream.avail_out = static_cast<uInt>(len);
+    page_zip_set_alloc(&d_stream, heap);
+
+    if (inflateInit(&d_stream) != Z_OK) {
+      mem_heap_free(heap);
+      return DB_OUT_OF_MEMORY;
+    }
+
+    dberr_t err = DB_SUCCESS;
+
+    for (;;) {
+      err = read_page(page_no, page);
+      if (err != DB_SUCCESS) {
+        break;
+      }
+
+      if (fil_page_get_type(page) != FIL_PAGE_SDI_ZBLOB) {
+        err = corrupt("an SDI BLOB page has the wrong page type");
+        break;
+      }
+
+      d_stream.next_in = const_cast<byte *>(page) + FIL_PAGE_DATA;
+      d_stream.avail_in =
+          static_cast<uInt>(m_page_size.physical() - FIL_PAGE_DATA);
+
+      const int ret = inflate(&d_stream, Z_NO_FLUSH);
+      page_no = mach_read_from_4(page + FIL_PAGE_NEXT);
+
+      if (ret == Z_STREAM_END || (ret == Z_OK && d_stream.avail_out == 0)) {
+        break;
+      }
+
+      if (ret != Z_OK || page_no == FIL_NULL) {
+        err = corrupt("a compressed SDI BLOB cannot be inflated");
+        break;
+      }
+    }
+
+    copied = len - d_stream.avail_out;
+    inflateEnd(&d_stream);
+    mem_heap_free(heap);
+
+    if (err != DB_SUCCESS) {
+      return err;
+    }
+  }
+
+  if (copied != len) {
+    return corrupt("an SDI BLOB is shorter than its record says");
+  }
+
+  return DB_SUCCESS;
+}
+
+dberr_t Ibd_sdi_reader::read_all(std::vector<Sdi_file_record> &records) {
+  /* SDI records are stored in ROW_FORMAT=COMPACT layout (DYNAMIC or
+  COMPRESSED pages use the same record format): the fixed-length fields
+  type (4), id (8), DB_TRX_ID, DB_ROLL_PTR, uncompressed length (4) and
+  compressed length (4), then the variable-length data. */
+  constexpr ulint OFF_TYPE = 0;
+  constexpr ulint OFF_ID = OFF_TYPE + 4;
+  constexpr ulint OFF_UNCOMP_LEN =
+      OFF_ID + 8 + DATA_TRX_ID_LEN + DATA_ROLL_PTR_LEN;
+  constexpr ulint OFF_COMP_LEN = OFF_UNCOMP_LEN + 4;
+  constexpr ulint OFF_DATA = OFF_COMP_LEN + 4;
+  /* Node pointer records hold the key (type, id) and the child page. */
+  constexpr ulint OFF_CHILD = OFF_TYPE + 4 + 8;
+
+  const ulint page_bytes = m_page_size.logical();
+
+  page_no_t page_no = m_sdi_root;
+  const byte *page;
+  dberr_t err;
+
+  /* Walk down the leftmost path to the leaf level. */
+  for (ulint depth = 0;; ++depth) {
+    err = read_page(page_no, page);
+    if (err != DB_SUCCESS) {
+      return err;
+    }
+
+    if (fil_page_get_type(page) != FIL_PAGE_SDI || !page_is_comp(page) ||
+        depth > BTR_MAX_LEVELS) {
+      return corrupt("an SDI index page is not valid");
+    }
+
+    if (page_is_leaf(page)) {
+      break;
+    }
+
+    const ulint first = (PAGE_NEW_INFIMUM +
+                         mach_read_from_2(page + PAGE_NEW_INFIMUM - REC_NEXT)) %
+                        page_bytes;
+
+    if (first < PAGE_NEW_SUPREMUM_END || first + OFF_CHILD + 4 > page_bytes) {
+      return corrupt("an SDI node pointer is outside its page");
+    }
+
+    page_no = mach_read_from_4(page + first + OFF_CHILD);
+  }
+
+  /* Walk the leaf level from left to right. A corrupt file must not make
+  us loop forever, so neither the pages nor the records of one page can be
+  visited more often than the file can hold them. */
+  page_no_t n_pages_visited = 0;
+
+  for (;;) {
+    ulint rec_off = PAGE_NEW_INFIMUM;
+    ulint n_recs = 0;
+
+    for (;;) {
+      rec_off =
+          (rec_off + mach_read_from_2(page + rec_off - REC_NEXT)) % page_bytes;
+
+      if (rec_off < PAGE_NEW_INFIMUM || rec_off >= page_bytes) {
+        return corrupt("an SDI record is outside its page");
+      }
+
+      const byte *rec = page + rec_off;
+
+      if (rec_get_status(rec) == REC_STATUS_SUPREMUM) {
+        break;
+      }
+
+      if (rec_get_status(rec) != REC_STATUS_ORDINARY ||
+          ++n_recs > page_bytes / REC_N_NEW_EXTRA_BYTES) {
+        return corrupt("an SDI leaf page holds a record that is not valid");
+      }
+
+      if (rec_get_deleted_flag(rec, true)) {
+        continue;
+      }
+
+      if (rec_off + OFF_DATA > page_bytes) {
+        return corrupt("an SDI record is outside its page");
+      }
+
+      Sdi_file_record sdi;
+      sdi.type = mach_read_from_4(rec + OFF_TYPE);
+      sdi.id = mach_read_from_8(rec + OFF_ID);
+      const uint32_t uncomp_len = mach_read_from_4(rec + OFF_UNCOMP_LEN);
+      const uint32_t comp_len = mach_read_from_4(rec + OFF_COMP_LEN);
+
+      /* The length of the only variable-length field: one byte, or two
+      bytes when the high bit is set; bit 0x40 then marks a field stored
+      externally, of which only a prefix and the reference are local. */
+      const byte len1 = *(rec - REC_N_NEW_EXTRA_BYTES - 1);
+      ulint local_len;
+      bool external = false;
+
+      if (len1 & 0x80) {
+        local_len = ((len1 & 0x3f) << 8) | *(rec - REC_N_NEW_EXTRA_BYTES - 2);
+        external = (len1 & 0x40) != 0;
+      } else {
+        local_len = len1;
+      }
+
+      if (rec_off + OFF_DATA + local_len > page_bytes ||
+          (external && local_len < BTR_EXTERN_FIELD_REF_SIZE)) {
+        return corrupt("an SDI record is outside its page");
+      }
+
+      const byte *data = rec + OFF_DATA;
+      std::vector<byte> comp;
+
+      if (!external) {
+        if (local_len != comp_len) {
+          return corrupt("an SDI record has a wrong length");
+        }
+        comp.assign(data, data + local_len);
+      } else {
+        const ulint prefix = local_len - BTR_EXTERN_FIELD_REF_SIZE;
+        const byte *ref = data + prefix;
+        const ulint ext_len = mach_read_from_4(ref + lob::BTR_EXTERN_LEN + 4);
+
+        if (prefix + ext_len != comp_len) {
+          return corrupt("an SDI record has a wrong length");
+        }
+
+        comp.resize(comp_len);
+        memcpy(comp.data(), data, prefix);
+
+        err = copy_blob(mach_read_from_4(ref + lob::BTR_EXTERN_PAGE_NO),
+                        ext_len, comp.data() + prefix);
+        if (err != DB_SUCCESS) {
+          return err;
+        }
+      }
+
+      sdi.json.resize(uncomp_len);
+      uLongf dest_len = uncomp_len;
+
+      if (uncompress(reinterpret_cast<Bytef *>(sdi.json.data()), &dest_len,
+                     comp.data(), comp_len) != Z_OK ||
+          dest_len != uncomp_len) {
+        return corrupt("an SDI record cannot be uncompressed");
+      }
+
+      records.push_back(std::move(sdi));
+    }
+
+    page_no = mach_read_from_4(page + FIL_PAGE_NEXT);
+
+    if (page_no == FIL_NULL) {
+      break;
+    }
+
+    if (++n_pages_visited >= m_n_pages) {
+      return corrupt("the SDI leaf pages form a loop");
+    }
+
+    err = read_page(page_no, page);
+    if (err != DB_SUCCESS) {
+      return err;
+    }
+
+    if (fil_page_get_type(page) != FIL_PAGE_SDI || !page_is_leaf(page)) {
+      return corrupt("an SDI leaf page is not valid");
+    }
+  }
+
+  return DB_SUCCESS;
+}
+
+dberr_t row_import_read_sdi_from_file(THD *thd, const char *path,
+                                      std::vector<Sdi_file_record> &records,
+                                      uint32_t *space_flags) {
+  Ibd_sdi_reader reader(thd);
+
+  dberr_t err = reader.open(path);
+
+  if (err == DB_SUCCESS) {
+    *space_flags = reader.space_flags();
+
+    /* A general tablespace holds the SDI of many tables; the caller does
+    not import those. */
+    if (!FSP_FLAGS_GET_SHARED(*space_flags)) {
+      err = reader.read_all(records);
+    }
+  }
+
+  return err;
+}

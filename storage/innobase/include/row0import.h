@@ -34,10 +34,14 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #ifndef row0import_h
 #define row0import_h
 
+#include <string>
+#include <vector>
+
 #include "dict0types.h"
 #include "univ.i"
 
 // Forward declarations
+class THD;
 struct trx_t;
 struct dict_table_t;
 struct row_prebuilt_t;
@@ -51,5 +55,29 @@ of the table in the data dictionary.
 [[nodiscard]] dberr_t row_import_for_mysql(dict_table_t *table,
                                            dd::Table *table_def,
                                            row_prebuilt_t *prebuilt);
+
+/** One SDI record read from a tablespace file. */
+struct Sdi_file_record {
+  /** SDI type: SDI_TYPE_TABLE or SDI_TYPE_TABLESPACE */
+  uint32_t type{};
+
+  /** Id of the object in the server that wrote the file */
+  uint64_t id{};
+
+  /** The serialized dictionary information, uncompressed (JSON) */
+  std::string json;
+};
+
+/** Read the SDI of a tablespace file that is not attached to this server.
+The file is read directly, outside the buffer pool. If the tablespace is
+encrypted, the key is read from the .cfp file next to it.
+@param[in]   thd      session, for error messages
+@param[in]   path     path of the .ibd file
+@param[out]  records  the live SDI records of the file, in key order
+@param[out]  space_flags  tablespace (FSP) flags of the file
+@return DB_SUCCESS or error code; errors are reported to thd */
+[[nodiscard]] dberr_t row_import_read_sdi_from_file(
+    THD *thd, const char *path, std::vector<Sdi_file_record> &records,
+    uint32_t *space_flags);
 
 #endif /* row0import_h */

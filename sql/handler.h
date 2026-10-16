@@ -43,6 +43,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <mysql/components/services/bulk_data_service.h>
 #include <mysql/components/services/page_track_service.h>
@@ -1827,6 +1828,28 @@ typedef bool (*sdi_set_t)(handlerton *hton, const dd::Tablespace &tablespace,
 typedef bool (*sdi_delete_t)(const dd::Tablespace &tablespace,
                              const dd::Table *table, const sdi_key_t *sdi_key);
 
+/** SDI read from a tablespace file that is not attached to the server. */
+struct Sdi_from_file {
+  /** The table SDIs of the file (JSON), in key order. */
+  std::vector<std::string> tables;
+
+  /** true if the file is a general (shared) tablespace. */
+  bool shared_tablespace{false};
+};
+
+/**
+  Read the SDI of a tablespace file that is not attached to the server,
+  for IMPORT TABLE FROM '<file>'. The file is only read.
+
+  @param[in]   thd   thread context
+  @param[in]   path  path of the tablespace file
+  @param[out]  sdi   the table SDIs found in the file
+  @retval      false success
+  @retval      true  failure, my_error() was called by the SE
+*/
+typedef bool (*sdi_get_from_file_t)(THD *thd, const char *path,
+                                    Sdi_from_file *sdi);
+
 /**
   Check if the DDSE is started in a way that leaves thd DD being read only.
 
@@ -2883,6 +2906,10 @@ struct handlerton {
   sdi_get_t sdi_get;
   sdi_set_t sdi_set;
   sdi_delete_t sdi_delete;
+
+  /** Read the SDI of a tablespace file that is not attached to the server,
+  or nullptr if the SE cannot import tables from their data files. */
+  sdi_get_from_file_t sdi_get_from_file;
 
   /**
     Null-ended array of file extensions that exist for the storage engine.
