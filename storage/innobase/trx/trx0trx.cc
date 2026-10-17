@@ -456,6 +456,7 @@ static trx_t *trx_create_low() {
   trx_t *trx = trx_pools->get();
 
   assert_trx_is_free(trx);
+  rs_check_trx(trx, "trx_create_low");
 
   mem_heap_t *heap;
   ib_alloc_t *alloc;
@@ -501,6 +502,7 @@ Release a trx_t instance back to the pool.
 @param trx the instance to release. */
 static void trx_free(trx_t *&trx) {
   assert_trx_is_free(trx);
+  rs_check_trx(trx, "trx_free");
 
   trx->mysql_thd = nullptr;
 
@@ -1354,6 +1356,7 @@ static void trx_start_low(
     trx_t *trx,      /*!< in: transaction */
     bool read_write) /*!< in: true if read-write transaction */
 {
+  rs_check_trx(trx, "trx_start_low");
   ut_ad(!trx->in_rollback);
   ut_ad(!trx->is_recovered);
   ut_ad(trx->start_line != 0);
@@ -2207,6 +2210,7 @@ written */
 @param[in,out] mtr Mini-transaction (will be committed), or null if trx made no
 modifications */
 void trx_commit_low(trx_t *trx, mtr_t *mtr) {
+  rs_check_trx(trx, "trx_commit_low");
   assert_trx_nonlocking_or_in_list(trx);
   ut_ad(!trx_state_eq(trx, TRX_STATE_COMMITTED_IN_MEMORY));
   ut_ad(!mtr || mtr->is_active());

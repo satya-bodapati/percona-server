@@ -41,11 +41,16 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "row0sel.h"
 
 #include <sys/types.h>
+#include <chrono>
+#include <cstdlib>
+#include <sstream>
+#include <thread>
 
 #include "btr0btr.h"
 #include "btr0cur.h"
 #include "btr0sea.h"
 #include "buf0lru.h"
+#include "current_thd.h"
 #include "dict0boot.h"
 #include "dict0dd.h"
 #include "dict0dict.h"
@@ -4294,6 +4299,114 @@ It also has optimization such as pre-caching the rows, using AHI, etc.
                                 pcur with stored position! In opening of a
                                 cursor 'direction' should be 0.
 @return DB_SUCCESS or error code */
+std::atomic<uint64_t> rs_probe[RS_PROBE_N];
+static std::atomic<uint64_t> rs_in_flight{0};
+uint32_t rs_shortcut_delay_us = [] {
+  const char *v = getenv("RS_SHORTCUT_DELAY_US");
+  return v == nullptr ? 0u : static_cast<uint32_t>(atoi(v));
+}();
+
+void rs_check_trx(const trx_t *trx, const char *where) {
+  const auto latch_byte = static_cast<unsigned>(
+      *reinterpret_cast<const unsigned char *>(&trx->has_search_latch));
+  if (latch_byte == 0 && trx->rs_canary0 == 0x5a && trx->rs_canary1 == 0xa5) {
+    return;
+  }
+  std::ostringstream s;
+  const unsigned char *p =
+      reinterpret_cast<const unsigned char *>(&trx->has_search_latch);
+  s << std::hex;
+  for (int i = -8; i < 8; ++i) {
+    s << (i == 0 ? " [" : " ") << static_cast<unsigned>(p[i])
+      << (i == 0 ? "]" : "");
+  }
+  ib::fatal(UT_LOCATION_HERE)
+      << "RS_CHECK " << where << ": trx " << static_cast<const void *>(trx)
+      << " id " << trx->id << " thd " << static_cast<void *>(trx->mysql_thd)
+      << " state " << static_cast<int>(trx->state.load())
+      << " has_search_latch byte 0x" << std::hex << latch_byte << " canaries 0x"
+      << static_cast<unsigned>(trx->rs_canary0) << " 0x"
+      << static_cast<unsigned>(trx->rs_canary1) << std::dec << " AHI "
+      << btr_search_enabled << " tid " << os_thread_get_tid()
+      << " bytes around flag:" << s.str();
+}
+
+void rs_probe_print(const char *why) {
+  static const char *names[RS_PROBE_N] = {
+      "entries",      "in_flight_max", "phase2_outer",
+      "shortcut",     "in_shortcut",   "in_shortcut_max",
+      "match",        "miss",          "retry",
+      "ahi_disable",  "ahi_enable",    "ahi_flip_in_shortcut_max",
+      "trx_detach",   "trx_attach",    "trx_disconnect_prepared",
+      "trx_swap_free"};
+  std::ostringstream s;
+  s << "RS_PROBE " << why;
+  for (int i = 0; i < RS_PROBE_N; ++i) {
+    s << " " << names[i] << "=" << rs_probe[i].load(std::memory_order_relaxed);
+  }
+  s << " ahi=" << btr_search_enabled;
+  ib::info(ER_IB_MSG_0) << s.str();
+}
+
+/** Investigation instrument for the has_search_latch assertion: marks the trx
+as owned by this thread for the duration of row_search_mvcc and dies with a
+diagnostic if another thread already owns it, if the trx does not belong to
+the current THD, or if has_search_latch is already set on entry. */
+struct Row_search_owner_guard {
+  Row_search_owner_guard(trx_t *trx, const row_prebuilt_t *prebuilt)
+      : m_trx(trx) {
+    const uint64_t n = rs_probe[RS_ENTRIES].fetch_add(1) + 1;
+    rs_probe_max(RS_IN_FLIGHT_MAX, rs_in_flight.fetch_add(1) + 1);
+    if ((n & ((1 << 20) - 1)) == 0) {
+      rs_probe_print("periodic");
+    }
+    rs_check_trx(trx, "row_search_mvcc entry");
+    const os_tid_t self = os_thread_get_tid();
+    os_tid_t none = 0;
+    const THD *cur_thd = current_thd;
+    const auto latch_byte = static_cast<unsigned>(
+        *reinterpret_cast<const unsigned char *>(&trx->has_search_latch));
+
+    if (!trx->row_search_owner.compare_exchange_strong(none, self)) {
+      ib::fatal(UT_LOCATION_HERE)
+          << "row_search_mvcc: trx " << static_cast<void *>(trx) << " (id "
+          << trx->id << ", thd " << static_cast<void *>(trx->mysql_thd)
+          << ") already in row_search_mvcc on thread " << none
+          << "; this thread " << self << ", current thd "
+          << static_cast<const void *>(cur_thd) << ", prebuilt "
+          << static_cast<const void *>(prebuilt) << ", AHI "
+          << btr_search_enabled << ", has_search_latch byte 0x" << std::hex
+          << latch_byte;
+    }
+
+    if (trx->mysql_thd != nullptr && trx->mysql_thd != cur_thd) {
+      ib::fatal(UT_LOCATION_HERE)
+          << "row_search_mvcc: trx " << static_cast<void *>(trx) << " (id "
+          << trx->id << ") belongs to thd "
+          << static_cast<void *>(trx->mysql_thd) << " but current thd is "
+          << static_cast<const void *>(cur_thd) << ", prebuilt "
+          << static_cast<const void *>(prebuilt);
+    }
+
+    if (latch_byte != 0) {
+      ib::fatal(UT_LOCATION_HERE)
+          << "row_search_mvcc: trx " << static_cast<void *>(trx) << " (id "
+          << trx->id << ", thd " << static_cast<void *>(trx->mysql_thd)
+          << ") has_search_latch byte 0x" << std::hex << latch_byte << std::dec
+          << " on entry, AHI " << btr_search_enabled << ", magic_n "
+          << trx->magic_n << ", this thread " << self;
+    }
+  }
+
+  ~Row_search_owner_guard() {
+    rs_check_trx(m_trx, "row_search_mvcc exit");
+    rs_in_flight.fetch_sub(1);
+    m_trx->row_search_owner.store(0);
+  }
+
+  trx_t *m_trx;
+};
+
 dberr_t row_search_mvcc(byte *buf, page_cur_mode_t mode,
                         row_prebuilt_t *prebuilt, ulint match_mode,
                         const ulint direction) {
@@ -4304,6 +4417,7 @@ dberr_t row_search_mvcc(byte *buf, page_cur_mode_t mode,
   const dtuple_t *search_tuple = prebuilt->search_tuple;
   btr_pcur_t *pcur = prebuilt->pcur;
   trx_t *trx = prebuilt->trx;
+  const Row_search_owner_guard owner_guard(trx, prebuilt);
   dict_index_t *clust_index;
   /* True if we are scanning a secondary index, but the template is based
   on the primary index. */
@@ -4529,6 +4643,7 @@ dberr_t row_search_mvcc(byte *buf, page_cur_mode_t mode,
       !prebuilt->used_in_HANDLER &&
       (prebuilt->mysql_row_len < UNIV_PAGE_SIZE / 8) && !prebuilt->innodb_api) {
     mode = PAGE_CUR_GE;
+    rs_probe_inc(RS_PHASE2_OUTER);
 
     if (trx->mysql_n_tables_locked == 0 && !prebuilt->ins_sel_stmt &&
         prebuilt->select_lock_type == LOCK_NONE &&
@@ -4549,6 +4664,13 @@ dberr_t row_search_mvcc(byte *buf, page_cur_mode_t mode,
       ut_a(!trx->has_search_latch);
       rw_lock_s_lock(btr_get_search_latch(index), UT_LOCATION_HERE);
       trx->has_search_latch = true;
+      rs_probe_inc(RS_SHORTCUT);
+      rs_probe_max(RS_IN_SHORTCUT_MAX,
+                   rs_probe[RS_IN_SHORTCUT].fetch_add(1) + 1);
+      if (rs_shortcut_delay_us != 0) {
+        std::this_thread::sleep_for(
+            std::chrono::microseconds(rs_shortcut_delay_us));
+      }
 
       switch (row_sel_try_search_shortcut_for_mysql(&rec, prebuilt, &offsets,
                                                     &heap, &mtr)) {
@@ -4598,6 +4720,8 @@ dberr_t row_search_mvcc(byte *buf, page_cur_mode_t mode,
 
           rw_lock_s_unlock(btr_get_search_latch(index));
           trx->has_search_latch = false;
+          rs_probe[RS_IN_SHORTCUT].fetch_sub(1);
+          rs_probe_inc(RS_SHORTCUT_MATCH);
 
           goto func_exit;
 
@@ -4609,6 +4733,8 @@ dberr_t row_search_mvcc(byte *buf, page_cur_mode_t mode,
 
           rw_lock_s_unlock(btr_get_search_latch(index));
           trx->has_search_latch = false;
+          rs_probe[RS_IN_SHORTCUT].fetch_sub(1);
+          rs_probe_inc(RS_SHORTCUT_MISS);
 
           /* NOTE that we do NOT store the cursor
           position */
@@ -4627,6 +4753,8 @@ dberr_t row_search_mvcc(byte *buf, page_cur_mode_t mode,
 
       rw_lock_s_unlock(btr_get_search_latch(index));
       trx->has_search_latch = false;
+      rs_probe[RS_IN_SHORTCUT].fetch_sub(1);
+      rs_probe_inc(RS_SHORTCUT_RETRY);
     }
   }
 

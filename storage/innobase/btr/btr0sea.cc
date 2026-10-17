@@ -39,6 +39,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
  *************************************************************************/
 
 #include "btr0sea.h"
+#include "trx0trx.h"
 
 #include <sys/types.h>
 
@@ -230,7 +231,7 @@ void btr_search_sys_resize(ulint hash_size) {
     ib::error(ER_IB_MSG_45) << "btr_search_sys_resize failed because"
                                " hash index hash table is not empty.";
     ut_d(ut_error);
-    ut_o(return);
+    ut_o(return );
   }
 
   /* Step-2: Recreate hash tables with new size. */
@@ -314,6 +315,10 @@ static void btr_search_await_no_reference(dict_table_t *table) {
 bool btr_search_disable() {
   if (!dict_sys) return false;
 
+  rs_probe_inc(RS_AHI_DISABLE);
+  rs_probe_max(RS_AHI_FLIP_IN_SHORTCUT_MAX, rs_probe[RS_IN_SHORTCUT].load());
+  rs_probe_print("ahi_disable");
+
   mutex_enter(&btr_search_enabled_mutex);
   if (!btr_search_enabled) {
     mutex_exit(&btr_search_enabled_mutex);
@@ -362,6 +367,10 @@ bool btr_search_enable() {
   /* Don't allow enabling AHI if buffer pool resize is happening.
   Ignore it silently. */
   if (srv_buf_pool_old_size != srv_buf_pool_size) return false;
+
+  rs_probe_inc(RS_AHI_ENABLE);
+  rs_probe_max(RS_AHI_FLIP_IN_SHORTCUT_MAX, rs_probe[RS_IN_SHORTCUT].load());
+  rs_probe_print("ahi_enable");
 
   /* We need to synchronize with any threads that are in the middle of
   btr_search_disable() - they must first clear all structures before we can

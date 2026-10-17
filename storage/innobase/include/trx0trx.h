@@ -1031,6 +1031,9 @@ struct trx_t {
                         the transaction; in that case we must
                         flush the log in
                         trx_commit_complete_for_mysql() */
+  /** Investigation canary: a wider stray write that hits has_search_latch
+  also hits one of these. */
+  uint8_t rs_canary0 = 0x5a;
   bool has_search_latch;
   /*!< true if this trx has latched the
   search system latch in S-mode.
@@ -1038,6 +1041,12 @@ struct trx_t {
   row_search_mvcc, the btr search latch
   must has been released before exiting,
   and this flag would be set to false */
+  uint8_t rs_canary1 = 0xa5;
+
+  /** Thread currently inside row_search_mvcc with this trx, 0 if none.
+  Investigation instrument: catches two threads using one trx at once. */
+  std::atomic<os_tid_t> row_search_owner{0};
+
   trx_dict_op_t dict_operation; /**< @see enum trx_dict_op_t */
 
   bool ddl_operation;  /*!< True if this trx involves dd table
@@ -1827,6 +1836,44 @@ dberr_t trx_set_prepared_in_tc_for_mysql(trx_t *trx);
 /** Human readable transaction state, for diagnostic purposes.
 @return pointer to static string, nullptr if state is not valid */
 inline const char *trx_state_string(trx_state_t state);
+
+/** Investigation probe for the has_search_latch assertion: counters that
+prove which paths the stress exercised. Defined in row0sel.cc. */
+enum rs_probe_t {
+  RS_ENTRIES,         /*!< row_search_mvcc calls */
+  RS_IN_FLIGHT_MAX,   /*!< max threads inside row_search_mvcc at once */
+  RS_PHASE2_OUTER,    /*!< PHASE 2 outer condition true (AHI on, unique) */
+  RS_SHORTCUT,        /*!< has_search_latch set to true */
+  RS_IN_SHORTCUT,     /*!< gauge: threads between set and clear */
+  RS_IN_SHORTCUT_MAX, /*!< max of the gauge */
+  RS_SHORTCUT_MATCH,  /*!< cleared on the SEL_FOUND path */
+  RS_SHORTCUT_MISS,   /*!< cleared on the SEL_EXHAUSTED/mismatch path */
+  RS_SHORTCUT_RETRY,  /*!< cleared on the SEL_RETRY / fall-through path */
+  RS_AHI_DISABLE,     /*!< btr_search_disable calls */
+  RS_AHI_ENABLE,      /*!< btr_search_enable calls */
+  RS_AHI_FLIP_IN_SHORTCUT_MAX, /*!< max gauge seen at a disable/enable call */
+  RS_TRX_DETACH, /*!< innodb_replace_trx_in_thd: trx detached from THD */
+  RS_TRX_ATTACH, /*!< innodb_replace_trx_in_thd: trx reattached */
+  RS_TRX_DISCONNECT_PREPARED, /*!< prepared trx disconnected from dead THD */
+  RS_TRX_SWAP_FREE,           /*!< innodb_replace_trx_in_thd freed the trx */
+  RS_PROBE_N
+};
+extern std::atomic<uint64_t> rs_probe[RS_PROBE_N];
+inline void rs_probe_inc(rs_probe_t i) {
+  rs_probe[i].fetch_add(1, std::memory_order_relaxed);
+}
+inline void rs_probe_max(rs_probe_t i, uint64_t v) {
+  uint64_t cur = rs_probe[i].load(std::memory_order_relaxed);
+  while (v > cur && !rs_probe[i].compare_exchange_weak(cur, v)) {
+  }
+}
+/** Log all probe counters with a reason prefix. */
+void rs_probe_print(const char *why);
+/** Die with a byte dump if has_search_latch or its canaries are off. */
+void rs_check_trx(const trx_t *trx, const char *where);
+/** Microseconds to sleep inside the PHASE 2 shortcut window while holding
+the AHI S-latch (env RS_SHORTCUT_DELAY_US), to collide with AHI flips. */
+extern uint32_t rs_shortcut_delay_us;
 
 #include "trx0trx.ic"
 #endif /* !UNIV_HOTBACKUP */

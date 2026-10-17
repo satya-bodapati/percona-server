@@ -3071,6 +3071,7 @@ static void innodb_replace_trx_in_thd(THD *thd, void *new_trx_arg,
 
   if (ptr_trx_arg) {
     *ptr_trx_arg = trx;
+    rs_probe_inc(RS_TRX_DETACH);
 
     ut_ad(trx == nullptr || (trx->mysql_thd == thd && !trx->is_recovered));
 
@@ -3079,6 +3080,7 @@ static void innodb_replace_trx_in_thd(THD *thd, void *new_trx_arg,
     if (trx->state.load(std::memory_order_relaxed) == TRX_STATE_NOT_STARTED) {
       ut_ad(thd == trx->mysql_thd);
       ut_ad(!trx_is_registered_for_2pc(trx));
+      rs_probe_inc(RS_TRX_SWAP_FREE);
       trx_free_for_mysql(trx);
     } else {
       ut_ad(thd == trx->mysql_thd);
@@ -3092,13 +3094,18 @@ static void innodb_replace_trx_in_thd(THD *thd, void *new_trx_arg,
       resources, while still allowing XA COMMIT it in the future, as it
       succeeds on missing xids. */
       if (trx_is_redo_rseg_updated(trx)) {
+        rs_probe_inc(RS_TRX_DISCONNECT_PREPARED);
         trx_disconnect_prepared(trx);
       } else {
+        rs_probe_inc(RS_TRX_SWAP_FREE);
         trx_rollback_for_mysql(trx);
         trx_deregister_from_2pc(trx);
         trx_free_for_mysql(trx);
       }
     }
+  }
+  if (new_trx_arg != nullptr) {
+    rs_probe_inc(RS_TRX_ATTACH);
   }
   trx = static_cast<trx_t *>(new_trx_arg);
 }
@@ -6877,6 +6884,10 @@ static int innobase_close_connection(
 
   trx_t *trx = thd_to_trx(thd);
   bool free_trx = false;
+
+  if (trx != nullptr) {
+    rs_check_trx(trx, "innobase_close_connection");
+  }
 
   /* During server initialization MySQL layer will try to open
   some of the master-slave tables those residing in InnoDB.
@@ -19341,7 +19352,7 @@ int ha_innobase::extra(enum ha_extra_function operation)
       m_prebuilt->no_autoinc_locking = true;
       break;
     default: /* Do nothing */
-        ;
+             ;
   }
 
   return (0);
