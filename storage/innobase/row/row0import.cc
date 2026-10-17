@@ -2564,6 +2564,18 @@ dberr_t PageConverter::update_index_page(buf_block_t *block) UNIV_NOTHROW {
     row_index_t *index = find_index(id);
 
     if (index == nullptr) {
+      char table_name[MAX_FULL_NAME_LEN + 1];
+
+      innobase_format_name(table_name, sizeof(table_name),
+                           m_cfg->m_table->name.m_name);
+
+      ib_errf(m_trx->mysql_thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
+              "Table %s: page %u of the tablespace file belongs to an index "
+              "that the table definition does not have (index id " IB_ID_FMT
+              "). The file is not this table's, or it was copied at another "
+              "time than the table definition.",
+              table_name, block->page.id.page_no(), id);
+
       m_index = nullptr;
       return (DB_CORRUPTION);
     }

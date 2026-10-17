@@ -174,5 +174,28 @@ DROP SPATIAL REFERENCE SYSTEM 4000001;
 IMPORT TABLE FROM 'test/g.ibd';
 --remove_file $MYSQLD_DATADIR/test/g.ibd
 
+--echo #
+--echo # A partition file copied after an ADD INDEX has pages of an index that
+--echo # the table definition does not have.
+--echo #
+CREATE TABLE t4 (id INT PRIMARY KEY, a INT) PARTITION BY RANGE (id)
+  (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20));
+INSERT INTO t4 VALUES (1, 1), (11, 11);
+FLUSH TABLES t4 FOR EXPORT;
+--copy_files_wildcard $MYSQLD_DATADIR/test $A t4#p#*.ibd
+UNLOCK TABLES;
+ALTER TABLE t4 ADD INDEX ka (a);
+FLUSH TABLES t4 FOR EXPORT;
+--copy_files_wildcard $MYSQLD_DATADIR/test $B t4#p#*.ibd
+UNLOCK TABLES;
+DROP TABLE t4;
+
+--copy_file $A/t4#p#p0.ibd $MYSQLD_DATADIR/test/t4#p#p0.ibd
+--copy_file $B/t4#p#p1.ibd $MYSQLD_DATADIR/test/t4#p#p1.ibd
+--replace_regex /page [0-9]+/page N/ /index id [0-9]+/index id N/
+--error ER_TABLE_SCHEMA_MISMATCH
+IMPORT TABLE FROM 'test/t4#p#*.ibd';
+--remove_files_wildcard $MYSQLD_DATADIR/test t4#p#*
+
 --force-rmdir $A
 --force-rmdir $B

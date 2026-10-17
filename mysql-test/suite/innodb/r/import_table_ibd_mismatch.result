@@ -127,3 +127,18 @@ DROP TABLE g;
 DROP SPATIAL REFERENCE SYSTEM 4000001;
 IMPORT TABLE FROM 'test/g.ibd';
 ERROR SR001: There's no spatial reference system with SRID 4000001.
+#
+# A partition file copied after an ADD INDEX has pages of an index that
+# the table definition does not have.
+#
+CREATE TABLE t4 (id INT PRIMARY KEY, a INT) PARTITION BY RANGE (id)
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20));
+INSERT INTO t4 VALUES (1, 1), (11, 11);
+FLUSH TABLES t4 FOR EXPORT;
+UNLOCK TABLES;
+ALTER TABLE t4 ADD INDEX ka (a);
+FLUSH TABLES t4 FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE t4;
+IMPORT TABLE FROM 'test/t4#p#*.ibd';
+ERROR HY000: Schema mismatch (Table `test`.`t4` /* Partition `p1` */: page N of the tablespace file belongs to an index that the table definition does not have (index id N). The file is not this table's, or it was copied at another time than the table definition.)
