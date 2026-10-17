@@ -80,6 +80,15 @@ encrypted, the key is read from the .cfp file next to it.
     THD *thd, const char *path, std::vector<Sdi_file_record> &records,
     uint32_t *space_flags);
 
+/** Read the space id of a tablespace file that is not attached to this
+server, from its first page.
+@param[in]   thd       session, for error messages
+@param[in]   path      path of the .ibd file
+@param[out]  space_id  space id stored in the file
+@return DB_SUCCESS or error code; errors are reported to thd */
+[[nodiscard]] dberr_t row_import_read_space_id(THD *thd, const char *path,
+                                               space_id_t *space_id);
+
 /** Attach the tablespace file of a table or partition created by IMPORT
 TABLE FROM '<file>.ibd'. The table was created without a tablespace, like a
 discarded one, and the file is already at the path the table uses. Its

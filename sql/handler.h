@@ -1851,6 +1851,23 @@ typedef bool (*sdi_get_from_file_t)(THD *thd, const char *path,
                                     Sdi_from_file *sdi);
 
 /**
+  Check that the files named for a table by IMPORT TABLE FROM '<file>' are
+  exactly its tablespace files, before any of them is changed: one file for
+  the table or for each partition, named after it, and holding the
+  tablespace that the table definition records for it.
+
+  @param[in]   thd     thread context
+  @param[in]   schema  schema name of the table, for error messages
+  @param[in]   source  table definition read from the SDI
+  @param[in]   files   paths of the files named for the table
+  @retval      false   success
+  @retval      true    failure, my_error() was called by the SE
+*/
+typedef bool (*sdi_check_import_files_t)(THD *thd, const char *schema,
+                                         const dd::Table &source,
+                                         const std::vector<std::string> &files);
+
+/**
   Check if the DDSE is started in a way that leaves thd DD being read only.
 
   @retval true    The data dictionary can only be read.
@@ -2910,6 +2927,10 @@ struct handlerton {
   /** Read the SDI of a tablespace file that is not attached to the server,
   or nullptr if the SE cannot import tables from their data files. */
   sdi_get_from_file_t sdi_get_from_file;
+
+  /** Check the files named for a table by IMPORT TABLE FROM '<file>', or
+  nullptr if the SE does not check them. */
+  sdi_check_import_files_t sdi_check_import_files;
 
   /**
     Null-ended array of file extensions that exist for the storage engine.

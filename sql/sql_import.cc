@@ -836,8 +836,41 @@ bool Sql_cmd_import_table::execute_ibd(THD *thd) {
         t.files.push_back(partition_files[i]);
       }
     }
+  }
 
-    if (t.files.size() != n_parts) {
+  for (size_t i = 0; i < partition_files.size(); ++i) {
+    if (used[i]) {
+      continue;
+    }
+
+    /* Named after a partition of a table being imported, but elsewhere. */
+    const std::string base = base_of(partition_files[i]);
+    for (const Ibd_target &t : targets) {
+      const std::string sdi_base = base_of(t.sdi_file);
+      const size_t sep = sdi_base.find("#p#") != std::string::npos
+                             ? sdi_base.find("#p#")
+                             : sdi_base.find("#P#");
+      if (sep != std::string::npos && base.size() > sep + 3 &&
+          my_strnncoll(files_charset_info,
+                       reinterpret_cast<const uchar *>(base.c_str()), sep + 3,
+                       reinterpret_cast<const uchar *>(sdi_base.c_str()),
+                       sep + 3) == 0) {
+        return wrong_ibd_file(partition_files[i],
+                              "is not in the same directory as the "
+                              "other files of its table");
+      }
+    }
+
+    return wrong_ibd_file(partition_files[i],
+                          "holds no table definition and is not a "
+                          "partition of a table being imported");
+  }
+
+  for (const Ibd_target &t : targets) {
+    const size_t n_parts =
+        static_cast<const dd::Table &>(*t.source).leaf_partitions().size();
+
+    if (n_parts != 0 && t.files.size() != n_parts) {
       std::string msg("IMPORT TABLE of `");
       msg.append(t.schema.c_str()).append("`.`").append(t.name.c_str());
       msg.append("` needs all ").append(std::to_string(n_parts));
@@ -845,14 +878,6 @@ bool Sql_cmd_import_table::execute_ibd(THD *thd) {
       msg.append(" were named");
       my_error(ER_TABLE_SCHEMA_MISMATCH, MYF(0), msg.c_str());
       return true;
-    }
-  }
-
-  for (size_t i = 0; i < partition_files.size(); ++i) {
-    if (!used[i]) {
-      return wrong_ibd_file(partition_files[i],
-                            "holds no table definition and is not a "
-                            "partition of a table being imported");
     }
   }
 
@@ -872,6 +897,14 @@ bool Sql_cmd_import_table::execute_ibd(THD *thd) {
 
   for (Ibd_target &t : targets) {
     if (check_ibd_location(&t) || check_ibd_privileges(thd, t)) {
+      return true;
+    }
+
+    /* Before any file is changed: the named files must be exactly the
+    table's files. */
+    if (hton->sdi_check_import_files != nullptr &&
+        hton->sdi_check_import_files(thd, t.schema.c_str(), *t.source,
+                                     t.files)) {
       return true;
     }
 

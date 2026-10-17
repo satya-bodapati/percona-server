@@ -5759,10 +5759,6 @@ static PSI_meter_info_v1 inno_meter[] = {
      std::size(data_metrics)}};
 #endif /* HAVE_PSI_METRICS_INTERFACE */
 
-/** Initialize the InnoDB storage engine plugin.
-@param[in,out]  p       InnoDB handlerton
-@return error code
-@retval 0 on success */
 /** Read the SDI of a tablespace file that is not attached to the server.
 Implements handlerton::sdi_get_from_file for IMPORT TABLE FROM '<file>.ibd'.
 @param[in]   thd   session
@@ -5795,6 +5791,156 @@ static bool innobase_sdi_get_from_file(THD *thd, const char *path,
   return false;
 }
 
+/** @return the space id that a table definition records for the indexes of
+a table or partition, or SPACE_UNKNOWN if it records none
+@param[in]  indexes  indexes of the table or partition */
+template <typename Indexes>
+static space_id_t sdi_recorded_space_id(const Indexes &indexes) {
+  for (const auto *index : indexes) {
+    const dd::Properties &p = index->se_private_data();
+    uint32_t space_id = 0;
+
+    if (p.exists(dd_index_key_strings[DD_INDEX_SPACE_ID]) &&
+        !p.get(dd_index_key_strings[DD_INDEX_SPACE_ID], &space_id)) {
+      return space_id;
+    }
+  }
+
+  return SPACE_UNKNOWN;
+}
+
+/** Check that the files named for a table by IMPORT TABLE FROM '<file>.ibd'
+are exactly its tablespace files: one for the table or for each partition,
+named after it, and holding the tablespace whose space id the table
+definition records for it. A partition file holds no table definition, so
+without this check a file of another partition, of another table or left
+over in the directory would be imported in its place.
+Implements handlerton::sdi_check_import_files.
+@param[in]  thd     session
+@param[in]  schema  schema name of the table, for error messages
+@param[in]  source  table definition read from the SDI
+@param[in]  files   paths of the files named for the table
+@retval false if they are the table's files
+@retval true otherwise; the error is reported */
+static bool innobase_sdi_check_import_files(
+    THD *thd, const char *schema, const dd::Table &source,
+    const std::vector<std::string> &files) {
+  /** A file the table definition expects. */
+  struct Expected {
+    /** file name, without the directory */
+    std::string name;
+    /** what the file holds, for error messages */
+    std::string what;
+    /** space id recorded in the table definition */
+    space_id_t space_id;
+    /** the named file, or nullptr if it was not named */
+    const std::string *path;
+  };
+
+  const std::string table =
+      std::string("`") + schema + "`.`" + source.name().c_str() + "`";
+  std::vector<Expected> expected;
+
+  if (source.leaf_partitions().empty()) {
+    std::string name;
+    dict_name::build_table("", source.name().c_str(), "", false, true, name);
+    expected.push_back({name + DOT_IBD, "table " + table,
+                        sdi_recorded_space_id(source.indexes()), nullptr});
+  }
+
+  for (const dd::Partition *part : source.leaf_partitions()) {
+    std::string partition;
+    std::string name;
+    dict_name::build_partition(part, partition);
+    dict_name::build_table("", source.name().c_str(), partition, false, true,
+                           name);
+
+    std::string what = "partition `";
+    if (part->parent() != nullptr) {
+      what.append(part->parent()->name().c_str()).append("`, subpartition `");
+    }
+    what.append(part->name().c_str()).append("` of ").append(table);
+
+    expected.push_back({name + DOT_IBD, what,
+                        sdi_recorded_space_id(part->indexes()), nullptr});
+  }
+
+  auto same_name = [](const std::string &a, const std::string &b) {
+    return lower_case_file_system
+               ? my_strcasecmp(files_charset_info, a.c_str(), b.c_str()) == 0
+               : a == b;
+  };
+
+  for (const std::string &file : files) {
+    const size_t sep = file.find_last_of(OS_PATH_SEPARATOR);
+    const std::string base =
+        sep == std::string::npos ? file : file.substr(sep + 1);
+
+    auto it = std::find_if(
+        expected.begin(), expected.end(),
+        [&](const Expected &e) { return same_name(e.name, base); });
+
+    if (it == expected.end() || it->path != nullptr) {
+      const std::string msg =
+          "'" + file + "' is not a tablespace file of " + table;
+      my_error(ER_TABLE_SCHEMA_MISMATCH, MYF(0), msg.c_str());
+      return true;
+    }
+
+    it->path = &file;
+  }
+
+  for (const Expected &e : expected) {
+    if (e.path == nullptr) {
+      const std::string msg =
+          "the file of " + e.what + " ('" + e.name + "') was not named";
+      my_error(ER_TABLE_SCHEMA_MISMATCH, MYF(0), msg.c_str());
+      return true;
+    }
+  }
+
+  for (const Expected &e : expected) {
+    space_id_t space_id = SPACE_UNKNOWN;
+
+    if (row_import_read_space_id(thd, e.path->c_str(), &space_id) !=
+        DB_SUCCESS) {
+      if (!thd->is_error()) {
+        my_error(ER_INTERNAL_ERROR, MYF(0), "cannot read a tablespace file");
+      }
+      return true;
+    }
+
+    if (e.space_id == SPACE_UNKNOWN || e.space_id == space_id) {
+      continue;
+    }
+
+    auto other =
+        std::find_if(expected.begin(), expected.end(),
+                     [&](const Expected &o) { return o.space_id == space_id; });
+
+    std::string msg = "'" + *e.path + "' holds ";
+    if (other != expected.end()) {
+      msg.append(other->what).append(", not ").append(e.what);
+    } else {
+      msg.append("the tablespace with space id ")
+          .append(std::to_string(space_id))
+          .append(", not the one of ")
+          .append(e.what)
+          .append(" (space id ")
+          .append(std::to_string(e.space_id))
+          .append("): it is a file of another table");
+    }
+    my_error(ER_TABLE_SCHEMA_MISMATCH, MYF(0), msg.c_str());
+    return true;
+  }
+
+  return false;
+}
+
+/** Initialize the InnoDB storage engine plugin.
+@param[in,out]  p       InnoDB handlerton
+@return error code
+@retval 0 on success */
 static int innodb_init(void *p) {
   DBUG_TRACE;
 
@@ -5897,6 +6043,7 @@ static int innodb_init(void *p) {
   innobase_hton->sdi_set = dict_sdi_set;
   innobase_hton->sdi_delete = dict_sdi_delete;
   innobase_hton->sdi_get_from_file = innobase_sdi_get_from_file;
+  innobase_hton->sdi_check_import_files = innobase_sdi_check_import_files;
 
   innobase_hton->rotate_encryption_master_key =
       innobase_encryption_key_rotation;

@@ -48,3 +48,50 @@ CHECK TABLE t2;
 Table	Op	Msg_type	Msg_text
 test.t2	check	status	OK
 DROP TABLE t2;
+#
+# A partition file holds no table definition, so it is matched to its
+# partition by name and by the space id the definition records for it.
+# Wrong files are refused before any file is changed, and all named
+# files are kept.
+#
+CREATE DATABASE db2;
+CREATE TABLE t3 (id INT PRIMARY KEY, v VARCHAR(20)) PARTITION BY RANGE (id)
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20),
+PARTITION p2 VALUES LESS THAN MAXVALUE);
+INSERT INTO t3 VALUES (1, 'a'), (11, 'k'), (21, 'u');
+CREATE TABLE db2.t3 LIKE t3;
+FLUSH TABLES t3, db2.t3 FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE t3, db2.t3;
+# The files of p0 and p1 swapped.
+IMPORT TABLE FROM 'test/t3#p#*.ibd';
+ERROR HY000: Schema mismatch ('DATADIRtest/t3#p#p0.ibd' holds partition `p1` of `test`.`t3`, not partition `p0` of `test`.`t3`)
+t3#p#p0.ibd
+t3#p#p1.ibd
+t3#p#p2.ibd
+# p1 is the file of the same table in another schema.
+IMPORT TABLE FROM 'test/t3#p#*.ibd';
+ERROR HY000: Schema mismatch ('DATADIRtest/t3#p#p1.ibd' holds the tablespace with space id N, not the one of partition `p1` of `test`.`t3` (space id N): it is a file of another table)
+t3#p#p0.ibd
+t3#p#p1.ibd
+t3#p#p2.ibd
+# A named file that is no partition, with the real p2 file present but
+# not named: the unnamed file must not be imported.
+IMPORT TABLE FROM 'test/t3#p#p0.ibd', 'test/t3#p#p1.ibd', 'test/t3#p#zz.ibd';
+ERROR HY000: Schema mismatch ('DATADIRtest/t3#p#zz.ibd' is not a tablespace file of `test`.`t3`)
+t3#p#p0.ibd
+t3#p#p1.ibd
+t3#p#p2.ibd
+t3#p#zz.ibd
+# One partition file in another schema directory.
+IMPORT TABLE FROM 'test/t3#p#p0.ibd', 'db2/t3#p#p1.ibd', 'test/t3#p#p2.ibd';
+ERROR HY000: Schema mismatch ('DATADIRdb2/t3#p#p1.ibd' is not in the same directory as the other files of its table)
+# The right files import.
+IMPORT TABLE FROM 'test/t3#p#*.ibd';
+SELECT * FROM t3 ORDER BY id;
+id	v
+1	a
+11	k
+21	u
+DROP TABLE t3;
+DROP DATABASE db2;

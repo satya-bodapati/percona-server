@@ -66,5 +66,71 @@ SELECT * FROM t2 ORDER BY id;
 CHECK TABLE t2;
 DROP TABLE t2;
 
+--echo #
+--echo # A partition file holds no table definition, so it is matched to its
+--echo # partition by name and by the space id the definition records for it.
+--echo # Wrong files are refused before any file is changed, and all named
+--echo # files are kept.
+--echo #
+CREATE DATABASE db2;
+CREATE TABLE t3 (id INT PRIMARY KEY, v VARCHAR(20)) PARTITION BY RANGE (id)
+  (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20),
+   PARTITION p2 VALUES LESS THAN MAXVALUE);
+INSERT INTO t3 VALUES (1, 'a'), (11, 'k'), (21, 'u');
+CREATE TABLE db2.t3 LIKE t3;
+FLUSH TABLES t3, db2.t3 FOR EXPORT;
+--copy_files_wildcard $MYSQLD_DATADIR/test $A t3#p#*.ibd
+--copy_files_wildcard $MYSQLD_DATADIR/db2 $B t3#p#*.ibd
+UNLOCK TABLES;
+DROP TABLE t3, db2.t3;
+
+--echo # The files of p0 and p1 swapped.
+--copy_file $A/t3#p#p0.ibd $MYSQLD_DATADIR/test/t3#p#p1.ibd
+--copy_file $A/t3#p#p1.ibd $MYSQLD_DATADIR/test/t3#p#p0.ibd
+--copy_file $A/t3#p#p2.ibd $MYSQLD_DATADIR/test/t3#p#p2.ibd
+--replace_result $MYSQLD_DATADIR DATADIR
+--error ER_TABLE_SCHEMA_MISMATCH
+IMPORT TABLE FROM 'test/t3#p#*.ibd';
+--list_files $MYSQLD_DATADIR/test t3*
+--remove_files_wildcard $MYSQLD_DATADIR/test t3#p#*
+
+--echo # p1 is the file of the same table in another schema.
+--copy_file $A/t3#p#p0.ibd $MYSQLD_DATADIR/test/t3#p#p0.ibd
+--copy_file $B/t3#p#p1.ibd $MYSQLD_DATADIR/test/t3#p#p1.ibd
+--copy_file $A/t3#p#p2.ibd $MYSQLD_DATADIR/test/t3#p#p2.ibd
+--replace_result $MYSQLD_DATADIR DATADIR
+--replace_regex /space id [0-9]+/space id N/
+--error ER_TABLE_SCHEMA_MISMATCH
+IMPORT TABLE FROM 'test/t3#p#*.ibd';
+--list_files $MYSQLD_DATADIR/test t3*
+--remove_files_wildcard $MYSQLD_DATADIR/test t3#p#*
+
+--echo # A named file that is no partition, with the real p2 file present but
+--echo # not named: the unnamed file must not be imported.
+--copy_files_wildcard $A $MYSQLD_DATADIR/test t3#p#*.ibd
+--copy_file $A/t3#p#p2.ibd $MYSQLD_DATADIR/test/t3#p#zz.ibd
+--replace_result $MYSQLD_DATADIR DATADIR
+--error ER_TABLE_SCHEMA_MISMATCH
+IMPORT TABLE FROM 'test/t3#p#p0.ibd', 'test/t3#p#p1.ibd', 'test/t3#p#zz.ibd';
+--list_files $MYSQLD_DATADIR/test t3*
+--remove_files_wildcard $MYSQLD_DATADIR/test t3#p#*
+
+--echo # One partition file in another schema directory.
+--copy_file $A/t3#p#p0.ibd $MYSQLD_DATADIR/test/t3#p#p0.ibd
+--copy_file $A/t3#p#p1.ibd $MYSQLD_DATADIR/db2/t3#p#p1.ibd
+--copy_file $A/t3#p#p2.ibd $MYSQLD_DATADIR/test/t3#p#p2.ibd
+--replace_result $MYSQLD_DATADIR DATADIR
+--error ER_TABLE_SCHEMA_MISMATCH
+IMPORT TABLE FROM 'test/t3#p#p0.ibd', 'db2/t3#p#p1.ibd', 'test/t3#p#p2.ibd';
+--remove_files_wildcard $MYSQLD_DATADIR/test t3#p#*
+--remove_files_wildcard $MYSQLD_DATADIR/db2 t3#p#*
+
+--echo # The right files import.
+--copy_files_wildcard $A $MYSQLD_DATADIR/test t3#p#*.ibd
+IMPORT TABLE FROM 'test/t3#p#*.ibd';
+SELECT * FROM t3 ORDER BY id;
+DROP TABLE t3;
+DROP DATABASE db2;
+
 --force-rmdir $A
 --force-rmdir $B

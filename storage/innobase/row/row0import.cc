@@ -5736,6 +5736,19 @@ dberr_t row_import_read_sdi_from_file(THD *thd, const char *path,
   return err;
 }
 
+dberr_t row_import_read_space_id(THD *thd, const char *path,
+                                 space_id_t *space_id) {
+  Ibd_sdi_reader reader(thd);
+
+  dberr_t err = reader.open(path);
+
+  if (err == DB_SUCCESS) {
+    *space_id = reader.space_id();
+  }
+
+  return err;
+}
+
 /** Metadata from the SDI of the tablespace file attached by IMPORT TABLE
 FROM '<file>.ibd'. The definition read from the SDI is turned into an InnoDB
 table object outside the dictionary cache, written in .cfg format to an
