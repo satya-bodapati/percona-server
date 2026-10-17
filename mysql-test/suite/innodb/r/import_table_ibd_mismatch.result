@@ -95,3 +95,22 @@ id	v
 21	u
 DROP TABLE t3;
 DROP DATABASE db2;
+#
+# Every table of the statement is checked before any is created: a
+# failure on a later table would delete the files of the earlier ones.
+#
+CREATE TABLE p (id INT PRIMARY KEY);
+CREATE TABLE c (id INT PRIMARY KEY, pid INT,
+FOREIGN KEY (pid) REFERENCES p (id));
+CREATE TABLE a1 (id INT PRIMARY KEY);
+INSERT INTO a1 VALUES (1);
+FLUSH TABLES c, a1 FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE c, a1, p;
+# The parent of c does not exist, and foreign_key_checks is on.
+IMPORT TABLE FROM 'test/a1.ibd', 'test/c.ibd';
+ERROR HY000: Failed to open the referenced table 'p'
+a1.ibd
+c.ibd
+SHOW TABLES;
+Tables_in_test

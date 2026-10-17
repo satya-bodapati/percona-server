@@ -583,6 +583,87 @@ void reset_se_private(dd::Table *table) {
   }
 }
 
+/** @return true if a table is one of the targets of the statement
+@param[in]  targets  the targets
+@param[in]  schema   schema name
+@param[in]  name     table name */
+bool is_ibd_target(const std::vector<Ibd_target> &targets,
+                   const dd::String_type &schema, const dd::String_type &name) {
+  for (const Ibd_target &t : targets) {
+    if (my_strcasecmp(table_alias_charset, t.schema.c_str(), schema.c_str()) ==
+            0 &&
+        my_strcasecmp(table_alias_charset, t.name.c_str(), name.c_str()) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Check a target before any table of the statement is created, since a
+failure found while creating a later table deletes the files of the tables
+already created: the schema exists, the table does not, and with
+foreign_key_checks on, every parent table that is not imported by the same
+statement exists. The table locks are held.
+@param[in]  thd      thread handle
+@param[in]  t        the target
+@param[in]  targets  all targets of the statement
+@return true on error, reported with my_error() */
+bool check_ibd_target(THD *thd, const Ibd_target &t,
+                      const std::vector<Ibd_target> &targets) {
+  dd::cache::Dictionary_client &dc = *thd->dd_client();
+  const dd::Schema *schema = nullptr;
+
+  if (dc.acquire(t.schema, &schema)) {
+    return true;
+  }
+
+  if (schema == nullptr) {
+    my_error(ER_IMP_SCHEMA_DOES_NOT_EXIST, MYF(0), t.schema.c_str());
+    return true;
+  }
+
+  const dd::Table *existing = nullptr;
+  if (dc.acquire(t.schema, t.name, &existing)) {
+    return true;
+  }
+
+  if (existing != nullptr) {
+    my_error(ER_IMP_TABLE_ALREADY_EXISTS, MYF(0), t.schema.c_str(),
+             t.name.c_str());
+    return true;
+  }
+
+  if (thd->variables.option_bits & OPTION_NO_FOREIGN_KEY_CHECKS) {
+    return false;
+  }
+
+  const dd::Table &source = *t.source;
+
+  for (const dd::Foreign_key *fk : source.foreign_keys()) {
+    /* A parent imported by the same statement is checked when the child is
+    created, in the order the tables are named. */
+    if (is_ibd_target(targets, fk->referenced_table_schema_name(),
+                      fk->referenced_table_name())) {
+      continue;
+    }
+
+    const dd::Table *parent = nullptr;
+
+    if (dc.acquire(fk->referenced_table_schema_name(),
+                   fk->referenced_table_name(), &parent)) {
+      return true;
+    }
+
+    if (parent == nullptr) {
+      my_error(ER_FK_CANNOT_OPEN_PARENT, MYF(0),
+               fk->referenced_table_name().c_str());
+      return true;
+    }
+  }
+
+  return false;
+}
+
 /** Create the table of a target on top of its tablespace files.
 @param[in]  thd   thread handle
 @param[in]  hton  InnoDB
@@ -986,6 +1067,12 @@ bool Sql_cmd_import_table::execute_ibd(THD *thd) {
 
   for (auto &sn : schema_names) {
     if (check_schema_readonly(thd, sn.c_str())) return true;
+  }
+
+  for (const Ibd_target &t : targets) {
+    if (check_ibd_target(thd, t, targets)) {
+      return true;
+    }
   }
 
   for (Ibd_target &t : targets) {

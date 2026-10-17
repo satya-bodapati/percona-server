@@ -132,5 +132,30 @@ SELECT * FROM t3 ORDER BY id;
 DROP TABLE t3;
 DROP DATABASE db2;
 
+--echo #
+--echo # Every table of the statement is checked before any is created: a
+--echo # failure on a later table would delete the files of the earlier ones.
+--echo #
+CREATE TABLE p (id INT PRIMARY KEY);
+CREATE TABLE c (id INT PRIMARY KEY, pid INT,
+                FOREIGN KEY (pid) REFERENCES p (id));
+CREATE TABLE a1 (id INT PRIMARY KEY);
+INSERT INTO a1 VALUES (1);
+FLUSH TABLES c, a1 FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/c.ibd $A/c.ibd
+--copy_file $MYSQLD_DATADIR/test/a1.ibd $A/a1.ibd
+UNLOCK TABLES;
+DROP TABLE c, a1, p;
+
+--echo # The parent of c does not exist, and foreign_key_checks is on.
+--copy_file $A/a1.ibd $MYSQLD_DATADIR/test/a1.ibd
+--copy_file $A/c.ibd $MYSQLD_DATADIR/test/c.ibd
+--error ER_FK_CANNOT_OPEN_PARENT
+IMPORT TABLE FROM 'test/a1.ibd', 'test/c.ibd';
+--list_files $MYSQLD_DATADIR/test *.ibd
+SHOW TABLES;
+--remove_file $MYSQLD_DATADIR/test/a1.ibd
+--remove_file $MYSQLD_DATADIR/test/c.ibd
+
 --force-rmdir $A
 --force-rmdir $B
