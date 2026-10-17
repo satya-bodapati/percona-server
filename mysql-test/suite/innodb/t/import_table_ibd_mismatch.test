@@ -1,0 +1,70 @@
+--echo #
+--echo # IMPORT TABLE FROM '<file>.ibd' with files that do not belong
+--echo # together. Each case is refused with an error.
+--echo #
+
+--source include/have_innodb_16k.inc
+
+let $MYSQLD_DATADIR = `SELECT @@datadir`;
+let $A = $MYSQL_TMP_DIR/import_mismatch_a;
+let $B = $MYSQL_TMP_DIR/import_mismatch_b;
+--mkdir $A
+--mkdir $B
+
+--echo #
+--echo # Only the first partition's file holds the table definition. A later
+--echo # partition copied after an INSTANT ADD COLUMN has rows that definition
+--echo # cannot parse.
+--echo #
+CREATE TABLE t1 (id INT PRIMARY KEY, a INT) PARTITION BY RANGE (id)
+  (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20));
+INSERT INTO t1 VALUES (1, 1), (11, 11);
+FLUSH TABLES t1 FOR EXPORT;
+--copy_files_wildcard $MYSQLD_DATADIR/test $A t1#p#*.ibd
+UNLOCK TABLES;
+ALTER TABLE t1 ADD COLUMN c VARCHAR(30) DEFAULT 'dflt', ALGORITHM=INSTANT;
+INSERT INTO t1 VALUES (2, 2, 'two'), (12, 12, 'twelve');
+FLUSH TABLES t1 FOR EXPORT;
+--copy_files_wildcard $MYSQLD_DATADIR/test $B t1#p#*.ibd
+UNLOCK TABLES;
+DROP TABLE t1;
+
+--copy_file $A/t1#p#p0.ibd $MYSQLD_DATADIR/test/t1#p#p0.ibd
+--copy_file $B/t1#p#p1.ibd $MYSQLD_DATADIR/test/t1#p#p1.ibd
+--error ER_TABLE_SCHEMA_MISMATCH
+IMPORT TABLE FROM 'test/t1#p#*.ibd';
+--error ER_NO_SUCH_TABLE
+SELECT * FROM t1;
+--remove_files_wildcard $MYSQLD_DATADIR/test t1#p#*
+
+--echo # The same after an INSTANT DROP COLUMN.
+CREATE TABLE t2 (id INT PRIMARY KEY, a INT, x INT) PARTITION BY RANGE (id)
+  (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20));
+INSERT INTO t2 VALUES (1, 1, 1), (11, 11, 11);
+FLUSH TABLES t2 FOR EXPORT;
+--copy_files_wildcard $MYSQLD_DATADIR/test $A t2#p#*.ibd
+UNLOCK TABLES;
+ALTER TABLE t2 DROP COLUMN x, ALGORITHM=INSTANT;
+INSERT INTO t2 VALUES (3, 3), (13, 13);
+FLUSH TABLES t2 FOR EXPORT;
+--copy_files_wildcard $MYSQLD_DATADIR/test $B t2#p#*.ibd
+UNLOCK TABLES;
+DROP TABLE t2;
+
+--copy_file $A/t2#p#p0.ibd $MYSQLD_DATADIR/test/t2#p#p0.ibd
+--copy_file $B/t2#p#p1.ibd $MYSQLD_DATADIR/test/t2#p#p1.ibd
+--error ER_TABLE_SCHEMA_MISMATCH
+IMPORT TABLE FROM 'test/t2#p#*.ibd';
+--error ER_NO_SUCH_TABLE
+SELECT * FROM t2;
+--remove_files_wildcard $MYSQLD_DATADIR/test t2#p#*
+
+--echo # Files copied together import.
+--copy_files_wildcard $B $MYSQLD_DATADIR/test t2#p#*.ibd
+IMPORT TABLE FROM 'test/t2#p#*.ibd';
+SELECT * FROM t2 ORDER BY id;
+CHECK TABLE t2;
+DROP TABLE t2;
+
+--force-rmdir $A
+--force-rmdir $B

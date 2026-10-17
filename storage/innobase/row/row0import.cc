@@ -915,6 +915,15 @@ class PageConverter : public AbstractCallback {
   @retval DB_SUCCESS or error code */
   dberr_t update_records(buf_block_t *block) UNIV_NOTHROW;
 
+  /** Check that the table definition knows the format of a record: a row
+  version no newer than the table's, and an INSTANT flag only in a table with
+  instant columns. A record written by a later definition of the table cannot
+  be parsed with this one.
+  @param[in]  rec   record
+  @param[in]  comp  true if the table is in a compact format
+  @return true if the record can be parsed */
+  bool rec_format_is_known(const rec_t *rec, bool comp) const UNIV_NOTHROW;
+
   /** Validate the page, check for corruption.
   @param        offset  physical offset within file.
   @param        block   page read from file.
@@ -2440,6 +2449,29 @@ dberr_t PageConverter::adjust_cluster_record(
   return (err);
 }
 
+bool PageConverter::rec_format_is_known(const rec_t *rec,
+                                        bool comp) const UNIV_NOTHROW {
+  const dict_table_t *table = m_cfg->m_table;
+
+  if (comp ? rec_new_is_versioned(rec) : rec_old_is_versioned(rec)) {
+    const uint8_t version = comp ? rec_get_instant_row_version_new(rec)
+                                 : rec_get_instant_row_version_old(rec);
+
+    /* Version 0 marks a row of an upgraded table with instant columns. */
+    if (version == 0) {
+      return table->has_instant_cols();
+    }
+
+    return table->has_row_versions() && version <= table->current_row_version;
+  }
+
+  if (comp && rec_get_instant_flag_new(rec)) {
+    return table->has_instant_cols();
+  }
+
+  return true;
+}
+
 /** Update the BLOB references and write UNDO log entries for
 rows that can't be purged optimistically.
 @param block block to update
@@ -2462,6 +2494,21 @@ dberr_t PageConverter::update_records(buf_block_t *block) UNIV_NOTHROW {
     /* CFG file is required to process records having version */
 
     if (m_cfg->m_missing && has_version) {
+      return (DB_SCHEMA_MISMATCH);
+    }
+
+    if (!rec_format_is_known(rec, comp)) {
+      char table_name[MAX_FULL_NAME_LEN + 1];
+
+      innobase_format_name(table_name, sizeof(table_name),
+                           m_cfg->m_table->name.m_name);
+
+      ib_errf(m_trx->mysql_thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
+              "Table %s: page %u of the tablespace file has rows written by "
+              "a later definition of the table than the one it is imported "
+              "with. The files of the table were copied at different times.",
+              table_name, block->page.id.page_no());
+
       return (DB_SCHEMA_MISMATCH);
     }
 
