@@ -66,6 +66,7 @@
 #include "sql/sql_db.h"                    // check_schema_readonly
 #include "sql/sql_error.h"
 #include "sql/sql_table.h"  // build_table_filename
+#include "sql/srs_fetcher.h"  // Srs_fetcher
 #include "sql/stateless_allocator.h"
 #include "sql/strfunc.h"  // casedn
 #include "sql/system_variables.h"
@@ -601,9 +602,10 @@ bool is_ibd_target(const std::vector<Ibd_target> &targets,
 
 /** Check a target before any table of the statement is created, since a
 failure found while creating a later table deletes the files of the tables
-already created: the schema exists, the table does not, and with
-foreign_key_checks on, every parent table that is not imported by the same
-statement exists. The table locks are held.
+already created: the schema exists, the table does not, the spatial
+reference systems of its columns exist, and with foreign_key_checks on, every
+parent table that is not imported by the same statement exists. The table
+locks are held.
 @param[in]  thd      thread handle
 @param[in]  t        the target
 @param[in]  targets  all targets of the statement
@@ -631,6 +633,26 @@ bool check_ibd_target(THD *thd, const Ibd_target &t,
     my_error(ER_IMP_TABLE_ALREADY_EXISTS, MYF(0), t.schema.c_str(),
              t.name.c_str());
     return true;
+  }
+
+  /* As for CREATE TABLE, the reference system of a column must exist. */
+  for (const dd::Column *column :
+       static_cast<const dd::Table &>(*t.source).columns()) {
+    const std::optional<gis::srid_t> srid = column->srs_id();
+
+    if (!srid.has_value() || srid.value() == 0) {
+      continue;
+    }
+
+    bool exists = false;
+    if (Srs_fetcher::srs_exists(thd, srid.value(), &exists)) {
+      return true;
+    }
+
+    if (!exists) {
+      my_error(ER_SRS_NOT_FOUND, MYF(0), srid.value());
+      return true;
+    }
   }
 
   if (thd->variables.option_bits & OPTION_NO_FOREIGN_KEY_CHECKS) {

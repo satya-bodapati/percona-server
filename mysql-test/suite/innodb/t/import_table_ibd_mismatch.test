@@ -157,5 +157,22 @@ SHOW TABLES;
 --remove_file $MYSQLD_DATADIR/test/a1.ibd
 --remove_file $MYSQLD_DATADIR/test/c.ibd
 
+--echo #
+--echo # As for CREATE TABLE, a column's spatial reference system must exist.
+--echo #
+CREATE SPATIAL REFERENCE SYSTEM 4000001 NAME 'TEST4000001 Long-Lat WGS 84' DEFINITION 'GEOGCS["Long-Lat WGS 84",DATUM["World Geodetic System 1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.017453292519943278,AUTHORITY["EPSG","9122"]],AXIS["Lon",EAST],AXIS["Lat",NORTH],AUTHORITY["EPSG","4326"]]';
+CREATE TABLE g (id INT PRIMARY KEY, pt POINT NOT NULL SRID 4000001,
+                SPATIAL INDEX sp (pt));
+INSERT INTO g VALUES (1, ST_GeomFromText('POINT(1 1)', 4000001));
+FLUSH TABLES g FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/g.ibd $A/g.ibd
+UNLOCK TABLES;
+DROP TABLE g;
+DROP SPATIAL REFERENCE SYSTEM 4000001;
+--copy_file $A/g.ibd $MYSQLD_DATADIR/test/g.ibd
+--error ER_SRS_NOT_FOUND
+IMPORT TABLE FROM 'test/g.ibd';
+--remove_file $MYSQLD_DATADIR/test/g.ibd
+
 --force-rmdir $A
 --force-rmdir $B
