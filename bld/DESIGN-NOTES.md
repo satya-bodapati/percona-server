@@ -1588,3 +1588,16 @@ Two adjustments:
   `Auto_releaser` around the schema lookup. Test `clone.partial_table` is now two servers: refusals,
   CLONE TABLE / CLONE DATABASE with CHECKSUM TABLE equal to the donor, DML on the clones, clone under
   concurrent DML (CHECK TABLE only until the undo step).
+- 2026-10-18, step 4 done: `clone/clone0undo.cc`. `clone_rollback_staged()` scans the stage root for undo
+  tablespaces (page 0 space id), walks RSEG_ARRAY (all 128 slots: the size field is never maintained)
+  → rseg slots → segment headers, keeps ACTIVE/PREPARED segments, groups them by trx id, walks each
+  trx's insert and update logs backwards as one stack (`Undo_cursor`, in-page helpers on an aligned
+  frame, FLST_PREV for the page hop) and feeds records of the donor table id to `row_undo_ins/mod`
+  with a background trx (donor trx id, `is_recovered`, state ACTIVE, reset before free). Hooks:
+  `undo_node_t::open_table` callback (maps the donor table id to the imported table), `no_history`
+  (skips `row_vers_must_preserve_del_marked` / `row_vers_old_has_index_entry`). Found while testing:
+  the first import pass must not rewrite the space id of an all-zero BLOB reference (a LOB not yet
+  stored by an open insert), or the rollback frees "page 0". `Clone_stage_file` (clone0stage.cc) is
+  shared by the redo and undo drivers. Test: an open trx on the donor (UPDATE, DELETE, INSERT, never
+  committed) during the clone; the clone shows the original rows, keeps key 80, lacks key 500, and the
+  error log reports "Clone rollback: table `test`.`t1`: N undo records of M open transactions".

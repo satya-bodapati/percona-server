@@ -54,6 +54,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "pars0pars.h"
 #include "que0que.h"
 #include "row0import.h"
+
+#include "clone0undo.h"
 #include "row0mysql.h"
 #include "row0quiesce.h"
 #include "row0sel.h"
@@ -2360,6 +2362,15 @@ dberr_t PageConverter::adjust_cluster_index_blob_column(rec_t *rec,
 
   field += lob::BTR_EXTERN_SPACE_ID - BTR_EXTERN_FIELD_REF_SIZE + len;
 
+  /* A reference of zeroes is a LOB that was not stored yet: the row was
+  inserted by a transaction still open when the file was copied. There is
+  nothing to point at, and the rollback of that insert relies on seeing the
+  reference as empty. */
+  lob::ref_t ref(field - lob::BTR_EXTERN_SPACE_ID);
+  if (ref.is_null_relaxed()) {
+    return (DB_SUCCESS);
+  }
+
   if (is_compressed_table()) {
     mach_write_to_4(field, get_space_id());
 
@@ -2921,6 +2932,10 @@ struct Import_ctx {
   /** true if the clustered index of the target table is the generated
   GEN_CLUST_INDEX, so that dict_sys->row_id has to be adjusted. */
   bool clust_index_was_generated{};
+
+  /** Partial clone: the table's id on the donor, as its undo records
+  name it. */
+  table_id_t source_table_id{};
 
   /** @return the session of the caller */
   THD *thd() const { return parent_trx->mysql_thd; }
@@ -5929,9 +5944,9 @@ tablespaces.
 @param[in]      clone_stage_dir staging directory of the clone
 @return error code */
 [[nodiscard]] static dberr_t row_import_clone_rollback(
-    Import_ctx &ctx [[maybe_unused]],
-    const char *clone_stage_dir [[maybe_unused]]) {
-  return DB_SUCCESS;
+    Import_ctx &ctx, const char *clone_stage_dir) {
+  return clone_rollback_staged(ctx.thd(), ctx.table, ctx.source_table_id,
+                               clone_stage_dir);
 }
 
 /** Second half of the import of a partial clone. The file is attached with
@@ -6058,6 +6073,7 @@ dberr_t row_import_attach(THD *thd, dict_table_t *table, dd::Table *table_def,
 
   Import_status status = sdi_source.read(ctx, cfg);
 
+  ctx.source_table_id = source->id;
   dd_free_uncached_table(source);
 
   if (status.err == DB_SUCCESS) {

@@ -39,7 +39,7 @@ Apply the redo of a partial clone to the staged tablespace files. */
 class THD;
 
 /** One staged tablespace file of a partial clone. */
-struct Clone_stage_file {
+struct Clone_stage_entry {
   /** Path of the file under the staging directory */
   std::string m_path;
 
@@ -57,7 +57,7 @@ the clone.
 @param[in]      redo_files      staged redo files, in order
 @return error code */
 int clone_apply_staged_redo(THD *thd,
-                            const std::vector<Clone_stage_file> &data_files,
+                            const std::vector<Clone_stage_entry> &data_files,
                             const std::vector<std::string> &redo_files);
 
 #endif /* CLONE_REDO_INCLUDE */

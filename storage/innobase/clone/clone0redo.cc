@@ -36,6 +36,7 @@ is older than the record, exactly as crash recovery does, and the page LSN
 is set to the end of the mini-transaction. */
 
 #include "clone0redo.h"
+#include "clone0stage.h"
 
 #include <map>
 #include <set>
@@ -72,15 +73,7 @@ int redo_error(const std::string &what) {
   return ER_INTERNAL_ERROR;
 }
 
-/** Report an error about a staged file.
-@param[in]      path    file path
-@return ER_CANT_OPEN_FILE */
-int file_error(const std::string &path) {
-  char errbuf[MYSYS_STRERROR_SIZE];
-  my_error(ER_CANT_OPEN_FILE, MYF(0), path.c_str(), errno,
-           my_strerror(errbuf, sizeof(errbuf), errno));
-  return ER_CANT_OPEN_FILE;
-}
+int file_error(const std::string &path) { return clone_stage_file_error(path); }
 
 /** A parsed redo record waiting to be applied. */
 struct Redo_rec {
@@ -95,184 +88,6 @@ struct Redo_rec {
 
 using Page_key = std::pair<space_id_t, page_no_t>;
 using Page_recs = std::map<Page_key, std::vector<Redo_rec>>;
-
-/** A staged tablespace file, read and written page by page. */
-class Stage_file {
- public:
-  explicit Stage_file(const Clone_stage_file &file)
-      : m_path(file.m_path), m_space_id(file.m_space_id) {}
-
-  ~Stage_file() { close(); }
-
-  /** Open the file and read the tablespace header from page 0.
-  @return error code */
-  int open();
-
-  void close() {
-    if (m_open) {
-      os_file_close(m_file);
-      m_open = false;
-    }
-  }
-
-  /** Grow the file with zero pages so that a page exists.
-  @param[in]    page_no highest page number needed
-  @return error code */
-  int extend_to(page_no_t page_no);
-
-  /** @return error code */
-  int read_page(page_no_t page_no, byte *buf);
-
-  /** @return error code */
-  int write_page(page_no_t page_no, byte *buf);
-
-  const page_size_t &page_size() const { return m_page_size; }
-  space_id_t space_id() const { return m_space_id; }
-  const std::string &path() const { return m_path; }
-
- private:
-  IORequest request(ulint type, page_no_t page_no) {
-    IORequest io_request(type);
-    io_request.block_size(m_block_size);
-    if (page_no != 0 && m_encryption.can_encrypt()) {
-      io_request.get_encryption_info().set(m_encryption);
-    }
-    return io_request;
-  }
-
-  std::string m_path;
-  space_id_t m_space_id;
-  pfs_os_file_t m_file{};
-  bool m_open{false};
-  page_size_t m_page_size{0, 0, false};
-  ulint m_block_size{0};
-  page_no_t m_n_pages{0};
-  Encryption_metadata m_encryption;
-};
-
-int Stage_file::open() {
-  bool success;
-
-  m_file = os_file_create_simple_no_error_handling(
-      innodb_data_file_key, m_path.c_str(), OS_FILE_OPEN, OS_FILE_READ_WRITE,
-      srv_read_only_mode, &success);
-
-  if (!success) {
-    return file_error(m_path);
-  }
-  m_open = true;
-
-  os_file_stat_t stat_info;
-  if (os_file_get_status(m_path.c_str(), &stat_info, false, false) !=
-      DB_SUCCESS) {
-    return file_error(m_path);
-  }
-  m_block_size = stat_info.block_size;
-
-  auto page0 = static_cast<byte *>(
-      ut::aligned_alloc(UNIV_PAGE_SIZE_MAX, UNIV_PAGE_SIZE_MAX));
-  if (page0 == nullptr) {
-    return ER_OUTOFMEMORY;
-  }
-
-  IORequest io_request(IORequest::READ);
-  io_request.block_size(m_block_size);
-  auto err = os_file_read(io_request, m_path.c_str(), m_file, page0, 0,
-                          UNIV_ZIP_SIZE_MIN);
-  if (err != DB_SUCCESS) {
-    ut::aligned_free(page0);
-    return file_error(m_path);
-  }
-
-  const uint32_t flags = fsp_header_get_flags(page0);
-  if (!fsp_flags_is_valid(flags)) {
-    ut::aligned_free(page0);
-    return redo_error("invalid tablespace flags in " + m_path);
-  }
-  m_page_size.copy_from(page_size_t(flags));
-
-  if (m_page_size.is_compressed()) {
-    ut::aligned_free(page0);
-    my_error(ER_NOT_SUPPORTED_YET, MYF(0),
-             "cloning a table with ROW_FORMAT=COMPRESSED");
-    return ER_NOT_SUPPORTED_YET;
-  }
-
-  err = os_file_read(io_request, m_path.c_str(), m_file, page0, 0,
-                     m_page_size.physical());
-  if (err != DB_SUCCESS) {
-    ut::aligned_free(page0);
-    return file_error(m_path);
-  }
-
-  if (mach_read_from_4(page0 + FIL_PAGE_SPACE_ID) != m_space_id) {
-    ut::aligned_free(page0);
-    return redo_error("unexpected tablespace id in " + m_path);
-  }
-
-  /* The clone re-wrapped the tablespace key with this server's master
-  key when it wrote page 0. */
-  if (FSP_FLAGS_GET_ENCRYPTION(flags)) {
-    byte key[Encryption::KEY_LEN];
-    byte iv[Encryption::KEY_LEN];
-    Encryption_key e_key{key, iv};
-
-    if (!fsp_header_get_encryption_key(flags, e_key, page0)) {
-      ut::aligned_free(page0);
-      return redo_error("cannot read the encryption key of " + m_path);
-    }
-    Encryption::set_or_generate(Encryption::AES, key, iv, m_encryption);
-  }
-  ut::aligned_free(page0);
-
-  const auto size = os_file_get_size(m_file);
-  if (size == static_cast<os_offset_t>(~0)) {
-    return file_error(m_path);
-  }
-  m_n_pages = static_cast<page_no_t>(size / m_page_size.physical());
-
-  return 0;
-}
-
-int Stage_file::extend_to(page_no_t page_no) {
-  if (page_no < m_n_pages) {
-    return 0;
-  }
-
-  /* Pages allocated after the copy: as cloned-db recovery does, grow by
-  whole extents. Their init record comes first in the redo. */
-  page_no_t new_pages = page_no + 1;
-  if (new_pages > FSP_EXTENT_SIZE) {
-    new_pages = ut_calc_align(new_pages, FSP_EXTENT_SIZE);
-  }
-
-  const os_offset_t cur_size = os_offset_t{m_n_pages} * m_page_size.physical();
-  const os_offset_t new_size = os_offset_t{new_pages} * m_page_size.physical();
-
-  if (!os_file_set_size(m_path.c_str(), m_file, cur_size, new_size, false)) {
-    return file_error(m_path);
-  }
-  m_n_pages = new_pages;
-  return 0;
-}
-
-int Stage_file::read_page(page_no_t page_no, byte *buf) {
-  auto io_request = request(IORequest::READ, page_no);
-  const os_offset_t offset = os_offset_t{page_no} * m_page_size.physical();
-
-  auto err = os_file_read(io_request, m_path.c_str(), m_file, buf, offset,
-                          m_page_size.physical());
-  return err == DB_SUCCESS ? 0 : file_error(m_path);
-}
-
-int Stage_file::write_page(page_no_t page_no, byte *buf) {
-  auto io_request = request(IORequest::WRITE, page_no);
-  const os_offset_t offset = os_offset_t{page_no} * m_page_size.physical();
-
-  auto err = os_file_write(io_request, m_path.c_str(), m_file, buf, offset,
-                           m_page_size.physical());
-  return err == DB_SUCCESS ? 0 : file_error(m_path);
-}
 
 /** The staged redo files, read block by block from the checkpoint. */
 class Redo_reader {
@@ -450,7 +265,7 @@ int Redo_reader::next_block(byte *block, lsn_t &block_lsn, uint32_t &data_len,
 them. */
 class Redo_applier {
  public:
-  Redo_applier(THD *thd, const std::vector<Clone_stage_file> &data_files,
+  Redo_applier(THD *thd, const std::vector<Clone_stage_entry> &data_files,
                const std::vector<std::string> &redo_files)
       : m_thd(thd), m_redo(redo_files) {
     for (const auto &file : data_files) {
@@ -492,12 +307,12 @@ class Redo_applier {
 
   /** Apply the records of one page.
   @return error code */
-  int apply_page(Stage_file &file, page_no_t page_no,
+  int apply_page(Clone_stage_file &file, page_no_t page_no,
                  const std::vector<Redo_rec> &recs);
 
   /** Apply one record to the private block.
   @return error code */
-  int apply_rec(const Redo_rec &rec, Stage_file &file, page_no_t page_no,
+  int apply_rec(const Redo_rec &rec, Clone_stage_file &file, page_no_t page_no,
                 mtr_t &mtr);
 
   /** @return true if the type is a change to a page */
@@ -520,7 +335,7 @@ class Redo_applier {
 
   THD *m_thd;
   Redo_reader m_redo;
-  std::map<space_id_t, Clone_stage_file> m_spaces;
+  std::map<space_id_t, Clone_stage_entry> m_spaces;
 
   /** Parse buffer: redo bytes without block headers, from m_buf_lsn */
   std::vector<byte> m_buf;
@@ -750,7 +565,7 @@ int Redo_applier::parse_buffer() {
   return 0;
 }
 
-int Redo_applier::apply_rec(const Redo_rec &rec, Stage_file &file,
+int Redo_applier::apply_rec(const Redo_rec &rec, Clone_stage_file &file,
                             page_no_t page_no, mtr_t &mtr) {
   /* A record without a body (MLOG_INIT_FILE_PAGE2) still needs a valid
   pointer: the apply functions return nullptr for failure. */
@@ -803,7 +618,7 @@ int Redo_applier::apply_rec(const Redo_rec &rec, Stage_file &file,
   return 0;
 }
 
-int Redo_applier::apply_page(Stage_file &file, page_no_t page_no,
+int Redo_applier::apply_page(Clone_stage_file &file, page_no_t page_no,
                              const std::vector<Redo_rec> &recs) {
   auto err = file.extend_to(page_no);
   if (err != 0) {
@@ -873,9 +688,10 @@ int Redo_applier::apply_batch() {
 
   for (auto it = m_recs.begin(); it != m_recs.end() && err == 0;) {
     const space_id_t space_id = it->first.first;
-    Stage_file file(m_spaces.at(space_id));
+    const auto &stage = m_spaces.at(space_id);
+    Clone_stage_file file(stage.m_path, stage.m_space_id);
 
-    err = file.open();
+    err = file.open(true);
 
     for (; err == 0 && it != m_recs.end() && it->first.first == space_id;
          ++it) {
@@ -984,7 +800,7 @@ int Redo_applier::run() {
 }  // namespace
 
 int clone_apply_staged_redo(THD *thd,
-                            const std::vector<Clone_stage_file> &data_files,
+                            const std::vector<Clone_stage_entry> &data_files,
                             const std::vector<std::string> &redo_files) {
   if (redo_files.empty()) {
     return redo_error("no redo files were staged");

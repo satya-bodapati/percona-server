@@ -177,6 +177,17 @@ struct undo_node_t {
       this must be emptied after undo is tried on a row */
   mem_heap_t *heap;
 
+  /** Partial clone: the undo records name the donor's table id. When set,
+  the table is opened through this callback instead of the dictionary. */
+  dict_table_t *(*open_table)(table_id_t table_id, THD *thd, MDL_ticket **mdl,
+                              void *arg){nullptr};
+  void *open_table_arg{nullptr};
+
+  /** Partial clone: no reader can need an older version of a row, so a
+  secondary index entry made obsolete by the rollback is removed rather
+  than delete-marked, and the version chain is never followed. */
+  bool no_history{false};
+
   /** true if partial rollback */
   bool partial;
 

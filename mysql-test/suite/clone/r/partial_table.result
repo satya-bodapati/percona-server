@@ -153,11 +153,82 @@ call execute_dml(0, 100, 100, 100, 20, 1);
 call execute_dml(1, 0, 25, 100, 20, 1);
 # In connection con3 - Running Delete Random [26 - 50 Key Range]
 call execute_dml(2, 26, 25, 100, 20, 1);
+# In connection con4 - changes that stay uncommitted during the clone
+BEGIN;
+UPDATE t1 SET col2 = -1 WHERE col1 BETWEEN 51 AND 75;
+UPDATE t2 SET col2 = -1 WHERE col1 BETWEEN 51 AND 75;
+DELETE FROM t1 WHERE col1 = 80;
+DELETE FROM t2 WHERE col1 = 80;
+INSERT INTO t1 VALUES (500, 500, 'never committed', NULL);
+INSERT INTO t2 VALUES (500, 500, 'never committed', NULL);
 CLONE TABLE test.t1, test.t2 FROM 'root'@'HOST':PORT IDENTIFIED BY '';
+ROLLBACK;
 CHECK TABLE t1, t2;
 Table	Op	Msg_type	Msg_text
 test.t1	check	status	OK
 test.t2	check	status	OK
+# The open transaction of the donor left nothing in the clone
+SELECT col1, col2 FROM t1 WHERE col1 BETWEEN 51 AND 75 ORDER BY col1;
+col1	col2
+51	510
+52	520
+53	530
+54	540
+55	550
+56	560
+57	570
+58	580
+59	590
+60	600
+61	610
+62	620
+63	630
+64	640
+65	650
+66	660
+67	670
+68	680
+69	690
+70	700
+71	710
+72	720
+73	730
+74	740
+75	750
+SELECT col1, col2 FROM t2 WHERE col1 BETWEEN 51 AND 75 ORDER BY col1;
+col1	col2
+51	510
+52	520
+53	530
+54	540
+55	550
+56	560
+57	570
+58	580
+59	590
+60	600
+61	610
+62	620
+63	630
+64	640
+65	650
+66	660
+67	670
+68	680
+69	690
+70	700
+71	710
+72	720
+73	730
+74	740
+75	750
+SELECT col1 FROM t1 WHERE col1 IN (80, 500) ORDER BY col1;
+col1
+80
+SELECT col1 FROM t2 WHERE col1 IN (80, 500) ORDER BY col1;
+col1
+80
+include/assert_grep.inc [undo records of the open transaction were rolled back]
 # The staged redo was applied to the staged files
 include/assert_grep.inc [redo records were applied to the staged pages]
 # Cleanup

@@ -189,8 +189,8 @@ introduced where a call to log_free_check() is bypassed. */
   or if we can remove it. */
 
   if (!node->pcur.restore_position(mode, mtr, UT_LOCATION_HERE) ||
-      row_vers_must_preserve_del_marked(node->new_trx_id, node->table->name,
-                                        mtr)) {
+      (!node->no_history && row_vers_must_preserve_del_marked(
+                                node->new_trx_id, node->table->name, mtr))) {
     return (DB_SUCCESS);
   }
 
@@ -490,7 +490,8 @@ introduced where a call to log_free_check() is bypassed. */
       node->pcur.restore_position(BTR_SEARCH_LEAF, &mtr_vers, UT_LOCATION_HERE);
   ut_a(success);
 
-  old_has = row_vers_old_has_index_entry(false, node->pcur.get_rec(), &mtr_vers,
+  old_has = !node->no_history &&
+            row_vers_old_has_index_entry(false, node->pcur.get_rec(), &mtr_vers,
                                          index, entry, 0, 0, thr->prebuilt);
   if (old_has) {
     err = btr_cur_del_mark_set_sec_rec(BTR_NO_LOCKING_FLAG, btr_cur, true, thr,
@@ -1222,7 +1223,9 @@ static void row_undo_mod_parse_undo_rec(undo_node_t *node, THD *thd,
   took here. Notably, there cannot be a race between ROLLBACK and
   DROP TEMPORARY TABLE, because temporary tables are
   private to a single connection. */
-  node->table = dd_table_open_on_id(table_id, thd, mdl, false, true);
+  node->table = node->open_table != nullptr
+                    ? node->open_table(table_id, thd, mdl, node->open_table_arg)
+                    : dd_table_open_on_id(table_id, thd, mdl, false, true);
 
   if (node->table == nullptr) {
     /* Table was dropped */

@@ -1164,7 +1164,7 @@ int innodb_clone_apply(handlerton *hton, THD *thd, const byte *loc,
 @return error code */
 static int clone_finish_partial(THD *thd, Clone_Handle *clone_hdl) {
   auto snapshot = clone_hdl->get_snapshot();
-  std::vector<Clone_stage_file> data_files;
+  std::vector<Clone_stage_entry> data_files;
   std::vector<std::string> redo_files;
 
   for (const auto *file_ctx : snapshot->data_files()) {
@@ -1173,7 +1173,7 @@ static int clone_finish_partial(THD *thd, Clone_Handle *clone_hdl) {
     if (file_meta->m_space_id == dict_sys_t::s_invalid_space_id) {
       continue;
     }
-    Clone_stage_file file;
+    Clone_stage_entry file;
     file_ctx->get_file_name(file.m_path);
     file.m_space_id = file_meta->m_space_id;
     data_files.push_back(file);

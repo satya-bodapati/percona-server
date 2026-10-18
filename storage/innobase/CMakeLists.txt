@@ -101,6 +101,8 @@ SET(INNOBASE_SOURCES
   buf/buf0rea.cc
   clone/clone0api.cc
   clone/clone0redo.cc
+  clone/clone0stage.cc
+  clone/clone0undo.cc
   clone/clone0clone.cc
   clone/clone0copy.cc
   clone/clone0apply.cc
