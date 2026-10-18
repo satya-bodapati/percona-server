@@ -68,4 +68,30 @@ SET foreign_key_checks = 0;
 DROP TABLE x1, x2, a2;
 SET foreign_key_checks = 1;
 
+--echo #
+--echo # REFERENCES is needed on the parent table of every foreign key.
+--echo #
+CREATE TABLE p2 (id INT PRIMARY KEY);
+CREATE TABLE c2 (id INT PRIMARY KEY, pid INT,
+                 FOREIGN KEY (pid) REFERENCES p2 (id));
+FLUSH TABLES c2 FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/c2.ibd $A/c2.ibd
+UNLOCK TABLES;
+DROP TABLE c2;
+CREATE USER importer@localhost;
+GRANT CREATE, ALTER ON test.* TO importer@localhost;
+--copy_file $A/c2.ibd $MYSQLD_DATADIR/test/c2.ibd
+--connect (con1, localhost, importer,,test)
+--error ER_TABLEACCESS_DENIED_ERROR
+IMPORT TABLE FROM 'test/c2.ibd';
+--disconnect con1
+--connection default
+GRANT REFERENCES ON test.p2 TO importer@localhost;
+--connect (con1, localhost, importer,,test)
+IMPORT TABLE FROM 'test/c2.ibd';
+--disconnect con1
+--connection default
+DROP TABLE c2, p2;
+DROP USER importer@localhost;
+
 --force-rmdir $A

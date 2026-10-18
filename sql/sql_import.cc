@@ -504,7 +504,25 @@ bool check_ibd_location(Ibd_target *t) {
   return false;
 }
 
-/** Check that the user may create and alter the table.
+/** Get the names of the parent table of a foreign key as MDL and the
+privilege tables use them: lowercase if lower_case_table_names=2.
+@param[in]   fk     the foreign key
+@param[out]  db     schema name of the parent, NAME_LEN + 1 bytes
+@param[out]  table  table name of the parent, NAME_LEN + 1 bytes */
+void fk_parent_names(const dd::Foreign_key &fk, char *db, char *table) {
+  my_stpncpy(db, fk.referenced_table_schema_name().c_str(), NAME_LEN);
+  my_stpncpy(table, fk.referenced_table_name().c_str(), NAME_LEN);
+  db[NAME_LEN] = '\0';
+  table[NAME_LEN] = '\0';
+
+  if (lower_case_table_names == 2) {
+    my_casedn_str(system_charset_info, db);
+    my_casedn_str(system_charset_info, table);
+  }
+}
+
+/** Check that the user may create and alter the table, and, as for CREATE
+TABLE, has REFERENCES on the parent table of each of its foreign keys.
 @param[in]  thd   thread handle
 @param[in]  t     the target
 @return true if not, reported with my_error() */
@@ -521,6 +539,32 @@ bool check_ibd_privileges(THD *thd, const Ibd_target &t) {
       return true;
     }
   }
+
+  const dd::Table &source = *t.source;
+
+  for (const dd::Foreign_key *fk : source.foreign_keys()) {
+    char db[NAME_LEN + 1];
+    char table[NAME_LEN + 1];
+    fk_parent_names(*fk, db, table);
+
+    Table_ref parent(db, strlen(db), table, strlen(table), table, TL_IGNORE);
+
+    /* Privileges on some columns of the parent are not enough: REFERENCES
+    is needed on the table. */
+    if (check_access(thd, REFERENCES_ACL, parent.db, &parent.grant.privilege,
+                     &parent.grant.m_internal, false, true) ||
+        check_grant(thd, REFERENCES_ACL, &parent, false, 1, true) ||
+        (parent.grant.privilege & REFERENCES_ACL) == 0) {
+      std::string fqtn(fk->referenced_table_schema_name().c_str());
+      fqtn.append(".").append(fk->referenced_table_name().c_str());
+
+      my_error(ER_TABLEACCESS_DENIED_ERROR, MYF(0), "REFERENCES",
+               thd->security_context()->priv_user().str,
+               thd->security_context()->host_or_ip().str, fqtn.c_str());
+      return true;
+    }
+  }
+
   return false;
 }
 
@@ -1094,13 +1138,7 @@ bool Sql_cmd_import_table::execute_ibd(THD *thd) {
     for (const dd::Foreign_key *fk : source.foreign_keys()) {
       char buff_db[NAME_LEN + 1];
       char buff_table[NAME_LEN + 1];
-      my_stpncpy(buff_db, fk->referenced_table_schema_name().c_str(), NAME_LEN);
-      my_stpncpy(buff_table, fk->referenced_table_name().c_str(), NAME_LEN);
-
-      if (lower_case_table_names == 2) {
-        my_casedn_str(system_charset_info, buff_db);
-        my_casedn_str(system_charset_info, buff_table);
-      }
+      fk_parent_names(*fk, buff_db, buff_table);
 
       MDL_request *parent = new (thd->mem_root) MDL_request;
       MDL_REQUEST_INIT(parent, MDL_key::TABLE, thd->mem_strdup(buff_db),

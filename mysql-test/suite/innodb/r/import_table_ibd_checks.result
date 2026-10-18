@@ -62,3 +62,20 @@ x2	x1
 SET foreign_key_checks = 0;
 DROP TABLE x1, x2, a2;
 SET foreign_key_checks = 1;
+#
+# REFERENCES is needed on the parent table of every foreign key.
+#
+CREATE TABLE p2 (id INT PRIMARY KEY);
+CREATE TABLE c2 (id INT PRIMARY KEY, pid INT,
+FOREIGN KEY (pid) REFERENCES p2 (id));
+FLUSH TABLES c2 FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE c2;
+CREATE USER importer@localhost;
+GRANT CREATE, ALTER ON test.* TO importer@localhost;
+IMPORT TABLE FROM 'test/c2.ibd';
+ERROR 42000: REFERENCES command denied to user 'importer'@'localhost' for table 'test.p2'
+GRANT REFERENCES ON test.p2 TO importer@localhost;
+IMPORT TABLE FROM 'test/c2.ibd';
+DROP TABLE c2, p2;
+DROP USER importer@localhost;
