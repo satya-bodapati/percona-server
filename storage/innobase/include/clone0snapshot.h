@@ -386,6 +386,12 @@ class Clone_Snapshot {
   @return true if the tablespace is copied */
   bool includes_space(space_id_t space_id) const;
 
+  /** @return all data files of the snapshot */
+  const Clone_File_Vec &data_files() const { return m_data_file_vector; }
+
+  /** @return all redo files of the snapshot */
+  const Clone_File_Vec &redo_files() const { return m_redo_file_vector; }
+
   /** Get the redo file size for the snapshot
   @return redo file size */
   uint64_t get_redo_file_size() { return (m_redo_file_size); }

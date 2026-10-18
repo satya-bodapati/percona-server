@@ -104,6 +104,8 @@ otherwise.  Note that this is false while a background thread is
 rolling back incomplete transactions. */
 volatile bool recv_recovery_on;
 
+thread_local bool recv_recovery_on_thread = false;
+
 #ifdef UNIV_HOTBACKUP
 std::list<std::pair<space_id_t, lsn_t>> index_load_list;
 volatile lsn_t backup_redo_log_flushed_lsn;
@@ -2395,6 +2397,15 @@ static const byte *recv_parse_or_apply_log_rec_body(
   }
 
   return ptr;
+}
+
+const byte *recv_apply_log_rec_body(mlog_id_t type, const byte *ptr,
+                                    const byte *end_ptr, space_id_t space_id,
+                                    page_no_t page_no, buf_block_t *block,
+                                    mtr_t *mtr) {
+  ut_ad(block != nullptr && mtr != nullptr);
+  return recv_parse_or_apply_log_rec_body(type, ptr, end_ptr, space_id, page_no,
+                                          block, mtr, ULINT_UNDEFINED, LSN_MAX);
 }
 
 /** Adds a new log record to the hash table of log records.

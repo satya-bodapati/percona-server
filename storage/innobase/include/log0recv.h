@@ -67,8 +67,23 @@ lsn_t recv_calc_lsn_on_data_add(
 @param[out]	page_no		page number
 @param[out]	body		start of log record body
 @return length of the record, or 0 if the record was not complete */
-ulint recv_parse_log_rec(mlog_id_t *type, byte *ptr, byte *end_ptr,
-                         space_id_t *space_id, page_no_t *page_no, byte **body);
+/** Apply one redo record to a page, outside crash recovery.
+@param[in]      type            record type
+@param[in]      ptr             record body
+@param[in]      end_ptr         end of the record
+@param[in]      space_id        tablespace of the page
+@param[in]      page_no         page number
+@param[in,out]  block           block holding the page, x-latched in mtr
+@param[in,out]  mtr             mini-transaction, MTR_LOG_NONE
+@return pointer after the record, or nullptr on error */
+const byte *recv_apply_log_rec_body(mlog_id_t type, const byte *ptr,
+                                    const byte *end_ptr, space_id_t space_id,
+                                    page_no_t page_no, buf_block_t *block,
+                                    mtr_t *mtr);
+
+ulint recv_parse_log_rec(mlog_id_t *type, const byte *ptr, const byte *end_ptr,
+                         space_id_t *space_id, page_no_t *page_no,
+                         const byte **body);
 
 #ifdef UNIV_HOTBACKUP
 
@@ -663,6 +678,11 @@ extern recv_sys_t *recv_sys;
 otherwise.  Note that this is false while a background thread is
 rolling back incomplete transactions. */
 extern volatile bool recv_recovery_on;
+
+/** True while the current thread applies redo records outside crash
+recovery, to the private pages of a partial clone. The apply functions then
+take their recovery paths for this thread only. */
+extern thread_local bool recv_recovery_on_thread;
 
 /** If the following is true, the buffer pool file pages must be invalidated
 after recovery and no ibuf operations are allowed; this becomes true if

@@ -871,7 +871,11 @@ int Client::clone() {
 
   /* Check if storage is initialized and close. */
   if (m_storage_initialized) {
-    hton_clone_apply_end(m_server_thd, m_share->m_storage_vec, m_tasks, err);
+    auto end_err = hton_clone_apply_end(m_server_thd, m_share->m_storage_vec,
+                                        m_tasks, err);
+    if (err == 0) {
+      err = end_err;
+    }
 
     m_storage_initialized = false;
     m_storage_active = false;

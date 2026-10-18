@@ -107,6 +107,27 @@ stage 2:
   ts1.ibd: absent
   test/t3.MYD: absent
   t1.ibd size matches donor: yes
+# Clone under concurrent DML, with an open transaction at the end
+# In connection con1 - Running Insert Random [100 - 200 Key range]
+call execute_dml(0, 100, 100, 100, 20, 1);
+# In connection con2 - Running Update Random [0 - 25 Key Range]
+call execute_dml(1, 0, 25, 100, 20, 1);
+# In connection con3 - Running Delete Random [26 - 50 Key Range]
+call execute_dml(2, 26, 25, 100, 20, 1);
+# In connection con4 - Running Update Random uncommited [51 - 75 Key Range]
+begin;
+call execute_dml(1, 51, 25, 100, 200, 1);
+CLONE TABLE t1, t2 FROM 'root'@'HOST':PORT IDENTIFIED BY '';
+commit;
+# The staged redo was applied to the staged files
+include/assert_grep.inc [redo records were applied to the staged pages]
+# Every staged page has a valid checksum
+  test/t1.ibd: ok
+  test/t2#p#p0.ibd: ok
+  test/t2#p#p1.ibd: ok
+  test/t2#p#p2.ibd: ok
+  test/t2#p#p3.ibd: ok
+  test/t2#p#p4.ibd: ok
 # Cleanup
 DROP TABLE t3;
 DROP TABLESPACE ts1;

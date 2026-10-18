@@ -35,6 +35,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "clone0api.h"
 #include "clone0clone.h"
+#include "clone0redo.h"
 #include "os0thread-create.h"
 
 #include "sql/clone_handler.h"
@@ -1157,10 +1158,48 @@ int innodb_clone_apply(handlerton *hton, THD *thd, const byte *loc,
   return (err);
 }
 
+/** Make the staged files of a partial clone consistent as of its end LSN.
+@param[in]      thd             server thread handle
+@param[in]      clone_hdl       apply handle, in DONE state
+@return error code */
+static int clone_finish_partial(THD *thd, Clone_Handle *clone_hdl) {
+  auto snapshot = clone_hdl->get_snapshot();
+  std::vector<Clone_stage_file> data_files;
+  std::vector<std::string> redo_files;
+
+  for (const auto *file_ctx : snapshot->data_files()) {
+    const auto *file_meta = file_ctx->get_file_meta_read();
+    /* The buffer pool dump list travels as a data file. */
+    if (file_meta->m_space_id == dict_sys_t::s_invalid_space_id) {
+      continue;
+    }
+    Clone_stage_file file;
+    file_ctx->get_file_name(file.m_path);
+    file.m_space_id = file_meta->m_space_id;
+    data_files.push_back(file);
+  }
+
+  for (const auto *file_ctx : snapshot->redo_files()) {
+    std::string name;
+    file_ctx->get_file_name(name);
+    redo_files.push_back(name);
+  }
+
+  return clone_apply_staged_redo(thd, data_files, redo_files);
+}
+
 int innodb_clone_apply_end(handlerton *hton, THD *thd, const byte *loc,
                            uint loc_len, uint task_id, int in_err) {
+  if (in_err == 0 && task_id == 0) {
+    auto clone_hdl = clone_sys->get_clone_by_index(loc, loc_len);
+
+    if (!clone_hdl->is_init() && clone_hdl->get_snapshot()->is_partial()) {
+      in_err = clone_finish_partial(thd, clone_hdl);
+    }
+  }
+
   auto err = innodb_clone_end(hton, thd, loc, loc_len, task_id, in_err);
-  return (err);
+  return (err != 0 ? err : in_err);
 }
 
 /* Logical bitmap for clone file state. */

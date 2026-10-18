@@ -78,6 +78,70 @@ for my $id (@stages) {
 }
 EOF
 
+--perl
+use File::Path qw(remove_tree);
+remove_tree("$ENV{MYSQLTEST_VARDIR}/mysqld.1/data/#clone_stage");
+EOF
+
+--echo # Clone under concurrent DML, with an open transaction at the end
+--echo # In connection con1 - Running Insert Random [100 - 200 Key range]
+connect (con1,localhost,root,,);
+--send call execute_dml(0, 100, 100, 100, 20, 1)
+
+--echo # In connection con2 - Running Update Random [0 - 25 Key Range]
+connect (con2,localhost,root,,);
+--send call execute_dml(1, 0, 25, 100, 20, 1)
+
+--echo # In connection con3 - Running Delete Random [26 - 50 Key Range]
+connect (con3,localhost,root,,);
+--send call execute_dml(2, 26, 25, 100, 20, 1)
+
+--echo # In connection con4 - Running Update Random uncommited [51 - 75 Key Range]
+connect (con4,localhost,root,,);
+begin;
+--send call execute_dml(1, 51, 25, 100, 200, 1)
+
+--connection default
+--replace_result $HOST HOST $PORT PORT
+--eval CLONE TABLE t1, t2 FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+
+--connection con1
+--reap
+--connection con2
+--reap
+--connection con3
+--reap
+--connection con4
+--reap
+commit;
+--connection default
+--disconnect con1
+--disconnect con2
+--disconnect con3
+--disconnect con4
+
+--echo # The staged redo was applied to the staged files
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_text = redo records were applied to the staged pages
+--let $assert_select = Clone Apply redo: [1-9][0-9]* records on [1-9][0-9]* pages
+--let $assert_count_condition = >= 1
+--source include/assert_grep.inc
+
+--echo # Every staged page has a valid checksum
+--perl
+my $dir = "$ENV{MYSQLTEST_VARDIR}/mysqld.1/data/#clone_stage";
+opendir(my $dh, $dir) or die "cannot open $dir: $!";
+my @stages = grep { !/^\./ } readdir($dh);
+closedir($dh);
+die "expected one staging directory" unless @stages == 1;
+for my $f (sort(glob("$dir/$stages[0]/test/*.ibd"))) {
+  my $out = `$ENV{INNOCHECKSUM} "$f" 2>&1`;
+  my $r = $f;
+  $r =~ s/^\Q$dir\E\/[^\/]*\///;
+  print "  $r: ", ($? == 0 ? "ok" : "FAILED\n$out"), "\n";
+}
+EOF
+
 --echo # Cleanup
 --perl
 use File::Path qw(remove_tree);
