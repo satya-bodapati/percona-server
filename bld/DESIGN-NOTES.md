@@ -1520,3 +1520,71 @@ wire beyond the undo tablespaces, no second mysqld.
 4. Undo driver; test: clone under concurrent DML with open trx at the end, CHECK TABLE + checksums
    against the donor's committed state at the end LSN.
 5. `CLONE DATABASE`, error paths (crash mid-import, network retry, refusals), MTR suite.
+
+## 30. Verification results (2026-10-18; details in bld/verify-A.md, verify-B.md, verify-D.md)
+
+Confirmed as designed:
+- Index ids must be the recipient's before any B-tree access (`ut_ad` in `btr_cur_search_to_nth_level`,
+  `page_cur_*`; release `ut_a` in `btr_search_build_page_hash_index`). The redo pass rewrites them.
+- `row_undo_ins(node, thr)` / `row_undo_mod(node, thr)` are callable with a self-filled `undo_node_t`;
+  the trx needs `id` = donor trx id (asserted against DB_TRX_ID), `in_rollback`, `is_recovered`;
+  `trx_allocate_for_background()` with no rsegs works. No undo is written, redo is. Missing secondary
+  entries are tolerated (crash-recovery semantics).
+- Exactly two `dd_table_open_on_id` calls to hook (the two `*_parse_undo_rec`); purge has its own parser.
+- Undo files: in-page walkers are pure byte reads on an aligned frame; only
+  `trx_undo_get_prev_rec_from_prev_page` needs replacing by a file read. Insert/update logs of one trx
+  interleave by descending undo_no. Clone already re-wraps undo page-0 keys on the recipient.
+- `fil_tablespace_iterate` works outside fil_system; takes `Encryption_metadata` as a parameter.
+- Import branch: `row_import_convert` (file pass) / `row_import_complete` already split; attach-raw is a
+  "keep rows" mode of the pass. Undo and purge skip tables with `ibd_file_missing`, so attach-raw must
+  end with the space open and the flag cleared.
+
+Two adjustments:
+1. **Version-chain reads during rollback.** `row_undo_mod_del_mark_or_remove_sec_low` →
+   `row_vers_old_has_index_entry`, and `row_undo_mod_remove_clust_low` →
+   `row_vers_must_preserve_del_marked`, follow DB_ROLL_PTR into the *recipient's* undo space unless
+   `purge_sys->view.changes_visible(trx_id)`. Donor roll ptrs are meaningless there. Fix: a
+   `no_history` flag on `undo_node_t`, set by our driver, that answers both questions with "no older
+   version needs it" (remove). Correct for us: the recipient has no reader of older versions, and the
+   cleanup pass resets all history anyway.
+2. **Phase (c) is a re-run of the file pass, not a buffer-pool walk.** After rollback: flush and evict the
+   space's pages, `fil_close_tablespace`, mark the table discarded again, run the normal
+   `row_import_convert` + `row_import_complete`. One extra file pass, zero new cleanup code, and LOB
+   page trx ids / PAGE_MAX_TRX_ID are handled by the existing converter.
+
+## 31. Implementation log
+
+- 2026-10-18, step 1 done (commit "CLONE TABLE / CLONE DATABASE: copy selected tables into a staging
+  directory", branch ps-clone-partial on top of ps-8.4-import-refactor). Donor filter in
+  `Clone_Snapshot::add_node` via `includes_space`; names resolved in `innodb_clone_set_objects` from the
+  DD (tablespace id on the first index, `dd_write_table` sets it on the table only for the system
+  tablespace); protocol 0x0104 + `COM_OBJECTS` after version negotiation; recipient files flattened under
+  `<datadir>/#clone_stage/<query id>/`; a failed clone removes the stage directory. Test
+  `clone.partial_table`: refusals (missing table, MyISAM, general tablespace, missing schema), then
+  `CLONE TABLE t1, test.t2` and `CLONE DATABASE test` stage exactly `test/*.ibd` + `undo_001/002`.
+  - Note: the stage dir also gets `#clone/#status_fix` and `#replace_files` from `create_status_file`,
+    harmless (startup hooks key on the server's own `#clone/`), to tidy in the final step.
+- 2026-10-18, step 2 done: `clone/clone0redo.cc`. `Redo_reader` walks `#ib_redoN` from the checkpoint
+  in file 0 to the trailer block (data_len < 512), decrypting with the re-wrapped key; `Redo_applier`
+  frames mtrs (single flag / MULTI_REC_END), keeps records of staged spaces, applies per page in a
+  private `buf_block_t` (x-latched, memo-pushed in a MTR_LOG_NONE mtr) via `recv_apply_log_rec_body`
+  with `recv_recovery_on_thread` set, then `buf_flush_init_for_writing(end_lsn)` and write. Special
+  cases: page-0 n-byte records applied with `mlog_parse_nbytes` (recovery would touch fil_space);
+  page-0 WRITE_STRING at the encryption offset skipped; MLOG_FILE_*/INDEX_LOAD/DYNAMIC_META parsed for
+  length only; body-less MLOG_INIT_FILE_PAGE2 needs a non-null body pointer. Files grow by extents for
+  pages allocated after the copy. Hooked in `innodb_clone_apply_end` (master, success); the plugin now
+  propagates apply_end's error. Test: clone under concurrent DML → "Clone Apply redo: N records on M
+  pages" asserted in the error log and innochecksum on every staged .ibd. Correctness of the applied
+  pages is proven only by step 3 (import and compare rows).
+- 2026-10-18, step 3 done: the staged tables become tables. `Sql_cmd_clone::execute` moves
+  `<stage>/<db>/*.ibd` into `<datadir>/<db>/` (creating the schema with server defaults if missing,
+  not binlogged), calls `import_ibd_files()` (the body of `IMPORT TABLE FROM '.ibd'`, now callable with a
+  file list and a `clone_stage_dir`), then removes the stage. InnoDB `row_import_attach` with a stage
+  dir runs two passes: `row_import_convert(keep_rows=true)` + `row_import_complete` (rows, trx ids,
+  delete marks and LOB trx ids untouched; purge skipped because nothing was attempted), the rollback
+  hook `row_import_clone_rollback` (stub until step 4), then `row_import_clone_finish`: flush + evict,
+  `fil_close_tablespace`, mark discarded, remap `cfg.m_indexes[i].m_id` to the new ids, full convert
+  and complete again. Needed on the SQL side: `Disable_autocommit_guard` (DD updates assert it) and an
+  `Auto_releaser` around the schema lookup. Test `clone.partial_table` is now two servers: refusals,
+  CLONE TABLE / CLONE DATABASE with CHECKSUM TABLE equal to the donor, DML on the clones, clone under
+  concurrent DML (CHECK TABLE only until the undo step).

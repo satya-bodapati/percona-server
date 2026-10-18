@@ -1,19 +1,20 @@
-# CLONE TABLE / CLONE DATABASE copy only the selected tables and the undo
-# tablespaces, into a staging directory under the data directory.
+# CLONE TABLE / CLONE DATABASE: the recipient (server 2) copies only the
+# selected tables and the undo tablespaces of the donor (server 1), makes
+# the files consistent as of the end of the clone, and imports them.
 
 --source include/have_innodb_default_undo_tablespaces.inc
+--let clone_inst_number = 2
 --source ../include/clone_connection_begin.inc
 
 --let $HOST = 127.0.0.1
---let $PORT = `select @@port`
+--let $PORT = $SERVER_PORT_1
 --let $USER = root
---let $MYSQLD_DATADIR = `select @@datadir`
+--let $RECIPIENT_DATADIR = $MYSQLTEST_VARDIR/mysqld.2/data
 
+--echo # Donor
+--connection default
 --replace_result $CLONE_PLUGIN CLONE_PLUGIN
 --eval INSTALL PLUGIN clone SONAME '$CLONE_PLUGIN'
-
---replace_result $HOST HOST $PORT PORT
---eval SET GLOBAL clone_valid_donor_list = '$HOST:$PORT'
 
 --source ../include/create_schema.inc
 call execute_dml(0, 0, 100, 100, 10, 0);
@@ -21,6 +22,13 @@ call execute_dml(0, 0, 100, 100, 10, 0);
 CREATE TABLE t3 (a INT) ENGINE = MyISAM;
 CREATE TABLESPACE ts1 ADD DATAFILE 'ts1.ibd';
 CREATE TABLE t4 (a INT) TABLESPACE ts1;
+
+CHECKSUM TABLE t1, t2;
+
+--echo # Recipient
+--connection clone_conn_1
+--replace_result $HOST HOST $PORT PORT
+--eval SET GLOBAL clone_valid_donor_list = '$HOST:$PORT'
 
 --echo # The donor refuses what it cannot clone
 --replace_result $HOST HOST $PORT PORT
@@ -39,51 +47,42 @@ CREATE TABLE t4 (a INT) TABLESPACE ts1;
 --error ER_CLONE_DONOR
 --eval CLONE DATABASE db_missing FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
 
---echo # Nothing was staged
---list_files $MYSQLD_DATADIR/#clone_stage
+--echo # Nothing is left of a failed clone
+--list_files $RECIPIENT_DATADIR/#clone_stage
+SHOW TABLES;
 
 --echo # Clone two tables: a plain one and a partitioned one
 --replace_result $HOST HOST $PORT PORT
---eval CLONE TABLE t1, test.t2 FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+--eval CLONE TABLE test.t1, test.t2 FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+
+SHOW TABLES;
+CHECKSUM TABLE t1, t2;
+CHECK TABLE t1, t2;
+SELECT col1, col2, col3 FROM t1 ORDER BY col1 LIMIT 5;
+SELECT col1, col2, col3 FROM t2 ORDER BY col1 DESC LIMIT 5;
+--list_files $RECIPIENT_DATADIR/#clone_stage
+--list_files $RECIPIENT_DATADIR/test *.ibd
+
+--echo # The cloned tables are tables like any other
+INSERT INTO t1 VALUES (1000, 1, 'added here', NULL);
+DELETE FROM t2 WHERE col1 = 1;
+SELECT COUNT(*) FROM t1;
+SELECT COUNT(*) FROM t2;
+DROP TABLE t1, t2;
 
 --echo # Clone a database: its InnoDB tables, not the MyISAM one
+--connection default
 DROP TABLE t4;
+--connection clone_conn_1
 --replace_result $HOST HOST $PORT PORT
 --eval CLONE DATABASE test FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
 
---echo # Staged files: selected tables and undo tablespaces only
---perl
-my $datadir = "$ENV{MYSQLTEST_VARDIR}/mysqld.1/data";
-my $dir = "$datadir/#clone_stage";
-opendir(my $dh, $dir) or die "cannot open $dir: $!";
-my @stages = sort grep { !/^\./ } readdir($dh);
-closedir($dh);
-print scalar(@stages), " staging directories\n";
-my $n = 0;
-for my $id (@stages) {
-  my $stage = "$dir/$id";
-  ++$n;
-  print "stage $n:\n";
-  for my $f (sort(glob("$stage/test/*")), sort(glob("$stage/undo_*"))) {
-    my $r = $f;
-    $r =~ s/^\Q$stage\E\///;
-    print "  $r\n";
-  }
-  for my $f ("ibdata1", "mysql.ibd", "ts1.ibd", "test/t3.MYD") {
-    print "  $f: ", (-e "$stage/$f" ? "present" : "absent"), "\n";
-  }
-  my $size = -s "$stage/test/t1.ibd";
-  my $donor = -s "$datadir/test/t1.ibd";
-  print "  t1.ibd size matches donor: ", ($size == $donor ? "yes" : "no"), "\n";
-}
-EOF
+SHOW TABLES;
+CHECKSUM TABLE t1, t2;
+DROP TABLE t1, t2;
 
---perl
-use File::Path qw(remove_tree);
-remove_tree("$ENV{MYSQLTEST_VARDIR}/mysqld.1/data/#clone_stage");
-EOF
-
---echo # Clone under concurrent DML, with an open transaction at the end
+--echo # Clone under concurrent DML on the donor
+--connection default
 --echo # In connection con1 - Running Insert Random [100 - 200 Key range]
 connect (con1,localhost,root,,);
 --send call execute_dml(0, 100, 100, 100, 20, 1)
@@ -96,14 +95,9 @@ connect (con2,localhost,root,,);
 connect (con3,localhost,root,,);
 --send call execute_dml(2, 26, 25, 100, 20, 1)
 
---echo # In connection con4 - Running Update Random uncommited [51 - 75 Key Range]
-connect (con4,localhost,root,,);
-begin;
---send call execute_dml(1, 51, 25, 100, 200, 1)
-
---connection default
+--connection clone_conn_1
 --replace_result $HOST HOST $PORT PORT
---eval CLONE TABLE t1, t2 FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+--eval CLONE TABLE test.t1, test.t2 FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
 
 --connection con1
 --reap
@@ -111,43 +105,35 @@ begin;
 --reap
 --connection con3
 --reap
---connection con4
---reap
-commit;
 --connection default
 --disconnect con1
 --disconnect con2
 --disconnect con3
---disconnect con4
+
+--connection clone_conn_1
+CHECK TABLE t1, t2;
+--list_files $RECIPIENT_DATADIR/#clone_stage
 
 --echo # The staged redo was applied to the staged files
---let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.2.err
 --let $assert_text = redo records were applied to the staged pages
 --let $assert_select = Clone Apply redo: [1-9][0-9]* records on [1-9][0-9]* pages
 --let $assert_count_condition = >= 1
 --source include/assert_grep.inc
 
---echo # Every staged page has a valid checksum
---perl
-my $dir = "$ENV{MYSQLTEST_VARDIR}/mysqld.1/data/#clone_stage";
-opendir(my $dh, $dir) or die "cannot open $dir: $!";
-my @stages = grep { !/^\./ } readdir($dh);
-closedir($dh);
-die "expected one staging directory" unless @stages == 1;
-for my $f (sort(glob("$dir/$stages[0]/test/*.ibd"))) {
-  my $out = `$ENV{INNOCHECKSUM} "$f" 2>&1`;
-  my $r = $f;
-  $r =~ s/^\Q$dir\E\/[^\/]*\///;
-  print "  $r: ", ($? == 0 ? "ok" : "FAILED\n$out"), "\n";
-}
-EOF
-
 --echo # Cleanup
---perl
-use File::Path qw(remove_tree);
-remove_tree("$ENV{MYSQLTEST_VARDIR}/mysqld.1/data/#clone_stage");
-EOF
+DROP TABLE t1, t2;
 
+# The objects clone_connection_begin.inc created on the recipient; a clone
+# that replaces the data directory would have removed them.
+DROP TABLE t_recipient;
+DROP TABLESPACE tbs1_recipient;
+ALTER UNDO TABLESPACE undo_005 SET INACTIVE;
+--let $wait_condition = SELECT STATE = 'empty' FROM INFORMATION_SCHEMA.INNODB_TABLESPACES WHERE NAME = 'undo_005'
+--source include/wait_condition.inc
+DROP UNDO TABLESPACE undo_005;
+
+--connection default
 DROP TABLE t3;
 DROP TABLESPACE ts1;
 --source ../include/drop_schema.inc

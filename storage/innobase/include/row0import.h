@@ -101,11 +101,15 @@ place and attached as for ALTER TABLE ... IMPORT TABLESPACE.
 @param[in]      source_part         partition of source_def that table is,
                                     or nullptr
 @param[in]      compression_option  COMPRESSION= option of the table
+@param[in]      clone_stage_dir     staging directory of a partial clone, or
+                                    nullptr: roll back the donor's open
+                                    transactions before converting the rows
 @return DB_SUCCESS or error code; errors are reported to thd */
 [[nodiscard]] dberr_t row_import_attach(THD *thd, dict_table_t *table,
                                         dd::Table *table_def,
                                         const dd::Table &source_def,
                                         const dd::Partition *source_part,
-                                        const char *compression_option);
+                                        const char *compression_option,
+                                        const char *clone_stage_dir);
 
 #endif /* row0import_h */

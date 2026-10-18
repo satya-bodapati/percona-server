@@ -24,12 +24,29 @@
 #ifndef SQL_IMPORT_INCLUDED
 #define SQL_IMPORT_INCLUDED
 
+#include <string>
+#include <vector>
 #include "lex_string.h"
 #include "my_sqlcommand.h"
 #include "sql/mem_root_array.h"
+
 #include "sql/sql_cmd.h"  // Sql_cmd
 
 class THD;
+
+/**
+  Import tables from InnoDB tablespace files (*.ibd) that are already in
+  the place the tables keep their tablespaces. The table definitions are
+  read from the SDI in the files. Used by IMPORT TABLE FROM '<file>.ibd'
+  and by a partial clone for its staged files.
+  @param thd              thread handle
+  @param files            the tablespace files
+  @param clone_stage_dir  staging directory of a partial clone, or nullptr
+  @retval true on error
+  @retval false otherwise
+*/
+bool import_ibd_files(THD *thd, const std::vector<std::string> &files,
+                      const char *clone_stage_dir);
 
 /**
   @file sql/sql_import.h Declaration of command class for the IMPORT TABLES

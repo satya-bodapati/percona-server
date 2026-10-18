@@ -1,5 +1,11 @@
+Install clone plugin on recipient server
 INSTALL PLUGIN clone SONAME 'CLONE_PLUGIN';
-SET GLOBAL clone_valid_donor_list = 'HOST:PORT';
+CREATE TABLE t_recipient(col1 INT PRIMARY KEY, col2 int);
+INSERT INTO t_recipient VALUES(1, 10);
+CREATE UNDO TABLESPACE undo_005 ADD DATAFILE 'undo_005.ibu';
+CREATE TABLESPACE tbs1_recipient ADD DATAFILE 'tbs1_data1.ibd';
+# Donor
+INSTALL PLUGIN clone SONAME 'CLONE_PLUGIN';
 CREATE TABLE t1(col1 INT PRIMARY KEY, col2 int, col3 varchar(64), col4 BLOB);
 CREATE TABLE t2(col1 INT PRIMARY KEY, col2 int, col3 varchar(64), col4 BLOB)
 PARTITION BY KEY(col1) PARTITIONS 5;
@@ -62,6 +68,12 @@ call execute_dml(0, 0, 100, 100, 10, 0);
 CREATE TABLE t3 (a INT) ENGINE = MyISAM;
 CREATE TABLESPACE ts1 ADD DATAFILE 'ts1.ibd';
 CREATE TABLE t4 (a INT) TABLESPACE ts1;
+CHECKSUM TABLE t1, t2;
+Table	Checksum
+test.t1	3009907073
+test.t2	3009907073
+# Recipient
+SET GLOBAL clone_valid_donor_list = 'HOST:PORT';
 # The donor refuses what it cannot clone
 CLONE TABLE test.t_missing FROM 'root'@'HOST':PORT IDENTIFIED BY '';
 ERROR HY000: Clone Donor Error: 1146 : Table 'test.t_missing' doesn't exist.
@@ -71,67 +83,94 @@ CLONE TABLE test.t4 FROM 'root'@'HOST':PORT IDENTIFIED BY '';
 ERROR HY000: Clone Donor Error: 1235 : This version of MySQL doesn't yet support 'cloning a table from a general or system tablespace'.
 CLONE DATABASE db_missing FROM 'root'@'HOST':PORT IDENTIFIED BY '';
 ERROR HY000: Clone Donor Error: 1049 : Unknown database 'db_missing'.
-# Nothing was staged
+# Nothing is left of a failed clone
+SHOW TABLES;
+Tables_in_test
+t_recipient
 # Clone two tables: a plain one and a partitioned one
-CLONE TABLE t1, test.t2 FROM 'root'@'HOST':PORT IDENTIFIED BY '';
+CLONE TABLE test.t1, test.t2 FROM 'root'@'HOST':PORT IDENTIFIED BY '';
+SHOW TABLES;
+Tables_in_test
+t1
+t2
+t_recipient
+CHECKSUM TABLE t1, t2;
+Table	Checksum
+test.t1	3009907073
+test.t2	3009907073
+CHECK TABLE t1, t2;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+test.t2	check	status	OK
+SELECT col1, col2, col3 FROM t1 ORDER BY col1 LIMIT 5;
+col1	col2	col3
+0	0	Clone Test Row - 0
+1	10	Clone Test Row - 1
+2	20	Clone Test Row - 2
+3	30	Clone Test Row - 3
+4	40	Clone Test Row - 4
+SELECT col1, col2, col3 FROM t2 ORDER BY col1 DESC LIMIT 5;
+col1	col2	col3
+99	990	Clone Test Row - 99
+98	980	Clone Test Row - 98
+97	970	Clone Test Row - 97
+96	960	Clone Test Row - 96
+95	950	Clone Test Row - 95
+t1.ibd
+t2#p#p0.ibd
+t2#p#p1.ibd
+t2#p#p2.ibd
+t2#p#p3.ibd
+t2#p#p4.ibd
+t_recipient.ibd
+# The cloned tables are tables like any other
+INSERT INTO t1 VALUES (1000, 1, 'added here', NULL);
+DELETE FROM t2 WHERE col1 = 1;
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+101
+SELECT COUNT(*) FROM t2;
+COUNT(*)
+99
+DROP TABLE t1, t2;
 # Clone a database: its InnoDB tables, not the MyISAM one
 DROP TABLE t4;
 CLONE DATABASE test FROM 'root'@'HOST':PORT IDENTIFIED BY '';
-# Staged files: selected tables and undo tablespaces only
-2 staging directories
-stage 1:
-  test/t1.ibd
-  test/t2#p#p0.ibd
-  test/t2#p#p1.ibd
-  test/t2#p#p2.ibd
-  test/t2#p#p3.ibd
-  test/t2#p#p4.ibd
-  undo_001
-  undo_002
-  ibdata1: absent
-  mysql.ibd: absent
-  ts1.ibd: absent
-  test/t3.MYD: absent
-  t1.ibd size matches donor: yes
-stage 2:
-  test/t1.ibd
-  test/t2#p#p0.ibd
-  test/t2#p#p1.ibd
-  test/t2#p#p2.ibd
-  test/t2#p#p3.ibd
-  test/t2#p#p4.ibd
-  undo_001
-  undo_002
-  ibdata1: absent
-  mysql.ibd: absent
-  ts1.ibd: absent
-  test/t3.MYD: absent
-  t1.ibd size matches donor: yes
-# Clone under concurrent DML, with an open transaction at the end
+SHOW TABLES;
+Tables_in_test
+t1
+t2
+t_recipient
+CHECKSUM TABLE t1, t2;
+Table	Checksum
+test.t1	3009907073
+test.t2	3009907073
+DROP TABLE t1, t2;
+# Clone under concurrent DML on the donor
 # In connection con1 - Running Insert Random [100 - 200 Key range]
 call execute_dml(0, 100, 100, 100, 20, 1);
 # In connection con2 - Running Update Random [0 - 25 Key Range]
 call execute_dml(1, 0, 25, 100, 20, 1);
 # In connection con3 - Running Delete Random [26 - 50 Key Range]
 call execute_dml(2, 26, 25, 100, 20, 1);
-# In connection con4 - Running Update Random uncommited [51 - 75 Key Range]
-begin;
-call execute_dml(1, 51, 25, 100, 200, 1);
-CLONE TABLE t1, t2 FROM 'root'@'HOST':PORT IDENTIFIED BY '';
-commit;
+CLONE TABLE test.t1, test.t2 FROM 'root'@'HOST':PORT IDENTIFIED BY '';
+CHECK TABLE t1, t2;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+test.t2	check	status	OK
 # The staged redo was applied to the staged files
 include/assert_grep.inc [redo records were applied to the staged pages]
-# Every staged page has a valid checksum
-  test/t1.ibd: ok
-  test/t2#p#p0.ibd: ok
-  test/t2#p#p1.ibd: ok
-  test/t2#p#p2.ibd: ok
-  test/t2#p#p3.ibd: ok
-  test/t2#p#p4.ibd: ok
 # Cleanup
+DROP TABLE t1, t2;
+DROP TABLE t_recipient;
+DROP TABLESPACE tbs1_recipient;
+ALTER UNDO TABLESPACE undo_005 SET INACTIVE;
+DROP UNDO TABLESPACE undo_005;
 DROP TABLE t3;
 DROP TABLESPACE ts1;
 DROP TABLE t1;
 DROP TABLE t2;
 DROP PROCEDURE execute_dml;
+UNINSTALL PLUGIN clone;
+Uninstall clone plugin on recipient server
 UNINSTALL PLUGIN clone;

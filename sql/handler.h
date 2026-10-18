@@ -3236,8 +3236,8 @@ inline constexpr const decltype(handlerton::flags) HTON_SUPPORTS_DISTANCE_SCAN{
     1 << 23};
 
 /* Whether the engine supports being specified as a default storage engine */
-inline constexpr const decltype(handlerton::flags)
-    HTON_NO_DEFAULT_ENGINE_SUPPORT{1 << 24};
+inline constexpr const decltype(
+    handlerton::flags) HTON_NO_DEFAULT_ENGINE_SUPPORT{1 << 24};
 
 /** Start of Percona specific HTON_* defines */
 
@@ -3477,6 +3477,14 @@ struct HA_CREATE_INFO {
     definition read from the SDI of those files.
   */
   const dd::Table *m_import_source{nullptr};
+
+  /**
+    Set with m_import_source by a partial clone: the staging directory of
+    the clone, holding the undo tablespaces of the donor. The engine rolls
+    back the transactions that were open on the donor before it converts
+    the rows.
+  */
+  const char *m_clone_stage_dir{nullptr};
 };
 
 /**
@@ -4371,7 +4379,9 @@ class Ft_hints {
 
      @return pointer to ft_hints struct
    */
-  struct ft_hints *get_hints() { return &hints; }
+  struct ft_hints *get_hints() {
+    return &hints;
+  }
 };
 
 /**

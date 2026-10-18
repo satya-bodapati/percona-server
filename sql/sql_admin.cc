@@ -62,6 +62,7 @@
 #include "sql/auth/sql_security_ctx.h"
 #include "sql/clone_handler.h"
 #include "sql/dd/cache/dictionary_client.h"  // dd::cache::Dictionary_client
+#include "sql/dd/dd_schema.h"                // dd::Schema_MDL_locker
 #include "sql/dd/dd_table.h"                 // dd::recreate_table
 #include "sql/dd/impl/sdi_utils.h"           // mdl_lock
 #include "sql/dd/info_schema/table_stats.h"  // dd::info_schema::update_*
@@ -95,7 +96,9 @@
 #include "sql/sql_backup_lock.h"     // acquire_shared_backup_lock
 #include "sql/sql_base.h"            // Open_table_context
 #include "sql/sql_class.h"           // THD
+#include "sql/sql_db.h"              // mysql_create_db
 #include "sql/sql_error.h"
+#include "sql/sql_import.h"  // import_ibd_files
 #include "sql/sql_lex.h"
 #include "sql/sql_list.h"
 #include "sql/sql_parse.h"      // check_table_access
@@ -2275,6 +2278,140 @@ static void remove_clone_stage_dir(const std::string &dir) {
   rmdir(dir.c_str());
 }
 
+/** Make sure a schema of the clone exists here; create it when it does
+not, with the server defaults.
+@param[in]  thd         session
+@param[in]  schema_fs   schema directory name
+@return true on error */
+static bool ensure_clone_schema(THD *thd, const char *schema_fs) {
+  char schema_name[NAME_LEN + 1];
+  filename_to_tablename(schema_fs, schema_name, sizeof(schema_name), true);
+
+  dd::Schema_MDL_locker mdl_locker(thd);
+  const dd::Schema *schema = nullptr;
+
+  {
+    const dd::cache::Dictionary_client::Auto_releaser releaser(
+        thd->dd_client());
+
+    if (mdl_locker.ensure_locked(schema_name) ||
+        thd->dd_client()->acquire(schema_name, &schema)) {
+      return true;
+    }
+    if (schema != nullptr) {
+      return false;
+    }
+  }
+
+  /* A clone is not replicated; neither is the schema it needs. */
+  const ulonglong saved_options = thd->variables.option_bits;
+  thd->variables.option_bits &= ~OPTION_BIN_LOG;
+
+  HA_CREATE_INFO create_info;
+  const bool failed = mysql_create_db(thd, schema_name, &create_info);
+
+  thd->variables.option_bits = saved_options;
+  return failed;
+}
+
+/** Move the staged table files of a partial clone into the data directory
+and import them. The schema directories of the stage hold the files; every
+other entry belongs to the clone itself.
+@param[in]  thd        session
+@param[in]  stage_dir  staging directory
+@return true on error */
+static bool import_clone_stage(THD *thd, const std::string &stage_dir) {
+  std::vector<std::string> moved;
+  bool failed = false;
+
+  /* As IMPORT TABLE runs: the dictionary changes of the import are one
+  transaction, committed by the import itself. */
+  Disable_autocommit_guard autocommit_guard(thd);
+
+  MY_DIR *schemas = my_dir(stage_dir.c_str(), MYF(MY_WANT_STAT));
+  if (schemas == nullptr) {
+    my_error(ER_CANT_READ_DIR, MYF(0), stage_dir.c_str(), errno);
+    return true;
+  }
+
+  for (uint i = 0; i < schemas->number_off_files && !failed; ++i) {
+    const auto &schema = schemas->dir_entry[i];
+    if (schema.name[0] == '.' || schema.name[0] == '#' ||
+        schema.mystat == nullptr || !MY_S_ISDIR(schema.mystat->st_mode)) {
+      continue;
+    }
+
+    std::string from_dir = stage_dir;
+    from_dir.push_back(FN_LIBCHAR);
+    from_dir.append(schema.name);
+
+    MY_DIR *entries = my_dir(from_dir.c_str(), MYF(MY_WANT_STAT));
+    if (entries == nullptr) {
+      my_error(ER_CANT_READ_DIR, MYF(0), from_dir.c_str(), errno);
+      failed = true;
+      break;
+    }
+
+    bool has_tables = false;
+    for (uint j = 0; j < entries->number_off_files; ++j) {
+      const char *name = entries->dir_entry[j].name;
+      const size_t len = strlen(name);
+      if (len > 4 && strcmp(name + len - 4, ".ibd") == 0) {
+        has_tables = true;
+        break;
+      }
+    }
+
+    if (has_tables) {
+      failed = ensure_clone_schema(thd, schema.name);
+
+      std::string to_dir(mysql_real_data_home);
+      to_dir.append(schema.name);
+
+      for (uint j = 0; j < entries->number_off_files && !failed; ++j) {
+        const char *name = entries->dir_entry[j].name;
+        const size_t len = strlen(name);
+        if (len <= 4 || strcmp(name + len - 4, ".ibd") != 0) {
+          continue;
+        }
+
+        std::string from = from_dir;
+        from.push_back(FN_LIBCHAR);
+        from.append(name);
+        std::string to = to_dir;
+        to.push_back(FN_LIBCHAR);
+        to.append(name);
+
+        MY_STAT stat_info;
+        if (mysql_file_stat(key_file_misc, to.c_str(), &stat_info, MYF(0)) !=
+            nullptr) {
+          my_error(ER_FILE_EXISTS_ERROR, MYF(0), to.c_str());
+          failed = true;
+        } else if (mysql_file_rename(key_file_misc, from.c_str(), to.c_str(),
+                                     MYF(MY_WME))) {
+          failed = true;
+        } else {
+          moved.push_back(to);
+        }
+      }
+    }
+    my_dirend(entries);
+  }
+  my_dirend(schemas);
+
+  if (!failed && !moved.empty()) {
+    failed = import_ibd_files(thd, moved, stage_dir.c_str());
+  }
+
+  if (failed) {
+    /* The import removed what it had started on; remove the rest. */
+    for (const auto &file : moved) {
+      mysql_file_delete(key_file_misc, file.c_str(), MYF(0));
+    }
+  }
+  return failed;
+}
+
 bool Sql_cmd_clone::execute(THD *thd) {
   DBUG_TRACE;
 
@@ -2392,8 +2529,21 @@ bool Sql_cmd_clone::execute(THD *thd) {
 
   /* Check for KILL after setting active VIO */
   if (!is_replace && thd->killed != THD::NOT_KILLED) {
+    if (is_partial()) {
+      remove_clone_stage_dir(stage_dir);
+    }
     my_error(ER_QUERY_INTERRUPTED, MYF(0));
     return true;
+  }
+
+  /* The staged files are consistent as of the end of the clone. Make them
+  tables here, then nothing of the stage is needed any more. */
+  if (is_partial()) {
+    const bool failed = import_clone_stage(thd, stage_dir);
+    remove_clone_stage_dir(stage_dir);
+    if (failed) {
+      return true;
+    }
   }
 
   /* Restart server after successfully cloning to current data directory. */

@@ -15253,7 +15253,8 @@ int create_table_info_t::attach_tablespace(Table *dd_tab) {
   }
 
   dberr_t err = row_import_attach(m_thd, m_table, &dd_tab->table(), source,
-                                  source_part, m_create_info->compress.str);
+                                  source_part, m_create_info->compress.str,
+                                  m_create_info->m_clone_stage_dir);
 
   if (err != DB_SUCCESS) {
     return convert_error_code_to_mysql(err, m_table->flags, m_thd);
@@ -19651,7 +19652,7 @@ int ha_innobase::extra(enum ha_extra_function operation)
       m_prebuilt->no_autoinc_locking = true;
       break;
     default: /* Do nothing */
-        ;
+             ;
   }
 
   return (0);

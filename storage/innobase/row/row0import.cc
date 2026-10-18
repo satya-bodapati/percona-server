@@ -853,8 +853,11 @@ class PageConverter : public AbstractCallback {
  public:
   /** Constructor
   @param cfg config of table being imported.
-  @param trx transaction covering the import */
-  PageConverter(row_import *cfg, trx_t *trx) UNIV_NOTHROW;
+  @param trx transaction covering the import
+  @param keep_rows leave DB_TRX_ID, DB_ROLL_PTR, delete marks and the LOB
+  transaction ids as they are: a partial clone rolls back the uncommitted
+  transactions of the file first, and converts the rows afterwards */
+  PageConverter(row_import *cfg, trx_t *trx, bool keep_rows) UNIV_NOTHROW;
 
   ~PageConverter() UNIV_NOTHROW override {
     if (m_heap != nullptr) {
@@ -1011,6 +1014,9 @@ class PageConverter : public AbstractCallback {
 
   /** Memory heap for the record offsets */
   mem_heap_t *m_heap;
+
+  /** true to leave the rows as the file has them (see the constructor) */
+  bool m_keep_rows;
 
   /** Cluster index instance */
   dict_index_t *m_cluster_index;
@@ -2310,11 +2316,12 @@ void IndexPurge::purge() UNIV_NOTHROW {
 /** Constructor
 @param cfg config of table being imported.
 @param trx transaction covering the import */
-PageConverter::PageConverter(row_import *cfg, trx_t *trx)
+PageConverter::PageConverter(row_import *cfg, trx_t *trx, bool keep_rows)
     : AbstractCallback(trx),
       m_cfg(cfg),
       m_page_zip_ptr(nullptr),
-      m_heap(nullptr) UNIV_NOTHROW {
+      m_heap(nullptr),
+      m_keep_rows(keep_rows) UNIV_NOTHROW {
   m_index = m_cfg->m_indexes;
 
   m_current_lsn = log_sys->flushed_to_disk_lsn;
@@ -2438,7 +2445,8 @@ dberr_t PageConverter::adjust_cluster_record(
 
   ut_ad(index->is_clustered());
 
-  if ((err = adjust_cluster_index_blob_ref(rec, offsets)) == DB_SUCCESS) {
+  if ((err = adjust_cluster_index_blob_ref(rec, offsets)) == DB_SUCCESS &&
+      !m_keep_rows) {
     /* Reset DB_TRX_ID and DB_ROLL_PTR.  Normally, these fields
     are only written in conjunction with other changes to the
     record. */
@@ -2538,7 +2546,7 @@ dberr_t PageConverter::update_records(buf_block_t *block) UNIV_NOTHROW {
       /* A successful purge will move the cursor to the
       next record. */
 
-      if (!purge()) {
+      if (m_keep_rows || !purge()) {
         m_rec_iter.next();
       }
 
@@ -2601,7 +2609,9 @@ dberr_t PageConverter::update_index_page(buf_block_t *block) UNIV_NOTHROW {
   btr_page_set_index_id(page, m_page_zip_ptr, m_index->m_srv_index->id,
                         nullptr);
 
-  page_set_max_trx_id(block, m_page_zip_ptr, m_trx->id, nullptr);
+  if (!m_keep_rows) {
+    page_set_max_trx_id(block, m_page_zip_ptr, m_trx->id, nullptr);
+  }
 
   if (page_is_empty(block->frame)) {
     /* Only a root page can be empty. */
@@ -2689,21 +2699,27 @@ dberr_t PageConverter::update_page(buf_block_t *block,
 
     case FIL_PAGE_TYPE_LOB_FIRST: {
       lob::first_page_t first_page(block);
-      first_page.import(m_trx->id);
+      if (!m_keep_rows) {
+        first_page.import(m_trx->id);
+      }
       first_page.set_space_id_no_redo(get_space_id());
       return (err);
     }
 
     case FIL_PAGE_TYPE_LOB_INDEX: {
       lob::node_page_t node_page(block);
-      node_page.import(m_trx->id);
+      if (!m_keep_rows) {
+        node_page.import(m_trx->id);
+      }
       node_page.set_space_id_no_redo(get_space_id());
       return (err);
     }
 
     case FIL_PAGE_TYPE_LOB_DATA: {
       lob::data_page_t data_page(block);
-      data_page.set_trx_id_no_redo(m_trx->id);
+      if (!m_keep_rows) {
+        data_page.set_trx_id_no_redo(m_trx->id);
+      }
       data_page.set_space_id_no_redo(get_space_id());
       return (err);
     }
@@ -2711,7 +2727,9 @@ dberr_t PageConverter::update_page(buf_block_t *block,
     case FIL_PAGE_TYPE_ZLOB_FIRST: {
       dict_index_t *index = const_cast<dict_index_t *>(m_index->m_srv_index);
       lob::z_first_page_t first_page(block, nullptr, index);
-      first_page.import(m_trx->id);
+      if (!m_keep_rows) {
+        first_page.import(m_trx->id);
+      }
       byte *ptr = get_frame(block) + FIL_PAGE_SPACE_ID;
       mach_write_to_4(ptr, get_space_id());
       return (err);
@@ -2719,7 +2737,9 @@ dberr_t PageConverter::update_page(buf_block_t *block,
 
     case FIL_PAGE_TYPE_ZLOB_DATA: {
       lob::z_data_page_t dpage(block);
-      dpage.set_trx_id_no_redo(m_trx->id);
+      if (!m_keep_rows) {
+        dpage.set_trx_id_no_redo(m_trx->id);
+      }
       byte *ptr = get_frame(block) + FIL_PAGE_SPACE_ID;
       mach_write_to_4(ptr, get_space_id());
       return (err);
@@ -2728,7 +2748,9 @@ dberr_t PageConverter::update_page(buf_block_t *block,
     case FIL_PAGE_TYPE_ZLOB_INDEX: {
       lob::z_index_page_t ipage(
           block, const_cast<dict_index_t *>(m_index->m_srv_index));
-      ipage.import(m_trx->id);
+      if (!m_keep_rows) {
+        ipage.import(m_trx->id);
+      }
       byte *ptr = get_frame(block) + FIL_PAGE_SPACE_ID;
       mach_write_to_4(ptr, get_space_id());
       return (err);
@@ -4728,7 +4750,8 @@ Delete-marked records are purged where possible.
 @param[in,out]  cfg     metadata of the tablespace file
 @return outcome; errors are already reported */
 [[nodiscard]] static Import_status row_import_convert(Import_ctx &ctx,
-                                                      row_import &cfg) {
+                                                      row_import &cfg,
+                                                      bool keep_rows) {
   dict_table_t *table = ctx.table;
   trx_t *trx = ctx.trx;
 
@@ -4741,7 +4764,7 @@ Delete-marked records are purged where possible.
   /* Iterate over all the pages and do the sanity checking and
   the conversion required to import the tablespace. */
 
-  PageConverter converter(&cfg, trx);
+  PageConverter converter(&cfg, trx, keep_rows);
 
   /* Set the IO buffer size in pages. */
 
@@ -4791,7 +4814,8 @@ as row_import_cleanup() expects.
 @param[in,out]  cfg     metadata of the tablespace file
 @return outcome */
 [[nodiscard]] static Import_status row_import_complete(Import_ctx &ctx,
-                                                       row_import &cfg) {
+                                                       row_import &cfg,
+                                                       bool again = false) {
   dict_table_t *table = ctx.table;
   dd::Table *table_def = ctx.table_def;
   trx_t *trx = ctx.trx;
@@ -4800,7 +4824,7 @@ as row_import_cleanup() expects.
 
   row_mysql_lock_data_dictionary(trx, UT_LOCATION_HERE);
 
-  if (table->has_instant_cols() || table->has_row_versions()) {
+  if (!again && (table->has_instant_cols() || table->has_row_versions())) {
     dd_import_instant_add_columns(table, table_def);
   }
 
@@ -5138,7 +5162,7 @@ dberr_t row_import_for_mysql(dict_table_t *table, dd::Table *table_def,
   Import_status status = source.read(ctx, cfg);
 
   if (status.err == DB_SUCCESS) {
-    status = row_import_convert(ctx, cfg);
+    status = row_import_convert(ctx, cfg, false);
   }
 
   if (status.err == DB_SUCCESS) {
@@ -5898,10 +5922,78 @@ Import_status Import_sdi_source::read(Import_ctx &ctx, row_import &cfg) {
   return Import_status{err, err != DB_SUCCESS};
 }
 
+/** Roll back, on the attached table, the transactions that were open on
+the donor when the clone ended. Their undo is in the staged undo
+tablespaces.
+@param[in,out]  ctx             import context
+@param[in]      clone_stage_dir staging directory of the clone
+@return error code */
+[[nodiscard]] static dberr_t row_import_clone_rollback(
+    Import_ctx &ctx [[maybe_unused]],
+    const char *clone_stage_dir [[maybe_unused]]) {
+  return DB_SUCCESS;
+}
+
+/** Second half of the import of a partial clone. The file is attached with
+its rows as the donor had them. Roll back the transactions that were open
+when the clone ended, then convert the rows as a plain import does: detach
+the file, run the page pass over it again and attach it for good.
+@param[in,out]  ctx             import context, dictionary latch held
+@param[in,out]  cfg             metadata of the tablespace file
+@param[in]      clone_stage_dir staging directory of the clone
+@return outcome */
+[[nodiscard]] static Import_status row_import_clone_finish(
+    Import_ctx &ctx, row_import &cfg, const char *clone_stage_dir) {
+  dict_table_t *table = ctx.table;
+  trx_t *trx = ctx.trx;
+
+  row_mysql_unlock_data_dictionary(trx);
+
+  dberr_t err = row_import_clone_rollback(ctx, clone_stage_dir);
+  if (err != DB_SUCCESS) {
+    return Import_status{err, true};
+  }
+
+  /* Detach: every page to disk, then forget the tablespace. The dictionary
+  objects keep their roots, which the second pass does not change. */
+  buf_LRU_flush_or_remove_pages(table->space, BUF_REMOVE_FLUSH_WRITE, trx);
+
+  if (trx_is_interrupted(trx)) {
+    return Import_status{DB_INTERRUPTED, true};
+  }
+
+  row_mysql_lock_data_dictionary(trx, UT_LOCATION_HERE);
+  err = fil_close_tablespace(table->space);
+  table->ibd_file_missing = true;
+  table->flags2 |= DICT_TF2_DISCARDED;
+  row_mysql_unlock_data_dictionary(trx);
+
+  if (err != DB_SUCCESS) {
+    return Import_status{err, true};
+  }
+
+  /* The first pass gave the pages their new index ids. */
+  for (ulint i = 0; i < cfg.m_n_indexes; ++i) {
+    row_index_t &index = cfg.m_indexes[i];
+    if (index.m_srv_index != nullptr) {
+      index.m_id = index.m_srv_index->id;
+    }
+  }
+
+  Import_status status = row_import_convert(ctx, cfg, false);
+
+  if (status.err == DB_SUCCESS) {
+    status = row_import_complete(ctx, cfg, true);
+  }
+
+  return status;
+}
+
 dberr_t row_import_attach(THD *thd, dict_table_t *table, dd::Table *table_def,
                           const dd::Table &source_def,
                           const dd::Partition *source_part,
-                          const char *compression_option) {
+                          const char *compression_option,
+                          const char *clone_stage_dir) {
   ut_ad(!srv_read_only_mode);
   ut_ad(!table->is_temporary());
   ut_a(table->ibd_file_missing);
@@ -5969,11 +6061,15 @@ dberr_t row_import_attach(THD *thd, dict_table_t *table, dd::Table *table_def,
   dd_free_uncached_table(source);
 
   if (status.err == DB_SUCCESS) {
-    status = row_import_convert(ctx, cfg);
+    status = row_import_convert(ctx, cfg, clone_stage_dir != nullptr);
   }
 
   if (status.err == DB_SUCCESS) {
     status = row_import_complete(ctx, cfg);
+  }
+
+  if (status.err == DB_SUCCESS && clone_stage_dir != nullptr) {
+    status = row_import_clone_finish(ctx, cfg, clone_stage_dir);
   }
 
   return row_import_end(ctx, status);

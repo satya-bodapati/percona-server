@@ -65,7 +65,7 @@
 #include "sql/sql_class.h"                 // THD
 #include "sql/sql_db.h"                    // check_schema_readonly
 #include "sql/sql_error.h"
-#include "sql/sql_table.h"  // build_table_filename
+#include "sql/sql_table.h"    // build_table_filename
 #include "sql/srs_fetcher.h"  // Srs_fetcher
 #include "sql/stateless_allocator.h"
 #include "sql/strfunc.h"  // casedn
@@ -278,6 +278,9 @@ struct Ibd_target {
 
   /** DATA DIRECTORY of the table, or empty if it is in the datadir. */
   std::string data_directory;
+
+  /** Staging directory of a partial clone, or nullptr. */
+  const char *clone_stage_dir{nullptr};
 };
 
 /** @return the real path of a file or directory, or an empty string if it
@@ -763,6 +766,7 @@ bool create_ibd_target(THD *thd, handlerton *hton, Ibd_target &t) {
   HA_CREATE_INFO create_info;
   create_info.db_type = hton;
   create_info.m_import_source = t.source.get();
+  create_info.m_clone_stage_dir = t.clone_stage_dir;
 
   uint32 key_block_size = 0;
   if (table_def->options().exists("key_block_size") &&
@@ -813,6 +817,36 @@ bool create_ibd_target(THD *thd, handlerton *hton, Ibd_target &t) {
 }  // namespace
 
 bool Sql_cmd_import_table::execute_ibd(THD *thd) {
+  std::vector<std::string> files;
+
+  for (auto &pattern : m_sdi_patterns) {
+    LEX_STRING converted = pattern;
+
+    if (thd->charset() != files_charset_info &&
+        thd->convert_string(&converted, files_charset_info, pattern.str,
+                            pattern.length, thd->charset())) {
+      return true;
+    }
+
+    dd::sdi_file::Paths_type paths{key_memory_DD_import};
+    if (dd::sdi_file::expand_ibd_pattern(thd, converted, &paths)) {
+      return true;
+    }
+    for (auto &p : paths) {
+      files.emplace_back(p.first.c_str(), p.first.length());
+    }
+  }
+
+  if (import_ibd_files(thd, files, nullptr)) {
+    return true;
+  }
+
+  my_ok(thd);
+  return false;
+}
+
+bool import_ibd_files(THD *thd, const std::vector<std::string> &files,
+                      const char *clone_stage_dir) {
   handlerton *hton = ha_resolve_by_legacy_type(thd, DB_TYPE_INNODB);
 
   if (hton == nullptr || hton->sdi_get_from_file == nullptr) {
@@ -842,29 +876,13 @@ bool Sql_cmd_import_table::execute_ibd(THD *thd) {
     return true;
   }
 
-  dd::sdi_file::Paths_type paths{key_memory_DD_import};
-  for (auto &pattern : m_sdi_patterns) {
-    LEX_STRING converted = pattern;
-
-    if (thd->charset() != files_charset_info &&
-        thd->convert_string(&converted, files_charset_info, pattern.str,
-                            pattern.length, thd->charset())) {
-      return true;
-    }
-
-    if (dd::sdi_file::expand_ibd_pattern(thd, converted, &paths)) {
-      return true;
-    }
-  }
-
   /* Read the table definitions from the files. Only the tablespace file of
   a table, or the first partition of a partitioned table, holds one. */
   std::vector<Ibd_target> targets;
   std::vector<std::string> partition_files;
   std::vector<std::string> seen;
 
-  for (auto &p : paths) {
-    const std::string file(p.first.c_str(), p.first.length());
+  for (const std::string &file : files) {
     const std::string real = real_path(file);
 
     if (std::find(seen.begin(), seen.end(), real) != seen.end()) {
@@ -894,6 +912,7 @@ bool Sql_cmd_import_table::execute_ibd(THD *thd) {
 
     Ibd_target t;
     t.sdi_file = file;
+    t.clone_stage_dir = clone_stage_dir;
     if (load_ibd_target(thd, sdi.tables.front(), &t)) {
       return true;
     }
@@ -1108,6 +1127,5 @@ bool Sql_cmd_import_table::execute_ibd(THD *thd) {
   }
 
   rbgrd.release();
-  my_ok(thd);
   return false;
 }
