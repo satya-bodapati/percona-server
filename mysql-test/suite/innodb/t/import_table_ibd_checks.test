@@ -137,4 +137,27 @@ SELECT * FROM edb.e1;
 DROP DATABASE edb;
 DROP USER importer@localhost;
 
+--echo #
+--echo # An engine listed in disabled_storage_engines does not create tables,
+--echo # so it does not import them either. The file is kept.
+--echo #
+CREATE TABLE d1 (id INT PRIMARY KEY);
+INSERT INTO d1 VALUES (1);
+FLUSH TABLES d1 FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/d1.ibd $A/d1.ibd
+UNLOCK TABLES;
+DROP TABLE d1;
+--let $restart_parameters = restart: --disabled-storage-engines=InnoDB
+--source include/restart_mysqld.inc
+--error ER_DISABLED_STORAGE_ENGINE
+CREATE TABLE d1 (id INT PRIMARY KEY) ENGINE = InnoDB;
+--copy_file $A/d1.ibd $MYSQLD_DATADIR/test/d1.ibd
+--error ER_DISABLED_STORAGE_ENGINE
+IMPORT TABLE FROM 'test/d1.ibd';
+--let $restart_parameters = restart:
+--source include/restart_mysqld.inc
+IMPORT TABLE FROM 'test/d1.ibd';
+SELECT * FROM d1;
+DROP TABLE d1;
+
 --force-rmdir $A

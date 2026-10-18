@@ -959,6 +959,14 @@ bool Sql_cmd_import_table::execute_ibd(THD *thd) {
     return true;
   }
 
+  /* As for CREATE TABLE: an engine listed in disabled_storage_engines does
+  not create tables. */
+  if (ha_is_storage_engine_disabled(hton)) {
+    my_error(ER_DISABLED_STORAGE_ENGINE, MYF(0),
+             ha_resolve_storage_engine_name(hton));
+    return true;
+  }
+
   /* The engine finishes the DDL after commit or rollback; after rollback it
   deletes the tablespace files it already converted. Declared first, so it
   runs after the rollback guard. */

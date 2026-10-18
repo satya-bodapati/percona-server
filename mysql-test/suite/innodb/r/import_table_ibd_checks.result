@@ -115,3 +115,23 @@ id
 1
 DROP DATABASE edb;
 DROP USER importer@localhost;
+#
+# An engine listed in disabled_storage_engines does not create tables,
+# so it does not import them either. The file is kept.
+#
+CREATE TABLE d1 (id INT PRIMARY KEY);
+INSERT INTO d1 VALUES (1);
+FLUSH TABLES d1 FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE d1;
+# restart: --disabled-storage-engines=InnoDB
+CREATE TABLE d1 (id INT PRIMARY KEY) ENGINE = InnoDB;
+ERROR HY000: Storage engine InnoDB is disabled (Table creation is disallowed).
+IMPORT TABLE FROM 'test/d1.ibd';
+ERROR HY000: Storage engine InnoDB is disabled (Table creation is disallowed).
+# restart:
+IMPORT TABLE FROM 'test/d1.ibd';
+SELECT * FROM d1;
+id
+1
+DROP TABLE d1;
