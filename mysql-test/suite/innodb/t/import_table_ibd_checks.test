@@ -1,0 +1,71 @@
+--echo #
+--echo # IMPORT TABLE FROM '<file>.ibd' creates a table, so it makes the checks
+--echo # that CREATE TABLE makes.
+--echo #
+
+--source include/have_innodb_16k.inc
+
+let $MYSQLD_DATADIR = `SELECT @@datadir`;
+let $A = $MYSQL_TMP_DIR/import_checks;
+--mkdir $A
+
+--echo #
+--echo # The parent table of a foreign key is created before its child,
+--echo # whatever order the files are named in.
+--echo #
+CREATE TABLE p (id INT PRIMARY KEY);
+CREATE TABLE c (id INT PRIMARY KEY, pid INT,
+                FOREIGN KEY (pid) REFERENCES p (id));
+CREATE TABLE a1 (id INT PRIMARY KEY);
+INSERT INTO p VALUES (1);
+INSERT INTO c VALUES (1, 1);
+INSERT INTO a1 VALUES (1);
+FLUSH TABLES p, c, a1 FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/p.ibd $A/p.ibd
+--copy_file $MYSQLD_DATADIR/test/c.ibd $A/c.ibd
+--copy_file $MYSQLD_DATADIR/test/a1.ibd $A/a1.ibd
+UNLOCK TABLES;
+DROP TABLE c, p, a1;
+--copy_file $A/a1.ibd $MYSQLD_DATADIR/test/a1.ibd
+--copy_file $A/c.ibd $MYSQLD_DATADIR/test/c.ibd
+--copy_file $A/p.ibd $MYSQLD_DATADIR/test/p.ibd
+IMPORT TABLE FROM 'test/a1.ibd', 'test/c.ibd', 'test/p.ibd';
+SELECT * FROM c;
+SHOW CREATE TABLE c;
+--error ER_NO_REFERENCED_ROW_2
+INSERT INTO c VALUES (2, 2);
+DROP TABLE c, p, a1;
+
+--echo # Tables that reference each other need foreign_key_checks off, as for
+--echo # CREATE TABLE. With it on they are refused before any file is changed.
+SET foreign_key_checks = 0;
+CREATE TABLE x1 (id INT PRIMARY KEY, y INT, FOREIGN KEY (y) REFERENCES x2 (id));
+CREATE TABLE x2 (id INT PRIMARY KEY, x INT, FOREIGN KEY (x) REFERENCES x1 (id));
+SET foreign_key_checks = 1;
+CREATE TABLE a2 (id INT PRIMARY KEY);
+INSERT INTO a2 VALUES (1);
+FLUSH TABLES x1, x2, a2 FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/test/x1.ibd $A/x1.ibd
+--copy_file $MYSQLD_DATADIR/test/x2.ibd $A/x2.ibd
+--copy_file $MYSQLD_DATADIR/test/a2.ibd $A/a2.ibd
+UNLOCK TABLES;
+SET foreign_key_checks = 0;
+DROP TABLE x1, x2, a2;
+SET foreign_key_checks = 1;
+--copy_file $A/a2.ibd $MYSQLD_DATADIR/test/a2.ibd
+--copy_file $A/x1.ibd $MYSQLD_DATADIR/test/x1.ibd
+--copy_file $A/x2.ibd $MYSQLD_DATADIR/test/x2.ibd
+--error ER_FK_CANNOT_OPEN_PARENT
+IMPORT TABLE FROM 'test/a2.ibd', 'test/x1.ibd', 'test/x2.ibd';
+--list_files $MYSQLD_DATADIR/test *.ibd
+SET foreign_key_checks = 0;
+IMPORT TABLE FROM 'test/a2.ibd', 'test/x1.ibd', 'test/x2.ibd';
+SET foreign_key_checks = 1;
+SELECT TABLE_NAME, REFERENCED_TABLE_NAME
+  FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS
+  WHERE CONSTRAINT_SCHEMA = 'test' ORDER BY TABLE_NAME;
+SET foreign_key_checks = 0;
+DROP TABLE x1, x2, a2;
+SET foreign_key_checks = 1;
+
+--force-rmdir $A

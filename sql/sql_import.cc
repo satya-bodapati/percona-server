@@ -584,19 +584,85 @@ void reset_se_private(dd::Table *table) {
   }
 }
 
-/** @return true if a table is one of the targets of the statement
+/** Find a table among the targets of the statement.
 @param[in]  targets  the targets
 @param[in]  schema   schema name
-@param[in]  name     table name */
-bool is_ibd_target(const std::vector<Ibd_target> &targets,
-                   const dd::String_type &schema, const dd::String_type &name) {
-  for (const Ibd_target &t : targets) {
+@param[in]  name     table name
+@return its index in targets, or targets.size() if it is not one */
+size_t find_ibd_target(const std::vector<Ibd_target> &targets,
+                       const dd::String_type &schema,
+                       const dd::String_type &name) {
+  for (size_t i = 0; i < targets.size(); ++i) {
+    const Ibd_target &t = targets[i];
+
     if (my_strcasecmp(table_alias_charset, t.schema.c_str(), schema.c_str()) ==
             0 &&
         my_strcasecmp(table_alias_charset, t.name.c_str(), name.c_str()) == 0) {
-      return true;
+      return i;
     }
   }
+  return targets.size();
+}
+
+/** Order the targets so that the parent table of every foreign key is
+created before its child, whatever order the files were named in: as for
+CREATE TABLE, a child's foreign keys are checked against the parent when the
+child is created. Tables that reference each other cannot be ordered. With
+foreign_key_checks on they are refused here, before any file is changed;
+with it off they keep their order, and their foreign keys are completed when
+the last of them is created.
+@param[in]      thd      thread handle
+@param[in,out]  targets  the targets, reordered
+@return true on error, reported with my_error() */
+bool order_ibd_targets(THD *thd, std::vector<Ibd_target> *targets) {
+  std::vector<Ibd_target> ordered;
+  std::vector<bool> placed(targets->size(), false);
+  ordered.reserve(targets->size());
+
+  /* The parent of a foreign key of a target that is not placed yet, or
+  nullptr if all its parents are placed or are not targets. */
+  auto unplaced_parent = [&](size_t i) -> const dd::Foreign_key * {
+    const dd::Table &source = *(*targets)[i].source;
+
+    for (const dd::Foreign_key *fk : source.foreign_keys()) {
+      const size_t parent =
+          find_ibd_target(*targets, fk->referenced_table_schema_name(),
+                          fk->referenced_table_name());
+
+      if (parent != targets->size() && parent != i && !placed[parent]) {
+        return fk;
+      }
+    }
+    return nullptr;
+  };
+
+  for (bool progress = true; progress;) {
+    progress = false;
+
+    for (size_t i = 0; i < targets->size(); ++i) {
+      if (!placed[i] && unplaced_parent(i) == nullptr) {
+        placed[i] = true;
+        ordered.push_back(std::move((*targets)[i]));
+        progress = true;
+      }
+    }
+  }
+
+  for (size_t i = 0; i < targets->size(); ++i) {
+    if (placed[i]) {
+      continue;
+    }
+
+    if (!(thd->variables.option_bits & OPTION_NO_FOREIGN_KEY_CHECKS)) {
+      my_error(ER_FK_CANNOT_OPEN_PARENT, MYF(0),
+               unplaced_parent(i)->referenced_table_name().c_str());
+      return true;
+    }
+
+    ordered.push_back(std::move((*targets)[i]));
+  }
+
+  *targets = std::move(ordered);
   return false;
 }
 
@@ -662,10 +728,10 @@ bool check_ibd_target(THD *thd, const Ibd_target &t,
   const dd::Table &source = *t.source;
 
   for (const dd::Foreign_key *fk : source.foreign_keys()) {
-    /* A parent imported by the same statement is checked when the child is
-    created, in the order the tables are named. */
-    if (is_ibd_target(targets, fk->referenced_table_schema_name(),
-                      fk->referenced_table_name())) {
+    /* A parent imported by the same statement is created first, and the
+    child is checked against it when the child is created. */
+    if (find_ibd_target(targets, fk->referenced_table_schema_name(),
+                        fk->referenced_table_name()) != targets.size()) {
       continue;
     }
 
@@ -993,6 +1059,10 @@ bool Sql_cmd_import_table::execute_ibd(THD *thd) {
                               "defines too");
       }
     }
+  }
+
+  if (order_ibd_targets(thd, &targets)) {
+    return true;
   }
 
   MDL_request_list mdl_requests;

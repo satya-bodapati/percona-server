@@ -1,0 +1,64 @@
+#
+# IMPORT TABLE FROM '<file>.ibd' creates a table, so it makes the checks
+# that CREATE TABLE makes.
+#
+#
+# The parent table of a foreign key is created before its child,
+# whatever order the files are named in.
+#
+CREATE TABLE p (id INT PRIMARY KEY);
+CREATE TABLE c (id INT PRIMARY KEY, pid INT,
+FOREIGN KEY (pid) REFERENCES p (id));
+CREATE TABLE a1 (id INT PRIMARY KEY);
+INSERT INTO p VALUES (1);
+INSERT INTO c VALUES (1, 1);
+INSERT INTO a1 VALUES (1);
+FLUSH TABLES p, c, a1 FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE c, p, a1;
+IMPORT TABLE FROM 'test/a1.ibd', 'test/c.ibd', 'test/p.ibd';
+SELECT * FROM c;
+id	pid
+1	1
+SHOW CREATE TABLE c;
+Table	Create Table
+c	CREATE TABLE `c` (
+  `id` int NOT NULL,
+  `pid` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `pid` (`pid`),
+  CONSTRAINT `c_ibfk_1` FOREIGN KEY (`pid`) REFERENCES `p` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+INSERT INTO c VALUES (2, 2);
+ERROR 23000: Cannot add or update a child row: a foreign key constraint fails (`test`.`c`, CONSTRAINT `c_ibfk_1` FOREIGN KEY (`pid`) REFERENCES `p` (`id`))
+DROP TABLE c, p, a1;
+# Tables that reference each other need foreign_key_checks off, as for
+# CREATE TABLE. With it on they are refused before any file is changed.
+SET foreign_key_checks = 0;
+CREATE TABLE x1 (id INT PRIMARY KEY, y INT, FOREIGN KEY (y) REFERENCES x2 (id));
+CREATE TABLE x2 (id INT PRIMARY KEY, x INT, FOREIGN KEY (x) REFERENCES x1 (id));
+SET foreign_key_checks = 1;
+CREATE TABLE a2 (id INT PRIMARY KEY);
+INSERT INTO a2 VALUES (1);
+FLUSH TABLES x1, x2, a2 FOR EXPORT;
+UNLOCK TABLES;
+SET foreign_key_checks = 0;
+DROP TABLE x1, x2, a2;
+SET foreign_key_checks = 1;
+IMPORT TABLE FROM 'test/a2.ibd', 'test/x1.ibd', 'test/x2.ibd';
+ERROR HY000: Failed to open the referenced table 'x2'
+a2.ibd
+x1.ibd
+x2.ibd
+SET foreign_key_checks = 0;
+IMPORT TABLE FROM 'test/a2.ibd', 'test/x1.ibd', 'test/x2.ibd';
+SET foreign_key_checks = 1;
+SELECT TABLE_NAME, REFERENCED_TABLE_NAME
+FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS
+WHERE CONSTRAINT_SCHEMA = 'test' ORDER BY TABLE_NAME;
+TABLE_NAME	REFERENCED_TABLE_NAME
+x1	x2
+x2	x1
+SET foreign_key_checks = 0;
+DROP TABLE x1, x2, a2;
+SET foreign_key_checks = 1;
