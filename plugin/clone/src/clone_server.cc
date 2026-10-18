@@ -245,6 +245,11 @@ int Server::parse_command_buffer(uchar command, uchar *com_buf, size_t com_len,
       log_error(get_thd(), false, err, "COM_EXECUTE: Storage Execute");
       break;
     }
+    case COM_OBJECTS:
+      err = set_objects(com_buf, com_len);
+      log_error(get_thd(), false, err, "COM_OBJECTS: Storage Objects");
+      break;
+
     case COM_ACK: {
       m_pfs_initialized = true;
       int err_code = 0;
@@ -394,6 +399,58 @@ err_end:
   my_error(ER_CLONE_PROTOCOL, MYF(0), "Wrong Clone RPC: Init buffer length");
 
   return (ER_CLONE_PROTOCOL);
+}
+
+int Server::set_objects(const uchar *com_buf, size_t com_len) {
+  if (!m_storage_initialized || !m_is_master ||
+      m_protocol_version < CLONE_PROTOCOL_VERSION_V5) {
+    my_error(ER_CLONE_PROTOCOL, MYF(0),
+             "Wrong Clone RPC: Objects request before Init");
+    return (ER_CLONE_PROTOCOL);
+  }
+
+  Ha_clone_objects objects;
+
+  /* Count, then per object: schema length, schema, table length, table. */
+  auto read_string = [&](std::string &str) {
+    if (com_len < 4) {
+      return false;
+    }
+    const size_t length = uint4korr(com_buf);
+    com_buf += 4;
+    com_len -= 4;
+
+    if (com_len < length) {
+      return false;
+    }
+    str.assign(reinterpret_cast<const char *>(com_buf), length);
+    com_buf += length;
+    com_len -= length;
+    return true;
+  };
+
+  bool valid = (com_len >= 4);
+  uint32_t count = 0;
+
+  if (valid) {
+    count = uint4korr(com_buf);
+    com_buf += 4;
+    com_len -= 4;
+  }
+
+  for (uint32_t index = 0; valid && index < count; ++index) {
+    Ha_clone_object object;
+    valid = read_string(object.m_db) && read_string(object.m_table) &&
+            !object.m_db.empty();
+    objects.m_objects.push_back(object);
+  }
+
+  if (!valid || com_len != 0 || objects.m_objects.empty()) {
+    my_error(ER_CLONE_PROTOCOL, MYF(0), "Wrong Clone RPC: Objects buffer");
+    return (ER_CLONE_PROTOCOL);
+  }
+
+  return (hton_clone_set_objects(get_thd(), get_storage_vector(), &objects));
 }
 
 int Server::send_key_value(Command_Response rcmd, String_Key &key_str,

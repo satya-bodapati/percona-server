@@ -10631,6 +10631,9 @@ ER_CF_DROPPED
 ER_CANT_DROP_CF
   eng "Cannot drop Column family ('%s') because it is in use or does not exist."
 
+ER_CLONE_PARTIAL_DONOR
+  eng "Clone Donor does not support cloning selected tables or databases."
+
 #
 # End of MyRocks specific client messages
 #

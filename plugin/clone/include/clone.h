@@ -138,8 +138,14 @@ const uint32_t CLONE_PROTOCOL_VERSION_V2 = 0x0101;
 /** Send more configurations required by recipient. */
 const uint32_t CLONE_PROTOCOL_VERSION_V3 = 0x0102;
 
+/** Reserved: used upstream for JSON version configurations. */
+const uint32_t CLONE_PROTOCOL_VERSION_V4 = 0x0103;
+
+/** Partial clone: COM_OBJECTS selects tables and schemas. */
+const uint32_t CLONE_PROTOCOL_VERSION_V5 = 0x0104;
+
 /**  Clone protocol latest version */
-const uint32_t CLONE_PROTOCOL_VERSION = CLONE_PROTOCOL_VERSION_V3;
+const uint32_t CLONE_PROTOCOL_VERSION = CLONE_PROTOCOL_VERSION_V5;
 
 /** Flag to indicate no backup lock for DDL. This is multiplexed with
 clone_ddl_timeout and sent to donor server. */
@@ -165,6 +171,9 @@ typedef enum Type_Cmmand_RPC : uchar {
 
   /** Exit clone protocol */
   COM_EXIT,
+
+  /** Select tables and schemas for a partial clone: version 0x0104 */
+  COM_OBJECTS,
 
   /** Limit value for clone RPC */
   COM_MAX

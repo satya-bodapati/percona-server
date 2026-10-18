@@ -6069,6 +6069,7 @@ static int innodb_init(void *p) {
   innobase_hton->clone_interface.clone_apply_begin = innodb_clone_apply_begin;
   innobase_hton->clone_interface.clone_apply = innodb_clone_apply;
   innobase_hton->clone_interface.clone_apply_end = innodb_clone_apply_end;
+  innobase_hton->clone_interface.clone_set_objects = innodb_clone_set_objects;
 
   innobase_hton->foreign_keys_flags =
       HTON_FKS_WITH_PREFIX_PARENT_KEYS |

@@ -36,6 +36,8 @@ Clone handler interface to access clone plugin
 #include "mysql.h"
 #include "sql/sql_plugin_ref.h"  // plugin_ref
 
+struct Ha_clone_objects;
+
 class THD;
 class Srv_session;
 struct Mysql_clone;
@@ -74,12 +76,16 @@ class Clone_handler {
   @param[in]	remote_port	remote server port
   @param[in]	remote_user	remote user name
   @param[in]	remote_passwd	remote user's password
-  @param[in]	data_dir	cloned data directory
+  @param[in]	data_dir	cloned data directory; for a partial clone the
+                                staging directory built by the server
   @param[in]	ssl_mode	remote connection ssl mode
+  @param[in]	objects		tables and schemas for a partial clone, or
+                                nullptr for the whole instance
   @return error code */
   int clone_remote_client(THD *thd, const char *remote_host, uint remote_port,
                           const char *remote_user, const char *remote_passwd,
-                          const char *data_dir, enum mysql_ssl_mode ssl_mode);
+                          const char *data_dir, enum mysql_ssl_mode ssl_mode,
+                          const Ha_clone_objects *objects);
 
   /** Clone handler interface for remote clone server.
   @param[in]	thd	server thread handle

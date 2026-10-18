@@ -44,6 +44,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "sql/handler.h"
 
 #include <map>
+#include <set>
 #include <vector>
 
 struct Clone_file_ctx {
@@ -363,6 +364,27 @@ class Clone_Snapshot {
   /** Get snapshot state
   @return state */
   Snapshot_State get_state() { return (m_snapshot_state); }
+
+  /** @return true if only selected tablespaces are cloned */
+  bool is_partial() const { return (m_partial); }
+
+  /** Restrict a copy snapshot to the given tablespaces. Undo tablespaces
+  are always included. Must be called in INIT state.
+  @param[in]    spaces  tablespaces of the selected tables */
+  void set_partial(const std::set<space_id_t> &spaces) {
+    ut_ad(m_snapshot_state == CLONE_SNAPSHOT_INIT);
+    m_partial = true;
+    m_partial_spaces = spaces;
+  }
+
+  /** Mark an apply snapshot as partial: every file lands under the clone
+  directory, whatever its path on the donor. */
+  void set_partial() { m_partial = true; }
+
+  /** Check if a tablespace is part of the snapshot.
+  @param[in]    space_id        tablespace ID
+  @return true if the tablespace is copied */
+  bool includes_space(space_id_t space_id) const;
 
   /** Get the redo file size for the snapshot
   @return redo file size */
@@ -1027,6 +1049,12 @@ class Clone_Snapshot {
 
   /** Index into m_data_file_vector for all undo files. */
   std::vector<int> m_undo_file_indexes;
+
+  /** True if only selected tablespaces are cloned. */
+  bool m_partial{false};
+
+  /** Tablespaces of the selected tables; copy snapshot only. */
+  std::set<space_id_t> m_partial_spaces;
 
   /** @name Snapshot page data */
 

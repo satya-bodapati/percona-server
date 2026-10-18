@@ -88,6 +88,19 @@ int innodb_clone_ack(handlerton *hton, THD *thd, const byte *loc, uint loc_len,
 int innodb_clone_end(handlerton *hton, THD *thd, const byte *loc, uint loc_len,
                      uint task_id, int in_err);
 
+/** Restrict a clone to the selected tables and schemas. On the donor the
+names are resolved to tablespaces before the copy starts; on the recipient
+the clone is marked partial so that every file lands under the clone
+directory.
+@param[in]      hton            handlerton for SE
+@param[in]      thd             server thread handle
+@param[in]      loc             locator
+@param[in]      loc_len         locator length in bytes
+@param[in]      objects         selected tables and schemas
+@return error code */
+int innodb_clone_set_objects(handlerton *hton, THD *thd, const byte *loc,
+                             uint loc_len, const Ha_clone_objects *objects);
+
 /** Begin apply to destination database
 @param[in]      hton            handlerton for SE
 @param[in]      thd             server thread handle

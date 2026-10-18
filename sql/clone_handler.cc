@@ -138,18 +138,22 @@ int Clone_handler::clone_local(THD *thd, const char *data_dir) {
   return error;
 }
 
-int Clone_handler::clone_remote_client(THD *thd, const char *remote_host,
-                                       uint remote_port,
-                                       const char *remote_user,
-                                       const char *remote_passwd,
-                                       const char *data_dir,
-                                       enum mysql_ssl_mode ssl_mode) {
+int Clone_handler::clone_remote_client(
+    THD *thd, const char *remote_host, uint remote_port,
+    const char *remote_user, const char *remote_passwd, const char *data_dir,
+    enum mysql_ssl_mode ssl_mode, const Ha_clone_objects *objects) {
   int error = 0;
   char dir_name[FN_REFLEN];
   char *dir_ptr = nullptr;
 
-  /* NULL when clone replaces current data directory. */
-  if (data_dir != nullptr) {
+  /* NULL when clone replaces current data directory. The staging directory
+  of a partial clone is built by the server inside the data directory, so
+  the user path checks do not apply to it. */
+  if (objects != nullptr) {
+    assert(data_dir != nullptr);
+    strmake(dir_name, data_dir, sizeof(dir_name) - 1);
+    dir_ptr = &dir_name[0];
+  } else if (data_dir != nullptr) {
     error = validate_dir(data_dir, dir_name);
     dir_ptr = &dir_name[0];
   }
@@ -163,14 +167,16 @@ int Clone_handler::clone_remote_client(THD *thd, const char *remote_host,
   of error otherwise the server would shutdown or restart at the end of
   operation. */
   const bool provisioning = (data_dir == nullptr);
+  assert(!provisioning || objects == nullptr);
   if (provisioning) {
     ++s_provision_in_progress;
   }
 
   const int mode = static_cast<int>(ssl_mode);
 
-  error = m_plugin_handle->clone_client(
-      thd, remote_host, remote_port, remote_user, remote_passwd, dir_ptr, mode);
+  error =
+      m_plugin_handle->clone_client(thd, remote_host, remote_port, remote_user,
+                                    remote_passwd, dir_ptr, mode, objects);
 
   if (error != 0 && provisioning) {
     --s_provision_in_progress;

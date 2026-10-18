@@ -184,6 +184,12 @@ class Server {
   @return error code */
   int deserialize_init_buffer(const uchar *init_buf, size_t init_len);
 
+  /** Handle COM_OBJECTS: restrict the clone to the selected objects
+  @param[in]	com_buf		command buffer
+  @param[in]	com_len		buffer length
+  @return error code */
+  int set_objects(const uchar *com_buf, size_t com_len);
+
   /** Deserialize COM_ACK command buffer to extract descriptor
   @param[in]	ack_buf		ACK command buffer
   @param[in]	ack_len		buffer length

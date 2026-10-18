@@ -462,7 +462,8 @@ static int plugin_clone_deinit(MYSQL_PLUGIN plugin_info [[maybe_unused]]) {
 @param[in]	data_dir	cloned data directory
 @return error code */
 static int plugin_clone_local(THD *thd, const char *data_dir) {
-  myclone::Client_Share client_share(nullptr, 0, nullptr, nullptr, data_dir, 0);
+  myclone::Client_Share client_share(nullptr, 0, nullptr, nullptr, data_dir, 0,
+                                     nullptr);
 
   myclone::Server server(thd, MYSQL_INVALID_SOCKET);
 
@@ -490,7 +491,8 @@ static int plugin_clone_local(THD *thd, const char *data_dir) {
 static int plugin_clone_remote_client(THD *thd, const char *remote_host,
                                       uint remote_port, const char *remote_user,
                                       const char *remote_passwd,
-                                      const char *data_dir, int ssl_mode) {
+                                      const char *data_dir, int ssl_mode,
+                                      const Ha_clone_objects *objects) {
   /* Validate that donor address matches with preconfigured value. */
   auto error = match_valid_donor_address(thd, remote_host, remote_port);
   if (error != 0) {
@@ -498,7 +500,8 @@ static int plugin_clone_remote_client(THD *thd, const char *remote_host,
   }
 
   myclone::Client_Share client_share(remote_host, remote_port, remote_user,
-                                     remote_passwd, data_dir, ssl_mode);
+                                     remote_passwd, data_dir, ssl_mode,
+                                     objects);
 
   /* Update session and statement PFS keys */
   assert(thd != nullptr);

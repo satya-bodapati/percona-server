@@ -757,6 +757,17 @@ int Client::clone() {
       assert(is_master());
       err = delay_if_needed();
     }
+
+    /* Partial clone: the donor must speak COM_OBJECTS. */
+    if (err == 0 && rpc_com == COM_INIT && is_partial()) {
+      if (m_share->m_protocol_version < CLONE_PROTOCOL_VERSION_V5) {
+        err = ER_CLONE_PARTIAL_DONOR;
+        my_error(err, MYF(0));
+      } else {
+        err = remote_command(COM_OBJECTS, false);
+      }
+      log_error(get_thd(), true, err, "Command COM_OBJECTS");
+    }
     snprintf(
         info_mesg, 128, "Command %s",
         is_master() ? (restart ? "COM_REINIT" : "COM_INIT") : "COM_ATTACH");
@@ -1044,6 +1055,23 @@ bool Client::plugin_is_installed(std::string &plugin_name) {
 
 int Client::validate_remote_params() {
   int last_error = 0;
+
+  /* A partial clone imports tables; the donor's plugins, collations and
+  server character sets do not have to match. The page size and the
+  version compatibility still do. */
+  if (is_partial()) {
+    Key_Values configs;
+    for (auto &config : m_parameters.m_configs) {
+      if (config.first == "version" ||
+          config.first == "version_compile_machine" ||
+          config.first == "version_compile_os" ||
+          config.first == "innodb_page_size") {
+        configs.push_back(config);
+      }
+    }
+    return (mysql_service_clone_protocol->mysql_clone_validate_configs(
+        get_thd(), configs));
+  }
 
   /* Validate plugins from old version CLONE_PROTOCOL_VERSION_V1.*/
   for (auto &plugin_name : m_parameters.m_plugins) {
@@ -1342,6 +1370,11 @@ int Client::prepare_command_buffer(Command_RPC com, size_t &buf_len) {
       /* No data is passed right now */
       break;
 
+    case COM_OBJECTS:
+      assert(is_master());
+      err = serialize_objects_cmd(buf_len);
+      break;
+
     case COM_ACK:
       err = serialize_ack_cmd(buf_len);
       break;
@@ -1427,10 +1460,12 @@ int Client::serialize_init_cmd(size_t &buf_len) {
   int4store(buf_ptr, m_share->m_protocol_version);
   buf_ptr += 4;
 
-  /* Store DDL timeout value. Default is no lock. */
+  /* Store DDL timeout value. Default is no lock. A partial clone keeps
+  the donor's backup lock for its whole duration: the selected tables
+  must not change shape while they are copied. */
   uint32_t timeout_value = clone_ddl_timeout;
 
-  if (!clone_block_ddl) {
+  if (!clone_block_ddl && !is_partial()) {
     timeout_value |= NO_BACKUP_LOCK_FLAG;
   }
 
@@ -1443,6 +1478,38 @@ int Client::serialize_init_cmd(size_t &buf_len) {
   }
 
   return (err);
+}
+
+int Client::serialize_objects_cmd(size_t &buf_len) {
+  assert(is_partial());
+  const auto &objects = m_share->m_objects->m_objects;
+
+  /* Count, then per object: schema length, schema, table length, table. */
+  buf_len = 4;
+  for (const auto &object : objects) {
+    buf_len += 4 + object.m_db.length() + 4 + object.m_table.length();
+  }
+
+  auto err = m_cmd_buff.allocate(buf_len);
+  auto buf_ptr = m_cmd_buff.m_buffer;
+
+  if (err != 0) {
+    return (err);
+  }
+
+  int4store(buf_ptr, static_cast<uint32_t>(objects.size()));
+  buf_ptr += 4;
+
+  for (const auto &object : objects) {
+    for (const auto *name : {&object.m_db, &object.m_table}) {
+      int4store(buf_ptr, static_cast<uint32_t>(name->length()));
+      buf_ptr += 4;
+      memcpy(buf_ptr, name->data(), name->length());
+      buf_ptr += name->length();
+    }
+  }
+
+  return (0);
 }
 
 int Client::receive_response(Command_RPC com, bool use_aux) {
@@ -1720,6 +1787,11 @@ int Client::set_locators(const uchar *buffer, size_t length) {
 
     for (auto &st_loc : m_share->m_storage_vec) {
       st_loc = local_locators[index++];
+    }
+
+    if (is_partial()) {
+      err = hton_clone_set_objects(m_server_thd, m_share->m_storage_vec,
+                                   m_share->m_objects);
     }
   }
 

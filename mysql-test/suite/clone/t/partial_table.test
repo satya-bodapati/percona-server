@@ -1,0 +1,91 @@
+# CLONE TABLE / CLONE DATABASE copy only the selected tables and the undo
+# tablespaces, into a staging directory under the data directory.
+
+--source include/have_innodb_default_undo_tablespaces.inc
+--source ../include/clone_connection_begin.inc
+
+--let $HOST = 127.0.0.1
+--let $PORT = `select @@port`
+--let $USER = root
+--let $MYSQLD_DATADIR = `select @@datadir`
+
+--replace_result $CLONE_PLUGIN CLONE_PLUGIN
+--eval INSTALL PLUGIN clone SONAME '$CLONE_PLUGIN'
+
+--replace_result $HOST HOST $PORT PORT
+--eval SET GLOBAL clone_valid_donor_list = '$HOST:$PORT'
+
+--source ../include/create_schema.inc
+call execute_dml(0, 0, 100, 100, 10, 0);
+
+CREATE TABLE t3 (a INT) ENGINE = MyISAM;
+CREATE TABLESPACE ts1 ADD DATAFILE 'ts1.ibd';
+CREATE TABLE t4 (a INT) TABLESPACE ts1;
+
+--echo # The donor refuses what it cannot clone
+--replace_result $HOST HOST $PORT PORT
+--error ER_CLONE_DONOR
+--eval CLONE TABLE test.t_missing FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+
+--replace_result $HOST HOST $PORT PORT
+--error ER_CLONE_DONOR
+--eval CLONE TABLE test.t3 FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+
+--replace_result $HOST HOST $PORT PORT
+--error ER_CLONE_DONOR
+--eval CLONE TABLE test.t4 FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+
+--replace_result $HOST HOST $PORT PORT
+--error ER_CLONE_DONOR
+--eval CLONE DATABASE db_missing FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+
+--echo # Nothing was staged
+--list_files $MYSQLD_DATADIR/#clone_stage
+
+--echo # Clone two tables: a plain one and a partitioned one
+--replace_result $HOST HOST $PORT PORT
+--eval CLONE TABLE t1, test.t2 FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+
+--echo # Clone a database: its InnoDB tables, not the MyISAM one
+DROP TABLE t4;
+--replace_result $HOST HOST $PORT PORT
+--eval CLONE DATABASE test FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+
+--echo # Staged files: selected tables and undo tablespaces only
+--perl
+my $datadir = "$ENV{MYSQLTEST_VARDIR}/mysqld.1/data";
+my $dir = "$datadir/#clone_stage";
+opendir(my $dh, $dir) or die "cannot open $dir: $!";
+my @stages = sort grep { !/^\./ } readdir($dh);
+closedir($dh);
+print scalar(@stages), " staging directories\n";
+my $n = 0;
+for my $id (@stages) {
+  my $stage = "$dir/$id";
+  ++$n;
+  print "stage $n:\n";
+  for my $f (sort(glob("$stage/test/*")), sort(glob("$stage/undo_*"))) {
+    my $r = $f;
+    $r =~ s/^\Q$stage\E\///;
+    print "  $r\n";
+  }
+  for my $f ("ibdata1", "mysql.ibd", "ts1.ibd", "test/t3.MYD") {
+    print "  $f: ", (-e "$stage/$f" ? "present" : "absent"), "\n";
+  }
+  my $size = -s "$stage/test/t1.ibd";
+  my $donor = -s "$datadir/test/t1.ibd";
+  print "  t1.ibd size matches donor: ", ($size == $donor ? "yes" : "no"), "\n";
+}
+EOF
+
+--echo # Cleanup
+--perl
+use File::Path qw(remove_tree);
+remove_tree("$ENV{MYSQLTEST_VARDIR}/mysqld.1/data/#clone_stage");
+EOF
+
+DROP TABLE t3;
+DROP TABLESPACE ts1;
+--source ../include/drop_schema.inc
+UNINSTALL PLUGIN clone;
+--source ../include/clone_connection_end.inc

@@ -32,8 +32,10 @@ API for clone plugin
 #include "plugin.h"
 #include "violite.h"
 
+struct Ha_clone_objects;
+
 /** Clone plugin interface version */
-#define MYSQL_CLONE_INTERFACE_VERSION 0x0100
+#define MYSQL_CLONE_INTERFACE_VERSION 0x0101
 
 /**
   The descriptor structure for the plugin, that is referred from
@@ -58,10 +60,13 @@ struct Mysql_clone {
   @param[in]	remote_passwd	remote user's password
   @param[in]	data_dir	cloned data directory
   @param[in]	ssl_mode	ssl mode for remote connection
+  @param[in]	objects		tables and schemas for a partial clone, or
+                                nullptr for the whole instance
   @return error code, 0 on success */
   int (*clone_client)(THD *thd, const char *remote_host, uint remote_port,
                       const char *remote_user, const char *remote_passwd,
-                      const char *data_dir, int ssl_mode);
+                      const char *data_dir, int ssl_mode,
+                      const Ha_clone_objects *objects);
 
   /** Clone database and send to remote clone client.
   @param[in]	thd	server thread handle

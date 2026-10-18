@@ -2345,6 +2345,31 @@ using Clone_apply_t = int (*)(handlerton *hton, THD *thd, const uchar *loc,
 using Clone_apply_end_t = int (*)(handlerton *hton, THD *thd, const uchar *loc,
                                   uint loc_len, uint task_id, int in_err);
 
+/** One object selected for a partial clone: a table, or a whole schema when
+m_table is empty. */
+struct Ha_clone_object {
+  std::string m_db;
+  std::string m_table;
+};
+
+/** The objects selected for a partial clone (CLONE TABLE / CLONE DATABASE). */
+struct Ha_clone_objects {
+  std::vector<Ha_clone_object> m_objects;
+};
+
+/** Restrict a clone to the selected objects. Called on the donor after
+clone_begin and on the recipient after clone_apply_begin, before any data is
+copied.
+@param[in]      hton    handlerton for SE
+@param[in]      thd     server thread handle
+@param[in]      loc     locator
+@param[in]      loc_len locator length in bytes
+@param[in]      objects selected tables and schemas
+@return error code */
+using Clone_set_objects_t = int (*)(handlerton *hton, THD *thd,
+                                    const uchar *loc, uint loc_len,
+                                    const Ha_clone_objects *objects);
+
 struct Clone_interface_t {
   /* Get clone capabilities of an SE */
   Clone_capability_t clone_capability;
@@ -2359,6 +2384,9 @@ struct Clone_interface_t {
   Clone_apply_begin_t clone_apply_begin;
   Clone_apply_t clone_apply;
   Clone_apply_end_t clone_apply_end;
+
+  /* Partial clone: nullptr when the SE cannot clone selected objects. */
+  Clone_set_objects_t clone_set_objects;
 };
 
 /**

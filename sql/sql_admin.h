@@ -33,6 +33,7 @@
 #include "my_sqlcommand.h"
 #include "sql/histograms/histogram.h"
 #include "sql/mem_root_allocator.h"
+#include "sql/mem_root_array.h"
 #include "sql/sql_cmd.h"            // Sql_cmd
 #include "sql/sql_cmd_dcl.h"        // ACL/DCL commands
 #include "sql/sql_cmd_ddl_table.h"  // Sql_cmd_ddl_table
@@ -430,6 +431,8 @@ class Sql_cmd_alter_instance : public Sql_cmd {
   Sql_cmd_clone implements CLONE ... statement.
 */
 
+class Table_ident;
+
 class Sql_cmd_clone : public Sql_cmd {
  public:
   /** Construct clone command for clone server */
@@ -447,6 +450,14 @@ class Sql_cmd_clone : public Sql_cmd {
   @param[in]  port port for remote server
   @param[in]  data_dir data directory to clone */
   explicit Sql_cmd_clone(LEX_USER *user_info, ulong port, LEX_CSTRING data_dir);
+
+  /** Construct clone command for selected tables or a schema
+  @param[in]  user_info user, password and remote host information
+  @param[in]  port port for remote server
+  @param[in]  tables tables to clone, or nullptr
+  @param[in]  database schema to clone, or NULL_CSTR */
+  Sql_cmd_clone(LEX_USER *user_info, ulong port,
+                Mem_root_array<Table_ident *> *tables, LEX_CSTRING database);
 
   /** Construct clone command for local clone
   @param[in]  data_dir data directory to clone */
@@ -482,6 +493,11 @@ class Sql_cmd_clone : public Sql_cmd {
   /** @return true, if it is local clone command */
   bool is_local() const { return (m_is_local); }
 
+  /** @return true, if only selected tables or a schema are cloned */
+  bool is_partial() const {
+    return (m_tables != nullptr || m_database.str != nullptr);
+  }
+
  private:
   /** Remote server IP */
   LEX_CSTRING m_host;
@@ -506,5 +522,11 @@ class Sql_cmd_clone : public Sql_cmd {
 
   /** If it is local clone operation */
   bool m_is_local;
+
+  /** Tables of a partial clone, nullptr otherwise */
+  Mem_root_array<Table_ident *> *m_tables{nullptr};
+
+  /** Schema of a partial clone, NULL_CSTR otherwise */
+  LEX_CSTRING m_database{NULL_CSTR};
 };
 #endif

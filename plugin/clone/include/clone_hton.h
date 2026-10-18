@@ -120,6 +120,14 @@ int hton_clone_begin(THD *thd, Storage_Vector &clone_loc_vec,
                      Task_Vector &task_vec, Ha_clone_type clone_type,
                      Ha_clone_mode clone_mode);
 
+/** Restrict the clone to the selected objects, in all storage engines
+@param[in,out]	thd		server thread handle
+@param[in]	clone_loc_vec	vector of locators for SEs
+@param[in]	objects		selected tables and schemas
+@return error code */
+int hton_clone_set_objects(THD *thd, Storage_Vector &clone_loc_vec,
+                           const Ha_clone_objects *objects);
+
 /** Clone copy for all storage engines supporting clone
 @param[in,out]	thd		server thread handle
 @param[in]	clone_loc_vec	vector of locators for SEs

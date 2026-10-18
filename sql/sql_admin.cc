@@ -38,6 +38,11 @@
 #include "my_base.h"
 #include "my_dbug.h"
 #include "my_dir.h"
+#ifdef _WIN32
+#include <direct.h>  // rmdir
+#else
+#include <unistd.h>  // rmdir
+#endif
 #include "my_inttypes.h"
 #include "my_io.h"
 #include "my_macros.h"
@@ -95,6 +100,7 @@
 #include "sql/sql_list.h"
 #include "sql/sql_parse.h"      // check_table_access
 #include "sql/sql_partition.h"  // set_part_state
+#include "sql/sql_show.h"       // append_identifier
 #include "sql/sql_table.h"      // mysql_recreate_table
 #include "sql/ssl_acceptor_context_operator.h"
 #include "sql/ssl_init_callback.h"
@@ -2176,10 +2182,103 @@ Sql_cmd_clone::Sql_cmd_clone(LEX_USER *user_info, ulong port,
   m_passwd = user_info->first_factor_auth_info.auth;
 }
 
+Sql_cmd_clone::Sql_cmd_clone(LEX_USER *user_info, ulong port,
+                             Mem_root_array<Table_ident *> *tables,
+                             LEX_CSTRING database)
+    : m_port(port),
+      m_data_dir(),
+      m_clone(),
+      m_is_local(false),
+      m_tables(tables),
+      m_database(database) {
+  m_host = user_info->host;
+  m_user = user_info->user;
+  m_passwd = user_info->first_factor_auth_info.auth;
+}
+
+/** Build the object list of a partial clone.
+@param[in]  thd      session
+@param[in]  tables   tables, or nullptr
+@param[in]  database schema, or NULL_CSTR
+@param[out] objects  tables and schemas to clone
+@return true on error */
+static bool build_clone_objects(THD *thd,
+                                const Mem_root_array<Table_ident *> *tables,
+                                LEX_CSTRING database,
+                                Ha_clone_objects &objects) {
+  if (tables == nullptr) {
+    objects.m_objects.push_back(
+        {std::string(database.str, database.length), std::string()});
+    return false;
+  }
+
+  for (const auto *table : *tables) {
+    LEX_CSTRING db = table->db;
+
+    if (db.str == nullptr) {
+      db = thd->db();
+      if (db.str == nullptr) {
+        my_error(ER_NO_DB_ERROR, MYF(0));
+        return true;
+      }
+    }
+    objects.m_objects.push_back(
+        {std::string(db.str, db.length),
+         std::string(table->table.str, table->table.length)});
+  }
+  return false;
+}
+
+/** Staging directory of a partial clone, inside the data directory.
+@param[in]  thd   session
+@param[out] dir   directory path
+@return true on error */
+static bool build_clone_stage_dir(THD *thd, std::string &dir) {
+  dir.assign(mysql_real_data_home);
+  dir.append("#clone_stage");
+  dir.push_back(FN_LIBCHAR);
+  dir.append(std::to_string(thd->query_id));
+
+  MY_STAT stat_info;
+  if (mysql_file_stat(key_file_misc, dir.c_str(), &stat_info, MYF(0)) !=
+      nullptr) {
+    my_error(ER_DB_CREATE_EXISTS, MYF(0), dir.c_str());
+    return true;
+  }
+  return false;
+}
+
+/** Remove the staging directory of a partial clone with everything in it.
+@param[in]  dir   directory path */
+static void remove_clone_stage_dir(const std::string &dir) {
+  MY_DIR *entries = my_dir(dir.c_str(), MYF(MY_WANT_STAT));
+  if (entries == nullptr) {
+    return;
+  }
+
+  for (uint i = 0; i < entries->number_off_files; ++i) {
+    const auto &entry = entries->dir_entry[i];
+    if (strcmp(entry.name, ".") == 0 || strcmp(entry.name, "..") == 0) {
+      continue;
+    }
+    std::string path = dir;
+    path.push_back(FN_LIBCHAR);
+    path.append(entry.name);
+
+    if (entry.mystat != nullptr && MY_S_ISDIR(entry.mystat->st_mode)) {
+      remove_clone_stage_dir(path);
+    } else {
+      mysql_file_delete(key_file_misc, path.c_str(), MYF(0));
+    }
+  }
+  my_dirend(entries);
+  rmdir(dir.c_str());
+}
+
 bool Sql_cmd_clone::execute(THD *thd) {
   DBUG_TRACE;
 
-  const bool is_replace = (m_data_dir.str == nullptr);
+  const bool is_replace = (m_data_dir.str == nullptr) && !is_partial();
 
   if (is_local()) {
     DBUG_PRINT("admin", ("CLONE type = local, DIR = %s", m_data_dir.str));
@@ -2243,9 +2342,23 @@ bool Sql_cmd_clone::execute(THD *thd) {
     ssl_mode = SSL_MODE_PREFERRED;
   }
 
+  Ha_clone_objects objects;
+  std::string stage_dir;
+  const char *data_dir = m_data_dir.str;
+
+  if (is_partial()) {
+    if (build_clone_objects(thd, m_tables, m_database, objects) ||
+        build_clone_stage_dir(thd, stage_dir)) {
+      clone_plugin_unlock(thd, m_plugin);
+      m_clone = nullptr;
+      return true;
+    }
+    data_dir = stage_dir.c_str();
+  }
+
   auto err = m_clone->clone_remote_client(
       thd, m_host.str, static_cast<uint>(m_port), m_user.str, m_passwd.str,
-      m_data_dir.str, ssl_mode);
+      data_dir, ssl_mode, is_partial() ? &objects : nullptr);
   clone_plugin_unlock(thd, m_plugin);
   m_clone = nullptr;
 
@@ -2256,6 +2369,11 @@ bool Sql_cmd_clone::execute(THD *thd) {
   }
 
   if (err != 0) {
+    /* A failed partial clone leaves nothing behind. */
+    if (is_partial()) {
+      remove_clone_stage_dir(stage_dir);
+    }
+
     /* Log donor error number and message. */
     if (err == ER_CLONE_DONOR) {
       const char *donor_mesg = nullptr;
@@ -2361,7 +2479,28 @@ bool Sql_cmd_clone::rewrite(THD *thd, String &rlb) {
     return false;
   }
 
-  rlb.append(STRING_WITH_LEN("CLONE INSTANCE FROM "));
+  if (m_tables != nullptr) {
+    rlb.append(STRING_WITH_LEN("CLONE TABLE "));
+    bool first = true;
+    for (const auto *table : *m_tables) {
+      if (!first) {
+        rlb.append(STRING_WITH_LEN(", "));
+      }
+      first = false;
+      if (table->db.str != nullptr) {
+        append_identifier(thd, &rlb, table->db.str, table->db.length);
+        rlb.append('.');
+      }
+      append_identifier(thd, &rlb, table->table.str, table->table.length);
+    }
+    rlb.append(STRING_WITH_LEN(" FROM "));
+  } else if (m_database.str != nullptr) {
+    rlb.append(STRING_WITH_LEN("CLONE DATABASE "));
+    append_identifier(thd, &rlb, m_database.str, m_database.length);
+    rlb.append(STRING_WITH_LEN(" FROM "));
+  } else {
+    rlb.append(STRING_WITH_LEN("CLONE INSTANCE FROM "));
+  }
 
   /* Append user name. */
   const String user(m_user.str, m_user.length, system_charset_info);

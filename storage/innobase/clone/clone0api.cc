@@ -50,6 +50,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "ha_innodb.h"
 #include "log0files_io.h"
 #include "sql/dd/cache/dictionary_client.h"
+#include "sql/dd/dd_schema.h"
 #include "sql/dd/dictionary.h"
 #include "sql/dd/impl/dictionary_impl.h"  // dd::dd_tablespace_id()
 #include "sql/dd/impl/sdi.h"
@@ -543,6 +544,184 @@ int innodb_clone_begin(handlerton *, THD *thd, const byte *&loc, uint &loc_len,
 
   /* Get the current locator from clone handle. */
   loc = clone_hdl->get_locator(loc_len);
+  return (0);
+}
+
+/** Add the file-per-table tablespace behind a DD tablespace id.
+@param[in]      thd             server thread handle
+@param[in]      dd_space_id     dd::Tablespace id of a table or partition
+@param[in]      db              schema name, for messages
+@param[in]      table           table name, for messages
+@param[in,out]  spaces          tablespaces to clone
+@return error code */
+static int clone_add_table_space(THD *thd, dd::Object_id dd_space_id,
+                                 const char *db, const char *table,
+                                 std::set<space_id_t> &spaces) {
+  auto dc = dd::get_dd_client(thd);
+  dd::Tablespace *dd_space = nullptr;
+
+  if (dd_space_id == dd::INVALID_OBJECT_ID ||
+      dc->acquire_uncached<dd::Tablespace>(dd_space_id, &dd_space) ||
+      dd_space == nullptr) {
+    my_error(ER_NO_SUCH_TABLE, MYF(0), db, table);
+    return (ER_NO_SUCH_TABLE);
+  }
+
+  const auto &se_data = dd_space->se_private_data();
+  space_id_t space_id = dict_sys_t::s_invalid_space_id;
+  uint32_t flags = 0;
+
+  if (se_data.get(dd_space_key_strings[DD_SPACE_ID], &space_id) ||
+      se_data.get(dd_space_key_strings[DD_SPACE_FLAGS], &flags)) {
+    my_error(ER_NO_SUCH_TABLE, MYF(0), db, table);
+    return (ER_NO_SUCH_TABLE);
+  }
+
+  /* The file of a general or system tablespace carries other tables. */
+  if (!fsp_is_file_per_table(space_id, flags)) {
+    my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+             "cloning a table from a general or system tablespace");
+    return (ER_NOT_SUPPORTED_YET);
+  }
+
+  /* clone_init_tablespaces() has loaded every tablespace already. */
+  if (fil_space_get(space_id) == nullptr) {
+    my_error(ER_TABLESPACE_MISSING, MYF(0), dd_space->name().c_str());
+    return (ER_TABLESPACE_MISSING);
+  }
+
+  spaces.insert(space_id);
+  return (0);
+}
+
+/** Add the tablespaces of one table.
+@param[in]      thd     server thread handle
+@param[in]      db      schema name
+@param[in]      table   table name
+@param[in,out]  spaces  tablespaces to clone
+@return error code */
+static int clone_add_table(THD *thd, const char *db, const char *table,
+                           std::set<space_id_t> &spaces) {
+  MDL_ticket *mdl = nullptr;
+
+  /* The donor's backup lock keeps DDL out for the whole clone; the MDL
+  is only for reading the definition. */
+  if (dd_mdl_acquire(thd, &mdl, db, table)) {
+    return (ER_LOCK_WAIT_TIMEOUT);
+  }
+
+  auto dc = dd::get_dd_client(thd);
+  const dd::Table *dd_table = nullptr;
+  int err = 0;
+
+  if (dc->acquire(db, table, &dd_table)) {
+    err = ER_INTERNAL_ERROR;
+
+  } else if (dd_table == nullptr) {
+    my_error(ER_NO_SUCH_TABLE, MYF(0), db, table);
+    err = ER_NO_SUCH_TABLE;
+
+  } else if (dd_table->engine() != innobase_hton_name) {
+    my_error(ER_NOT_SUPPORTED_YET, MYF(0), "cloning a non-InnoDB table");
+    err = ER_NOT_SUPPORTED_YET;
+
+  } else if (!dd_table_is_partitioned(*dd_table)) {
+    /* A file-per-table tablespace is recorded on the indexes, not on the
+    table (dd_write_table). */
+    err = clone_add_table_space(thd, dd_first_index(dd_table)->tablespace_id(),
+                                db, table, spaces);
+  } else {
+    for (const auto *dd_part : dd_table->leaf_partitions()) {
+      err = clone_add_table_space(thd, dd_first_index(dd_part)->tablespace_id(),
+                                  db, table, spaces);
+      if (err != 0) {
+        break;
+      }
+    }
+  }
+
+  dd_mdl_release(thd, &mdl);
+  return (err);
+}
+
+/** Add the tablespaces of all InnoDB tables of a schema.
+@param[in]      thd     server thread handle
+@param[in]      db      schema name
+@param[in,out]  spaces  tablespaces to clone
+@return error code */
+static int clone_add_schema(THD *thd, const char *db,
+                            std::set<space_id_t> &spaces) {
+  dd::Schema_MDL_locker mdl_locker(thd);
+  auto dc = dd::get_dd_client(thd);
+  const dd::Schema *schema = nullptr;
+
+  if (mdl_locker.ensure_locked(db) || dc->acquire(db, &schema)) {
+    return (ER_INTERNAL_ERROR);
+  }
+
+  if (schema == nullptr) {
+    my_error(ER_BAD_DB_ERROR, MYF(0), db);
+    return (ER_BAD_DB_ERROR);
+  }
+
+  std::vector<dd::String_type> names;
+
+  if (dc->fetch_schema_table_names_by_engine(schema, innobase_hton_name,
+                                             &names)) {
+    return (ER_INTERNAL_ERROR);
+  }
+
+  for (const auto &name : names) {
+    auto err = clone_add_table(thd, db, name.c_str(), spaces);
+    if (err != 0) {
+      return (err);
+    }
+  }
+  return (0);
+}
+
+int innodb_clone_set_objects(handlerton *, THD *thd, const byte *loc,
+                             uint loc_len, const Ha_clone_objects *objects) {
+  if (!clone_validate_locator(loc, loc_len)) {
+    my_error(ER_CLONE_PROTOCOL, MYF(0), "Wrong Clone RPC: Invalid Locator");
+    return (ER_CLONE_PROTOCOL);
+  }
+
+  auto clone_hdl = clone_sys->get_clone_by_index(loc, loc_len);
+  auto snapshot = clone_hdl->get_snapshot();
+
+  /* Recipient: the files go under the clone directory. */
+  if (!clone_hdl->is_copy_clone()) {
+    if (clone_hdl->replace_datadir()) {
+      my_error(ER_INTERNAL_ERROR, MYF(0),
+               "Innodb Clone of selected tables cannot replace data directory");
+      return (ER_INTERNAL_ERROR);
+    }
+    snapshot->set_partial();
+    return (0);
+  }
+
+  /* Donor: the file set is fixed when the copy starts. */
+  if (snapshot->get_state() != CLONE_SNAPSHOT_INIT) {
+    my_error(ER_CLONE_PROTOCOL, MYF(0),
+             "Wrong Clone RPC: Objects after copy started");
+    return (ER_CLONE_PROTOCOL);
+  }
+
+  dd::cache::Dictionary_client::Auto_releaser releaser(dd::get_dd_client(thd));
+  std::set<space_id_t> spaces;
+
+  for (const auto &object : objects->m_objects) {
+    auto err = object.m_table.empty()
+                   ? clone_add_schema(thd, object.m_db.c_str(), spaces)
+                   : clone_add_table(thd, object.m_db.c_str(),
+                                     object.m_table.c_str(), spaces);
+    if (err != 0) {
+      return (err);
+    }
+  }
+
+  snapshot->set_partial(spaces);
   return (0);
 }
 
@@ -1430,7 +1609,7 @@ void clone_update_gtid_status(std::string &gtids) {
   std::string recovery_file(CLONE_INNODB_RECOVERY_FILE);
   if (!file_exists(recovery_file)) {
     ut_d(ut_error);
-    ut_o(return);
+    ut_o(return );
   }
   /* Open status file to append GTID. */
   std::ofstream status_file;
@@ -2443,7 +2622,7 @@ static void clone_init_compression(THD *thd) {
 
   if (dc->fetch_global_component_ids<dd::Table>(&dd_table_ids)) {
     ut_d(ut_error);
-    ut_o(return);
+    ut_o(return );
   }
 
   for (auto dd_table_id : dd_table_ids) {

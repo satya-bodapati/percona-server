@@ -327,6 +327,7 @@ int Clone_Snapshot::build_file_path_unsafe(const char *data_dir,
 
   bool redo_file = (m_snapshot_state == CLONE_SNAPSHOT_REDO_COPY);
   bool absolute_path = false;
+  bool undo_file = fsp_is_undo_tablespace(file_meta->m_space_id);
 
   if (!redo_file) {
     source.assign(file_meta->m_file_name);
@@ -338,6 +339,25 @@ int Clone_Snapshot::build_file_path_unsafe(const char *data_dir,
       return err; /* purecov: inspected */
     }
     absolute_path = Fil_path::is_absolute_path(source);
+
+    /* Partial clone: the donor's layout (DATA DIRECTORY tables, a separate
+    undo directory) is not reproduced. A table file keeps its schema
+    directory, every other file keeps only its name. */
+    if (is_partial()) {
+      ut_ad(data_dir != nullptr);
+      absolute_path = false;
+
+      auto name_pos = source.find_last_of(OS_PATH_SEPARATOR);
+      if (name_pos != std::string::npos && !undo_file) {
+        auto dir_pos = source.find_last_of(OS_PATH_SEPARATOR, name_pos - 1);
+        if (dir_pos != std::string::npos) {
+          name_pos = dir_pos;
+        }
+      }
+      if (name_pos != std::string::npos) {
+        source.erase(0, name_pos + 1);
+      }
+    }
   }
 
   /* For absolute path, copy the name and return. */
@@ -355,8 +375,6 @@ int Clone_Snapshot::build_file_path_unsafe(const char *data_dir,
     built_path.assign(source);
     return 0;
   }
-
-  bool undo_file = fsp_is_undo_tablespace(file_meta->m_space_id);
 
   /* Append appropriate data directory path. */
 

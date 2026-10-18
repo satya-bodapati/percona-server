@@ -293,15 +293,18 @@ struct Client_Share {
   @param[in]	user	remote user name
   @param[in]	passwd	remote user's password
   @param[in]	dir	target data directory for clone
-  @param[in]	mode	client SSL mode */
+  @param[in]	mode	client SSL mode
+  @param[in]	objects	tables and schemas for a partial clone, or nullptr */
   Client_Share(const char *host, const uint port, const char *user,
-               const char *passwd, const char *dir, int mode)
+               const char *passwd, const char *dir, int mode,
+               const Ha_clone_objects *objects)
       : m_host(host),
         m_port(port),
         m_user(user),
         m_passwd(passwd),
         m_data_dir(dir),
         m_ssl_mode(mode),
+        m_objects(objects),
         m_max_concurrency(clone_max_concurrency),
         m_protocol_version(CLONE_PROTOCOL_VERSION) {
     m_storage_vec.reserve(MAX_CLONE_STORAGE_ENGINE);
@@ -327,6 +330,9 @@ struct Client_Share {
 
   /** Client SSL mode */
   const int m_ssl_mode;
+
+  /** Selected tables and schemas; nullptr clones the whole instance. */
+  const Ha_clone_objects *m_objects;
 
   /** Maximum number of concurrent threads for current operation. */
   const uint32_t m_max_concurrency;
@@ -464,6 +470,9 @@ class Client {
   @return data directory */
   const char *get_data_dir() const { return (m_share->m_data_dir); }
 
+  /** @return true if only selected tables and schemas are cloned */
+  bool is_partial() const { return (m_share->m_objects != nullptr); }
+
   /** Get clone locator for a storage engine at specified index.
   @param[in]	index	locator index
   @param[out]	loc_len	locator length in bytes
@@ -545,6 +554,11 @@ class Client {
   @param[in]	use_aux	use auxiliary connection
   @return error if not successful */
   int remote_command(Command_RPC com, bool use_aux);
+
+  /** Serialize the selected objects for COM_OBJECTS
+  @param[out]	buf_len	serialized length
+  @return error if not successful */
+  int serialize_objects_cmd(size_t &buf_len);
 
   /** Begin state in PFS table.
   @return error code. */

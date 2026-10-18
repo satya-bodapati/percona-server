@@ -859,6 +859,11 @@ int Clone_Snapshot::add_file(const char *name, uint64_t size_bytes,
   return 0;
 }
 
+bool Clone_Snapshot::includes_space(space_id_t space_id) const {
+  return (!m_partial || fsp_is_undo_tablespace(space_id) ||
+          m_partial_spaces.count(space_id) != 0);
+}
+
 dberr_t Clone_Snapshot::add_node(fil_node_t *node, bool by_ddl) {
   ut_ad(m_snapshot_handle_type == CLONE_HDL_COPY);
 
@@ -867,6 +872,13 @@ dberr_t Clone_Snapshot::add_node(fil_node_t *node, bool by_ddl) {
   /* Skip deleted tablespaces. Their pages may still be in
   the buffer pool. */
   if (space->is_deleted()) {
+    return (DB_SUCCESS);
+  }
+
+  /* Partial clone: only the selected tables and the undo tablespaces.
+  Pages and DDL notifications of other tablespaces are dropped later by
+  the same test, through m_data_file_map. */
+  if (!includes_space(space->id)) {
     return (DB_SUCCESS);
   }
 

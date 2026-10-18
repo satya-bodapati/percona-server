@@ -18440,6 +18440,47 @@ clone_stmt:
             if (Lex->m_sql_cmd == nullptr)
               MYSQL_YYABORT;
           }
+
+        | CLONE_SYM TABLE_SYM table_list FROM user ':' ulong_num
+          IDENTIFIED_SYM BY TEXT_STRING_sys
+          opt_ssl
+          {
+            Lex->sql_command= SQLCOM_CLONE;
+            /* Reject space characters around ':' */
+            if (@7.raw.start - @5.raw.end != 1) {
+              YYTHD->syntax_error_at(@6);
+              MYSQL_YYABORT;
+            }
+            $5->first_factor_auth_info.auth = to_lex_cstring($10);
+            $5->first_factor_auth_info.uses_identified_by_clause = true;
+            Lex->contains_plaintext_password= true;
+
+            Lex->m_sql_cmd= NEW_PTN Sql_cmd_clone($5, $7, $3, NULL_CSTR);
+
+            if (Lex->m_sql_cmd == nullptr)
+              MYSQL_YYABORT;
+          }
+
+        | CLONE_SYM DATABASE ident FROM user ':' ulong_num
+          IDENTIFIED_SYM BY TEXT_STRING_sys
+          opt_ssl
+          {
+            Lex->sql_command= SQLCOM_CLONE;
+            /* Reject space characters around ':' */
+            if (@7.raw.start - @5.raw.end != 1) {
+              YYTHD->syntax_error_at(@6);
+              MYSQL_YYABORT;
+            }
+            $5->first_factor_auth_info.auth = to_lex_cstring($10);
+            $5->first_factor_auth_info.uses_identified_by_clause = true;
+            Lex->contains_plaintext_password= true;
+
+            Lex->m_sql_cmd= NEW_PTN Sql_cmd_clone($5, $7, nullptr,
+                                                  to_lex_cstring($3));
+
+            if (Lex->m_sql_cmd == nullptr)
+              MYSQL_YYABORT;
+          }
         ;
 
 opt_datadir_ssl:

@@ -29,6 +29,8 @@ Clone Plugin: Interface with SE handlerton
 
 #include "plugin/clone/include/clone_hton.h"
 
+#include "mysqld_error.h"
+
 /* Namespace for all clone data types */
 namespace myclone {
 /** Structure to pass clone information to each storage plugin */
@@ -177,6 +179,28 @@ int hton_clone_end(THD *thd, Storage_Vector &clone_loc_vec,
       return (err);
     }
     ++index;
+  }
+
+  return (0);
+}
+
+int hton_clone_set_objects(THD *thd, Storage_Vector &clone_loc_vec,
+                           const Ha_clone_objects *objects) {
+  for (auto &loc_iter : clone_loc_vec) {
+    auto hton = loc_iter.m_hton;
+
+    if (hton->clone_interface.clone_set_objects == nullptr) {
+      my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+               "cloning selected tables from this storage engine");
+      return (ER_NOT_SUPPORTED_YET);
+    }
+
+    auto err = hton->clone_interface.clone_set_objects(
+        hton, thd, loc_iter.m_loc, loc_iter.m_loc_len, objects);
+
+    if (err != 0) {
+      return (err);
+    }
   }
 
   return (0);
