@@ -56,6 +56,7 @@
 #include "sql/dd/types/schema.h"           // dd::Schema
 #include "sql/dd/types/table.h"            // dd::Table
 #include "sql/dd_sql_view.h"               // update_referencing_views_metadata
+#include "sql/derror.h"                    // ER_THD
 #include "sql/field.h"                     // COLUMN_FORMAT_TYPE_COMPRESSED
 #include "sql/handler.h"                   // Sdi_from_file
 #include "sql/mdl.h"                       // MDL_request
@@ -713,7 +714,8 @@ bool order_ibd_targets(THD *thd, std::vector<Ibd_target> *targets) {
 /** Check a target before any table of the statement is created, since a
 failure found while creating a later table deletes the files of the tables
 already created: the schema exists, the table does not, the spatial
-reference systems of its columns exist, and with foreign_key_checks on, every
+reference systems of its columns exist, the user may give it an encryption
+other than the schema's default, and with foreign_key_checks on, every
 parent table that is not imported by the same statement exists. The table
 locks are held.
 @param[in]  thd      thread handle
@@ -743,6 +745,32 @@ bool check_ibd_target(THD *thd, const Ibd_target &t,
     my_error(ER_IMP_TABLE_ALREADY_EXISTS, MYF(0), t.schema.c_str(),
              t.name.c_str());
     return true;
+  }
+
+  /* As for CREATE TABLE: a table encrypted unlike the schema's default needs
+  TABLE_ENCRYPTION_ADMIN when table_encryption_privilege_check is on, and an
+  unencrypted table in an encrypted schema gets a warning otherwise. */
+  const dd::Properties &options =
+      static_cast<const dd::Table &>(*t.source).options();
+  dd::String_type encrypt_type;
+
+  if (options.exists("encrypt_type")) {
+    (void)options.get("encrypt_type", &encrypt_type);
+  }
+
+  const bool encrypted = dd::is_encrypted(encrypt_type);
+
+  if (schema->default_encryption() != encrypted) {
+    if (opt_table_encryption_privilege_check) {
+      if (check_table_encryption_admin_access(thd)) {
+        my_error(ER_CANNOT_SET_TABLE_ENCRYPTION, MYF(0));
+        return true;
+      }
+    } else if (schema->default_encryption()) {
+      push_warning(thd, Sql_condition::SL_WARNING,
+                   WARN_UNENCRYPTED_TABLE_IN_ENCRYPTED_DB,
+                   ER_THD(thd, WARN_UNENCRYPTED_TABLE_IN_ENCRYPTED_DB));
+    }
   }
 
   /* As for CREATE TABLE, the reference system of a column must exist. */

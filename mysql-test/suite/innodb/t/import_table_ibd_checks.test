@@ -94,4 +94,47 @@ IMPORT TABLE FROM 'test/c2.ibd';
 DROP TABLE c2, p2;
 DROP USER importer@localhost;
 
+--echo #
+--echo # With table_encryption_privilege_check on, a table encrypted unlike
+--echo # the schema's default needs TABLE_ENCRYPTION_ADMIN.
+--echo #
+CREATE DATABASE edb DEFAULT ENCRYPTION = 'Y';
+CREATE TABLE edb.e1 (id INT PRIMARY KEY) ENCRYPTION = 'N';
+INSERT INTO edb.e1 VALUES (1);
+FLUSH TABLES edb.e1 FOR EXPORT;
+--copy_file $MYSQLD_DATADIR/edb/e1.ibd $A/e1.ibd
+UNLOCK TABLES;
+DROP TABLE edb.e1;
+CREATE USER importer@localhost;
+GRANT CREATE, ALTER ON edb.* TO importer@localhost;
+--copy_file $A/e1.ibd $MYSQLD_DATADIR/edb/e1.ibd
+SET GLOBAL table_encryption_privilege_check = ON;
+--connect (con1, localhost, importer,,test)
+--error ER_CANNOT_SET_TABLE_ENCRYPTION
+IMPORT TABLE FROM 'edb/e1.ibd';
+--disconnect con1
+--connection default
+
+--echo # With the check off, the table is imported with a warning.
+SET GLOBAL table_encryption_privilege_check = OFF;
+--connect (con1, localhost, importer,,test)
+IMPORT TABLE FROM 'edb/e1.ibd';
+--disconnect con1
+--connection default
+SELECT * FROM edb.e1;
+DROP TABLE edb.e1;
+
+--echo # With TABLE_ENCRYPTION_ADMIN, the check passes.
+--copy_file $A/e1.ibd $MYSQLD_DATADIR/edb/e1.ibd
+SET GLOBAL table_encryption_privilege_check = ON;
+GRANT TABLE_ENCRYPTION_ADMIN ON *.* TO importer@localhost;
+--connect (con1, localhost, importer,,test)
+IMPORT TABLE FROM 'edb/e1.ibd';
+--disconnect con1
+--connection default
+SET GLOBAL table_encryption_privilege_check = OFF;
+SELECT * FROM edb.e1;
+DROP DATABASE edb;
+DROP USER importer@localhost;
+
 --force-rmdir $A

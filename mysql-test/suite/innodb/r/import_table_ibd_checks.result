@@ -79,3 +79,39 @@ GRANT REFERENCES ON test.p2 TO importer@localhost;
 IMPORT TABLE FROM 'test/c2.ibd';
 DROP TABLE c2, p2;
 DROP USER importer@localhost;
+#
+# With table_encryption_privilege_check on, a table encrypted unlike
+# the schema's default needs TABLE_ENCRYPTION_ADMIN.
+#
+CREATE DATABASE edb DEFAULT ENCRYPTION = 'Y';
+CREATE TABLE edb.e1 (id INT PRIMARY KEY) ENCRYPTION = 'N';
+Warnings:
+Warning	3824	Creating an unencrypted table in a database with default encryption enabled.
+INSERT INTO edb.e1 VALUES (1);
+FLUSH TABLES edb.e1 FOR EXPORT;
+UNLOCK TABLES;
+DROP TABLE edb.e1;
+CREATE USER importer@localhost;
+GRANT CREATE, ALTER ON edb.* TO importer@localhost;
+SET GLOBAL table_encryption_privilege_check = ON;
+IMPORT TABLE FROM 'edb/e1.ibd';
+ERROR HY000: Table encryption differ from its database default encryption, and user doesn't have enough privilege.
+# With the check off, the table is imported with a warning.
+SET GLOBAL table_encryption_privilege_check = OFF;
+IMPORT TABLE FROM 'edb/e1.ibd';
+Warnings:
+Warning	3824	Creating an unencrypted table in a database with default encryption enabled.
+SELECT * FROM edb.e1;
+id
+1
+DROP TABLE edb.e1;
+# With TABLE_ENCRYPTION_ADMIN, the check passes.
+SET GLOBAL table_encryption_privilege_check = ON;
+GRANT TABLE_ENCRYPTION_ADMIN ON *.* TO importer@localhost;
+IMPORT TABLE FROM 'edb/e1.ibd';
+SET GLOBAL table_encryption_privilege_check = OFF;
+SELECT * FROM edb.e1;
+id
+1
+DROP DATABASE edb;
+DROP USER importer@localhost;
