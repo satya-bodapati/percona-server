@@ -37,6 +37,18 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "log0chkp.h"
 #include "srv0start.h"
 
+/* PS-11549 investigation: PS11549_TRACE=1 prints the reset block flush path,
+PS11549_DELAY_MS=N delays the reset block flush by N milliseconds. */
+static bool ps11549_trace() {
+  static const bool on = getenv("PS11549_TRACE") != nullptr;
+  return on;
+}
+
+static uint ps11549_delay_ms() {
+  static const char *val = getenv("PS11549_DELAY_MS");
+  return val == nullptr ? 0 : static_cast<uint>(atoi(val));
+}
+
 #ifdef UNIV_DEBUG
 /** Archived page file default size in number of blocks. */
 uint ARCH_PAGE_FILE_CAPACITY =
@@ -1734,6 +1746,12 @@ void Arch_Page_Sys::track_page(buf_page_t *bpage, lsn_t track_lsn,
 
       m_write_pos.set_next();
 
+      if (ps11549_trace()) {
+        ib::info() << "PS11549 track_page: block "
+                   << m_write_pos.m_block_num - 1
+                   << " full, write_pos -> block " << m_write_pos.m_block_num;
+      }
+
       /* Writing to a new file so move to the next reset block. */
       if (m_write_pos.m_block_num % ARCH_PAGE_FILE_DATA_CAPACITY == 0) {
         Arch_Block *reset_block =
@@ -2723,6 +2741,14 @@ dberr_t Arch_Page_Sys::flush_active_block(Arch_Page_Pos cur_pos,
   arch_oper_mutex_enter();
 
   if (!cur_blk->is_active()) {
+    if (ps11549_trace()) {
+      ib::info() << "PS11549 flush_active_block: block " << cur_pos.m_block_num
+                 << " is no longer active (state "
+                 << static_cast<int>(cur_blk->get_state())
+                 << "), returning without flushing"
+                 << (partial_reset_block_flush ? " the REQUESTED reset block"
+                                               : "");
+    }
     arch_oper_mutex_exit();
     return (DB_SUCCESS);
   }
@@ -2749,6 +2775,12 @@ dberr_t Arch_Page_Sys::flush_active_block(Arch_Page_Pos cur_pos,
     arch_oper_mutex_exit();
 
     err = reset_block->flush(m_current_group, ARCH_FLUSH_NORMAL);
+
+    if (ps11549_trace()) {
+      ib::info() << "PS11549 flush_active_block: reset block for file "
+                 << reset_block->get_number() << " written, data_len "
+                 << reset_block->get_data_len() << ", err " << err;
+    }
 
     if (err != DB_SUCCESS) {
       return (err);
@@ -2804,6 +2836,25 @@ dberr_t Arch_Page_Sys::flush_blocks(bool *wait) {
 
     /* We do partial flush only if we're explicitly requested to flush. */
     if (data_block_flush || reset_block_flush) {
+      if (reset_block_flush && ps11549_trace()) {
+        ib::info() << "PS11549 flush_blocks: reset flush requested for block "
+                   << request_blk_num_with_lsn << " (last flushed "
+                   << (flush_blk_num_with_lsn == ARCH_UNKNOWN_BLOCK
+                           ? std::string("none")
+                           : std::to_string(flush_blk_num_with_lsn))
+                   << "), captured cur_pos=" << cur_pos.m_block_num << "/"
+                   << cur_pos.m_offset << " end_pos=" << end_pos.m_block_num;
+      }
+
+      if (reset_block_flush && ps11549_delay_ms() > 0) {
+        if (ps11549_trace()) {
+          ib::info() << "PS11549 flush_blocks: sleeping " << ps11549_delay_ms()
+                     << " ms before flush_active_block";
+        }
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(ps11549_delay_ms()));
+      }
+
       err = flush_active_block(cur_pos, reset_block_flush);
 
       if (err != DB_SUCCESS) {
@@ -2817,6 +2868,11 @@ dberr_t Arch_Page_Sys::flush_blocks(bool *wait) {
         (flush_blk_num_with_lsn == ARCH_UNKNOWN_BLOCK ||
          request_blk_num_with_lsn > flush_blk_num_with_lsn)) {
       m_flush_blk_num_with_lsn = request_blk_num_with_lsn;
+
+      if (ps11549_trace()) {
+        ib::info() << "PS11549 flush_blocks: reset flush request for block "
+                   << request_blk_num_with_lsn << " marked done";
+      }
     }
 
     arch_oper_mutex_exit();
@@ -3020,6 +3076,15 @@ bool Arch_Page_Sys::save_reset_point(bool is_durable) {
               m_last_reset_file_index, m_last_lsn, m_last_pos.m_block_num,
               m_last_pos.m_offset));
 
+  if (ps11549_trace()) {
+    ib::info() << "PS11549 save_reset_point: lsn " << m_last_lsn << " in file "
+               << m_last_reset_file_index << ", data block "
+               << m_last_pos.m_block_num << "/" << m_last_pos.m_offset
+               << ", reset block data_len " << reset_block->get_data_len()
+               << ", requested reset flush for block "
+               << request_blk_num_with_lsn << ", durable " << is_durable;
+  }
+
   return is_durable;
 }
 
@@ -3040,6 +3105,11 @@ bool Arch_Page_Sys::wait_for_reset_info_flush(uint64_t request_blk) {
   bool success = wait_flush_archiver(cbk);
 
   arch_oper_mutex_exit();
+
+  if (ps11549_trace()) {
+    ib::info() << "PS11549 wait_for_reset_info_flush: request for block "
+               << request_blk << " done, success " << success;
+  }
 
   return (success);
 }
