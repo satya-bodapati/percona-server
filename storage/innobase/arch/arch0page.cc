@@ -33,8 +33,11 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "arch0page.h"
 #include "arch0recv.h"
 #include "clone0clone.h"
+#include "current_thd.h"
+#include "debug_sync.h"
 #include "log0buf.h"
 #include "log0chkp.h"
+#include "sql_thd_internal_api.h"
 #include "srv0start.h"
 
 #ifdef UNIV_DEBUG
@@ -53,6 +56,9 @@ os_event_t page_archiver_thread_event;
 /** Archiver background thread */
 void page_archiver_thread() {
   bool page_wait = false;
+
+  /* Needed to signal debug sync points from this thread. */
+  ut_d(THD *thd = create_internal_thd());
 
   Arch_Group::init_dblwr_file_ctx(
       ARCH_DBLWR_DIR, ARCH_DBLWR_FILE, ARCH_DBLWR_NUM_FILES,
@@ -73,6 +79,8 @@ void page_archiver_thread() {
       os_event_reset(page_archiver_thread_event);
     }
   }
+
+  ut_d(destroy_internal_thd(thd));
 }
 
 void Arch_Reset_File::init() {
@@ -2801,6 +2809,29 @@ dberr_t Arch_Page_Sys::flush_blocks(bool *wait) {
         request_blk_num_with_lsn != ARCH_UNKNOWN_BLOCK &&
         (flush_blk_num_with_lsn == ARCH_UNKNOWN_BLOCK ||
          request_blk_num_with_lsn > flush_blk_num_with_lsn);
+
+    /* Hold the reset block flush until the writer has moved past the current
+    block, so that the block is no longer active when it is flushed. */
+    DBUG_EXECUTE_IF("page_archiver_hold_reset_flush", {
+      if (reset_block_flush) {
+        const char act[] = "now SIGNAL page_archiver_reset_flush_held";
+        assert(opt_debug_sync_timeout > 0);
+        assert(!debug_sync_set_action(current_thd, STRING_WITH_LEN(act)));
+      }
+
+      while (reset_block_flush &&
+             srv_shutdown_state.load() < SRV_SHUTDOWN_CLEANUP) {
+        arch_oper_mutex_enter();
+        const bool moved = m_write_pos.m_block_num > cur_pos.m_block_num;
+        arch_oper_mutex_exit();
+
+        if (moved) {
+          break;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    });
 
     /* We do partial flush only if we're explicitly requested to flush. */
     if (data_block_flush || reset_block_flush) {
