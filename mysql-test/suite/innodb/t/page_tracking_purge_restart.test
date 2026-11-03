@@ -1,0 +1,130 @@
+# A restart after mysqlbackup_page_track_purge_up_to() must continue the page
+# tracking group with a new file after its last file.
+#
+# Purge removes the oldest files of a group, so the group's first file index
+# is above 0. After a restart, the next file the archiver creates must be
+# ib_page_<last + 1>, and no existing file may be written over.
+#
+# page_archiver_simulate_more_archived_files makes each file hold 7 data
+# blocks, so the group needs only a few rounds of tracked pages per file.
+
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+# t1 needs more pages than one archive block holds page IDs.
+--source include/have_innodb_16k.inc
+
+let MYSQLD_DATADIR = `SELECT @@datadir`;
+
+INSTALL COMPONENT 'file://component_mysqlbackup';
+
+# 8192 rows of 5000 bytes: about 2700 pages, more than one archive block
+# holds page IDs.
+CREATE TABLE t1 (id INT AUTO_INCREMENT PRIMARY KEY, n INT, pad VARCHAR(5000))
+  ENGINE=InnoDB;
+INSERT INTO t1 (n, pad) VALUES (0, REPEAT('a', 5000));
+--disable_query_log
+--let $i = 13
+while ($i)
+{
+  INSERT INTO t1 (n, pad) SELECT n, pad FROM t1;
+  --dec $i
+}
+--enable_query_log
+
+--let $page_tracking_start_lsn = `SELECT mysqlbackup_page_track_set(1)`
+
+--echo #
+--echo # Track pages into ib_page_0 and ib_page_1
+--echo #
+--let $file_index = 1
+--source suite/innodb/include/page_tracking_write_until_file.inc
+
+--let $purge_lsn = `SELECT mysqlbackup_page_track_set(1)`
+
+--echo #
+--echo # Track pages into ib_page_3
+--echo #
+--let $file_index = 2
+--source suite/innodb/include/page_tracking_write_until_file.inc
+
+# The block of the end LSN is full before the changed pages are counted.
+--let $end_lsn = `SELECT mysqlbackup_page_track_set(1)`
+
+--let $file_index = 3
+--source suite/innodb/include/page_tracking_write_until_file.inc
+
+--echo #
+--echo # Purge the files before the purge LSN
+--echo #
+--disable_query_log
+--disable_result_log
+eval SELECT mysqlbackup_page_track_purge_up_to($purge_lsn);
+--enable_result_log
+--enable_query_log
+
+--perl
+my $dir = "$ENV{MYSQLD_DATADIR}/#ib_archive";
+my @indexes = sort { $a <=> $b }
+              map { /ib_page_(\d+)$/ ? $1 : () }
+              glob("$dir/page_group_*/ib_page_*");
+die "ib_page_0 was not purged: @indexes\n" if $indexes[0] == 0;
+die "Expected at least two files after purge: @indexes\n" if @indexes < 2;
+my $inc = "$ENV{MYSQLTEST_VARDIR}/tmp/page_tracking_last.inc";
+open(my $fh, '>', $inc) or die "Cannot write $inc: $!";
+print $fh "--let \$file_index = " . ($indexes[-1] + 1) . "\n";
+close($fh);
+EOF
+
+--let $pages_before = `SELECT mysqlbackup_page_track_get_changed_page_count($purge_lsn, $end_lsn)`
+
+--source include/restart_mysqld.inc
+
+--echo #
+--echo # The changed pages between the purge LSN and the end LSN are the same
+--echo # as before the restart
+--echo #
+--let $pages_after = `SELECT mysqlbackup_page_track_get_changed_page_count($purge_lsn, $end_lsn)`
+if ($pages_after != $pages_before)
+{
+  --echo Changed pages after the restart: $pages_after, before: $pages_before
+  --die Changed pages differ after the restart
+}
+
+--echo #
+--echo # Track pages into the file after the last file
+--echo #
+--source $MYSQLTEST_VARDIR/tmp/page_tracking_last.inc
+--remove_file $MYSQLTEST_VARDIR/tmp/page_tracking_last.inc
+--source suite/innodb/include/page_tracking_write_until_file.inc
+
+--echo #
+--echo # Every file holds the data blocks of its own index
+--echo #
+--perl
+my $dir = "$ENV{MYSQLD_DATADIR}/#ib_archive";
+my $block_size = 16384;
+my $data_blocks_per_file = 7;
+foreach my $path (glob("$dir/page_group_*/ib_page_*")) {
+  my ($index) = $path =~ /ib_page_(\d+)$/;
+  open(my $fh, '<:raw', $path) or die "Cannot open $path: $!";
+  # Header of the first data block; its block number is at offset 24.
+  seek($fh, $block_size, 0);
+  my $read = read($fh, my $header, 32);
+  close($fh);
+  next if $read != 32 || $header eq "\0" x 32;
+  my $block_num = unpack('Q>', substr($header, 24, 8));
+  my $owner = int($block_num / $data_blocks_per_file);
+  die "ib_page_$index holds block $block_num of ib_page_$owner\n"
+    if $owner != $index;
+}
+EOF
+
+--echo #
+--echo # Cleanup
+--echo #
+--disable_result_log
+SELECT mysqlbackup_page_track_set(0);
+--enable_result_log
+DROP TABLE t1;
+UNINSTALL COMPONENT 'file://component_mysqlbackup';
+--force-rmdir $MYSQLD_DATADIR/#ib_archive
