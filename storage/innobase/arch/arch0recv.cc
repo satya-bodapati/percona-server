@@ -385,8 +385,8 @@ dberr_t Arch_Group::Recovery::cleanup_if_required(Arch_Recv_Group_Info &info) {
   }
 
   /* Need to reinitialize the file context as num_files has changed. */
-  err =
-      file_ctx.init(ARCH_DIR, ARCH_PAGE_DIR, ARCH_PAGE_FILE, info.m_num_files);
+  err = file_ctx.init(ARCH_DIR, ARCH_PAGE_DIR, ARCH_PAGE_FILE,
+                      info.m_file_start_index + info.m_num_files);
 
   return err;
 }
@@ -505,8 +505,9 @@ dberr_t Arch_Group::recover(Arch_Recv_Group_Info &group_info,
   const auto file_size =
       static_cast<uint64_t>(ARCH_PAGE_BLK_SIZE) * ARCH_PAGE_FILE_CAPACITY;
 
-  auto err = init_file_ctx(ARCH_DIR, ARCH_PAGE_DIR, ARCH_PAGE_FILE,
-                           group_info.m_num_files, file_size, 0);
+  auto err = init_file_ctx(
+      ARCH_DIR, ARCH_PAGE_DIR, ARCH_PAGE_FILE,
+      group_info.m_file_start_index + group_info.m_num_files, file_size, 0);
 
   if (err != DB_SUCCESS) {
     return err;
@@ -602,15 +603,14 @@ void Arch_File_Ctx::Recovery::reset_print(uint file_start_index) {
 dberr_t Arch_Group::Recovery::parse(Arch_Recv_Group_Info &info) {
   dberr_t err = DB_SUCCESS;
 
-  size_t num_files = m_group->get_file_count();
+  size_t file_count = m_group->get_file_count();
 
-  if (num_files == 0) {
+  if (file_count == 0) {
     DBUG_PRINT("page_archiver", ("No group information available"));
     return DB_SUCCESS;
   }
 
   uint start_index = info.m_file_start_index;
-  size_t file_count = start_index + num_files;
 
   auto &file_ctx = m_group->m_file_ctx;
 
@@ -702,6 +702,10 @@ dberr_t Arch_File_Ctx::Recovery::parse_stop_points(bool last_file,
     return DB_CORRUPTION;
   }
 
+  /* m_stop_points is indexed by file index. Purged files hold no tracked
+  LSN, so they get a stop LSN below all of them. */
+  ut_ad(m_file_ctx.m_stop_points.size() <= m_file_ctx.m_index);
+  m_file_ctx.m_stop_points.resize(m_file_ctx.m_index, 0);
   m_file_ctx.m_stop_points.push_back(stop_lsn);
 
   if (last_file) {
