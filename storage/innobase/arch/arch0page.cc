@@ -1763,7 +1763,33 @@ void Arch_Page_Sys::track_page(buf_page_t *bpage, lsn_t track_lsn,
         break;
       }
 
-      /* Current block is full. Move to next block. */
+      /* The current block is full. It stays active until the buffer of the
+      next block is free, so that the write position always names the block
+      in its buffer, also while this thread waits without the mutex. */
+      Arch_Page_Pos next_pos = m_write_pos;
+      next_pos.set_next();
+
+      Arch_Block *next_blk = m_data.get_block(&next_pos, ARCH_DATA_BLOCK);
+
+      if (next_blk->get_state() == ARCH_BLOCK_READY_TO_FLUSH) {
+        DBUG_EXECUTE_IF("page_archiver_wait_for_full_ring", {
+          int no_writer_waits = 0;
+          page_archiver_full_ring_state.compare_exchange_strong(no_writer_waits,
+                                                                1);
+        });
+
+        /* Wait until the archiver writes the block in the next buffer. The
+        wait releases the operation mutex, so read the state again after
+        it. */
+        auto cbk = [next_blk] {
+          return next_blk->get_state() == ARCH_BLOCK_READY_TO_FLUSH;
+        };
+
+        count = wait_flush_archiver(cbk) ? 0 : 2;
+        continue;
+      }
+
+      /* Move to the next block. */
       cur_blk->end_write();
 
       m_write_pos.set_next();
@@ -1801,13 +1827,10 @@ void Arch_Page_Sys::track_page(buf_page_t *bpage, lsn_t track_lsn,
 
       ut_a(cur_blk->get_state() == ARCH_BLOCK_READY_TO_FLUSH);
 
-      DBUG_EXECUTE_IF("page_archiver_wait_for_full_ring", {
-        int no_writer_waits = 0;
-        page_archiver_full_ring_state.compare_exchange_strong(no_writer_waits,
-                                                              1);
-      });
-
-      auto cbk = std::bind(&Arch_Block::is_flushable, *cur_blk);
+      /* Wait until the archiver writes the block. */
+      auto cbk = [cur_blk] {
+        return cur_blk->get_state() == ARCH_BLOCK_READY_TO_FLUSH;
+      };
 
       /* Might release operation mutex temporarily. Need to
       loop again verifying the state. */
