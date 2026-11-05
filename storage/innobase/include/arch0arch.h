@@ -548,7 +548,8 @@ class Arch_File_Ctx {
   @param[in]    path            path to the file
   @param[in]    base_dir        directory name prefix
   @param[in]    base_file       file name prefix
-  @param[in]    num_files       initial number of files
+  @param[in]    num_files       initial number of files, counting the purged
+                                files: the index of the next file to create
   @return error code. */
   dberr_t init(const char *path, const char *base_dir, const char *base_file,
                uint num_files);
@@ -682,7 +683,8 @@ class Arch_File_Ctx {
     return (file_size.m_total_size);
   }
 
-  /** Update stop lsn of a file in the group.
+  /** Update stop lsn of a file in the group. Files before file_index that
+  have no stop lsn yet get stop lsn 0.
   @param[in]    file_index      file_index the current write_pos belongs to
   @param[in]    stop_lsn        stop point */
   void update_stop_point(uint file_index, lsn_t stop_lsn);
@@ -808,7 +810,8 @@ class Arch_File_Ctx {
   /** File index within the archive group */
   uint m_index{};
 
-  /** Current number of files in the archive group */
+  /** Number of files in the archive group, counting the purged files: the
+  index of the next file to create */
   uint m_count{};
 
   /** Current file offset */
@@ -880,7 +883,8 @@ class Arch_Group {
   @param[in]  path        path to the file
   @param[in]  base_dir    directory name prefix
   @param[in]  base_file   file name prefix
-  @param[in]  num_files   initial number of files
+  @param[in]  num_files   initial number of files, counting the purged files:
+                          the index of the next file to create
   @param[in]  file_size   size of file used when a new file is created
   @param[in]  uuid        uuid of this arch group or 0 if unknown
   @return error code. */

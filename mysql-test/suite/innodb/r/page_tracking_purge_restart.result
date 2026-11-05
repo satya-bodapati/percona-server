@@ -1,0 +1,30 @@
+INSTALL COMPONENT 'file://component_mysqlbackup';
+CREATE TABLE t1 (id INT AUTO_INCREMENT PRIMARY KEY, n INT, pad VARCHAR(5000))
+ENGINE=InnoDB;
+INSERT INTO t1 (n, pad) VALUES (0, REPEAT('a', 5000));
+#
+# Track pages into ib_page_0 and ib_page_1
+#
+#
+# Track pages into ib_page_3
+#
+#
+# Purge the files before the purge LSN
+#
+# restart
+#
+# The changed pages between the purge LSN and the end LSN are the same
+# as before the restart
+#
+#
+# Track pages into the file after the last file
+#
+#
+# Every file holds the data blocks of its own index
+#
+#
+# Cleanup
+#
+SELECT mysqlbackup_page_track_set(0);
+DROP TABLE t1;
+UNINSTALL COMPONENT 'file://component_mysqlbackup';
