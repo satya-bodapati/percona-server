@@ -1,0 +1,94 @@
+--source include/have_debug_sync.inc
+--source include/not_valgrind.inc
+
+--echo #
+--echo # PS-11907: a crash must not leave the saved graph naming a node whose
+--echo # row was never committed.
+--echo #
+--echo # Writer A's node is linked into its neighbours' in-memory lists and its
+--echo # row is written, but the row's sub-transaction has not committed yet.
+--echo # Writer B then links a nearby node and saves a neighbour list. If that
+--echo # list names A, the crash rolls A's row back and the saved graph names a
+--echo # node with no row.
+--echo #
+
+DELIMITER |;
+CREATE PROCEDURE fill()
+BEGIN
+  DROP TABLE IF EXISTS t1;
+  CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY,
+                   v VECTOR(4) NOT NULL,
+                   VECTOR KEY vk (v) TYPE hnsw (M = 8));
+  INSERT INTO t1 VALUES
+    (1,  STRING_TO_VECTOR('[0.1,0.1,0.1,0.1]')),
+    (2,  STRING_TO_VECTOR('[0.2,0.1,0.1,0.1]')),
+    (3,  STRING_TO_VECTOR('[0.3,0.2,0.1,0.1]')),
+    (4,  STRING_TO_VECTOR('[0.4,0.3,0.2,0.1]')),
+    (5,  STRING_TO_VECTOR('[0.5,0.4,0.3,0.2]')),
+    (6,  STRING_TO_VECTOR('[0.6,0.5,0.4,0.3]')),
+    (7,  STRING_TO_VECTOR('[0.7,0.6,0.5,0.4]')),
+    (8,  STRING_TO_VECTOR('[0.8,0.7,0.6,0.5]')),
+    (9,  STRING_TO_VECTOR('[0.8,0.8,0.7,0.6]')),
+    (10, STRING_TO_VECTOR('[0.7,0.8,0.8,0.7]'));
+END|
+DELIMITER ;|
+
+--echo # The index must answer, take a row, and find every row.
+DELIMITER |;
+CREATE PROCEDURE check_index(new_id INT)
+BEGIN
+  SELECT id FROM t1 FORCE INDEX (vk)
+   ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0.9,0.9,0.9,0.9]'), 'euclidean')
+   LIMIT 3;
+  INSERT INTO t1 VALUES (new_id, STRING_TO_VECTOR('[0.95,0.9,0.9,0.9]'));
+  SELECT (SELECT COUNT(*) FROM (
+            SELECT id FROM t1 FORCE INDEX (vk)
+             ORDER BY DISTANCE(v, STRING_TO_VECTOR('[0,0,0,0]'), 'euclidean')
+             LIMIT 1000) AS x) = COUNT(*) AS index_finds_every_row
+    FROM t1;
+END|
+DELIMITER ;|
+
+--echo #
+--echo # 1. A and B both INSERT.
+--echo #
+CALL fill();
+
+--connect (writer_a,localhost,root,,test)
+SET DEBUG_SYNC = 'vec_node_row_written SIGNAL parked WAIT_FOR go';
+--send INSERT INTO t1 VALUES (1000, STRING_TO_VECTOR('[0.91,0.9,0.9,0.9]'))
+
+--connection default
+SET DEBUG_SYNC = 'now WAIT_FOR parked';
+INSERT INTO t1 VALUES (1001, STRING_TO_VECTOR('[0.9,0.91,0.9,0.9]'));
+
+--source include/kill_and_restart_mysqld.inc
+--disconnect writer_a
+
+SELECT id FROM t1 ORDER BY id;
+CALL check_index(101);
+CHECK TABLE t1;
+
+--echo #
+--echo # 2. A and B both change a vector with UPDATE.
+--echo #
+CALL fill();
+
+--connect (writer_a,localhost,root,,test)
+SET DEBUG_SYNC = 'vec_node_row_written SIGNAL parked WAIT_FOR go';
+--send UPDATE t1 SET v = STRING_TO_VECTOR('[0.91,0.9,0.9,0.9]') WHERE id = 1
+
+--connection default
+SET DEBUG_SYNC = 'now WAIT_FOR parked';
+UPDATE t1 SET v = STRING_TO_VECTOR('[0.9,0.91,0.9,0.9]') WHERE id = 2;
+
+--source include/kill_and_restart_mysqld.inc
+--disconnect writer_a
+
+SELECT id, VECTOR_TO_STRING(v) FROM t1 WHERE id IN (1, 2) ORDER BY id;
+CALL check_index(102);
+CHECK TABLE t1;
+
+DROP PROCEDURE fill;
+DROP PROCEDURE check_index;
+DROP TABLE t1;

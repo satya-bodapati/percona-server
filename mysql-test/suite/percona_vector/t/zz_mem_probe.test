@@ -1,0 +1,56 @@
+--source include/have_debug.inc
+SET GLOBAL innodb_hnsw_max_memory = 0;
+DELIMITER |;
+CREATE PROCEDURE add_rows(tname VARCHAR(10), seq INT, n INT)
+BEGIN
+  DECLARE i INT DEFAULT seq;
+  DECLARE d INT;
+  WHILE i < seq + n DO
+    SET @s = CONCAT('[', SIN(i));
+    SET d = 1;
+    WHILE d < 128 DO
+      SET @s = CONCAT(@s, ',', ROUND(SIN(i * (d + 0.37) + d), 3));
+      SET d = d + 1;
+    END WHILE;
+    SET @q = CONCAT('INSERT INTO ', tname, ' (v) VALUES (STRING_TO_VECTOR(''', @s, ']''))');
+    PREPARE s FROM @q; EXECUTE s; DEALLOCATE PREPARE s;
+    SET i = i + 1;
+  END WHILE;
+END|
+DELIMITER ;|
+--let $T = 8
+--let $n = 0
+while ($n < $T) {
+  eval CREATE TABLE t$n (id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT, v VECTOR(128) NOT NULL, VECTOR KEY vk (v) TYPE hnsw (M = 8));
+  eval CALL add_rows('t$n', $n * 100000 + 1, 800);
+  --inc $n
+}
+--source include/restart_mysqld.inc
+--disable_query_log
+--disable_result_log
+--let $n = 0
+while ($n < $T) {
+  eval SELECT id FROM t$n FORCE INDEX (vk) ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[', REPEAT('9,', 127), '9]')), 'euclidean') LIMIT 1;
+  --let $used = `SELECT CAST(VARIABLE_VALUE AS UNSIGNED) FROM performance_schema.global_status WHERE VARIABLE_NAME='Innodb_hnsw_memory_used'`
+  --let $lim = `SELECT $used + 1 + $n * 65536`
+  eval SET GLOBAL innodb_hnsw_max_memory = $lim;
+  --disable_abort_on_error
+  eval CALL add_rows('t$n', $n * 100000 + 50000, 1);
+  --let $e = $mysql_errno
+  --enable_abort_on_error
+  SET GLOBAL innodb_hnsw_max_memory = 0;
+  --let $used2 = `SELECT CAST(VARIABLE_VALUE AS UNSIGNED) FROM performance_schema.global_status WHERE VARIABLE_NAME='Innodb_hnsw_memory_used'`
+  --echo t$n used $used limit_slabs $n errno $e used_after $used2
+  eval CALL add_rows('t$n', $n * 100000 + 60000, 40);
+  --inc $n
+}
+--source include/restart_mysqld.inc
+--let $n = 0
+--disable_abort_on_error
+while ($n < $T) {
+  eval CALL add_rows('t$n', $n * 100000 + 70000, 20);
+  --echo t$n after restart insert errno $mysql_errno
+  eval SELECT COUNT(*) FROM (SELECT id FROM t$n FORCE INDEX (vk) ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[', REPEAT('0,', 127), '0]')), 'euclidean') LIMIT 100000) x;
+  --echo t$n after restart ann errno $mysql_errno
+  --inc $n
+}

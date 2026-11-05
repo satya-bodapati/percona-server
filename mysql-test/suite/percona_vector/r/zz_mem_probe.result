@@ -1,0 +1,45 @@
+SET GLOBAL innodb_hnsw_max_memory = 0;
+CREATE PROCEDURE add_rows(tname VARCHAR(10), seq INT, n INT)
+BEGIN
+DECLARE i INT DEFAULT seq;
+DECLARE d INT;
+WHILE i < seq + n DO
+SET @s = CONCAT('[', SIN(i));
+SET d = 1;
+WHILE d < 256 DO
+SET @s = CONCAT(@s, ',', ROUND(SIN(i * (d + 0.37) + d), 3));
+SET d = d + 1;
+END WHILE;
+SET @q = CONCAT('INSERT INTO ', tname, ' (v) VALUES (STRING_TO_VECTOR(''', @s, ']''))');
+PREPARE s FROM @q; EXECUTE s; DEALLOCATE PREPARE s;
+SET i = i + 1;
+END WHILE;
+END|
+CREATE TABLE t0 (id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT, v VECTOR(256) NOT NULL, VECTOR KEY vk (v) TYPE hnsw (M = 8));
+CALL add_rows('t0', 0 * 100000 + 1, 1000);
+CREATE TABLE t1 (id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT, v VECTOR(256) NOT NULL, VECTOR KEY vk (v) TYPE hnsw (M = 8));
+CALL add_rows('t1', 1 * 100000 + 1, 1000);
+CREATE TABLE t2 (id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT, v VECTOR(256) NOT NULL, VECTOR KEY vk (v) TYPE hnsw (M = 8));
+CALL add_rows('t2', 2 * 100000 + 1, 1000);
+# restart
+t0 failed 2
+t1 failed 1
+t2 failed 1
+CALL add_rows('t0', 0 * 100000 + 70000, 20);
+t0 after restart insert errno 0
+SELECT COUNT(*) FROM (SELECT id FROM t0 FORCE INDEX (vk) ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[', REPEAT('0,', 255), '0]')), 'euclidean') LIMIT 100000) x;
+COUNT(*)
+1188
+t0 after restart ann errno 0
+CALL add_rows('t1', 1 * 100000 + 70000, 20);
+t1 after restart insert errno 0
+SELECT COUNT(*) FROM (SELECT id FROM t1 FORCE INDEX (vk) ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[', REPEAT('0,', 255), '0]')), 'euclidean') LIMIT 100000) x;
+COUNT(*)
+1206
+t1 after restart ann errno 0
+CALL add_rows('t2', 2 * 100000 + 70000, 20);
+t2 after restart insert errno 0
+SELECT COUNT(*) FROM (SELECT id FROM t2 FORCE INDEX (vk) ORDER BY DISTANCE(v, STRING_TO_VECTOR(CONCAT('[', REPEAT('0,', 255), '0]')), 'euclidean') LIMIT 100000) x;
+COUNT(*)
+1186
+t2 after restart ann errno 0
