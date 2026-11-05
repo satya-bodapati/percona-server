@@ -1,0 +1,581 @@
+Logging: /home/satya/WORK/vector/vec-memory-i-s/mysql-test/mysql-test-run.pl  --mysqld=--log-error-suppression-list=MY-011873,MY-011879,MY-011875 --suite=main --parallel=32 --force --max-test-fail=0 --retry=0
+MySQL Version 9.7.1
+Checking supported features
+ - Binaries are debug compiled
+Using suite(s): main
+Collecting tests
+Removing old var directory
+Creating var directory '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var'
+Installing system database
+Using parallel: 32
+ports_per_thread:30
+
+==============================================================================
+                  TEST NAME                   WORKER RESULT  TIME (ms) COMMENT
+------------------------------------------------------------------------------
+[  0%] main.alter_table-big                      [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] main.alter_table-big_myisam               [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] main.big_packets                          [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] main.big_packets_async                    [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] main.big_packets_boundary                 [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] main.big_packets_boundary_async           [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] main.change_user_deadlock                 [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] main.count_distinct3                      [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] main.create-big                           [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] main.ctype_cp932_binlog_stm               [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] main.ctype_eucjpms                        [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] main.ctype_euckr                          [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] main.ctype_gb18030_conversion             [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] main.ctype_ujis                           [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  0%] main.ctype_unicode900_casetable           [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] main.dd_bootstrap                         [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] main.dd_bootstrap_debug                   [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] main.deprecation_56                       [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] main.disable_drop_rename_user             [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] main.ds_mrr-big                           [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] main.events_stress                        [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] main.grant_dynamic_flush_privileges_upgrade  [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] main.grant_dynamic_flush_upgrade          [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] main.grant_dynamic_suid_upgrade           [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] main.greedy_optimizer                     [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] main.hypergraph_io_cost                   [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] main.index_merge_innodb                   [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] main.index_merge_innodb_hypergraph        [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] main.initialize-bug20350099               [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  1%] main.initialize-bug20504142               [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] main.initialize-bug21335821               [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] main.initialize-bug35254025               [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] main.initialize-errors                    [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] main.initialize-init-acls                 [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] main.initialize-sha256                    [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] main.initialize                           [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] main.innodb_explain_json_non_select_all   [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] main.innodb_explain_json_non_select_none  [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] main.innodb_explain_non_select_all        [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] main.innodb_explain_non_select_none       [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] main.innodb_tmp_table_heap_to_disk        [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] main.log_buffered-big                     [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] main.log_connection_hanging               [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] main.log_options_cmdline                  [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] main.log_server_stages                    [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  2%] main.log_tables-big                       [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] main.lowercase_table4                     [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] main.lowercase_utf8                       [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] main.lowercase_view                       [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] main.merge-big                            [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] main.multi_update2                        [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] main.mysql_upgrade                        [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] main.mysql_upgrade_grant                  [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] main.mysql_upgrade_slave_master_info      [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] main.mysqlbinlog_row_big                  [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] main.opt_costmodel_upgrade                [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] main.packet_big_test                      [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] main.parser-big-64bit                     [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] main.ps_sys_upgrade                       [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] main.restart_server_no_acl                [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  3%] main.slow_log_extra-big                   [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  4%] main.ssl-big                              [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  4%] main.ssl_connect                          [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  4%] main.sum_distinct-big                     [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  4%] main.type_newdecimal-big                  [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  4%] main.variables-big                        [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  4%] main.window_functions_big                 [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  4%] main.with_recursive_closure               [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  4%] main.wrong_basedir                        [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  4%] main.xa_applier_shutdown                  [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  4%] main.xa_recovery_errors                   [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  4%] main.xa_recovery_errors_mmap              [ skipped ]  Test needs 'big-test' or 'only-big-test' option.
+[  4%] main.dd_schema_definition_after_upgrade_80_debug  [ disabled ]   Bug#36312666 Several InnoDB testcases fail after the change to 9.0
+[  4%] main.dd_upgrade_ci                        [ disabled ]   Bug#36312666 Several InnoDB testcases fail after the change to 9.0
+[  4%] main.dd_upgrade_cs                        [ disabled ]   Bug#36312666 Several InnoDB testcases fail after the change to 9.0
+[  4%] main.dd_upgrade_error_ci                  [ disabled ]   Bug#36312666 Several InnoDB testcases fail after the change to 9.0
+[  5%] main.dd_upgrade_error_cs                  [ disabled ]   Bug#36312666 Several InnoDB testcases fail after the change to 9.0
+[  5%] main.dd_upgrade_error_debug               [ disabled ]   Bug#36312666 Several InnoDB testcases fail after the change to 9.0
+[  5%] main.events_time_zone                     [ disabled ]   BUG#2179 percona https://jira.percona.com/browse/PS-2179
+[  5%] main.mysql_80_inplace_upgrade             [ disabled ]   Bug#36312666 Several InnoDB testcases fail after the change to 9.0
+[  5%] main.mysql_inplace_upgrade                [ disabled ]   Bug#36312666 Several InnoDB testcases fail after the change to 9.0
+[  5%] main.partition_prefixkey_upgrade          [ disabled ]   Bug#36312666 Several InnoDB testcases fail after the change to 9.0
+[  5%] main.print_stacktrace                     [ disabled ]   Bug#36027494 Add mtr test for my_print_stacktrace
+[  5%] main.read_only_ddl                        [ disabled ]   Bug#36312666 Several InnoDB testcases fail after the change to 9.0
+[  5%] main.upgrade_with_float_auto_increment    [ disabled ]   Bug#36312666 Several InnoDB testcases fail after the change to 9.0
+[  5%] main.log_components_eventlog             w14 [ skipped ]  Need windows
+[  5%] main.test_mysql_thd_store_service        w26 [ pass ]     18
+[  5%] main.component_init_then_register        w8  [ pass ]      9
+[  5%] main.component_deinit_no_deadlock        w11 [ pass ]      9
+[  5%] main.component_file_service              w30 [ pass ]     10
+[  5%] main.conflicting_variables_plugin        w31 [ pass ]     39
+[  5%] main.bug46261                            w13 [ pass ]     25
+[  6%] main.plugin_load_option                  w20 [ pass ]     12
+[  6%] main.plugin_load_early                   w16 [ pass ]     29
+[  6%] main.multi_plugin_load_add2              w17 [ pass ]     14
+[  6%] main.dynamic_loader_guard                w22 [ pass ]      7
+[  6%] main.log_components_config               w6  [ pass ]     30
+[  6%] main.plugin_load                         w32 [ pass ]      5
+[  6%] main.component_debug                     w23 [ pass ]     18
+[  6%] main.log_timestamp_ts                    w4  [ pass ]     17
+[  6%] main.log_components                      w9  [ pass ]     97
+[  6%] main.plugin                              w25 [ pass ]    175
+[  6%] main.multi_plugin_load                   w19 [ pass ]     10
+[  6%] main.plugin_auth_qa_2                    w3  [ pass ]    311
+[  6%] main.log_components_notwin               w7  [ pass ]     17
+[  6%] main.component_set                       w24 [ pass ]    233
+[  6%] main.plugin_is_dying                     w21 [ pass ]    206
+[  7%] main.log_components_filter               w1  [ pass ]    247
+[  7%] main.query_attributes                    w30 [ pass ]     46
+[  7%] main.udf_services                        w22 [ pass ]     18
+[  7%] main.component_string_service            w9  [ pass ]      8
+[  7%] main.sensitive_variables_permission      w4  [ pass ]    112
+[  7%] main.component_string_service_charset    w9  [ pass ]      9
+[  7%] main.component_string_service_long       w9  [ pass ]      7
+[  7%] main.sensitive_variables_rewrite         w4  [ pass ]     27
+[  7%] main.component_backup_lock_service       w6  [ pass ]   3917
+[  7%] main.multi_plugin_load_add               w8  [ pass ]     14
+[  7%] main.plugin_auth_sha256_server_default_tls w30 [ pass ]    145
+[  7%] main.ipv6_debug                          w22 [ pass ]      5
+[  7%] main.locking_service                     w10 [ pass ]   5483
+[  7%] main.binlog_storage_iterator_skip_binlog w20 [ pass ]     52
+[  7%] main.plugin_auth_qa_3                    w11 [ pass ]     66
+[  7%] main.test_security_context               w32 [ pass ]     16
+[  8%] main.fulltext_plugin                     w16 [ pass ]     55
+[  8%] main.udf_skip_grants                     w19 [ pass ]      7
+[  8%] main.enable_cleartext_plugin             w26 [ pass ]    355
+[  8%] main.validate_password_plugin_check_user w24 [ pass ]     80
+[  8%] main.roles-sp-case                       w1  [ pass ]     76
+[  8%] main.create_if_not_exists                w3  [ pass ]    326
+[  8%] main.mysql_client_test_valgrind          w26 [ skipped ]  Need '--valgrind'
+[  8%] main.bind_address_3                      w4  [ pass ]    169
+[  8%] main.bind_address_2_not_windows          w9  [ pass ]    160
+[  8%] main.grant_alter_user_qa                 w28 [ pass ]   8188
+[  8%] main.mysqlbinlog_compressed_files        w8  [ pass ]    103
+[  8%] main.flush2                              w6  [ pass ]     40
+[  8%] main.ipv4_as_ipv6                        w9  [ pass ]   1950
+[  8%] main.lock_tables_lost_commit             w30 [ pass ]     70
+[  8%] main.ctype_filesystem                    w20 [ pass ]     12
+[  9%] main.mysqlbinlog_start_stop_streaming_input w8  [ pass ]    326
+[  9%] main.ctype_utf16_def                     w19 [ pass ]     13
+[  9%] main.ctype_latin1_de_myisam              w11 [ pass ]     82
+[  9%] main.ctype_ucs2_def                      w16 [ pass ]    120
+[  9%] main.deprecate_user_defined_collations   w24 [ pass ]    160
+[  9%] main.ctype_latin1_de                     w32 [ pass ]    467
+[  9%] main.no_engine_substitution              w18 [ pass ]  12321
+[  9%] main.lock_sync                           w22 [ pass ]   1774
+[  9%] main.utf8_hugeid_ci                      w4  [ pass ]     24
+[  9%] main.component                           w27 [ pass ]  12332
+[  9%] main.disabled_storage_engines            w12 [ pass ]  13060
+[  9%] main.persisted_variables_for_component   w7  [ pass ]  11984
+[  9%] main.mysqlbinlog                         w10 [ pass ]   3166
+[  9%] main.system_variable_source              w25 [ pass ]  14335
+[  9%] main.boot_coll_server_binary             w6  [ pass ]     20
+[ 10%] main.xa_commit_failure_before_commit_engines_mmap w20 [ skipped ]  Test only executed when `GLOBAL.log_bin = 0`
+[ 10%] main.type_timestamp_myisam               w11 [ pass ]     35
+[ 10%] main.no_binlog_gtid_next_partially_failed_stmts_error w8  [ pass ]    165
+[ 10%] main.xa_commit_failure_before_commit_tc_mmap w20 [ skipped ]  Test only executed when `GLOBAL.log_bin = 0`
+[ 10%] main.no_binlog_gtid_next_partially_failed_stmts w19 [ pass ]    442
+[ 10%] main.xa_commit_failure_before_gtid_externalization_mmap w20 [ skipped ]  Test only executed when `GLOBAL.log_bin = 0`
+[ 10%] main.explain_other                       w30 [ pass ]   1042
+[ 10%] main.show_check_ci_myisam                w22 [ skipped ]  Test requires 'case_insensitive_file_system'
+[ 10%] main.myisam-blob                         w32 [ pass ]    826
+[ 10%] main.sensitive_variables_persistence_without_keyring w23 [ pass ]  10049
+[ 10%] main.xa_commit_one_phase_failure_before_commit_engines_mmap w20 [ skipped ]  Test only executed when `GLOBAL.log_bin = 0`
+[ 10%] main.key_cache                           w18 [ pass ]    361
+[ 10%] main.merge_mmap                          w27 [ pass ]    327
+[ 10%] main.xa_commit_one_phase_failure_before_commit_tc_mmap w20 [ skipped ]  Test only executed when `GLOBAL.log_bin = 0`
+[ 10%] main.show_check_cs_myisam                w22 [ pass ]    439
+[ 10%] main.import_empty_secure_file_priv       w12 [ pass ]     87
+[ 11%] main.xa_commit_one_phase_failure_before_gtid_externalization_mmap w20 [ skipped ]  Test only executed when `GLOBAL.log_bin = 0`
+[ 11%] main.xa_prepare_failure_before_gtid_externalization_mmap w20 [ skipped ]  Test only executed when `GLOBAL.log_bin = 0`
+[ 11%] main.log_components_split                w5  [ pass ]  10109
+[ 11%] main.xa_prepare_failure_before_prepare_2nd_phase_mmap w20 [ skipped ]  Test only executed when `GLOBAL.log_bin = 0`
+[ 11%] main.log_tables_myisam                   w11 [ pass ]    157
+[ 11%] main.xa_prepare_failure_before_prepare_in_engines_mmap w20 [ skipped ]  Test only executed when `GLOBAL.log_bin = 0`
+[ 11%] main.mysqlcheck_myisam                   w23 [ pass ]    282
+[ 11%] main.delete_all_rows_myisam              w25 [ pass ]    114
+[ 11%] main.xa_prepare_failure_before_prepare_tc_mmap w20 [ skipped ]  Test only executed when `GLOBAL.log_bin = 0`
+[ 11%] main.myisam_crash_before_flush_keys      w10 [ pass ]   2158
+[ 11%] main.default_as_expr                     w3  [ pass ]  14407
+[ 11%] main.import_symlink                      w8  [ pass ]     48
+[ 11%] main.no_binlog_gtid_next_single_stmt_trx_rollback w6  [ pass ]    748
+[ 11%] main.insert_update_myisam                w32 [ pass ]     94
+[ 11%] main.no_binlog_gtid_next_partially_failed_stmts_anonymous w25 [ pass ]    121
+[ 12%] main.xa_rollback_failure_before_gtid_externalization_mmap w20 [ skipped ]  Test only executed when `GLOBAL.log_bin = 0`
+[ 12%] main.almost_full                         w19 [ pass ]    203
+[ 12%] main.log_components_syslog               w2  [ pass ]  21983
+[ 12%] main.filter_single_col_idx_small_myisam  w30 [ pass ]    165
+[ 12%] main.xa_rollback_failure_before_rollback_engines_mmap w20 [ skipped ]  Test only executed when `GLOBAL.log_bin = 0`
+[ 12%] main.invalid_text_sort                   w32 [ pass ]     32
+[ 12%] main.mdl_sync                            w16 [ pass ]   6331
+[ 12%] main.alter_sync_myisam                   w19 [ pass ]    223
+[ 12%] main.mysqldump_single_trans_min_privs    w22 [ pass ]    250
+[ 12%] main.time_zone2_myisam                   w18 [ pass ]     63
+[ 12%] main.xa_rollback_failure_before_rollback_tc_mmap w20 [ skipped ]  Test only executed when `GLOBAL.log_bin = 0`
+[ 12%] main.session_tracker_trx_state_myisam    w25 [ pass ]    589
+[ 12%] main.flush_myisam                        w30 [ pass ]     59
+[ 12%] main.disconnect_on_expired_password_off  w27 [ pass ]    137
+[ 12%] main.all_persisted_variables             w31 [ pass ]  17968
+[ 13%] main.symlink                             w8  [ pass ]   1647
+[ 13%] main.ctype_ldml                          w1  [ pass ]  11222
+[ 13%] main.xa_gtid                             w12 [ pass ]    349
+[ 13%] main.invalid_collation                   w28 [ pass ]  10331
+[ 13%] main.invisible_columns_myisam            w32 [ pass ]   1224
+[ 13%] main.no_binlog_gtid_empty_transaction    w6  [ pass ]    290
+[ 13%] main.invisible_indexes_myisam            w32 [ pass ]   1204
+[ 13%] main.mysqldump_gtid                      w10 [ pass ]    154
+[ 13%] main.table_open_cache_triggers_functionality w11 [ pass ]   1032
+[ 13%] main.partition_innodb_semi_consistent    w24 [ pass ]  10378
+[ 13%] main.persisted_variables_for_plugin      w21 [ pass ]  25872
+[ 13%] main.time_zone3                          w18 [ skipped ]  Test requires 'have_moscow_leap_timezone'
+[ 13%] main.key_myisam                          w32 [ pass ]   1304
+[ 13%] main.mem_cnt_common                      w31 [ skipped ]  Test requires binaries to be compiled in release mode
+[ 13%] main.log_state_bug33693                  w25 [ pass ]      5
+[ 13%] main.init_connect                        w1  [ pass ]   1648
+[ 14%] main.myisam_recover                      w4  [ pass ]  11346
+[ 14%] main.flush_read_lock                     w30 [ pass ]   5529
+[ 14%] main.alter_table_myisam                  w19 [ pass ]   5953
+[ 14%] main.no_binlog_gtid_mode_on              w2  [ pass ]   2020
+[ 14%] main.kill_myisam                         w32 [ pass ]    573
+[ 14%] main.flush_read_lock_on_function_update_temp_table_row w30 [ pass ]     60
+[ 14%] main.analyze_myisam                      w19 [ pass ]     71
+[ 14%] main.limit_myisam                        w32 [ pass ]     32
+[ 14%] main.flush_table_myisam                  w30 [ pass ]     21
+[ 14%] main.no_binlog_gtid_mode_on_explicit_prepared_stmts w2  [ pass ]   1099
+[ 14%] main.init_file                           w8  [ pass ]     79
+[ 14%] main.type_timestamp                      w22 [ pass ]   3592
+[ 14%] main.auto_increment                      w19 [ pass ]    970
+[ 14%] main.no_binlog_gtid_next_begin_caused_trx w2  [ pass ]     97
+[ 14%] main.trigger-trans_myisam                w18 [ pass ]    124
+[ 15%] main.bench_count_distinct                w19 [ pass ]    128
+[ 15%] main.foreign_key_myisam                  w30 [ pass ]   1647
+[ 15%] main.type_timestamp_explicit             w20 [ pass ]   4821
+[ 15%] main.populate_charsets                   w28 [ pass ]   8190
+[ 15%] main.bug46760_myisam                     w19 [ pass ]     23
+[ 15%] main.trigger_before_not_null_myisam      w18 [ pass ]    384
+[ 15%] main.check_constraints_myisam            w19 [ pass ]     70
+[ 15%] main.trigger_debug                       w18 [ pass ]     68
+[ 15%] main.session_tracker                     w21 [ pass ]   6155
+[ 15%] main.check_myisam                        w19 [ pass ]     67
+[ 15%] main.system_tables_myisam                w3  [ pass ]  12452
+[ 15%] main.mysqldump-max                       w23 [ pass ]  13863
+[ 15%] main.log_state                           w27 [ pass ]   6645
+[ 15%] main.validate_password_component         w7  [ pass ]  22250
+[ 15%] main.fulltext                            w30 [ pass ]   2881
+[ 15%] main.validate_password_plugin            w21 [ pass ]   1417
+[ 16%] main.explain_for_connection_small_json   w9  [ pass ]  22917
+[ 16%] main.lock_backup_ddl_myisam              w32 [ pass ]   6080
+[ 16%] main.mysqldump_myisam                    w23 [ pass ]   1816
+[ 16%] main.innodb_recovery_with_upper_case_names w28 [ skipped ]  Test requires 'case_insensitive_file_system'
+[ 16%] main.fulltext2                           w30 [ pass ]   1048
+[ 16%] main.partition_list                      w22 [ pass ]   2670
+[ 16%] main.null_key_all_myisam                 w23 [ pass ]    324
+[ 16%] main.trigger_myisam                      w18 [ pass ]   4296
+[ 16%] main.fulltext3                           w30 [ pass ]    334
+[ 16%] main.null_key_icp_myisam                 w23 [ pass ]    355
+[ 16%] main.fulltext_cache                      w30 [ pass ]     50
+[ 16%] main.udf                                 w3  [ pass ]   1862
+[ 16%] main.basedir                             w13 [ pass ]  35288
+[ 16%] main.fulltext_distinct                   w30 [ pass ]     55
+[ 16%] main.null_key_none_myisam                w23 [ pass ]    327
+[ 17%] main.type_bit_myisam                     w18 [ pass ]   1250
+[ 17%] main.bug46760                            w27 [ pass ]     88
+[ 17%] main.validate_password_component_check_user w7  [ pass ]     93
+[ 17%] main.fulltext_left_join                  w30 [ pass ]    217
+[ 17%] main.mysqld_cmdline_warnings             w13 [ pass ]    671
+[ 17%] main.type_blob_myisam                    w18 [ pass ]     37
+[ 17%] main.olap_myisam                         w23 [ pass ]    197
+[ 17%] main.partition_innodb_tablespace         w2  [ pass ]   4610
+[ 17%] main.fulltext_multi                      w30 [ pass ]     32
+[ 17%] main.validate_password_component_random_password w7  [ pass ]    249
+[ 17%] main.type_datetime_myisam                w18 [ pass ]     56
+[ 17%] main.opt_costmodel_myisam                w23 [ pass ]    142
+[ 17%] main.fulltext_order_by                   w30 [ pass ]    146
+[ 17%] main.type_float_myisam                   w18 [ pass ]     25
+[ 17%] main.fulltext_update                     w30 [ pass ]     33
+[ 18%] main.type_newdecimal_myisam              w18 [ pass ]     22
+[ 18%] main.fulltext_var                        w30 [ pass ]     31
+[ 18%] main.type_set_myisam                     w18 [ pass ]     58
+[ 18%] main.lowercase_mixed_tmpdir              w24 [ pass ]     69
+[ 18%] main.insert_debug                        w3  [ pass ]    320
+[ 18%] main.func_date_add_myisam                w30 [ pass ]     43
+[ 18%] main.undo_tablespace_myisam              w18 [ pass ]      7
+[ 18%] main.system_tables_myisam_lctn_2         w4  [ skipped ]  Test requires 'case_insensitive_file_system'
+[ 18%] main.lowercase_mixed_tmpdir_innodb       w25 [ skipped ]  Test requires 'lower_case_table_names = 2'
+[ 18%] main.library_privileges_db_caseness      w1  [ pass ]     49
+[ 18%] main.func_str_myisam                     w30 [ pass ]    157
+[ 18%] main.union_myisam                        w18 [ pass ]    147
+[ 18%] main.dd_debug_lowercase1                 w31 [ pass ]    125
+[ 18%] main.update_myisam                       w18 [ pass ]    303
+[ 18%] main.mysql_load_data_local_dir           w7  [ pass ]    184
+[ 18%] main.lock_multi                          w32 [ pass ]   9595
+[ 19%] main.bug17076131                         w28 [ pass ]   5667
+[ 19%] main.lowercase_table                     w8  [ pass ]    927
+[ 19%] main.lock_myisam                         w32 [ pass ]    229
+[ 19%] main.internal_tmp_disk_storage_engine    w6  [ pass ]   5013
+[ 19%] main.lowercase_table_grant               w8  [ pass ]     70
+[ 19%] main.function_defaults_myisam            w30 [ pass ]   2718
+[ 19%] main.locking_clause_myisam               w32 [ pass ]     21
+[ 19%] main.secure_file_priv_win                w3  [ skipped ]  Need windows
+[ 19%] main.innodb_mysql_lock                   w2  [ pass ]   2885
+[ 19%] main.ssl_dynamic_binlog                  w25 [ pass ]    115
+[ 19%] main.ps_trace_thread_outfile_exists      w24 [ pass ]    627
+[ 19%] main.persisted_variables_extended        w14 [ pass ]  47172
+[ 19%] main.alter_table_partition               w11 [ pass ]   6454
+[ 19%] main.gis-precise                         w30 [ pass ]    779
+[ 19%] main.gis-rt-precise                      w30 [ pass ]    266
+[ 20%] main.multi_statement                     w28 [ pass ]     72
+[ 20%] main.error_logging_verbosity             w31 [ pass ]    378
+[ 20%] main.show_check_ci                       w7  [ skipped ]  Test requires 'case_insensitive_file_system'
+[ 20%] main.table_open_cache_functionality      w10 [ pass ]   8567
+[ 20%] main.gis-rtree                           w30 [ pass ]    776
+[ 20%] main.archive                             w11 [ pass ]   1743
+[ 20%] main.no_binlog_related_options           w8  [ pass ]     31
+[ 20%] main.log_timestamps                      w25 [ pass ]      4
+[ 20%] main.concurrent_innodb_safelog           w13 [ pass ]  10013
+[ 20%] main.view_myisam                         w18 [ pass ]   8283
+[ 20%] main.slow_log_extra                      w3  [ pass ]   2097
+[ 20%] main.plugin_auth_sha256_2                w24 [ pass ]    153
+[ 20%] main.system_tables_myisam_lctn_1         w1  [ pass ]   7964
+[ 20%] main.plugin_auth_sha256_server_default   w24 [ pass ]    129
+[ 20%] main.slow_log_extra_myisam               w3  [ pass ]     88
+[ 21%] main.dd_pfs                              w22 [ pass ]  14514
+[ 21%] main.debug_sync2                         w14 [ pass ]   1326
+[ 21%] main.ps                                  w27 [ pass ]  11556
+[ 21%] main.innodb_deadlock                     w13 [ pass ]    866
+[ 21%] main.named_pipe                          w10 [ skipped ]  Need windows
+[ 21%] main.opt_costmodel_restart_myisam        w23 [ pass ]  15066
+[ 21%] main.show_check_cs                       w7  [ pass ]   4949
+[ 21%] main.histogram_background_error_throttling w28 [ pass ]   1157
+[ 21%] main.func_time                           w4  [ pass ]   9958
+[ 21%] main.opt_hints_join_order_myisam         w23 [ pass ]    846
+[ 21%] main.skip_grants                         w1  [ pass ]    225
+[ 21%] main.status                              w5  [ pass ]  36850
+[ 21%] main.create-big_myisam                   w19 [ pass ]  25220
+[ 21%] main.explain_for_connection_small_trad   w9  [ pass ]  22932
+[ 21%] main.optimizer_bug12837084               w23 [ pass ]     96
+[ 21%] main.skip_grants_flush                   w1  [ pass ]     31
+[ 22%] main.mysql_client_test                   w29 [ pass ]  62141
+[ 22%] main.create_myisam                       w19 [ pass ]    130
+[ 22%] main.plugin_auth_sha256                  w22 [ pass ]    201
+[ 22%] main.wait_for_disk_space                 w18 [ pass ]   5055
+[ 22%] main.skip_log_bin                        w10 [ pass ]    111
+[ 22%] main.shm                                 w14 [ skipped ]  Need windows
+[ 22%] main.select_for_update                   w13 [ pass ]   4269
+[ 22%] main.create_select_tmp_myisam            w19 [ pass ]     64
+[ 22%] main.shm_server_restart                  w27 [ skipped ]  Need windows
+[ 22%] main.window_functions_myisam             w18 [ pass ]     31
+[ 22%] main.roles-admin                         w24 [ pass ]    739
+[ 22%] main.windows_myisam                      w18 [ skipped ]  Need windows
+[ 22%] main.csv_myisam                          w19 [ pass ]     70
+[ 22%] main.gis                                 w30 [ pass ]   9681
+[ 22%] main.packet_myisam                       w23 [ pass ]   2406
+[ 23%] main.ssl_8k_key                          w7  [ pass ]     84
+[ 23%] main.component-upgrade                   w15 [ pass ]  64616
+[ 23%] main.year-myisam                         w18 [ pass ]    342
+[ 23%] main.parser_myisam                       w23 [ pass ]      9
+[ 23%] main.func_digest_small_buffer            w28 [ pass ]    102
+[ 23%] main.ctype_utf8mb4_innodb                w11 [ pass ]  10305
+[ 23%] main.ctype_binary_myisam                 w19 [ pass ]    298
+[ 23%] main.server_offline_6                    w1  [ pass ]    163
+[ 23%] main.partition_myisam                    w23 [ pass ]    201
+[ 23%] main.func_group_innodb_16k               w11 [ pass ]     98
+[ 23%] main.grant2                              w30 [ pass ]   1373
+[ 23%] main.ctype_cp1251_myisam                 w19 [ pass ]    288
+[ 23%] main.partition_not_supported_myisam      w23 [ pass ]    202
+[ 23%] main.ctype_gb18030_binlog                w19 [ pass ]    148
+[ 23%] main.grant4_myisam                       w30 [ pass ]    175
+[ 23%] main.relay_log_variables                 w14 [ pass ]     11
+[ 24%] main.dd_schema_dd_properties_debug       w27 [ pass ]     44
+[ 24%] main.bug58669                            w22 [ pass ]     83
+[ 24%] main.innodb_mrr                          w8  [ pass ]  10005
+[ 24%] main.relay_log_index_variables           w10 [ pass ]      7
+[ 24%] main.grant3                              w13 [ pass ]    603
+[ 24%] main.ssl-big-packet                      w5  [ pass ]   3368
+[ 24%] main.loaddata_special                    w27 [ fail ]
+        Test ended at 2026-10-05 15:30:35
+
+CURRENT_TEST: main.loaddata_special
+mysqltest: At line 24: Query was expected to fail, but succeeded.
+Query: 'select load_file("/proc/self/fd/0")'
+Expected error(s): 1085
+
+The result from queries just before the failure was:
+select load_file("/proc/uptime");
+load_file("/proc/uptime")
+<num> <num>
+
+SET @old_net_buffer_length = @@global.net_buffer_length;
+SET @old_max_allowed_packet= @@global.max_allowed_packet;
+SET GLOBAL net_buffer_length = 1024;
+SET GLOBAL max_allowed_packet = 1024;
+select load_file("/proc/modules");
+load_file("/proc/modules")
+NULL
+Warnings:
+Warning	1301	Result of load_file() was larger than max_allowed_packet (1024) - truncated
+SET GLOBAL max_allowed_packet = @old_max_allowed_packet;
+SET GLOBAL net_buffer_length = @old_net_buffer_length;
+select load_file("/proc/self/fd/0");
+load_file("/proc/self/fd/0")
+NULL
+safe_process[292614]: Child process: 292615, exit: 1
+
+
+
+Server [mysqld.1 - pid: 291261, winpid: 291261] log: 
+Server log from this test:
+----------SERVER LOG START-----------
+----------SERVER LOG END-------------
+
+
+ - the logfile can be found in '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/log/main.loaddata_special/loaddata_special.log'
+
+[ 24%] main.events_bugs                         w2  [ pass ]  14698
+[ 24%] main.delete_all_rows                     w18 [ pass ]    254
+[ 24%] main.union                               w6  [ pass ]  15149
+[ 24%] main.disabled_replication                w7  [ pass ]     89
+[ 24%] main.subquery_scalar_to_derived          w3  [ pass ]   7442
+[ 24%] main.no_binlog_gtid_next_temporary_table w18 [ pass ]     92
+[ 24%] main.mysqldump-no-binlog                 w28 [ pass ]     56
+[ 24%] main.plugin_auth                         w26 [ pass ]  62925
+[ 25%] main.no_binlog                           w1  [ pass ]    113
+[ 25%] main.preload                             w23 [ pass ]   3463
+[ 25%] main.xa_prepared_binlog_off              w28 [ skipped ]  Test only executed when `GLOBAL.xa_detach_on_prepare = 0`
+[ 25%] main.group_skip_scan                     w30 [ pass ]   3477
+[ 25%] main.plugin_auth_expire                  w26 [ pass ]     29
+[ 25%] main.no_binlog_gtid_empty_statement      w1  [ pass ]    155
+[ 25%] main.session_tracker_trx_state           w18 [ pass ]    731
+[ 25%] main.ctype_latin1_myisam                 w19 [ pass ]   4642
+[ 25%] main.ps_2myisam                          w23 [ pass ]    867
+[ 25%] main.partition                           w20 [ pass ]  34298
+[ 25%] main.bind_address_1_not_windows          w14 [ pass ]    250
+[ 25%] main.roles                               w24 [ pass ]   8379
+[ 25%] main.plugin_auth_password_history        w26 [ pass ]     67
+[ 25%] main.ctype_latin2_ch_myisam              w19 [ pass ]     80
+[ 25%] main.ps_ddl_myisam                       w23 [ pass ]    273
+[ 26%] main.ssl_verify_identity                 w13 [ pass ]    132
+[ 26%] main.histogram_background_error          w31 [ pass ]  15411
+[ 26%] main.flush_privileges_sql_mode           w10 [ pass ]    144
+[ 26%] main.sp                                  w16 [ pass ]  46269
+[ 26%] main.ctype_tis620_myisam                 w19 [ pass ]    154
+[ 26%] main.ps_grant                            w23 [ pass ]    161
+[ 26%] main.warnings                            w15 [ pass ]   1336
+[ 26%] main.ssl-sha512                          w5  [ pass ]     39
+[ 26%] main.plugin_auth_qa                      w26 [ pass ]    365
+[ 26%] main.ctype_uca_myisam                    w19 [ pass ]     52
+[ 26%] main.ipv6                                w14 [ pass ]   1424
+[ 26%] main.ssl_crl_clients_valid               w7  [ pass ]     38
+[ 26%] main.utility_warnings                    w6  [ pass ]    349
+[ 26%] main.ssl_crl_clients                     w28 [ pass ]     67
+[ 26%] main.group_skip_scan_hypergraph          w30 [ pass ]   3579
+[ 26%] main.ctype_ucs2_def_myisam               w19 [ pass ]     21
+[ 27%] main.plugin_auth_qa_1                    w26 [ pass ]    346
+[ 27%] main.grant_alter_user                    w4  [ pass ]  14970
+[ 27%] main.plugin_auth_user_lock               w26 [ pass ]     41
+[ 27%] main.ctype_ucs_myisam                    w19 [ pass ]    466
+[ 27%] main.ssl_crl                             w1  [ pass ]     82
+[ 27%] main.ctype_ujis_myisam                   w19 [ pass ]     24
+[ 27%] main.tls_certificate_validation_ca_path  w2  [ pass ]   4014
+[ 27%] main.ssl_crl_crlpath                     w24 [ pass ]     50
+[ 27%] main.ctype_utf16_myisam                  w19 [ pass ]    150
+[ 27%] main.subquery_to_derived_hypergraph      w3  [ pass ]   7429
+[ 27%] main.innodb_mrr_all                      w8  [ pass ]  10232
+[ 27%] main.skip_name_resolve                   w14 [ pass ]   3295
+[ 27%] main.ssl_ca                              w13 [ pass ]     68
+[ 27%] main.ctype_utf16_uca_myisam              w19 [ pass ]     51
+[ 27%] main.ssl_cipher                          w10 [ pass ]     41
+[ 28%] main.archive_symlink                     w15 [ pass ]     61
+[ 28%] main.ctype_utf16le_myisam                w19 [ pass ]    131
+[ 28%] main.trigger-single-table                w7  [ pass ]     94
+[ 28%] main.sysdate_is_now                      w5  [ pass ]   1005
+[ 28%] main.mem_cnt_temptable_keys              w6  [ pass ]    364
+[ 28%] main.ctype_utf32_myisam                  w19 [ pass ]    165
+[ 28%] main.no-threads                          w28 [ pass ]     10
+[ 28%] main.partition_exchange                  w20 [ pass ]   8085
+[ 28%] main.ctype_utf32_uca_myisam              w19 [ pass ]     50
+[ 28%] main.tls_certificate_validation_crl      w31 [ pass ]   3975
+[ 28%] main.grant_user_lock                     w4  [ pass ]   5137
+[ 28%] main.group_by                            w11 [ pass ]  15950
+[ 28%] main.mysql_ssl                           w1  [ pass ]     46
+[ 28%] main.long_tmpdir                         w3  [ pass ]     31
+[ 28%] main.grant_user_lock_qa                  w26 [ pass ]   1025
+[ 28%] main.xa_debug                            w18 [ pass ]  10301
+[ 29%] main.change_user                         w14 [ pass ]     55
+[ 29%] main.bug33509                            w10 [ pass ]    100
+[ 29%] main.temp_table                          w24 [ pass ]   1272
+[ 29%] main.bug35507223                         w10 [ pass ]     59
+[ 29%] main.func_isnull                         w14 [ pass ]    483
+[ 29%] main.rename_myisam                       w23 [ pass ]  10657
+[ 29%] main.count_distinct2                     w9  [ pass ]  20797
+[ 29%] main.temptable_disk                      w6  [ pass ]   4300
+[ 29%] main.handler_innodb                      w30 [ pass ]   9911
+[ 29%] main.bug39022                            w10 [ skipped ]  Test cannot run with binlog_format ROW
+[ 29%] main.ctype_gb18030_ligatures             w7  [ pass ]    564
+[ 29%] main.repair                              w23 [ pass ]    272
+[ 29%] main.date_formats                        w5  [ pass ]    711
+[ 29%] main.loaddata                            w4  [ pass ]   3796
+[ 29%] main.bulk_replace                        w10 [ pass ]     83
+[ 30%] main.multi_update_tiny_hash              w9  [ pass ]    387
+[ 30%] main.host_cache_size_functionality       w11 [ pass ]   4016
+[ 30%] main.temptable_fallback                  w6  [ pass ]    570
+[ 30%] main.func_like                           w14 [ pass ]   1100
+[ 30%] main.rollback_myisam                     w23 [ pass ]     32
+can't redirect STDOUT to '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/5/tmp/check-mysqld_1.err': No such file or directory at /home/satya/WORK/vector/vec-memory-i-s/mysql-test/mysql-test-run.pl line 7848.
+Use of uninitialized value $report in concatenation (.) or string at /home/satya/WORK/vector/vec-memory-i-s/mysql-test/mysql-test-run.pl line 4913.
+worker[3] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/3/log/mysqld.1.err' for reading: No such file or directory
+worker[7] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/7/log/mysqld.1.err' for reading: No such file or directory
+Use of uninitialized value $report in concatenation (.) or string at /home/satya/WORK/vector/vec-memory-i-s/mysql-test/mysql-test-run.pl line 4913.
+worker[18] mysql-test-run: WARNING: Check-testcase failed, this could also be caused by the previous test run by this worker thread
+worker[10] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/10/log/mysqld.1.err' for reading: No such file or directory
+worker[1] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/1/log/mysqld.1.err' for reading: No such file or directory
+worker[20] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/20/log/mysqld.1.err' for reading: No such file or directory
+worker[5] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/5/log/mysqld.1.err' for reading: No such file or directory
+worker[19] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/19/log/mysqld.1.err' for reading: No such file or directory
+worker[22] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/22/log/mysqld.1.err' for reading: No such file or directory
+worker[31] mysql-test-run: *** ERROR: can't open file "/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/31/tmp/mysqld.1.expect": No such file or directory
+worker[12] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/12/log/mysqld.1.err' for reading: No such file or directory
+worker[21] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/21/log/mysqld.1.err' for reading: No such file or directory
+worker[4] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/4/log/mysqld.1.err' for reading: No such file or directory
+worker[30] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/30/log/mysqld.1.err' for reading: No such file or directory
+worker[24] mysql-test-run: WARNING: Process [mysqld.1 - pid: 300184, winpid: 300184, exit: 256] died after mysql-test-run waited 2.6 seconds for /home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/24/run/mysqld.1.pid to be created.
+worker[24] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/24/log/mysqld.1.err' for reading: No such file or directory
+worker[13] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/13/log/mysqld.1.err' for reading: No such file or directory
+worker[27] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/27/log/mysqld.1.err' for reading: No such file or directory
+worker[8] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/8/log/mysqld.1.err' for reading: No such file or directory
+worker[2] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/2/log/mysqld.1.err' for reading: No such file or directory
+worker[32] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/32/log/mysqld.1.err' for reading: No such file or directory
+worker[28] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/28/log/mysqld.1.err' for reading: No such file or directory
+worker[16] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/16/log/mysqld.1.err' for reading: No such file or directory
+worker[15] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/15/log/mysqld.1.err' for reading: No such file or directory
+worker[18] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/18/log/mysqld.1.err' for reading: No such file or directory
+ERROR: A process did not stop gracefully, killing it forcefully. If this happens, a child process seems to have a bug. [cmdline = "/home/satya/WORK/vector/vec-memory-i-s/bld/runtime_output_directory/mysqld --defaults-group-suffix=.1 --defaults-file=/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/9/my.cnf --log-output=file --explain-format=TRADITIONAL_STRICT --loose-debug-sync-timeout=600 --log-error-suppression-list=MY-011873,MY-011879,MY-011875 --max_heap_table_size=16384 --core-file"]. at lib/My/SafeProcess.pm line 270.
+ERROR: A process did not stop gracefully, killing it forcefully. If this happens, a child process seems to have a bug. [cmdline = "/home/satya/WORK/vector/vec-memory-i-s/bld/runtime_output_directory/mysqld --defaults-group-suffix=.1 --defaults-file=/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/11/my.cnf --log-output=file --explain-format=TRADITIONAL_STRICT --loose-debug-sync-timeout=600 --log-error-suppression-list=MY-011873,MY-011879,MY-011875 --innodb-page-size=16k --host_cache_size=1 --core-file"]. at lib/My/SafeProcess.pm line 270.
+ERROR: A process did not stop gracefully, killing it forcefully. If this happens, a child process seems to have a bug. [cmdline = "/home/satya/WORK/vector/vec-memory-i-s/bld/runtime_output_directory/mysqld --defaults-group-suffix=.1 --defaults-file=/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/6/my.cnf --log-output=file --explain-format=TRADITIONAL_STRICT --loose-debug-sync-timeout=600 --log-error-suppression-list=MY-011873,MY-011879,MY-011875 --temptable-max-mmap=1073741824 --temptable-max-ram=1073741824 --core-file"]. at lib/My/SafeProcess.pm line 270.
+worker[29] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/29/log/mysqld.1.err' for reading: No such file or directory
+worker[9] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/9/log/mysqld.1.err' for reading: No such file or directory
+worker[11] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/11/log/mysqld.1.err' for reading: No such file or directory
+worker[6] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/6/log/mysqld.1.err' for reading: No such file or directory
+worker[26] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/26/log/mysqld.1.err' for reading: No such file or directory
+worker[14] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/14/log/mysqld.1.err' for reading: No such file or directory
+worker[23] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/23/log/mysqld.1.err' for reading: No such file or directory
+worker[17] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/17/log/mysqld.1.err' for reading: No such file or directory
+worker[25] Trying to dump core for [mysqltest - pid: 289963, winpid: 289963]
+worker[25] Trying to dump core for [mysqld.1 - pid: 296820, winpid: 296820]
+worker[25] mysql-test-run: *** ERROR: Could not open file '/home/satya/WORK/vector/vec-memory-i-s/bld/mysql-test/var/25/log/mysqld.1.err' for reading: No such file or directory
+------------------------------------------------------------------------------
+466  of 1537 test(s) completed.
+Not all tests completed: main.log_components_implicit main.persisted_variables main.persisted_variables_bugs main.ctype_utf8 main.ctype_utf8mb4 main.ctype_utf8mb4_myisam main.dd_is_compatibility_ci_myisam main.dd_is_compatibility_cs_myisam main.dd_is_debug_myisam main.dd_is_gcov_myisam main.debug_sync_myisam main.delete_myisam main.derived main.eq_range_idx_stat main.explain main.explain_json_all main.explain_json_none main.filter_single_col_idx_big_myisam main.handler_myisam main.having_myisam main.heap_btree_myisam main.heap_hash_myisam main.import main.import_debug main.index_merge_myisam main.index_merge_myisam_hypergraph main.information_schema_ci_myisam main.information_schema_cs_myisam main.information_schema_statistics_myisam main.insert_myisam main.insert_select_myisam main.log_tables_upgrade main.merge_innodb main.merge_myisam main.metadata_myisam main.mix2_myisam main.mix2_myisam_ucs2 main.multi_update_myisam main.myisam-system main.myisam main.myisam_debug main.myisam_explain_json_non_select_all main.myisam_explain_json_non_select_none main.myisam_explain_non_select_all main.myisam_explain_non_select_none main.myisam_icp main.myisam_icp_all main.myisam_icp_none main.myisam_mrr main.myisam_mrr_all ... and 1021 more
+
+The servers were restarted 164 times
+The servers were reinitialized 9 times
+Spent 1269.097 of 983 seconds executing testcases
+
+In completed tests: Failed 1/352 tests, 99.72% were successful.
+
+Failing test(s): main.loaddata_special
+
+The log files in var/log may give you some hint of what went wrong.
+
+If you want to report this error, please read first the documentation
+at http://dev.mysql.com/doc/mysql/en/mysql-test-suite.html
+
+101 tests were skipped, 29 by the test itself.
+
+mysql-test-run: *** ERROR: there were failing test cases

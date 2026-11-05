@@ -1,0 +1,4 @@
+percona_vector,sys_vars exit=0
+main exit=1
+innodb exit=0
+ALLDONE
