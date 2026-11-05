@@ -1630,3 +1630,27 @@ Two adjustments:
   those off leaves the key in the headers, so the test servers could not restart without a keyring.
   The drivers decrypt them through the same code as the encrypted .ibd (Clone_stage_file) and the
   redo header key (Redo_reader).
+
+## 32. What the feature does, as of step 5 (for review)
+
+Syntax: `CLONE TABLE [db.]t [, ...] FROM 'user'@'host':port IDENTIFIED BY 'pw' [REQUIRE [NO] SSL]`
+and `CLONE DATABASE db FROM ...`. Needs the clone plugin on both sides, `clone_valid_donor_list` on
+the recipient, BACKUP_ADMIN on the donor, CLONE_ADMIN plus CREATE and ALTER on the recipient.
+
+What happens: the donor sends the selected `.ibd` files, its undo tablespaces and the redo from the
+last checkpoint to the end of the clone, holding the backup lock (no DDL) but no table locks. The
+recipient stages everything under `<datadir>/#clone_stage/<query id>/`, applies the redo to the staged
+files, moves them into the schema (created with defaults if missing, not binlogged), imports each
+table in two passes with the donor's open transactions rolled back from the staged undo in between,
+rebuilds FULLTEXT indexes, and removes the stage. Nothing is binlogged. A failed or killed clone
+leaves nothing; a crash mid-clone leaves a stage directory that the next plugin start removes.
+
+Refused by the donor: non-InnoDB tables, tables in general or the system tablespace,
+ROW_FORMAT=COMPRESSED, COLUMN_FORMAT COMPRESSED, `innodb_change_buffering` other than NONE, a donor
+older than protocol 0x0104. Refused by the recipient before the transfer: a table of the same name.
+CLONE DATABASE copies the InnoDB tables of the schema only (no views, routines, triggers, events,
+non-InnoDB tables). Foreign keys to tables outside the set are imported unchecked. Partitioned,
+encrypted and FULLTEXT tables are supported. Known gap: a crash of the recipient between the move of
+the files into the schema directory and the end of the import leaves those files as orphans.
+
+Tests: `clone.partial_table`, `clone.partial_restart` (debug), `clone.partial_encrypt`.
