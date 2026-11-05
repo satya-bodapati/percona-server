@@ -607,13 +607,13 @@ int Redo_applier::apply_rec(const Redo_rec &rec, Clone_stage_file &file,
   }
 
   if (new_ptr == nullptr) {
-    return redo_error(
-        "cannot apply " + std::string(get_mlog_string(rec.m_type)) + " (LSN " +
-        std::to_string(rec.m_start_lsn) + "-" + std::to_string(rec.m_end_lsn) +
-        ", " + std::to_string(rec.m_body.size()) + " bytes) to page " +
-        std::to_string(page_no) + " (LSN " +
-        std::to_string(mach_read_from_8(page + FIL_PAGE_LSN)) + ") of " +
-        file.path());
+    return redo_error("cannot apply record type " + std::to_string(rec.m_type) +
+                      " (LSN " + std::to_string(rec.m_start_lsn) + "-" +
+                      std::to_string(rec.m_end_lsn) + ", " +
+                      std::to_string(rec.m_body.size()) + " bytes) to page " +
+                      std::to_string(page_no) + " (LSN " +
+                      std::to_string(mach_read_from_8(page + FIL_PAGE_LSN)) +
+                      ") of " + file.path());
   }
   return 0;
 }
@@ -735,8 +735,8 @@ int Redo_applier::run() {
   bool last = false;
 
   while (!last) {
-    lsn_t block_lsn;
-    uint32_t data_len;
+    lsn_t block_lsn = 0;
+    uint32_t data_len = 0;
 
     err = m_redo.next_block(block, block_lsn, data_len, last);
     if (err != 0) {
