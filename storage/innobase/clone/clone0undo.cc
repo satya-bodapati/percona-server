@@ -323,6 +323,9 @@ dberr_t rollback_trx(THD *thd, Table_map &map, trx_id_t trx_id,
 
   /* A transaction object as trx_resurrect() would build: the donor's id,
   which the pages carry, and no undo segments of its own. */
+  /* The donor's id, as the undo records and the rows carry it. */
+  trx_sys_raise_next_trx_id(trx_id);
+
   trx_t *trx = trx_allocate_for_background();
   trx->id = trx_id;
   trx->mysql_thd = thd;

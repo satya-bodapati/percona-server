@@ -895,7 +895,8 @@ bool import_ibd_files(THD *thd, const std::vector<std::string> &files,
     }
 
     Sdi_from_file sdi;
-    if (hton->sdi_get_from_file(thd, file.c_str(), &sdi)) {
+    if (hton->sdi_get_from_file(thd, file.c_str(), clone_stage_dir != nullptr,
+                                &sdi)) {
       return true;
     }
 

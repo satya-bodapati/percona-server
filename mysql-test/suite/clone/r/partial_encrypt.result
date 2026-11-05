@@ -1,0 +1,71 @@
+Install clone plugin on recipient server
+INSTALL PLUGIN clone SONAME 'CLONE_PLUGIN';
+CREATE TABLE t_recipient(col1 INT PRIMARY KEY, col2 int);
+INSERT INTO t_recipient VALUES(1, 10);
+CREATE UNDO TABLESPACE undo_005 ADD DATAFILE 'undo_005.ibu';
+CREATE TABLESPACE tbs1_recipient ADD DATAFILE 'tbs1_data1.ibd';
+# A keyring on each server
+# Creating local configuration file for keyring component: component_keyring_file
+# Creating manifest file for current MySQL server instance
+# Creating local configuration file for keyring component: component_keyring_file
+# Creating manifest file for current MySQL server instance
+# Donor
+INSTALL PLUGIN clone SONAME 'CLONE_PLUGIN';
+CREATE TABLE te (id INT PRIMARY KEY, v VARCHAR(100), b BLOB) ENCRYPTION = 'Y';
+INSERT INTO te
+WITH RECURSIVE n (id) AS (SELECT 1 UNION ALL SELECT id + 1 FROM n WHERE id < 200)
+SELECT id, CONCAT('row ', id), REPEAT('encrypted ', 1000) FROM n;
+CHECKSUM TABLE te;
+Table	Checksum
+test.te	2473152223
+# Changes that stay uncommitted during the clone
+BEGIN;
+UPDATE te SET v = 'never committed' WHERE id <= 10;
+DELETE FROM te WHERE id = 20;
+INSERT INTO te VALUES (500, 'never committed', NULL);
+# Recipient
+SET GLOBAL clone_valid_donor_list = 'HOST:PORT';
+CLONE TABLE test.te FROM 'root'@'HOST':PORT IDENTIFIED BY '';
+ROLLBACK;
+SHOW CREATE TABLE te;
+Table	Create Table
+te	CREATE TABLE `te` (
+  `id` int NOT NULL,
+  `v` varchar(100) DEFAULT NULL,
+  `b` blob,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci ENCRYPTION='Y'
+CHECKSUM TABLE te;
+Table	Checksum
+test.te	2473152223
+CHECK TABLE te;
+Table	Op	Msg_type	Msg_text
+test.te	check	status	OK
+SELECT COUNT(*) FROM te WHERE v = 'never committed';
+COUNT(*)
+0
+SELECT id FROM te WHERE id IN (20, 500);
+id
+20
+SELECT NAME, ENCRYPTION FROM INFORMATION_SCHEMA.INNODB_TABLESPACES WHERE NAME = 'test/te';
+NAME	ENCRYPTION
+test/te	Y
+include/assert_grep.inc [the open transaction of the donor was rolled back on the encrypted table]
+include/assert_grep.inc [the redo was applied to the encrypted staged file]
+# Cleanup
+DROP TABLE te;
+DROP TABLE t_recipient;
+DROP TABLESPACE tbs1_recipient;
+ALTER UNDO TABLESPACE undo_005 SET INACTIVE;
+DROP UNDO TABLESPACE undo_005;
+DROP TABLE te;
+UNINSTALL PLUGIN clone;
+# Remove the keyrings and restart both servers without them
+# Removing manifest file for current MySQL server instance
+# Removing local configuration file for keyring component: component_keyring_file
+# Removing local keyring file for keyring component: component_keyring_file
+# Removing manifest file for current MySQL server instance
+# Removing local configuration file for keyring component: component_keyring_file
+# Removing local keyring file for keyring component: component_keyring_file
+Uninstall clone plugin on recipient server
+UNINSTALL PLUGIN clone;

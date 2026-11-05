@@ -70,12 +70,17 @@ CREATE TABLESPACE ts1 ADD DATAFILE 'ts1.ibd';
 CREATE TABLE t4 (a INT) TABLESPACE ts1;
 CREATE TABLE t5 (a INT) ROW_FORMAT = COMPRESSED;
 CREATE TABLE t6 (a INT, b TEXT COLUMN_FORMAT COMPRESSED);
+CREATE TABLE t7 (id INT PRIMARY KEY, txt TEXT,
+FULLTEXT KEY ft (txt) COMMENT 'rebuilt by the clone');
+INSERT INTO t7 VALUES (1, 'hello world'), (2, 'goodbye moon');
 CHECKSUM TABLE t1, t2;
 Table	Checksum
 test.t1	3009907073
 test.t2	3009907073
 # Recipient
 SET GLOBAL clone_valid_donor_list = 'HOST:PORT';
+call mtr.add_suppression("Skipping FTS index");
+call mtr.add_suppression("Skip adjustment of root pages for index");
 # The donor refuses what it cannot clone
 CLONE TABLE test.t_missing FROM 'root'@'HOST':PORT IDENTIFIED BY '';
 ERROR HY000: Clone Donor Error: 1146 : Table 'test.t_missing' doesn't exist.
@@ -143,6 +148,29 @@ t2#p#p2.ibd
 t2#p#p3.ibd
 t2#p#p4.ibd
 t_recipient.ibd
+# A FULLTEXT index is rebuilt after the import, without binary logging
+include/rpl/save_binlog_file_position.inc
+CLONE TABLE test.t7 FROM 'root'@'HOST':PORT IDENTIFIED BY '';
+include/rpl/deprecated/show_binlog_events.inc
+SHOW CREATE TABLE t7;
+Table	Create Table
+t7	CREATE TABLE `t7` (
+  `id` int NOT NULL,
+  `txt` text,
+  PRIMARY KEY (`id`),
+  FULLTEXT KEY `ft` (`txt`) COMMENT 'rebuilt by the clone'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+SELECT id FROM t7 WHERE MATCH (txt) AGAINST ('hello');
+id
+1
+CHECK TABLE t7;
+Table	Op	Msg_type	Msg_text
+test.t7	check	status	OK
+INSERT INTO t7 VALUES (3, 'added here');
+SELECT id FROM t7 WHERE MATCH (txt) AGAINST ('added');
+id
+3
+DROP TABLE t7;
 # The cloned tables are tables like any other
 INSERT INTO t1 VALUES (1000, 1, 'added here', NULL);
 DELETE FROM t2 WHERE col1 = 1;
@@ -160,12 +188,13 @@ SHOW TABLES;
 Tables_in_test
 t1
 t2
+t7
 t_recipient
 CHECKSUM TABLE t1, t2;
 Table	Checksum
 test.t1	3009907073
 test.t2	3009907073
-DROP TABLE t1, t2;
+DROP TABLE t1, t2, t7;
 # Clone under concurrent DML on the donor
 # In connection con1 - Running Insert Random [100 - 200 Key range]
 call execute_dml(0, 100, 100, 100, 20, 1);
@@ -181,12 +210,24 @@ DELETE FROM t1 WHERE col1 = 80;
 DELETE FROM t2 WHERE col1 = 80;
 INSERT INTO t1 VALUES (500, 500, 'never committed', NULL);
 INSERT INTO t2 VALUES (500, 500, 'never committed', NULL);
-CLONE TABLE test.t1, test.t2 FROM 'root'@'HOST':PORT IDENTIFIED BY '';
+INSERT INTO t7 VALUES (500, 'never committed');
+UPDATE t7 SET txt = 'changed and never committed' WHERE id = 1;
+CLONE TABLE test.t1, test.t2, test.t7 FROM 'root'@'HOST':PORT IDENTIFIED BY '';
 ROLLBACK;
-CHECK TABLE t1, t2;
+CHECK TABLE t1, t2, t7;
 Table	Op	Msg_type	Msg_text
 test.t1	check	status	OK
 test.t2	check	status	OK
+test.t7	check	status	OK
+SELECT * FROM t7 ORDER BY id;
+id	txt
+1	hello world
+2	goodbye moon
+SELECT id FROM t7 WHERE MATCH (txt) AGAINST ('hello');
+id
+1
+SELECT id FROM t7 WHERE MATCH (txt) AGAINST ('committed');
+id
 # The open transaction of the donor left nothing in the clone
 SELECT col1, col2 FROM t1 WHERE col1 BETWEEN 51 AND 75 ORDER BY col1;
 col1	col2
@@ -252,12 +293,12 @@ include/assert_grep.inc [undo records of the open transaction were rolled back]
 # The staged redo was applied to the staged files
 include/assert_grep.inc [redo records were applied to the staged pages]
 # Cleanup
-DROP TABLE t1, t2;
+DROP TABLE t1, t2, t7;
 DROP TABLE t_recipient;
 DROP TABLESPACE tbs1_recipient;
 ALTER UNDO TABLESPACE undo_005 SET INACTIVE;
 DROP UNDO TABLESPACE undo_005;
-DROP TABLE t3;
+DROP TABLE t3, t7;
 DROP TABLESPACE ts1;
 DROP TABLE t1;
 DROP TABLE t2;

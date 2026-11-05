@@ -143,6 +143,12 @@ or trx_sys_allocate_trx_id_trx_no() was called.
 @return the next trx->id or trx->no that will be allocated */
 inline trx_id_t trx_sys_get_next_trx_id_or_no();
 
+/** Makes sure that the next transaction id allocated is above a given one.
+Pages imported with their rows as another server wrote them carry that
+server's transaction ids, which every check expects below the counter.
+@param[in]      id      transaction id found in such a page */
+void trx_sys_raise_next_trx_id(trx_id_t id);
+
 #ifdef UNIV_DEBUG
 /* Flag to control TRX_RSEG_N_SLOTS behavior debugging. */
 extern uint trx_rseg_n_slots_debug;

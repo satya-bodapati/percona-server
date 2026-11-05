@@ -305,10 +305,12 @@ struct row_import {
 
   row_index_t *m_indexes; /*!< Index meta data */
 
-  bool m_missing; /*!< true if a .cfg file was
-                  found and was readable */
-  bool m_has_sdi; /*!< true if tablespace has
-                  SDI */
+  bool m_missing;      /*!< true if a .cfg file was
+                       found and was readable */
+  bool m_has_sdi;      /*!< true if tablespace has
+                       SDI */
+  bool m_clone{false}; /*!< true for a partial clone, which rebuilds the
+                       FULLTEXT indexes after the import */
 
   bool m_cfp_missing; /*!< true if a .cfp file was
                       found and was readable */
@@ -2456,8 +2458,14 @@ dberr_t PageConverter::adjust_cluster_record(
 
   ut_ad(index->is_clustered());
 
-  if ((err = adjust_cluster_index_blob_ref(rec, offsets)) == DB_SUCCESS &&
-      !m_keep_rows) {
+  if ((err = adjust_cluster_index_blob_ref(rec, offsets)) != DB_SUCCESS) {
+    return (err);
+  }
+
+  if (m_keep_rows) {
+    /* The record keeps the transaction id of the server that wrote it. */
+    trx_sys_raise_next_trx_id(row_get_rec_trx_id(rec, index, offsets));
+  } else {
     /* Reset DB_TRX_ID and DB_ROLL_PTR.  Normally, these fields
     are only written in conjunction with other changes to the
     record. */
@@ -2608,6 +2616,11 @@ dberr_t PageConverter::update_index_page(buf_block_t *block) UNIV_NOTHROW {
   if (m_cfg->m_missing &&
       (m_index == nullptr || m_index->m_srv_index == nullptr)) {
     return (DB_SUCCESS);
+  }
+
+  /* The page keeps the transaction ids of the server that wrote it. */
+  if (m_keep_rows) {
+    trx_sys_raise_next_trx_id(page_get_max_trx_id(page));
   }
 
 #ifdef UNIV_ZIP_DEBUG
@@ -3104,10 +3117,13 @@ the caller, then clean up and commit.
         break;
       }
 
-      ib_errf(trx->mysql_thd, IB_LOG_LEVEL_WARN, ER_INNODB_INDEX_CORRUPT,
-              "Index %s not found or corrupt,"
-              " you should recreate this index.",
-              index->name());
+      /* A FULLTEXT index is never in the file; a clone recreates it. */
+      if (!cfg.m_clone || !(index->type & DICT_FTS)) {
+        ib_errf(trx->mysql_thd, IB_LOG_LEVEL_WARN, ER_INNODB_INDEX_CORRUPT,
+                "Index %s not found or corrupt,"
+                " you should recreate this index.",
+                index->name());
+      }
 
       /* Do not bail out, so that the data
       can be recovered. */
@@ -4630,6 +4646,11 @@ from the .cfp file next to it.
     return Import_status{};
   }
 
+  /* A clone read the key from the file already. */
+  if (cfg.m_encryption_metadata.can_encrypt()) {
+    return Import_status{};
+  }
+
   /* First try to read CFP file here. */
   dberr_t err = row_import_read_cfp(table, trx->mysql_thd, cfg);
   ut_ad(cfg.m_cfp_missing || err == DB_SUCCESS);
@@ -5196,8 +5217,13 @@ in the file is never registered, so it cannot clash with a tablespace of
 this server. */
 class Ibd_sdi_reader {
  public:
-  /** @param[in] thd   session, for error messages */
-  explicit Ibd_sdi_reader(THD *thd) : m_thd(thd) {}
+  /** @param[in] thd          session, for error messages
+  @param[in] key_in_file  true if the key of an encrypted tablespace is on
+                          page 0, wrapped with this server's master key (a
+                          clone re-wrapped it); false if it is in the .cfp
+                          file next to the .ibd file */
+  explicit Ibd_sdi_reader(THD *thd, bool key_in_file = false)
+      : m_thd(thd), m_key_in_file(key_in_file) {}
 
   ~Ibd_sdi_reader() {
     if (m_file_open) {
@@ -5215,6 +5241,14 @@ class Ibd_sdi_reader {
   @param[in]  path  path of the .ibd file
   @return DB_SUCCESS or error code; errors are reported */
   [[nodiscard]] dberr_t open(const char *path);
+
+  /** Load the encryption key of an encrypted tablespace, from page 0 or
+  from the .cfp file. Nothing to do for an unencrypted one.
+  @return DB_SUCCESS or error code; errors are reported */
+  [[nodiscard]] dberr_t load_key();
+
+  /** @return the encryption key after load_key() */
+  const Encryption_metadata &encryption() const { return m_encryption; }
 
   /** Read every live SDI record of the file.
   @param[out]  records  SDI records, in key order
@@ -5262,6 +5296,9 @@ class Ibd_sdi_reader {
 
   /** Session, for error messages. */
   THD *m_thd;
+
+  /** true if the key is on page 0, false if it is in the .cfp file. */
+  bool m_key_in_file;
 
   /** Path of the file. */
   std::string m_path;
@@ -5421,41 +5458,60 @@ dberr_t Ibd_sdi_reader::open(const char *path) {
     return corrupt("the SDI root page is not recorded on page 0");
   }
 
-  if (FSP_FLAGS_GET_ENCRYPTION(m_flags)) {
-    /* The key comes from the .cfp file next to the .ibd file, in the format
-    written by FLUSH TABLES ... FOR EXPORT and xtrabackup --export. */
-    std::string cfp_path(m_path);
-    const size_t ext_len = strlen(dot_ext[IBD]);
+  return DB_SUCCESS;
+}
 
-    if (cfp_path.size() > ext_len &&
-        cfp_path.compare(cfp_path.size() - ext_len, ext_len, dot_ext[IBD]) ==
-            0) {
-      cfp_path.resize(cfp_path.size() - ext_len);
-    }
-    cfp_path.append(dot_ext[CFP]);
+dberr_t Ibd_sdi_reader::load_key() {
+  if (!FSP_FLAGS_GET_ENCRYPTION(m_flags) || m_encryption.can_encrypt()) {
+    return DB_SUCCESS;
+  }
 
-    FILE *cfp = fopen(cfp_path.c_str(), "rb");
+  if (m_key_in_file) {
+    /* Page 0 is still in m_raw: read_page() has not run yet. */
+    byte key[Encryption::KEY_LEN];
+    byte iv[Encryption::KEY_LEN];
+    Encryption_key e_key{key, iv};
 
-    if (cfp == nullptr) {
+    if (!fsp_header_get_encryption_key(m_flags, e_key, m_raw)) {
       ib_errf(m_thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
-              "Table is in an encrypted tablespace, but the encryption"
-              " meta-data file '%s' cannot be found while importing.",
-              cfp_path.c_str());
+              "Table is in an encrypted tablespace, but its key cannot be"
+              " read from the file.");
       return DB_ERROR;
     }
 
-    row_import cfg{};
-    err = row_import_read_encryption_data(cfg, cfp, m_thd);
-    fclose(cfp);
-
-    if (err != DB_SUCCESS) {
-      return err;
-    }
-
-    m_encryption = cfg.m_encryption_metadata;
+    Encryption::set_or_generate(Encryption::AES, key, iv, m_encryption);
+    return DB_SUCCESS;
   }
 
-  return DB_SUCCESS;
+  /* The key comes from the .cfp file next to the .ibd file, in the format
+  written by FLUSH TABLES ... FOR EXPORT and xtrabackup --export. */
+  std::string cfp_path(m_path);
+  const size_t ext_len = strlen(dot_ext[IBD]);
+
+  if (cfp_path.size() > ext_len &&
+      cfp_path.compare(cfp_path.size() - ext_len, ext_len, dot_ext[IBD]) == 0) {
+    cfp_path.resize(cfp_path.size() - ext_len);
+  }
+  cfp_path.append(dot_ext[CFP]);
+
+  FILE *cfp = fopen(cfp_path.c_str(), "rb");
+
+  if (cfp == nullptr) {
+    ib_errf(m_thd, IB_LOG_LEVEL_ERROR, ER_TABLE_SCHEMA_MISMATCH,
+            "Table is in an encrypted tablespace, but the encryption"
+            " meta-data file '%s' cannot be found while importing.",
+            cfp_path.c_str());
+    return DB_ERROR;
+  }
+
+  row_import cfg{};
+  const dberr_t err = row_import_read_encryption_data(cfg, cfp, m_thd);
+  fclose(cfp);
+
+  if (err == DB_SUCCESS) {
+    m_encryption = cfg.m_encryption_metadata;
+  }
+  return err;
 }
 
 dberr_t Ibd_sdi_reader::read_page(page_no_t page_no, const byte *&page) {
@@ -5598,6 +5654,11 @@ dberr_t Ibd_sdi_reader::copy_blob(page_no_t first_page, ulint len, byte *dest) {
 }
 
 dberr_t Ibd_sdi_reader::read_all(std::vector<Sdi_file_record> &records) {
+  const dberr_t key_err = load_key();
+  if (key_err != DB_SUCCESS) {
+    return key_err;
+  }
+
   /* SDI records are stored in ROW_FORMAT=COMPACT layout (DYNAMIC or
   COMPRESSED pages use the same record format): the fixed-length fields
   type (4), id (8), DB_TRX_ID, DB_ROLL_PTR, uncompressed length (4) and
@@ -5768,9 +5829,10 @@ dberr_t Ibd_sdi_reader::read_all(std::vector<Sdi_file_record> &records) {
 }
 
 dberr_t row_import_read_sdi_from_file(THD *thd, const char *path,
+                                      bool key_in_file,
                                       std::vector<Sdi_file_record> &records,
                                       uint32_t *space_flags) {
-  Ibd_sdi_reader reader(thd);
+  Ibd_sdi_reader reader(thd, key_in_file);
 
   dberr_t err = reader.open(path);
 
@@ -6020,7 +6082,7 @@ dberr_t row_import_attach(THD *thd, dict_table_t *table, dd::Table *table_def,
     return DB_OUT_OF_MEMORY;
   }
 
-  Ibd_sdi_reader reader(thd);
+  Ibd_sdi_reader reader(thd, clone_stage_dir != nullptr);
   dberr_t err = reader.open(filepath);
   ut::free(filepath);
 
@@ -6068,10 +6130,22 @@ dberr_t row_import_attach(THD *thd, dict_table_t *table, dd::Table *table_def,
   }
 
   row_import cfg{};
+  cfg.m_clone = (clone_stage_dir != nullptr);
   Import_sdi_source sdi_source(source, &source_def, reader.space_flags(),
                                reader.sdi_root());
 
-  Import_status status = sdi_source.read(ctx, cfg);
+  Import_status status{};
+
+  if (cfg.m_clone && FSP_FLAGS_GET_ENCRYPTION(reader.space_flags())) {
+    /* The clone re-wrapped the key on page 0 with this server's master
+    key; there is no .cfp file. */
+    status.err = reader.load_key();
+    cfg.m_encryption_metadata = reader.encryption();
+  }
+
+  if (status.err == DB_SUCCESS) {
+    status = sdi_source.read(ctx, cfg);
+  }
 
   ctx.source_table_id = source->id;
   dd_free_uncached_table(source);

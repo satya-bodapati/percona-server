@@ -70,15 +70,18 @@ struct Sdi_file_record {
 
 /** Read the SDI of a tablespace file that is not attached to this server.
 The file is read directly, outside the buffer pool. If the tablespace is
-encrypted, the key is read from the .cfp file next to it.
+encrypted, the key is read from the .cfp file next to it, or from page 0
+when a clone re-wrapped it with this server's master key.
 @param[in]   thd      session, for error messages
 @param[in]   path     path of the .ibd file
+@param[in]   key_in_file  true if the key is on page 0 (a clone), false if
+                          it is in the .cfp file
 @param[out]  records  the live SDI records of the file, in key order
 @param[out]  space_flags  tablespace (FSP) flags of the file
 @return DB_SUCCESS or error code; errors are reported to thd */
 [[nodiscard]] dberr_t row_import_read_sdi_from_file(
-    THD *thd, const char *path, std::vector<Sdi_file_record> &records,
-    uint32_t *space_flags);
+    THD *thd, const char *path, bool key_in_file,
+    std::vector<Sdi_file_record> &records, uint32_t *space_flags);
 
 /** Read the space id of a tablespace file that is not attached to this
 server, from its first page.

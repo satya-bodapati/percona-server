@@ -1843,12 +1843,16 @@ struct Sdi_from_file {
 
   @param[in]   thd   thread context
   @param[in]   path  path of the tablespace file
+  @param[in]   key_in_file  true if the key of an encrypted file is in the
+                            file, wrapped with this server's master key (a
+                            partial clone re-wrapped it); false if it is in
+                            the file written by FLUSH TABLES ... FOR EXPORT
   @param[out]  sdi   the table SDIs found in the file
   @retval      false success
   @retval      true  failure, my_error() was called by the SE
 */
 typedef bool (*sdi_get_from_file_t)(THD *thd, const char *path,
-                                    Sdi_from_file *sdi);
+                                    bool key_in_file, Sdi_from_file *sdi);
 
 /**
   Check that the files named for a table by IMPORT TABLE FROM '<file>' are

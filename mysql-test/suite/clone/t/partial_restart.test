@@ -1,0 +1,78 @@
+# CLONE TABLE: the recipient (server 2) reconnects to the donor (server 1)
+# after a network error, as a clone of the whole instance does.
+
+--source include/have_debug.inc
+--source include/have_innodb_default_undo_tablespaces.inc
+--let clone_inst_number = 2
+--source ../include/clone_connection_begin.inc
+
+--let $HOST = 127.0.0.1
+--let $PORT = $SERVER_PORT_1
+--let $USER = root
+--let $RECIPIENT_DATADIR = $MYSQLTEST_VARDIR/mysqld.2/data
+
+--echo # Donor
+--connection default
+--replace_result $CLONE_PLUGIN CLONE_PLUGIN
+--eval INSTALL PLUGIN clone SONAME '$CLONE_PLUGIN'
+
+--source ../include/create_schema.inc
+call execute_dml(0, 0, 100, 100, 10, 0);
+CHECKSUM TABLE t1, t2;
+
+--echo # Recipient
+--connection clone_conn_1
+--replace_result $HOST HOST $PORT PORT
+--eval SET GLOBAL clone_valid_donor_list = '$HOST:$PORT'
+
+--echo # A network error with no restart allowed by the donor fails the clone
+--connection default
+SET GLOBAL clone_donor_timeout_after_network_failure = 0;
+--connection clone_conn_1
+SET GLOBAL debug = "+d,clone_restart_apply";
+--replace_result $HOST HOST $PORT PORT
+--error ER_CLONE_DONOR
+--eval CLONE TABLE test.t1, test.t2 FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+SELECT ID, STATE, ERROR_NO FROM performance_schema.clone_status;
+--list_files $RECIPIENT_DATADIR/#clone_stage
+SHOW TABLES;
+
+--echo # Network errors with restart allowed: the clone reconnects and completes
+--connection default
+SET GLOBAL clone_donor_timeout_after_network_failure = 15;
+--connection clone_conn_1
+--replace_result $HOST HOST $PORT PORT
+--eval CLONE TABLE test.t1, test.t2 FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+SET GLOBAL debug = "-d,clone_restart_apply";
+--connection default
+SET GLOBAL clone_donor_timeout_after_network_failure = default;
+--connection clone_conn_1
+
+SELECT ID, STATE, ERROR_NO FROM performance_schema.clone_status;
+SHOW TABLES;
+CHECKSUM TABLE t1, t2;
+CHECK TABLE t1, t2;
+--list_files $RECIPIENT_DATADIR/#clone_stage
+
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.2.err
+--let $assert_text = the recipient reconnected to the donor
+--let $assert_select = Client: Command COM_REINIT
+--let $assert_count_condition = >= 1
+--source include/assert_grep.inc
+
+--echo # Cleanup
+DROP TABLE t1, t2;
+
+# The objects clone_connection_begin.inc created on the recipient; a clone
+# that replaces the data directory would have removed them.
+DROP TABLE t_recipient;
+DROP TABLESPACE tbs1_recipient;
+ALTER UNDO TABLESPACE undo_005 SET INACTIVE;
+--let $wait_condition = SELECT STATE = 'empty' FROM INFORMATION_SCHEMA.INNODB_TABLESPACES WHERE NAME = 'undo_005'
+--source include/wait_condition.inc
+DROP UNDO TABLESPACE undo_005;
+
+--connection default
+--source ../include/drop_schema.inc
+UNINSTALL PLUGIN clone;
+--source ../include/clone_connection_end.inc

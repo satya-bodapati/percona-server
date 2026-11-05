@@ -5763,15 +5763,17 @@ static PSI_meter_info_v1 inno_meter[] = {
 Implements handlerton::sdi_get_from_file for IMPORT TABLE FROM '<file>.ibd'.
 @param[in]   thd   session
 @param[in]   path  path of the tablespace file
+@param[in]   key_in_file  true if the key of an encrypted file is on page 0
 @param[out]  sdi   table SDIs of the file
 @retval false on success
 @retval true on failure, the error is reported */
 static bool innobase_sdi_get_from_file(THD *thd, const char *path,
-                                       Sdi_from_file *sdi) {
+                                       bool key_in_file, Sdi_from_file *sdi) {
   std::vector<Sdi_file_record> records;
   uint32_t space_flags = 0;
 
-  dberr_t err = row_import_read_sdi_from_file(thd, path, records, &space_flags);
+  dberr_t err = row_import_read_sdi_from_file(thd, path, key_in_file, records,
+                                              &space_flags);
 
   if (err != DB_SUCCESS) {
     if (!thd->is_error()) {

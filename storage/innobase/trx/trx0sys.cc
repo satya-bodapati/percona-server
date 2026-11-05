@@ -97,6 +97,21 @@ void ReadView::check_trx_id_sanity(trx_id_t id, const table_name_t &name) {
 uint trx_rseg_n_slots_debug = 0;
 #endif /* UNIV_DEBUG */
 
+void trx_sys_raise_next_trx_id(trx_id_t id) {
+  if (trx_sys_get_next_trx_id_or_no() > id) {
+    return;
+  }
+
+  trx_sys_mutex_enter();
+
+  if (trx_sys->next_trx_id_or_no.load() <= id) {
+    trx_sys->next_trx_id_or_no.store(id + 1);
+    trx_sys_write_max_trx_id();
+  }
+
+  trx_sys_mutex_exit();
+}
+
 /** Writes the value of max_trx_id to the file based trx system header. */
 void trx_sys_write_max_trx_id(void) {
   mtr_t mtr;

@@ -1,0 +1,123 @@
+# CLONE TABLE of an encrypted table from a donor (server 1) to a recipient
+# (server 2) with its own keyring: the key travels re-wrapped with the
+# recipient's master key, the import reads it from the file, the drivers
+# decrypt the staged pages.
+
+--source include/have_component_keyring_file.inc
+--source include/have_innodb_default_undo_tablespaces.inc
+--let clone_inst_number = 2
+--source ../include/clone_connection_begin.inc
+
+--let $HOST = 127.0.0.1
+--let $PORT = $SERVER_PORT_1
+--let $USER = root
+
+--echo # A keyring on each server
+--let COMPONENT_LIBRARY = `SELECT SUBSTRING_INDEX('$KEYRING_FILE_COMPONENT_LOAD', '=', -1)`
+--let COMPONENT_DIR = $KEYRING_FILE_COMPONENT_DIR
+--let COMPONENT_NAME = `SELECT SUBSTRING_INDEX('$COMPONENT_LIBRARY', '.', 1)`
+--let LOCAL_MANIFEST_CONTENT = `SELECT CONCAT('{ \"components\": \"file://', '$COMPONENT_NAME', '\" }')`
+
+--connection default
+--let CURRENT_DATADIR = `SELECT @@datadir`
+--let KEYRING_FILE_PATH = $MYSQLTEST_VARDIR/keyring_file_donor
+--let KEYRING_CONFIG_CONTENT = `SELECT CONCAT('{ \"path\": \"', '$KEYRING_FILE_PATH','\", \"read_only\": false }')`
+--source include/keyring_tests/helper/local_keyring_create_config.inc
+--source include/keyring_tests/helper/instance_create_manifest.inc
+--let DONOR_DATADIR = $CURRENT_DATADIR
+--let DONOR_KEYRING_FILE_PATH = $KEYRING_FILE_PATH
+--let $restart_parameters = restart: $KEYRING_FILE_COMPONENT_OPT
+--source include/restart_mysqld_no_echo.inc
+
+--connection clone_conn_1
+--let CURRENT_DATADIR = `SELECT @@datadir`
+--let KEYRING_FILE_PATH = $MYSQLTEST_VARDIR/keyring_file_recipient
+--let KEYRING_CONFIG_CONTENT = `SELECT CONCAT('{ \"path\": \"', '$KEYRING_FILE_PATH','\", \"read_only\": false }')`
+--source include/keyring_tests/helper/local_keyring_create_config.inc
+--source include/keyring_tests/helper/instance_create_manifest.inc
+--let RECIPIENT_DATADIR = $CURRENT_DATADIR
+--let RECIPIENT_KEYRING_FILE_PATH = $KEYRING_FILE_PATH
+--let $restart_parameters = restart: $KEYRING_FILE_COMPONENT_OPT
+--source include/restart_mysqld_no_echo.inc
+
+--echo # Donor
+--connection default
+--replace_result $CLONE_PLUGIN CLONE_PLUGIN
+--eval INSTALL PLUGIN clone SONAME '$CLONE_PLUGIN'
+CREATE TABLE te (id INT PRIMARY KEY, v VARCHAR(100), b BLOB) ENCRYPTION = 'Y';
+INSERT INTO te
+  WITH RECURSIVE n (id) AS (SELECT 1 UNION ALL SELECT id + 1 FROM n WHERE id < 200)
+  SELECT id, CONCAT('row ', id), REPEAT('encrypted ', 1000) FROM n;
+CHECKSUM TABLE te;
+
+--echo # Changes that stay uncommitted during the clone
+connect (con1,localhost,root,,);
+BEGIN;
+UPDATE te SET v = 'never committed' WHERE id <= 10;
+DELETE FROM te WHERE id = 20;
+INSERT INTO te VALUES (500, 'never committed', NULL);
+
+--echo # Recipient
+--connection clone_conn_1
+--replace_result $HOST HOST $PORT PORT
+--eval SET GLOBAL clone_valid_donor_list = '$HOST:$PORT'
+--replace_result $HOST HOST $PORT PORT
+--eval CLONE TABLE test.te FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+
+--connection con1
+ROLLBACK;
+--disconnect con1
+--connection clone_conn_1
+
+SHOW CREATE TABLE te;
+CHECKSUM TABLE te;
+CHECK TABLE te;
+SELECT COUNT(*) FROM te WHERE v = 'never committed';
+SELECT id FROM te WHERE id IN (20, 500);
+SELECT NAME, ENCRYPTION FROM INFORMATION_SCHEMA.INNODB_TABLESPACES WHERE NAME = 'test/te';
+
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.2.err
+--let $assert_text = the open transaction of the donor was rolled back on the encrypted table
+--let $assert_select = Clone rollback: table .test.\..te.: [1-9][0-9]* undo records of [1-9][0-9]* open transactions
+--let $assert_count_condition = >= 1
+--source include/assert_grep.inc
+
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.2.err
+--let $assert_text = the redo was applied to the encrypted staged file
+--let $assert_select = Clone Apply redo: [0-9]+ records on [0-9]+ pages
+--let $assert_count_condition = >= 1
+--source include/assert_grep.inc
+
+--echo # Cleanup
+DROP TABLE te;
+DROP TABLE t_recipient;
+DROP TABLESPACE tbs1_recipient;
+ALTER UNDO TABLESPACE undo_005 SET INACTIVE;
+--let $wait_condition = SELECT STATE = 'empty' FROM INFORMATION_SCHEMA.INNODB_TABLESPACES WHERE NAME = 'undo_005'
+--source include/wait_condition.inc
+DROP UNDO TABLESPACE undo_005;
+
+--connection default
+DROP TABLE te;
+UNINSTALL PLUGIN clone;
+
+--echo # Remove the keyrings and restart both servers without them
+--let CURRENT_DATADIR = $DONOR_DATADIR
+--source include/keyring_tests/helper/instance_remove_manifest.inc
+--source include/keyring_tests/helper/local_keyring_remove_config.inc
+--let KEYRING_FILE_PATH = $DONOR_KEYRING_FILE_PATH
+--source include/keyring_tests/helper/local_keyring_file_remove.inc
+--let $restart_parameters = restart:
+--source include/restart_mysqld_no_echo.inc
+
+--connection clone_conn_1
+--let CURRENT_DATADIR = $RECIPIENT_DATADIR
+--source include/keyring_tests/helper/instance_remove_manifest.inc
+--source include/keyring_tests/helper/local_keyring_remove_config.inc
+--let KEYRING_FILE_PATH = $RECIPIENT_KEYRING_FILE_PATH
+--source include/keyring_tests/helper/local_keyring_file_remove.inc
+--let $restart_parameters = restart:
+--source include/restart_mysqld_no_echo.inc
+
+--connection default
+--source ../include/clone_connection_end.inc

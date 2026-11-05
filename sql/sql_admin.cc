@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -69,6 +70,9 @@
 #include "sql/dd/info_schema/table_stats.h"  // dd::info_schema::update_*
 #include "sql/dd/string_type.h"              // dd::String_type
 #include "sql/dd/types/abstract_table.h"     // dd::enum_table_type
+#include "sql/dd/types/column.h"             // dd::Column
+#include "sql/dd/types/index.h"              // dd::Index
+#include "sql/dd/types/index_element.h"      // dd::Index_element
 #include "sql/dd/types/table.h"              // dd::Table
 #include "sql/debug_sync.h"                  // DEBUG_SYNC
 #include "sql/derror.h"                      // ER_THD
@@ -108,6 +112,8 @@
 #include "sql/sql_table.h"      // mysql_recreate_table
 #include "sql/ssl_acceptor_context_operator.h"
 #include "sql/ssl_init_callback.h"
+#include "sql/statement/ed_connection.h"  // Ed_connection
+#include "sql/strfunc.h"                  // lex_string_strmake
 #include "sql/system_variables.h"
 #include "sql/table.h"
 #include "sql/table_trigger_dispatcher.h"  // Table_trigger_dispatcher
@@ -2365,7 +2371,11 @@ other entry belongs to the clone itself.
 @param[in]  thd        session
 @param[in]  stage_dir  staging directory
 @return true on error */
-static bool import_clone_stage(THD *thd, const std::string &stage_dir) {
+/** A cloned table, by name. */
+using Clone_table_name = std::pair<std::string, std::string>;
+
+static bool import_clone_stage(THD *thd, const std::string &stage_dir,
+                               std::set<Clone_table_name> &tables) {
   std::vector<std::string> moved;
   bool failed = false;
 
@@ -2410,6 +2420,10 @@ static bool import_clone_stage(THD *thd, const std::string &stage_dir) {
     if (has_tables) {
       failed = ensure_clone_schema(thd, schema.name);
 
+      char schema_name[NAME_LEN + 1];
+      filename_to_tablename(schema.name, schema_name, sizeof(schema_name),
+                            true);
+
       std::string to_dir(mysql_real_data_home);
       to_dir.append(schema.name);
 
@@ -2437,6 +2451,18 @@ static bool import_clone_stage(THD *thd, const std::string &stage_dir) {
           failed = true;
         } else {
           moved.push_back(to);
+
+          /* The table name: the file name without ".ibd" and, for a
+          partition, without the "#p#..." part. */
+          std::string table_fs(name, len - 4);
+          const auto part = table_fs.find("#p#");
+          if (part != std::string::npos) {
+            table_fs.resize(part);
+          }
+          char table_name[NAME_LEN + 1];
+          filename_to_tablename(table_fs.c_str(), table_name,
+                                sizeof(table_name), true);
+          tables.emplace(schema_name, table_name);
         }
       }
     }
@@ -2454,6 +2480,125 @@ static bool import_clone_stage(THD *thd, const std::string &stage_dir) {
       mysql_file_delete(key_file_misc, file.c_str(), MYF(0));
     }
   }
+  return failed;
+}
+
+/** Rebuild the FULLTEXT indexes of a cloned table. The import attached
+the table with them marked corrupted: the auxiliary tables of the donor
+are not part of the clone.
+@param[in]  thd     session
+@param[in]  name    schema and table
+@return true on error */
+static bool clone_rebuild_fulltext(THD *thd, const Clone_table_name &name) {
+  const std::string &db = name.first;
+  const std::string &table = name.second;
+  String drop, add;
+
+  {
+    MDL_ticket *ticket = nullptr;
+    if (dd::acquire_shared_table_mdl(thd, db.c_str(), table.c_str(), false,
+                                     &ticket)) {
+      return true;
+    }
+
+    const dd::cache::Dictionary_client::Auto_releaser releaser(
+        thd->dd_client());
+    const dd::Table *dd_table = nullptr;
+    const bool error =
+        thd->dd_client()->acquire(db.c_str(), table.c_str(), &dd_table);
+
+    if (!error && dd_table != nullptr) {
+      for (const dd::Index *index : dd_table->indexes()) {
+        if (index->type() != dd::Index::IT_FULLTEXT) {
+          continue;
+        }
+        if (!drop.is_empty()) {
+          drop.append(STRING_WITH_LEN(", "));
+          add.append(STRING_WITH_LEN(", "));
+        }
+        drop.append(STRING_WITH_LEN("DROP INDEX "));
+        append_identifier(thd, &drop, index->name().c_str(),
+                          index->name().length());
+
+        add.append(STRING_WITH_LEN("ADD FULLTEXT INDEX "));
+        append_identifier(thd, &add, index->name().c_str(),
+                          index->name().length());
+        add.append(STRING_WITH_LEN(" ("));
+        bool first = true;
+        for (const dd::Index_element *element : index->elements()) {
+          if (element->is_hidden()) {
+            continue;
+          }
+          if (!first) {
+            add.append(STRING_WITH_LEN(", "));
+          }
+          first = false;
+          const dd::String_type &column = element->column().name();
+          append_identifier(thd, &add, column.c_str(), column.length());
+        }
+        add.append(')');
+
+        dd::String_type parser;
+        if (index->options().exists("parser_name") &&
+            !index->options().get("parser_name", &parser)) {
+          add.append(STRING_WITH_LEN(" WITH PARSER "));
+          append_identifier(thd, &add, parser.c_str(), parser.length());
+        }
+        if (!index->comment().empty()) {
+          add.append(STRING_WITH_LEN(" COMMENT "));
+          append_unescaped(&add, index->comment().c_str(),
+                           index->comment().length());
+        }
+      }
+    }
+    dd::release_mdl(thd, ticket);
+    if (error) {
+      return true;
+    }
+  }
+
+  if (drop.is_empty()) {
+    return false;
+  }
+
+  String prefix;
+  prefix.append(STRING_WITH_LEN("ALTER TABLE "));
+  append_identifier(thd, &prefix, db.c_str(), db.length());
+  prefix.append('.');
+  append_identifier(thd, &prefix, table.c_str(), table.length());
+  prefix.append(' ');
+
+  /* Dropping and adding an index in one statement keeps it unusable, as
+  the import tests show: two statements. Not replicated, like the clone. */
+  const ulonglong saved_options = thd->variables.option_bits;
+  thd->variables.option_bits &= ~OPTION_BIN_LOG;
+  bool failed = false;
+
+  for (const String *change : {&drop, &add}) {
+    String query;
+    query.append(prefix);
+    query.append(*change);
+
+    LEX_STRING text;
+    if (lex_string_strmake(thd->mem_root, &text, query.ptr(), query.length())) {
+      failed = true;
+      break;
+    }
+
+    /* Each statement is a transaction with an XID of its own, derived
+    from the query id; a stored program does the same per statement. */
+    thd->set_query_id(next_query_id());
+
+    Ed_connection conn(thd);
+    if (conn.execute_direct(text)) {
+      my_printf_error(conn.get_last_errno(), "%s", MYF(0),
+                      conn.get_last_error());
+      failed = true;
+      break;
+    }
+  }
+
+  thd->variables.option_bits = saved_options;
   return failed;
 }
 
@@ -2585,10 +2730,16 @@ bool Sql_cmd_clone::execute(THD *thd) {
   /* The staged files are consistent as of the end of the clone. Make them
   tables here, then nothing of the stage is needed any more. */
   if (is_partial()) {
-    const bool failed = import_clone_stage(thd, stage_dir);
+    std::set<Clone_table_name> tables;
+    const bool failed = import_clone_stage(thd, stage_dir, tables);
     remove_clone_stage_dir(stage_dir);
     if (failed) {
       return true;
+    }
+    for (const auto &table : tables) {
+      if (clone_rebuild_fulltext(thd, table)) {
+        return true;
+      }
     }
   }
 

@@ -1609,3 +1609,24 @@ Two adjustments:
   contacting the donor, removes `#clone_stage` when the clone plugin starts (a killed clone or a
   crash cannot leave it behind for ever), and no longer writes `#clone/#status_fix` or
   `#replace_files` into the stage (a partial clone's directory is never started on).
+- 2026-11-05, step 5b done: FULLTEXT indexes. The import leaves a FULLTEXT index marked corrupted (its
+  auxiliary tables are the donor's); after the import the clone runs `ALTER TABLE ... DROP INDEX` and
+  `ALTER TABLE ... ADD FULLTEXT INDEX ...` (columns, parser, comment from the DD) through
+  `Ed_connection`, binary logging off, each with its own query id (the statement XID derives from it;
+  a stored program does the same per statement). The corrupt-index warning of the import is not
+  pushed for a clone. Found on the way: the first import pass keeps the donor's transaction ids in
+  the pages, and every check (page_validate, lock_check_trx_id_sanity) expects them below the
+  recipient's counter; `trx_sys_raise_next_trx_id()` raises the counter as pass 1 sees each
+  PAGE_MAX_TRX_ID / DB_TRX_ID, and the undo driver does the same for the trx id it replays. The
+  earlier test passed only because the recipient had allocated more transaction ids than the donor.
+- 2026-11-05, step 5c done: reconnect and encryption. `clone.partial_restart` (debug build): with the
+  donor's `clone_donor_timeout_after_network_failure` = 0 a network error fails the clone and leaves
+  nothing; with restart allowed the recipient reconnects (COM_REINIT, no COM_OBJECTS again: the
+  donor's snapshot keeps the file set) and the clone completes. `clone.partial_encrypt`: an
+  encrypted table; the clone re-wraps the tablespace key on page 0 with the recipient's master key,
+  so the import takes the key from the file instead of the `.cfp` of FLUSH TABLES ... FOR EXPORT
+  (`Ibd_sdi_reader::load_key`, `sdi_get_from_file` gets a `key_in_file` flag, `row_import_read_key`
+  skips the .cfp when the key is known). Not tested: encrypted redo and undo on the donor; turning
+  those off leaves the key in the headers, so the test servers could not restart without a keyring.
+  The drivers decrypt them through the same code as the encrypted .ibd (Clone_stage_file) and the
+  redo header key (Redo_reader).

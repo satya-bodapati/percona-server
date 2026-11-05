@@ -24,6 +24,9 @@ CREATE TABLESPACE ts1 ADD DATAFILE 'ts1.ibd';
 CREATE TABLE t4 (a INT) TABLESPACE ts1;
 CREATE TABLE t5 (a INT) ROW_FORMAT = COMPRESSED;
 CREATE TABLE t6 (a INT, b TEXT COLUMN_FORMAT COMPRESSED);
+CREATE TABLE t7 (id INT PRIMARY KEY, txt TEXT,
+                 FULLTEXT KEY ft (txt) COMMENT 'rebuilt by the clone');
+INSERT INTO t7 VALUES (1, 'hello world'), (2, 'goodbye moon');
 
 CHECKSUM TABLE t1, t2;
 
@@ -31,6 +34,9 @@ CHECKSUM TABLE t1, t2;
 --connection clone_conn_1
 --replace_result $HOST HOST $PORT PORT
 --eval SET GLOBAL clone_valid_donor_list = '$HOST:$PORT'
+# The import of a table with a FULLTEXT index, before the clone rebuilds it
+call mtr.add_suppression("Skipping FTS index");
+call mtr.add_suppression("Skip adjustment of root pages for index");
 
 --echo # The donor refuses what it cannot clone
 --replace_result $HOST HOST $PORT PORT
@@ -103,6 +109,19 @@ SELECT col1, col2, col3 FROM t2 ORDER BY col1 DESC LIMIT 5;
 --list_files $RECIPIENT_DATADIR/#clone_stage
 --list_files $RECIPIENT_DATADIR/test *.ibd
 
+--echo # A FULLTEXT index is rebuilt after the import, without binary logging
+--source include/rpl/save_binlog_file_position.inc
+--replace_result $HOST HOST $PORT PORT
+--eval CLONE TABLE test.t7 FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+--let $binlog_start = $binlog_position
+--source include/rpl/deprecated/show_binlog_events.inc
+SHOW CREATE TABLE t7;
+SELECT id FROM t7 WHERE MATCH (txt) AGAINST ('hello');
+CHECK TABLE t7;
+INSERT INTO t7 VALUES (3, 'added here');
+SELECT id FROM t7 WHERE MATCH (txt) AGAINST ('added');
+DROP TABLE t7;
+
 --echo # The cloned tables are tables like any other
 INSERT INTO t1 VALUES (1000, 1, 'added here', NULL);
 DELETE FROM t2 WHERE col1 = 1;
@@ -119,7 +138,7 @@ DROP TABLE t4, t5, t6;
 
 SHOW TABLES;
 CHECKSUM TABLE t1, t2;
-DROP TABLE t1, t2;
+DROP TABLE t1, t2, t7;
 
 --echo # Clone under concurrent DML on the donor
 --connection default
@@ -144,10 +163,12 @@ DELETE FROM t1 WHERE col1 = 80;
 DELETE FROM t2 WHERE col1 = 80;
 INSERT INTO t1 VALUES (500, 500, 'never committed', NULL);
 INSERT INTO t2 VALUES (500, 500, 'never committed', NULL);
+INSERT INTO t7 VALUES (500, 'never committed');
+UPDATE t7 SET txt = 'changed and never committed' WHERE id = 1;
 
 --connection clone_conn_1
 --replace_result $HOST HOST $PORT PORT
---eval CLONE TABLE test.t1, test.t2 FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+--eval CLONE TABLE test.t1, test.t2, test.t7 FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
 
 --connection con1
 --reap
@@ -164,8 +185,11 @@ ROLLBACK;
 --disconnect con4
 
 --connection clone_conn_1
-CHECK TABLE t1, t2;
+CHECK TABLE t1, t2, t7;
 --list_files $RECIPIENT_DATADIR/#clone_stage
+SELECT * FROM t7 ORDER BY id;
+SELECT id FROM t7 WHERE MATCH (txt) AGAINST ('hello');
+SELECT id FROM t7 WHERE MATCH (txt) AGAINST ('committed');
 
 --echo # The open transaction of the donor left nothing in the clone
 SELECT col1, col2 FROM t1 WHERE col1 BETWEEN 51 AND 75 ORDER BY col1;
@@ -187,7 +211,7 @@ SELECT col1 FROM t2 WHERE col1 IN (80, 500) ORDER BY col1;
 --source include/assert_grep.inc
 
 --echo # Cleanup
-DROP TABLE t1, t2;
+DROP TABLE t1, t2, t7;
 
 # The objects clone_connection_begin.inc created on the recipient; a clone
 # that replaces the data directory would have removed them.
@@ -199,7 +223,7 @@ ALTER UNDO TABLESPACE undo_005 SET INACTIVE;
 DROP UNDO TABLESPACE undo_005;
 
 --connection default
-DROP TABLE t3;
+DROP TABLE t3, t7;
 DROP TABLESPACE ts1;
 --source ../include/drop_schema.inc
 UNINSTALL PLUGIN clone;
