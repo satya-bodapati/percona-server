@@ -456,6 +456,14 @@ class Arch_Block {
   @return file index */
   static uint get_file_index(uint64_t block_num, Arch_Blk_Type type);
 
+  /** Read the block number of a reset point from a reset block. A reset
+  point is in a data block of the file of its reset block, which stores the
+  low 16 bits of the block number.
+  @param[in]  entry       block number of the reset point in the reset block
+  @param[in]  file_index  index of the file of the reset block
+  @return block number of the reset point */
+  static uint64_t read_reset_block_num(const byte *entry, uint file_index);
+
   /** Get block type from the block header.
   @param[in]     block   block from where to get the type
   @return block type */
@@ -683,7 +691,8 @@ class Arch_File_Ctx {
     return (file_size.m_total_size);
   }
 
-  /** Update stop lsn of a file in the group.
+  /** Update stop lsn of a file in the group. Files before file_index that
+  have no stop lsn yet get stop lsn 0.
   @param[in]    file_index      file_index the current write_pos belongs to
   @param[in]    stop_lsn        stop point */
   void update_stop_point(uint file_index, lsn_t stop_lsn);
