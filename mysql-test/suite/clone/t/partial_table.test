@@ -22,6 +22,8 @@ call execute_dml(0, 0, 100, 100, 10, 0);
 CREATE TABLE t3 (a INT) ENGINE = MyISAM;
 CREATE TABLESPACE ts1 ADD DATAFILE 'ts1.ibd';
 CREATE TABLE t4 (a INT) TABLESPACE ts1;
+CREATE TABLE t5 (a INT) ROW_FORMAT = COMPRESSED;
+CREATE TABLE t6 (a INT, b TEXT COLUMN_FORMAT COMPRESSED);
 
 CHECKSUM TABLE t1, t2;
 
@@ -45,11 +47,49 @@ CHECKSUM TABLE t1, t2;
 
 --replace_result $HOST HOST $PORT PORT
 --error ER_CLONE_DONOR
+--eval CLONE TABLE test.t5 FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+
+--replace_result $HOST HOST $PORT PORT
+--error ER_CLONE_DONOR
+--eval CLONE TABLE test.t6 FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+
+--replace_result $HOST HOST $PORT PORT
+--error ER_CLONE_DONOR
 --eval CLONE DATABASE db_missing FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+
+--echo # Change buffering on the donor would leave the copied files behind
+--connection default
+SET GLOBAL innodb_change_buffering = all;
+--connection clone_conn_1
+--replace_result $HOST HOST $PORT PORT
+--error ER_CLONE_DONOR
+--eval CLONE TABLE test.t1 FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+--connection default
+SET GLOBAL innodb_change_buffering = none;
+--connection clone_conn_1
+
+--echo # A table of that name here is refused before anything is copied
+CREATE TABLE t1 (a INT);
+--replace_result $HOST HOST $PORT PORT
+--error ER_TABLE_EXISTS_ERROR
+--eval CLONE TABLE test.t1, test.t2 FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''
+DROP TABLE t1;
 
 --echo # Nothing is left of a failed clone
 --list_files $RECIPIENT_DATADIR/#clone_stage
 SHOW TABLES;
+
+--echo # What a clone that never finished left behind goes when the plugin starts
+--mkdir $RECIPIENT_DATADIR/#clone_stage/999
+--write_file $RECIPIENT_DATADIR/#clone_stage/999/leftover.ibd
+EOF
+UNINSTALL PLUGIN clone;
+--replace_result $CLONE_PLUGIN CLONE_PLUGIN
+--eval INSTALL PLUGIN clone SONAME '$CLONE_PLUGIN'
+--error 1
+--file_exists $RECIPIENT_DATADIR/#clone_stage/999/leftover.ibd
+--replace_result $HOST HOST $PORT PORT
+--eval SET GLOBAL clone_valid_donor_list = '$HOST:$PORT'
 
 --echo # Clone two tables: a plain one and a partitioned one
 --replace_result $HOST HOST $PORT PORT
@@ -72,7 +112,7 @@ DROP TABLE t1, t2;
 
 --echo # Clone a database: its InnoDB tables, not the MyISAM one
 --connection default
-DROP TABLE t4;
+DROP TABLE t4, t5, t6;
 --connection clone_conn_1
 --replace_result $HOST HOST $PORT PORT
 --eval CLONE DATABASE test FROM '$USER'@'$HOST':$PORT IDENTIFIED BY ''

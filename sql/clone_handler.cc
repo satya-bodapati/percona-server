@@ -41,6 +41,7 @@
 #include "mysql/psi/mysql_mutex.h"
 #include "mysqld_error.h"
 #include "sql/mysqld.h"
+#include "sql/sql_admin.h"  // clone_remove_stage_dirs
 #include "sql/sql_class.h"
 #include "sql/sql_parse.h"
 #include "sql/sql_plugin.h"  // plugin_unlock
@@ -285,6 +286,8 @@ int clone_handle_create(const char *plugin_name) {
     LogErr(ERROR_LEVEL, ER_CLONE_CREATE_HANDLER_FAIL_TRACE);
     return 1;
   }
+
+  clone_remove_stage_dirs();
 
   return clone_handle->init();
 }

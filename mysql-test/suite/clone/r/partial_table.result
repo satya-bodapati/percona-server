@@ -68,6 +68,8 @@ call execute_dml(0, 0, 100, 100, 10, 0);
 CREATE TABLE t3 (a INT) ENGINE = MyISAM;
 CREATE TABLESPACE ts1 ADD DATAFILE 'ts1.ibd';
 CREATE TABLE t4 (a INT) TABLESPACE ts1;
+CREATE TABLE t5 (a INT) ROW_FORMAT = COMPRESSED;
+CREATE TABLE t6 (a INT, b TEXT COLUMN_FORMAT COMPRESSED);
 CHECKSUM TABLE t1, t2;
 Table	Checksum
 test.t1	3009907073
@@ -81,12 +83,30 @@ CLONE TABLE test.t3 FROM 'root'@'HOST':PORT IDENTIFIED BY '';
 ERROR HY000: Clone Donor Error: 1235 : This version of MySQL doesn't yet support 'cloning a non-InnoDB table'.
 CLONE TABLE test.t4 FROM 'root'@'HOST':PORT IDENTIFIED BY '';
 ERROR HY000: Clone Donor Error: 1235 : This version of MySQL doesn't yet support 'cloning a table from a general or system tablespace'.
+CLONE TABLE test.t5 FROM 'root'@'HOST':PORT IDENTIFIED BY '';
+ERROR HY000: Clone Donor Error: 1235 : This version of MySQL doesn't yet support 'cloning a table with ROW_FORMAT=COMPRESSED'.
+CLONE TABLE test.t6 FROM 'root'@'HOST':PORT IDENTIFIED BY '';
+ERROR HY000: Clone Donor Error: 1235 : This version of MySQL doesn't yet support 'cloning a table with compressed columns'.
 CLONE DATABASE db_missing FROM 'root'@'HOST':PORT IDENTIFIED BY '';
 ERROR HY000: Clone Donor Error: 1049 : Unknown database 'db_missing'.
+# Change buffering on the donor would leave the copied files behind
+SET GLOBAL innodb_change_buffering = all;
+CLONE TABLE test.t1 FROM 'root'@'HOST':PORT IDENTIFIED BY '';
+ERROR HY000: Clone Donor Error: 1235 : This version of MySQL doesn't yet support 'cloning tables while innodb_change_buffering is not NONE'.
+SET GLOBAL innodb_change_buffering = none;
+# A table of that name here is refused before anything is copied
+CREATE TABLE t1 (a INT);
+CLONE TABLE test.t1, test.t2 FROM 'root'@'HOST':PORT IDENTIFIED BY '';
+ERROR 42S01: Table 't1' already exists
+DROP TABLE t1;
 # Nothing is left of a failed clone
 SHOW TABLES;
 Tables_in_test
 t_recipient
+# What a clone that never finished left behind goes when the plugin starts
+UNINSTALL PLUGIN clone;
+INSTALL PLUGIN clone SONAME 'CLONE_PLUGIN';
+SET GLOBAL clone_valid_donor_list = 'HOST:PORT';
 # Clone two tables: a plain one and a partitioned one
 CLONE TABLE test.t1, test.t2 FROM 'root'@'HOST':PORT IDENTIFIED BY '';
 SHOW TABLES;
@@ -134,7 +154,7 @@ COUNT(*)
 99
 DROP TABLE t1, t2;
 # Clone a database: its InnoDB tables, not the MyISAM one
-DROP TABLE t4;
+DROP TABLE t4, t5, t6;
 CLONE DATABASE test FROM 'root'@'HOST':PORT IDENTIFIED BY '';
 SHOW TABLES;
 Tables_in_test

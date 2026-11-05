@@ -49,6 +49,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include "dict0dd.h"
 #include "ha_innodb.h"
+#include "ibuf0ibuf.h"
 #include "log0files_io.h"
 #include "sql/dd/cache/dictionary_client.h"
 #include "sql/dd/dd_schema.h"
@@ -58,6 +59,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "sql/dd/impl/utils.h"
 #include "sql/dd/types/schema.h"
 #include "sql/dd/types/table.h"
+#include "sql/field.h"
 #include "sql/rpl_msr.h"  // is_slave_configured()
 
 /* To get current session thread default THD */
@@ -196,15 +198,18 @@ static void drop_status_file(const Clone_Handle *clone) {
     path_name.append(OS_PATH_SEPARATOR_STR);
   }
 
-  /* Indicate that clone needs table fix up on recovery. */
-  file_name.assign(path_name);
-  file_name.append(CLONE_INNODB_FIXUP_FILE);
-  create_file(file_name);
+  /* The staged files of a partial clone are imported, never started on. */
+  if (!clone->get_snapshot()->is_partial()) {
+    /* Indicate that clone needs table fix up on recovery. */
+    file_name.assign(path_name);
+    file_name.append(CLONE_INNODB_FIXUP_FILE);
+    create_file(file_name);
 
-  /* Indicate clone needs to update recovery status. */
-  file_name.assign(path_name);
-  file_name.append(CLONE_INNODB_REPLACED_FILES);
-  create_file(file_name);
+    /* Indicate clone needs to update recovery status. */
+    file_name.assign(path_name);
+    file_name.append(CLONE_INNODB_REPLACED_FILES);
+    create_file(file_name);
+  }
 
   /* Mark successful clone operation. */
   file_name.assign(path_name);
@@ -585,6 +590,13 @@ static int clone_add_table_space(THD *thd, dd::Object_id dd_space_id,
     return (ER_NOT_SUPPORTED_YET);
   }
 
+  /* The redo and undo of the clone are applied on uncompressed pages. */
+  if (FSP_FLAGS_GET_ZIP_SSIZE(flags) != 0) {
+    my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+             "cloning a table with ROW_FORMAT=COMPRESSED");
+    return (ER_NOT_SUPPORTED_YET);
+  }
+
   /* clone_init_tablespaces() has loaded every tablespace already. */
   if (fil_space_get(space_id) == nullptr) {
     my_error(ER_TABLESPACE_MISSING, MYF(0), dd_space->name().c_str());
@@ -601,6 +613,20 @@ static int clone_add_table_space(THD *thd, dd::Object_id dd_space_id,
 @param[in]      table   table name
 @param[in,out]  spaces  tablespaces to clone
 @return error code */
+/** @param[in] dd_table table definition
+@return true if a column is stored compressed (COLUMN_FORMAT COMPRESSED) */
+static bool clone_has_compressed_column(const dd::Table *dd_table) {
+  for (const auto *column : dd_table->columns()) {
+    uint format = 0;
+    if (column->options().exists("column_format") &&
+        !column->options().get("column_format", &format) &&
+        format == COLUMN_FORMAT_TYPE_COMPRESSED) {
+      return (true);
+    }
+  }
+  return (false);
+}
+
 static int clone_add_table(THD *thd, const char *db, const char *table,
                            std::set<space_id_t> &spaces) {
   MDL_ticket *mdl = nullptr;
@@ -624,6 +650,12 @@ static int clone_add_table(THD *thd, const char *db, const char *table,
 
   } else if (dd_table->engine() != innobase_hton_name) {
     my_error(ER_NOT_SUPPORTED_YET, MYF(0), "cloning a non-InnoDB table");
+    err = ER_NOT_SUPPORTED_YET;
+
+  } else if (clone_has_compressed_column(dd_table)) {
+    /* The dictionary of a compressed column is not in the tablespace. */
+    my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+             "cloning a table with compressed columns");
     err = ER_NOT_SUPPORTED_YET;
 
   } else if (!dd_table_is_partitioned(*dd_table)) {
@@ -709,6 +741,14 @@ int innodb_clone_set_objects(handlerton *, THD *thd, const byte *loc,
     return (ER_CLONE_PROTOCOL);
   }
 
+  /* Buffered changes to the secondary indexes would be missing from the
+  copied files: they are merged into the pages only when read. */
+  if (innodb_change_buffering != IBUF_USE_NONE) {
+    my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+             "cloning tables while innodb_change_buffering is not NONE");
+    return (ER_NOT_SUPPORTED_YET);
+  }
+
   dd::cache::Dictionary_client::Auto_releaser releaser(dd::get_dd_client(thd));
   std::set<space_id_t> spaces;
 
@@ -720,6 +760,11 @@ int innodb_clone_set_objects(handlerton *, THD *thd, const byte *loc,
     if (err != 0) {
       return (err);
     }
+  }
+
+  /* Changes buffered before the setting was turned off. */
+  for (auto space : spaces) {
+    ibuf_merge_space(space);
   }
 
   snapshot->set_partial(spaces);

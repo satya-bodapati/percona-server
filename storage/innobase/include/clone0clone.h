@@ -352,6 +352,8 @@ class Clone_Task_Manager {
   @return snapshot */
   Clone_Snapshot *get_snapshot() { return (m_clone_snapshot); }
 
+  const Clone_Snapshot *get_snapshot() const { return (m_clone_snapshot); }
+
   /** Move to next snapshot state. Each task must call this after
   no more chunk is left in current state. The state can be changed
   only after all tasks have finished transferring the reserved chunks.
@@ -675,6 +677,10 @@ class Clone_Handle {
 
   /** @return active snapshot */
   Clone_Snapshot *get_snapshot() { return m_clone_task_manager.get_snapshot(); }
+
+  const Clone_Snapshot *get_snapshot() const {
+    return m_clone_task_manager.get_snapshot();
+  }
 
   /** Check if it is copy clone
   @return true if copy clone handle */

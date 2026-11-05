@@ -433,6 +433,10 @@ class Sql_cmd_alter_instance : public Sql_cmd {
 
 class Table_ident;
 
+/** Remove what partial clones that did not finish left under the data
+directory. Called when the clone plugin starts, when no clone can run. */
+void clone_remove_stage_dirs();
+
 class Sql_cmd_clone : public Sql_cmd {
  public:
   /** Construct clone command for clone server */

@@ -1601,3 +1601,11 @@ Two adjustments:
   shared by the redo and undo drivers. Test: an open trx on the donor (UPDATE, DELETE, INSERT, never
   committed) during the clone; the clone shows the original rows, keeps key 80, lacks key 500, and the
   error log reports "Clone rollback: table `test`.`t1`: N undo records of M open transactions".
+- 2026-11-05, step 5a done: refusals and leftovers. The donor refuses ROW_FORMAT=COMPRESSED (the
+  drivers work on uncompressed pages), COLUMN_FORMAT COMPRESSED (dictionary not in the file; same
+  check as the import) and any innodb_change_buffering other than NONE (buffered secondary-index
+  changes would be missing from the files); leftover buffered changes are merged with
+  `ibuf_merge_space` before the copy. The recipient refuses a CLONE TABLE whose table exists before
+  contacting the donor, removes `#clone_stage` when the clone plugin starts (a killed clone or a
+  crash cannot leave it behind for ever), and no longer writes `#clone/#status_fix` or
+  `#replace_files` into the stage (a partial clone's directory is never started on).

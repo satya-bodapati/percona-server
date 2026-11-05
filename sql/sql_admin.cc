@@ -64,6 +64,7 @@
 #include "sql/dd/cache/dictionary_client.h"  // dd::cache::Dictionary_client
 #include "sql/dd/dd_schema.h"                // dd::Schema_MDL_locker
 #include "sql/dd/dd_table.h"                 // dd::recreate_table
+#include "sql/dd/dictionary.h"               // dd::acquire_shared_table_mdl
 #include "sql/dd/impl/sdi_utils.h"           // mdl_lock
 #include "sql/dd/info_schema/table_stats.h"  // dd::info_schema::update_*
 #include "sql/dd/string_type.h"              // dd::String_type
@@ -2251,6 +2252,44 @@ static bool build_clone_stage_dir(THD *thd, std::string &dir) {
   return false;
 }
 
+/** Refuse to clone a table that exists on the recipient, before anything is
+transferred. The import takes the real locks later; this check only saves
+the transfer.
+@param[in]  thd       session
+@param[in]  objects   tables to clone
+@return true on error */
+static bool clone_targets_exist(THD *thd, const Ha_clone_objects &objects) {
+  for (const auto &object : objects.m_objects) {
+    if (object.m_table.empty()) {
+      continue;
+    }
+
+    MDL_ticket *ticket = nullptr;
+    if (dd::acquire_shared_table_mdl(thd, object.m_db.c_str(),
+                                     object.m_table.c_str(), false, &ticket)) {
+      return true;
+    }
+
+    bool exists = false;
+    bool error;
+    {
+      dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
+      error = dd::table_exists(thd->dd_client(), object.m_db.c_str(),
+                               object.m_table.c_str(), &exists);
+    }
+    dd::release_mdl(thd, ticket);
+
+    if (error) {
+      return true;
+    }
+    if (exists) {
+      my_error(ER_TABLE_EXISTS_ERROR, MYF(0), object.m_table.c_str());
+      return true;
+    }
+  }
+  return false;
+}
+
 /** Remove the staging directory of a partial clone with everything in it.
 @param[in]  dir   directory path */
 static void remove_clone_stage_dir(const std::string &dir) {
@@ -2276,6 +2315,12 @@ static void remove_clone_stage_dir(const std::string &dir) {
   }
   my_dirend(entries);
   rmdir(dir.c_str());
+}
+
+void clone_remove_stage_dirs() {
+  std::string dir(mysql_real_data_home);
+  dir.append("#clone_stage");
+  remove_clone_stage_dir(dir);
 }
 
 /** Make sure a schema of the clone exists here; create it when it does
@@ -2485,6 +2530,7 @@ bool Sql_cmd_clone::execute(THD *thd) {
 
   if (is_partial()) {
     if (build_clone_objects(thd, m_tables, m_database, objects) ||
+        clone_targets_exist(thd, objects) ||
         build_clone_stage_dir(thd, stage_dir)) {
       clone_plugin_unlock(thd, m_plugin);
       m_clone = nullptr;
