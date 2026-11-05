@@ -1,0 +1,26 @@
+INSTALL COMPONENT 'file://component_mysqlbackup';
+CREATE TABLE t1 (id INT PRIMARY KEY, pad VARCHAR(7000)) ENGINE=InnoDB;
+SET SESSION cte_max_recursion_depth = 12000;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+WHERE n < 12000)
+SELECT n, REPEAT('a', 7000) FROM seq;
+SET GLOBAL innodb_page_cleaner_disabled_debug = ON;
+UPDATE t1 SET pad = REPEAT('b', 7000);
+SET GLOBAL DEBUG = '+d,page_archiver_hold_reset_flush';
+SELECT mysqlbackup_page_track_set(1) INTO @reset_lsn;
+SET DEBUG_SYNC = 'now WAIT_FOR page_archiver_reset_flush_held';
+SET GLOBAL innodb_page_cleaner_disabled_debug = OFF;
+SET GLOBAL innodb_buf_flush_list_now = ON;
+SET GLOBAL DEBUG = '-d,page_archiver_hold_reset_flush';
+SET DEBUG_SYNC = 'RESET';
+# Kill and restart
+#
+# The group starts at the returned reset point after the restart
+#
+#
+# Page tracking starts again
+#
+DROP TABLE t1;
+SELECT mysqlbackup_page_track_set(0);
+UNINSTALL COMPONENT 'file://component_mysqlbackup';
