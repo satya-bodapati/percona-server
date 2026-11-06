@@ -665,6 +665,14 @@ class HNSW {
       // This is a rare case which results in a slightly worse graph due to
       // missed update. We accept this as a tradeoff to doing I/O under the
       // lock.
+      //
+      // The copy also leaves out neighbors that are still NODE_LINKING
+      // (copy_neighbors_to_persist()), so it can go stale without any change
+      // to the list: such a neighbor completes and persists this list with
+      // itself in it, and our older copy is persisted after it. The edge is
+      // lost on disk until this list is persisted again. If it was the only
+      // edge to that neighbor, the neighbor is unreachable after a reload.
+      //
       // TODO: Possible workaround is to use some versioning scheme to refuse
       // stale updates.
       const size_t all_neighbors_size = neighbor->all_neighbors_size(*this);
