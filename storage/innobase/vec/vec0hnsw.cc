@@ -26,6 +26,7 @@ The HNSW runtime and the persistence callbacks behind it.
 
 #include "vec0hnsw.h"
 
+#include <debug_sync.h>
 #include <algorithm>
 
 #include "srv0srv.h"
@@ -109,7 +110,10 @@ dberr_t vec_persist_insert(Vec_ctx *ctx, uint64_t id, uint64_t base_pk,
   row.neighbors_len = neighbors.size();
 
   const dberr_t err = vec_aux_insert(ctx->trx, ctx->aux, row);
-  if (err == DB_SUCCESS) vec_ctx_step_commit(ctx);
+  if (err != DB_SUCCESS) return err;
+  /* The node's row is written but not yet committed. */
+  DEBUG_SYNC_C("vec_node_row_written");
+  vec_ctx_step_commit(ctx);
   return err;
 }
 

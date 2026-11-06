@@ -277,9 +277,9 @@ class HNSW {
                     a neighbor-slot pointer; search skips it.
                     Cause: load_node_cb returned HNSW_NOT_FOUND — the id
                     is still referenced (e.g. in a persisted neighbor list)
-                    but the node itself was never properly persisted, typically
-                    after a crash mid-insert before insert_cb committed while a
-                    concurrent insert already wrote reverse edges;
+                    but the node itself has no persisted row. Persisted lists
+                    only name nodes with a row (copy_neighbors_to_persist()),
+                    so this means the store was damaged;
       NODE_FAILED   Node is unusable and must not be used by search; layer
                     and vector are set, but neighbors list might be incomplete.
                     Causes: (1) failed insert_cb while NODE_LINKING;
@@ -670,8 +670,7 @@ class HNSW {
       const size_t all_neighbors_size = neighbor->all_neighbors_size(*this);
       {
         std::scoped_lock neighbor_lock(node_lock(neighbor));
-        std::copy(neighbor->all_neighbors_begin(*this),
-                  neighbor->all_neighbors_end(*this), scratch_buffer.data());
+        copy_neighbors_to_persist(neighbor, scratch_buffer.data());
       }
 
       const HnswResult update_rc = m_persistor.update_neighbors_cb(
@@ -1856,6 +1855,34 @@ class HNSW {
 
   NeighborIdRange neighbor_ids(Node **begin, Node **end) const {
     return NeighborIdRange{begin, end};
+  }
+
+  /**
+    Copy a node's neighbor lists to @p out for update_neighbors_cb(), keeping
+    only neighbors the persistor has a row for: NODE_COMPLETE ones, and
+    NODE_DUMMY stubs, which came from a persisted list. A NODE_LINKING
+    neighbor's row is not committed yet, and a NODE_FAILED or NODE_LOST one
+    has none, so persisting their ids would leave a reference that a reload
+    cannot resolve. A LINKING neighbor persists this list itself once it is
+    complete.
+
+    Each layer's list stays packed, as search stops at the first empty slot.
+    Caller holds the node lock.
+  */
+  void copy_neighbors_to_persist(const Node *node, Node **out) const {
+    Node **const all = node->all_neighbors_begin(*this);
+    for (int l = node->layer(); l >= 0; --l) {
+      Node **src = node->neighbors_begin(*this, l);
+      Node **const end = node->neighbors_end(*this, l);
+      Node **dst = out + (src - all);
+      Node **const dst_end = out + (end - all);
+      for (; src != end; ++src) {
+        if (*src == nullptr) continue;
+        const NodeState state = (*src)->state();
+        if (state == NODE_COMPLETE || state == NODE_DUMMY) *dst++ = *src;
+      }
+      std::fill(dst, dst_end, nullptr);
+    }
   }
 
   const size_t m_dimensions;
