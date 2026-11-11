@@ -75,9 +75,11 @@ right after InnoDB has finished.
 The committing side does one small thing per group: store the new position and wake any waiting
 stream threads. It never builds a list, never copies GTIDs, and never waits for a client.
 
-Each client gets its own server thread. That thread reads the binlog file, which already contains
-every GTID, up to the last committed position, and sends only the GTID events. When it reaches the
-position it sleeps until the leader moves it.
+In practice there is usually one client per server: the reader process that feeds ProxySQL. More are
+allowed. No extra thread is created for a client. Every MySQL connection already has a server thread,
+and when the client starts the stream that thread does the sending, as it does for a replica today.
+It reads the binlog file, which already contains every GTID, up to the last committed position, and
+sends only the GTID events. When it reaches the position it sleeps until the leader moves it.
 
 ```
 replica binlog file
