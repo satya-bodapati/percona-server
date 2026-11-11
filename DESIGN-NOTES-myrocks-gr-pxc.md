@@ -50,6 +50,27 @@ A non-blocking version needs a RocksDB end point tied to InnoDB's: the building 
 (`LockWAL` and the WAL file list in `performance_schema.log_status`, `ha_rocksdb.cc:7853-7914`; PXB
 uses exactly these, PXB `backup_copy.cc:1227-1550`).
 
+### 1a. Meta's MyRocks clone (fb-mysql-8.0.32, commit 5d31d0a9f0, PR facebook/mysql-5.6#1250)
+
+Laurynas Biveinis, 2023; 216 files; `storage/rocksdb/clone/{common,donor,client}.{h,cc}`. None of
+it is in PS 8.4 (no `clone_precopy`, `set_log_stop` or `storage/rocksdb/clone`).
+
+- Donor stays writable. Engines are synchronised by a `performance_schema.log_status` query run
+  from the clone plugin (`synchronize_engines`), not by a read lock.
+- Two new handlerton calls: `clone_precopy` (copy before the consistent point) and `set_log_stop`
+  (gives each engine its stop position).
+- RocksDB donor: states NONE, ROLLING, FINAL, FINAL_WITH_LOGS. SST files are copied in precopy from
+  rolling checkpoints; at `set_log_stop` the WAL files are added.
+- InnoDB changes: redo archiving stops at the log_status LSN, also in the middle of a block; crash
+  recovery of the clone keeps recovered dynamic metadata. New InnoDB clone state "SST COPY".
+- Capabilities: HYBRID, MULTI_TASK, RESTART (resume after a network error).
+- Clone plugin fixes: O_DIRECT files of any size, size estimates from several engines, rollback
+  marker shared between engines, error ACK always sent to InnoDB too.
+- Tests: `rocksdb_clone` suite reusing the InnoDB clone tests.
+- Stated limits: concurrent DDL not supported; `clone.local_xa` disabled because the new
+  synchronisation no longer blocks on XA; "this change breaks some of the clone-related group
+  replication MTR tests ... this patch makes no effort to fix them".
+
 For PXC, clone SST exists (`scripts/wsrep_sst_clone.sh`) but the runtime check accepts only
 `xtrabackup-v2` (PXC `sql/wsrep_sst.cc:126-144`).
 
@@ -71,9 +92,8 @@ For PXC, clone SST exists (`scripts/wsrep_sst_clone.sh`) but the runtime check a
 | Read-free replication, `rpl_skip_tx_api` | Would apply to the GR applier. `rpl_skip_tx_api` loses transactions on crash (PS-11912) | Refuse or document | S |
 | Mixed InnoDB + RocksDB | No refusal; binlog coordinates | Works, needs tests | S |
 
-Reuse: MySQL upstream has nothing (GR is InnoDB-only there). Meta runs MyRocks with Raft, not GR;
-from memory, fb-mysql has a non-blocking MyRocks clone (`storage/rocksdb/clone/`) that PS did not
-take. Not checked in this session.
+Reuse: MySQL upstream has nothing (GR is InnoDB-only there). Meta runs MyRocks with Raft, not GR.
+fb-mysql has a non-blocking MyRocks clone; see 1a.
 
 ## 3. PXC
 
