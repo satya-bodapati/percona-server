@@ -242,7 +242,7 @@ svg .hv { fill: var(--visible); } svg .hf { fill: var(--flushed); } svg .hn { fi
 <p>The leader of the commit stage. In <code>MYSQL_BIN_LOG::process_commit_stage_queue</code>, while it still holds <code>LOCK_commit</code>:</p>
 <pre>for each session in the group:  finish_transaction_in_engines()   // rows become visible   :8947
 gtid_state->update_commit_group(first)                            // gtid_executed updated :8957
-<strong>update_visible_pos(file, pos of the last session in the group)   // NEW: store V, wake stream threads</strong></pre>
+<strong>update_binlog_last_committed_pos(file, pos of the group's last session)  // NEW: store V, wake stream threads</strong></pre>
 <p>The end position of every session is already recorded at flush time (<code>THD::set_trans_pos</code>, binlog.cc:8764). The sync stage already walks the group to find the last one for <code>binlog_end_pos</code> (:9419-9428). V uses the same value, later.</p>
 
 <h3>Why this is correct</h3>
@@ -271,7 +271,7 @@ gtid_state->update_commit_group(first)                            // gtid_execut
 <h2 id="cost">7. Cost on the commit path</h2>
 <div class="scroll"><table>
 <tr><th>What</th><th>How often</th><th>Under which lock</th></tr>
-<tr><td>Store V (file name pointer + offset)</td><td>once per commit group</td><td>new small mutex, taken inside <code>LOCK_commit</code></td></tr>
+<tr><td>Store V (file name pointer + offset)</td><td>once per commit group</td><td>new mutex <code>LOCK_binlog_last_committed_pos</code>, taken inside <code>LOCK_commit</code></td></tr>
 <tr><td>Wake stream threads</td><td>once per group, skipped when no stream is connected</td><td>same</td></tr>
 <tr><td>Find the group's end position</td><td>inside the loop that already walks the group</td><td>none added</td></tr>
 </table></div>
@@ -282,7 +282,17 @@ gtid_state->update_commit_group(first)                            // gtid_execut
 <li><strong>Reading a matching pair.</strong> V is a file name and an offset. Without a lock, a thread could read the new file with the old offset during a rotation.</li>
 </ul>
 <p>That mutex could be <code>LOCK_commit</code> itself, with no new one. Then every stream thread would take <code>LOCK_commit</code> each time it checks or sleeps, and would compete with the commit leaders for the lock that the whole commit stage runs under. A separate mutex keeps consumers off the commit path's locks: the leader holds the new one for a few instructions, and a stream thread holds it only to compare positions and go to sleep.</p>
-<p>This is the arrangement replication already uses: <code>binlog_end_pos</code> has its own <code>LOCK_binlog_end_pos</code> and condition variable, separate from <code>LOCK_log</code> and <code>LOCK_sync</code>, for the same reason (binlog.cc:9775-9792, rpl_binlog_sender.cc:790-812).</p>
+<h3>Same strategy as <code>LOCK_binlog_end_pos</code></h3>
+<p>Replication already solves this exact problem for <code>binlog_end_pos</code>: it has its own <code>LOCK_binlog_end_pos</code> and condition variable, separate from <code>LOCK_log</code> and <code>LOCK_sync</code>. The leader takes it once per group to store the position and signal; dump threads take it only to wait (binlog.cc:9775-9792, rpl_binlog_sender.cc:790-812). We follow the same strategy and name the new pieces to match.</p>
+<div class="scroll"><table>
+<tr><th>Role</th><th>Existing, for replication</th><th>New, for the visible stream</th></tr>
+<tr><td>Position</td><td><code>atomic_binlog_end_pos</code> (offset in the active file)</td><td>last committed position, V (file name + offset)</td></tr>
+<tr><td>Mutex</td><td><code>LOCK_binlog_end_pos</code></td><td><code>LOCK_binlog_last_committed_pos</code></td></tr>
+<tr><td>Condition</td><td><code>update_cond</code></td><td><code>update_last_committed_cond</code></td></tr>
+<tr><td>Writer</td><td><code>update_binlog_end_pos()</code>, after flush or sync</td><td><code>update_binlog_last_committed_pos()</code>, after the engine commits</td></tr>
+<tr><td>Waiter</td><td><code>Binlog_sender::wait_new_events()</code></td><td>the same function in visible mode, on the new mutex and condition</td></tr>
+</table></div>
+<p>One difference: <code>binlog_end_pos</code> is a single atomic offset, so dump threads read it without the mutex and lock only to sleep. V also carries a file name, so the first version reads it under the mutex. A lock-free read can be added later if a profile shows it matters.</p>
 <ul>
 <li>This mirrors what <code>update_binlog_end_pos</code> already does once per group for replication (:9785-9792).</li>
 <li>It happens <em>after</em> the engine commits, so it does not delay visibility or lock release.</li>
@@ -380,7 +390,7 @@ route a causal read here only if visible is known and contains the client's GTID
 <h2 id="code">12. Code change map and tests</h2>
 <div class="scroll"><table>
 <tr><th>File</th><th>Change</th></tr>
-<tr><td><code>sql/binlog.h</code>, <code>sql/binlog.cc</code></td><td>V (file, offset), its mutex and condition; <code>update_visible_pos()</code> called from <code>process_commit_stage_queue</code>; initial value at open and after reset.</td></tr>
+<tr><td><code>sql/binlog.h</code>, <code>sql/binlog.cc</code></td>V (file, offset), <code>LOCK_binlog_last_committed_pos</code> and its condition; <code>update_binlog_last_committed_pos()</code> called from <code>process_commit_stage_queue</code>; initial value at open and after reset.</td></tr>
 <tr><td><code>sql/rpl_binlog_sender.h/.cc</code></td><td>Visible mode: end position from V instead of <code>binlog_end_pos</code> (<code>get_binlog_end_pos</code> :538, <code>wait_new_events</code> :790); send only GTID events; snapshot as Previous GTIDs; resync check.</td></tr>
 <tr><td><code>sql/rpl_source.cc</code></td><td>Read <code>@visible_gtid_stream</code> in <code>com_binlog_dump_gtid</code> (:1011); settings check; skip the start-file search.</td></tr>
 <tr><td><code>sql/rpl_gtid_state.cc</code>, <code>sql/handler.cc</code></td><td>Bump the resync counter where GTIDs change outside the binlog.</td></tr>
