@@ -184,3 +184,53 @@ A complete source exists one level lower: the points where a GTID enters `gtid_e
 - Both run after the engine commit (section 2). They run under the sidno lock, and in the group path
   under `LOCK_commit`, so a subscriber may only enqueue.
 - This is a server-tree change. A plugin cannot observe it today.
+
+## 9. Background: why ProxySQL tracks GTIDs and reads the binlog
+
+Source: ProxySQL's public docs and code (section 7). Not tested here.
+
+### The problem
+
+1. An application writes a row on the primary.
+2. Its next query is a SELECT, and ProxySQL sends reads to replicas.
+3. Replication is asynchronous, so the replica may not have the row yet, and the application does
+   not see what it just wrote.
+
+The usual workarounds are to send all reads to the primary after a write, which wastes the
+replicas, or to accept stale reads.
+
+### ProxySQL's solution, in two halves
+
+**Half 1: know what the client wrote.**
+- The primary runs with `session_track_gtids=OWN_GTID`.
+- After each write, the primary returns that transaction's GTID in its OK packet.
+- ProxySQL remembers the last GTID for each client connection.
+
+**Half 2: know what each replica has.**
+- ProxySQL keeps, in memory, the set of executed GTIDs for every backend server.
+- When the SELECT arrives, it picks a replica whose set contains the client's GTID. If none has it
+  yet, the read goes to the primary.
+- This is a lookup in ProxySQL's own memory, so the query pays no round trip and no wait.
+
+### Why the binlog reader exists
+
+Half 2 needs each replica's GTID set to be kept current in real time. The options were:
+
+| Option | Problem |
+|---|---|
+| Poll `SELECT @@global.gtid_executed` on each replica | stale between polls, and expensive |
+| Run `WAIT_FOR_EXECUTED_GTID_SET` before every read | a round trip and a possible wait on every query |
+| Have each replica push every new GTID as it happens | none of these, but MySQL has no such feature |
+
+The only thing MySQL pushes continuously is the binlog. So ProxySQL's authors wrote
+`proxysql_binlog_reader`: a small process on each MySQL host that connects like a replica, reads
+the binlog, extracts just the GTIDs, and pushes them to ProxySQL over a port.
+
+### Where it goes wrong
+
+The reader treats "this GTID is in the replica's binlog" as "this replica has the data". But the
+binlog is written slightly before the InnoDB commit (section 1). In that window ProxySQL sends the
+SELECT to the replica and the row is not there yet, which is the stale read the feature was built
+to prevent.
+
+The fix is to replace "is in the binlog" with "is committed and visible" as the signal for half 2.
