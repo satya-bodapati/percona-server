@@ -71,6 +71,31 @@ it is in PS 8.4 (no `clone_precopy`, `set_log_stop` or `storage/rocksdb/clone`).
   synchronisation no longer blocks on XA; "this change breaks some of the clone-related group
   replication MTR tests ... this patch makes no effort to fix them".
 
+### 1b. What Meta's clone changes in InnoDB clone (Satya's concern)
+
+In `Clone_Snapshot::init_redo_copy` Meta disables, with `#if 0`, the block that upstream and PS 8.4
+run before stopping redo archiving (`storage/innobase/clone/clone0copy.cc:474-510`):
+
+- `Clone_handler::XA_Block` (external XA blocked during the switch).
+- `synchronize_binlog_gtid` (`clone0copy.cc:332-348`): wait for binlog-prepared transactions, flush
+  the GTID persister (`gtid_persistor.wait_flush`, "Persist non-innodb GTIDs"), write the binlog
+  position to the trx sys page.
+- `dict_persist_t::Enable_immediate` for dynamic metadata; replaced by a change in clone recovery.
+
+In its place: `clone_cbk->synchronize_engines()` (log_status query), redo archiving that stops at
+that LSN (`arch0log.cc`), and recovery changes (`log0recv.cc`, `srv0start.cc`).
+
+Risk for PS (inferred, not tested): GTIDs of RocksDB-only transactions live only in memory and the
+binlog until the persister flushes them to `mysql.gtid_executed`. Without the flush at the clone
+point the recipient can hold RocksDB rows whose GTIDs it does not know, and GR recovery would fetch
+those transactions again. In the patch only the storage-engine part of log_status is used. Meta's
+MyRocks stores binlog position and GTID in RocksDB itself; PS MyRocks does not
+(`BINLOG_INFO_INDEX_NUMBER` is reserved and unused, `rdb_datadic.h:1595-1597`).
+
+A third shape, not implemented anywhere: copy SST files online from rolling checkpoints (Meta's
+precopy), keep the upstream InnoDB block unchanged, and block commits only for the short final step
+in which the RocksDB WAL files are added.
+
 For PXC, clone SST exists (`scripts/wsrep_sst_clone.sh`) but the runtime check accepts only
 `xtrabackup-v2` (PXC `sql/wsrep_sst.cc:126-144`).
 
