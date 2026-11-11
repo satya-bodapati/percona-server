@@ -150,3 +150,37 @@ removed `SHOW MASTER STATUS`.
    component, someone needs to check whether a transaction-observer service exists.
 5. Should we measure the window (Debug sync point and a sysbench run on the lab) before choosing?
 6. Tagged GTIDs: ProxySQL's parser cannot read them. Is that in scope?
+
+## 8. Is `after_commit` a complete source? (researched 2026-11-11)
+
+No. The transaction observer's `after_commit` means "a binlogged transaction committed". It is not
+"a GTID became visible". The flag that enables it, `m_flags.run_hooks`, is set in exactly one place:
+`init_thd_variables` in `ordered_commit` (binlog.cc:8792, `run_hooks = !skip_commit`).
+
+GTIDs that reach `gtid_executed` with no `after_commit` call:
+
+| Case | GTID added at | Why no hook |
+|---|---|---|
+| Binlog off for the thread: `log_bin=OFF`, `sql_log_bin=0`, applier with `log_replica_updates=OFF` | handler.cc:1882, rpl_replica_commit_order_manager.cc:377, rpl_commit_stage_manager.cc:494 | never enters `ordered_commit`, so `run_hooks` stays false and the call at handler.cc:2024 is skipped |
+| DDL with the binlog off | `gtid_end_transaction`, binlog.cc:1920-1972 | same |
+| ROLLBACK that is binlogged (non-transactional tables changed) | group path, binlog.cc:8957 | `ordered_commit(skip_commit=true)` at binlog.cc:3094; the hook after it runs only for XA ROLLBACK (:3098) |
+| `SET gtid_purged`, startup, clone | sys_vars.cc:7231, then rpl_gtid_state.cc:656 | not a transaction |
+
+Other points:
+- The GTID the hook reports is the session's "last used GTID", set in `acquire_ownership`
+  (rpl_gtid_state.cc:104) and never cleared (rpl_context.cc:199). A transaction with no GTID would
+  report the previous one.
+- XA PREPARE fires the hook (binlog.cc:8718). Its GTID is in `gtid_executed`, so that is consistent.
+- PXC does not use this observer. It has its own `wsrep_after_commit`, called from two places,
+  around `ordered_commit` and at the end of `ha_commit_low`, chosen by a per-THD flag (PXC 8.4
+  sql/binlog.cc and sql/handler.cc, read from GitHub). So PXC already had to cover the non-binlog
+  path itself. PXC-3706 is a fix in that hook for group commit. I found no other Jira issue by
+  text search; the search results were mostly unrelated.
+
+A complete source exists one level lower: the points where a GTID enters `gtid_executed`.
+- `update_gtids_impl_own_gtid` (rpl_gtid_state.cc:889) is reached by every transaction path above.
+  The session tracker is already notified on the next line (:890).
+- `add_lost_gtids` (:656) covers `SET gtid_purged`.
+- Both run after the engine commit (section 2). They run under the sidno lock, and in the group path
+  under `LOCK_commit`, so a subscriber may only enqueue.
+- This is a server-tree change. A plugin cannot observe it today.
