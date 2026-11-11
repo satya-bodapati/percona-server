@@ -1,0 +1,202 @@
+<title>Visible GTID Stream Brief</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Serif:wght@500&display=swap">
+<style>
+/* Layout: one reading column (max 46rem); figures and tables may scroll sideways inside their own box. */
+:root {
+  --bg: #f5f7f9; --surface: #ffffff; --fg: #17212b; --muted: #5a6875; --line: #d5dce3;
+  --visible: #0b7a75; --visible-soft: #d3ecea;
+  --flushed: #b26a00; --flushed-soft: #fbe6c4;
+  --race: #b3261e; --race-soft: #f9dcd9;
+  --link: #1f5fbf; --code-bg: #e9eef2;
+  --sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --display: "IBM Plex Serif", Georgia, serif;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #10161c; --surface: #18212a; --fg: #e3e9ee; --muted: #9aa8b5; --line: #2e3b47;
+  --visible: #4fc7bf; --visible-soft: #12403d;
+  --flushed: #f0b04a; --flushed-soft: #4a3610;
+  --race: #f28b82; --race-soft: #4d1f1b;
+  --link: #8ab4f8; --code-bg: #222d38; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #10161c; --surface: #18212a; --fg: #e3e9ee; --muted: #9aa8b5; --line: #2e3b47;
+  --visible: #4fc7bf; --visible-soft: #12403d;
+  --flushed: #f0b04a; --flushed-soft: #4a3610;
+  --race: #f28b82; --race-soft: #4d1f1b;
+  --link: #8ab4f8; --code-bg: #222d38; color-scheme: dark }
+
+body { background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 16px; line-height: 1.6;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 2rem 4rem; }
+main { max-width: 46rem; margin: 0 auto; display: flex; flex-direction: column; gap: 1.1rem; }
+h1 { font-family: var(--display); font-weight: 500; font-size: 2.1rem; line-height: 1.15; margin: 0; text-wrap: balance; }
+h2 { font-family: var(--display); font-weight: 500; font-size: 1.4rem; margin: 1.8rem 0 0; padding-top: 1.1rem; border-top: 1px solid var(--line); text-wrap: balance; }
+h3 { font-size: 1rem; font-weight: 600; margin: .6rem 0 0; }
+p, ul, ol { margin: 0; }
+ul, ol { padding-left: 1.3rem; display: flex; flex-direction: column; gap: .35rem; }
+a { color: var(--link); }
+.lede { font-size: 1.1rem; color: var(--muted); }
+.meta { font-family: var(--mono); font-size: .78rem; color: var(--muted); }
+code, .ref { font-family: var(--mono); font-size: .86em; background: var(--code-bg); padding: .05em .3em; border-radius: 3px; overflow-wrap: anywhere; }
+.ref { background: none; color: var(--muted); padding: 0; font-size: .78em; }
+pre { font-family: var(--mono); font-size: .82rem; line-height: 1.5; background: var(--code-bg); padding: .9rem 1rem; border-radius: 6px; overflow-x: auto; margin: 0; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .9rem; min-width: 34rem; }
+th, td { text-align: left; vertical-align: top; padding: .5rem .6rem; border-bottom: 1px solid var(--line); }
+th { font-weight: 600; font-size: .78rem; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+figure { margin: .4rem 0; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 1rem; }
+figure .scroll svg { display: block; width: 100%; min-width: 600px; height: auto; }
+figcaption { font-size: .86rem; color: var(--muted); margin-top: .6rem; }
+.summary { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.1rem; display: flex; flex-direction: column; gap: .6rem; }
+.pill { display: inline-block; font-family: var(--mono); font-size: .74rem; padding: .08rem .45rem; border-radius: 999px; white-space: nowrap; }
+.pill.req { background: var(--visible-soft); color: var(--visible); }
+.pill.any { background: var(--code-bg); color: var(--muted); }
+.pill.open { background: var(--flushed-soft); color: var(--flushed); }
+.note { border-left: 3px solid var(--flushed); padding: .1rem 0 .1rem .8rem; color: var(--muted); font-size: .93rem; }
+nav { font-size: .9rem; columns: 2 14rem; column-gap: 2rem; }
+nav a { display: block; padding: .12rem 0; text-decoration: none; }
+/* SVG */
+svg text { font-family: var(--sans); font-size: 12px; fill: var(--fg); }
+svg .m { fill: var(--muted); } svg .mono { font-family: var(--mono); font-size: 11px; }
+svg .box { fill: var(--surface); stroke: var(--fg); stroke-width: 1.2; }
+svg .bg { fill: var(--bg); stroke: var(--line); }
+svg .vis { fill: var(--visible-soft); stroke: var(--visible); stroke-width: 1.2; }
+svg .flu { fill: var(--flushed-soft); stroke: var(--flushed); stroke-width: 1.2; }
+svg .rac { fill: var(--race-soft); stroke: var(--race); stroke-width: 1; }
+svg .tv { fill: var(--visible); font-weight: 600; } svg .tf { fill: var(--flushed); font-weight: 600; } svg .tr { fill: var(--race); font-weight: 600; }
+svg .ln { stroke: var(--fg); stroke-width: 1.3; fill: none; } svg .lv { stroke: var(--visible); stroke-width: 2; fill: none; }
+svg .lf { stroke: var(--flushed); stroke-width: 1.6; fill: none; stroke-dasharray: 5 4; }
+svg .hv { fill: var(--visible); } svg .hf { fill: var(--flushed); } svg .hn { fill: var(--fg); }
+</style>
+
+<main>
+<p class="meta">Short design · Percona Server 8.4 · proposal, not implemented</p>
+<h1>Visible GTID Stream</h1>
+<p class="lede">The server tells a proxy which GTIDs a query can already see, so reads that follow a write can go to a replica safely.</p>
+
+<h2 id="s1">1. The problem we are solving</h2>
+<p>An application writes a row through ProxySQL and reads it back straight away. The write goes to the primary; the read may go to a replica. If the replica has not applied the write yet, the application does not see its own row.</p>
+<p>ProxySQL avoids this with GTIDs:</p>
+<ul>
+<li>The primary returns the GTID of each commit to ProxySQL in the OK packet.</li>
+<li>ProxySQL keeps, per replica, the set of GTIDs that replica has. A read goes only to a replica whose set contains the client's last GTID.</li>
+</ul>
+<p>To keep those sets current, a helper process (<code>proxysql_binlog_reader</code>) reads each replica's binlog and reports every GTID it sees.</p>
+
+<h2 id="s2">2. What goes wrong today</h2>
+<p>A transaction is written to the replica's binlog <em>before</em> it is committed in InnoDB. The reader reports the GTID when it appears in the binlog. For a short time ProxySQL believes the replica has the write, sends the read there, and the row is not visible yet.</p>
+<figure>
+<div class="scroll">
+<svg viewBox="0 0 760 250" role="img" aria-label="Timeline of one commit group. The binlog position that readers follow moves after flush or sync. The row becomes visible only after the engine commit.">
+<defs>
+<marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" class="hn"/></marker>
+<marker id="a1v" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" class="hv"/></marker>
+<marker id="a1f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" class="hf"/></marker>
+</defs>
+<text class="m" x="20" y="22">One commit group, time runs left to right</text>
+<rect class="box" x="20" y="34" width="190" height="46" rx="4"/><text x="115" y="54" text-anchor="middle">1 Flush</text><text class="m" x="115" y="70" text-anchor="middle">write to binlog file</text>
+<rect class="box" x="218" y="34" width="190" height="46" rx="4"/><text x="313" y="54" text-anchor="middle">2 Sync</text><text class="m" x="313" y="70" text-anchor="middle">fsync binlog</text>
+<rect class="box" x="416" y="34" width="190" height="46" rx="4"/><text x="511" y="54" text-anchor="middle">3 Commit</text><text class="m" x="511" y="70" text-anchor="middle">commit in InnoDB</text>
+<rect class="bg" x="614" y="34" width="126" height="46" rx="4"/><text class="m" x="677" y="61" text-anchor="middle">done</text>
+<rect class="rac" x="210" y="100" width="396" height="34" rx="3"/>
+<text class="tr" x="408" y="121" text-anchor="middle">GTID already reported; a SELECT does not see the row</text>
+<path class="lf" d="M210 82 V178"/>
+<text class="tf" x="210" y="196" text-anchor="middle">flushed / synced position</text><text class="m" x="210" y="212" text-anchor="middle">binlog_end_pos: readers see the GTID</text>
+<path class="lv" d="M606 82 V178"/>
+<text class="tv" x="606" y="196" text-anchor="middle">committed position</text><text class="m" x="606" y="212" text-anchor="middle">a query can see the row</text>
+</svg>
+</div>
+<figcaption>The server tracks only the first position today. This design adds the second one and streams from it.</figcaption>
+</figure>
+<p>The two positions differ on purpose. The binlog must be written first because it decides, after a crash, which transactions are committed. Replication, and semisync in particular, must be able to send a transaction before it is committed. So the existing position cannot simply be moved later.</p>
+<p>The gap is usually under a few milliseconds, but it grows without limit when the fsync or a semisync acknowledgement is slow.</p>
+
+<h2 id="s3">3. Where the server knows what is committed</h2>
+<p>In the last stage of group commit. One thread, the group leader, does three things in order for the whole group:</p>
+<ol>
+<li><strong>InnoDB commits each transaction.</strong> InnoDB removes the transaction from its list of active transactions. From that moment every new query sees its rows.</li>
+<li><strong>The server adds the group's GTIDs to <code>gtid_executed</code>.</strong> This is the in-memory set behind <code>@@global.gtid_executed</code>.</li>
+<li><strong>New: the leader records the binlog position where the group ends.</strong> We call it the <em>last committed position</em>. Everything in the binlog before it is committed.</li>
+</ol>
+<p>Every transaction that has a GTID in the binlog passes through this stage: client transactions, replication applier threads (single or parallel), DDL, and the empty transactions a filtered replica writes. With <code>binlog_order_commits=ON</code>, groups commit in the order they were written, so one position is enough to describe what is committed.</p>
+<p>InnoDB itself is not changed. It does not need to know about the position; the leader records it right after InnoDB has finished.</p>
+
+<h2 id="s4">4. Sending it to many clients without slowing commits</h2>
+<p>The committing side does one small thing per group: store the new position and wake any waiting stream threads. It never builds a list, never copies GTIDs, and never waits for a client.</p>
+<p>Each client gets its own server thread. That thread reads the binlog file, which already contains every GTID, up to the last committed position, and sends only the GTID events. When it reaches the position it sleeps until the leader moves it.</p>
+<figure>
+<div class="scroll">
+<svg viewBox="0 0 760 240" role="img" aria-label="The binlog as a strip of transactions with two positions. Each client thread reads the file up to the last committed position at its own pace.">
+<text class="m" x="20" y="24">replica binlog file</text>
+<rect class="vis" x="20" y="36" width="84" height="44"/><text x="62" y="63" text-anchor="middle">T1</text>
+<rect class="vis" x="104" y="36" width="84" height="44"/><text x="146" y="63" text-anchor="middle">T2</text>
+<rect class="vis" x="188" y="36" width="84" height="44"/><text x="230" y="63" text-anchor="middle">T3</text>
+<rect class="vis" x="272" y="36" width="84" height="44"/><text x="314" y="63" text-anchor="middle">T4</text>
+<rect class="vis" x="356" y="36" width="84" height="44"/><text x="398" y="63" text-anchor="middle">T5</text>
+<rect class="flu" x="440" y="36" width="84" height="44"/><text x="482" y="63" text-anchor="middle">T6</text>
+<rect class="flu" x="524" y="36" width="84" height="44"/><text x="566" y="63" text-anchor="middle">T7</text>
+<rect class="bg" x="608" y="36" width="132" height="44"/><text class="m" x="674" y="63" text-anchor="middle">not written yet</text>
+<path class="lv" d="M440 30 V104"/><path class="hv" d="M440 86 l-7 12 h14 z"/>
+<text class="tv" x="440" y="120" text-anchor="middle">last committed position (new)</text>
+<path class="lf" d="M608 30 V104"/><path class="hf" d="M608 86 l-7 12 h14 z"/>
+<text class="tf" x="620" y="120" text-anchor="middle">binlog_end_pos</text>
+<path class="lv" d="M20 160 H436" marker-end="url(#a1v)"/><text x="20" y="152">client A: up to date, waiting at the position</text>
+<path class="lv" d="M20 200 H226" marker-end="url(#a1v)"/><text x="20" y="192">client B: slow, still at T3; holds nothing in server memory</text>
+</svg>
+</div>
+<figcaption>Green is committed, amber is written but not yet visible. A slow client is just further back in the file. It delays nobody.</figcaption>
+</figure>
+<p>There is no queue between committers and clients, so there is nothing to fill up, nothing to trim, and no per-client state beyond a file offset.</p>
+
+<h2 id="s5">5. Same mechanism as <code>binlog_end_pos</code></h2>
+<p>Replication already works exactly this way. The leader stores <code>binlog_end_pos</code> under a small dedicated mutex and signals; each replica's dump thread reads the file up to it and waits there. We add a second position of the same kind and reuse the dump thread code.</p>
+<div class="scroll"><table>
+<tr><th></th><th>Existing</th><th>New</th></tr>
+<tr><td>Position</td><td><code>binlog_end_pos</code>: flushed or synced</td><td>last committed position</td></tr>
+<tr><td>Moved</td><td>after flush or sync</td><td>after the InnoDB commits</td></tr>
+<tr><td>Mutex</td><td><code>LOCK_binlog_end_pos</code></td><td><code>LOCK_binlog_last_committed_pos</code></td></tr>
+<tr><td>Reader</td><td>dump thread, sends whole events</td><td>dump thread in "visible" mode, sends GTID events only</td></tr>
+</table></div>
+<p>Existing replication, semisync and <code>binlog_end_pos</code> are not changed.</p>
+
+<h2 id="s6">6. How a client connects and reads</h2>
+<figure>
+<div class="scroll">
+<svg viewBox="0 0 760 400" role="img" aria-label="Sequence between client and server: connect, ask for the visible stream, receive the full set, then one GTID event per newly visible transaction, heartbeats when idle, and close.">
+<rect class="box" x="60" y="14" width="150" height="36" rx="4"/><text x="135" y="37" text-anchor="middle">Client (reader / proxy)</text>
+<rect class="box" x="500" y="14" width="200" height="36" rx="4"/><text x="600" y="37" text-anchor="middle">Server (replica)</text>
+<path class="ln" d="M135 50 V386"/><path class="ln" d="M600 50 V386"/>
+
+<path class="ln" d="M135 84 H596" marker-end="url(#a1)"/><text x="150" y="76">1. connect and log in, as a replica does</text>
+<path class="ln" d="M135 124 H596" marker-end="url(#a1)"/><text x="150" y="116">2. SET @visible_gtid_stream = 1</text>
+<path class="ln" d="M135 164 H596" marker-end="url(#a1)"/><text x="150" y="156">3. start binlog dump (COM_BINLOG_DUMP_GTID)</text>
+<path class="lv" d="M600 214 H139" marker-end="url(#a1v)"/><text class="tv" x="150" y="206">4. full set of visible GTIDs (once)</text>
+<path class="lv" d="M600 254 H139" marker-end="url(#a1v)"/><text class="tv" x="150" y="246">5. one GTID event per newly committed transaction</text>
+<path class="lv" d="M600 280 H139" marker-end="url(#a1v)"/>
+<path class="lv" d="M600 296 H139" marker-end="url(#a1v)"/>
+<path class="ln" d="M600 336 H139" marker-end="url(#a1)"/><text class="m" x="150" y="328">6. heartbeat when nothing happens</text>
+<path class="ln" d="M135 376 H596" marker-end="url(#a1)"/><text x="150" y="368">7. close the connection when done</text>
+<text class="m" x="612" y="210">starts at the last</text><text class="m" x="612" y="225">committed position</text>
+<text class="m" x="612" y="284">waits when it</text><text class="m" x="612" y="299">reaches it</text>
+</svg>
+</div>
+<figcaption>Steps 1 and 3 are what any replica or binlog reader does today. Step 2 is the only new request. Any number of clients can do this at the same time.</figcaption>
+</figure>
+<p>If the connection drops, or the server restarts or resets its GTIDs, the client connects again and starts from step 1. It needs no saved state, because step 4 always gives the full set.</p>
+
+<h2 id="s7">7. How the client understands the stream</h2>
+<p>The stream uses ordinary binlog events, so any existing binlog library can decode it. The client sees three kinds that matter:</p>
+<div class="scroll"><table>
+<tr><th>Event</th><th>Meaning</th><th>Client does</th></tr>
+<tr><td>Previous GTIDs</td><td>everything visible on this server right now</td><td>replace its set with this one</td></tr>
+<tr><td>GTID</td><td>this transaction has just become visible</td><td>add it to the set</td></tr>
+<tr><td>Heartbeat</td><td>server is alive, nothing new</td><td>nothing</td></tr>
+</table></div>
+<p><strong>The client keeps a set, not one "last GTID".</strong> A replica can have GTIDs from several sources, and a parallel applier can commit number 12 before number 11. So there is no single last value. The question ProxySQL asks is "is the client's GTID in this replica's set?", which is the check it already does today.</p>
+<p>While a client is disconnected, or before it has received the first Previous GTIDs event, it treats the replica's set as unknown and does not send causal reads there.</p>
+
+<h2 id="s8">Settings this needs</h2>
+<p><code>gtid_mode=ON</code>, binlog on, <code>log_replica_updates=ON</code> on replicas, <code>binlog_order_commits=ON</code>. All are defaults in 8.4. If one is off, the server refuses the stream with an error naming it.</p>
+<p class="meta">Details, code references and open questions are in the full design: DESIGN-gtid-visible-stream.md</p>
+</main>
