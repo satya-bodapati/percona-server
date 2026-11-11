@@ -390,7 +390,7 @@ route a causal read here only if visible is known and contains the client's GTID
 <h2 id="code">12. Code change map and tests</h2>
 <div class="scroll"><table>
 <tr><th>File</th><th>Change</th></tr>
-<tr><td><code>sql/binlog.h</code>, <code>sql/binlog.cc</code></td>V (file, offset), <code>LOCK_binlog_last_committed_pos</code> and its condition; <code>update_binlog_last_committed_pos()</code> called from <code>process_commit_stage_queue</code>; initial value at open and after reset.</td></tr>
+<tr><td><code>sql/binlog.h</code>, <code>sql/binlog.cc</code></td><td>V (file, offset), <code>LOCK_binlog_last_committed_pos</code> and its condition; <code>update_binlog_last_committed_pos()</code> called from <code>process_commit_stage_queue</code>; initial value at open and after reset.</td></tr>
 <tr><td><code>sql/rpl_binlog_sender.h/.cc</code></td><td>Visible mode: end position from V instead of <code>binlog_end_pos</code> (<code>get_binlog_end_pos</code> :538, <code>wait_new_events</code> :790); send only GTID events; snapshot as Previous GTIDs; resync check.</td></tr>
 <tr><td><code>sql/rpl_source.cc</code></td><td>Read <code>@visible_gtid_stream</code> in <code>com_binlog_dump_gtid</code> (:1011); settings check; skip the start-file search.</td></tr>
 <tr><td><code>sql/rpl_gtid_state.cc</code>, <code>sql/handler.cc</code></td><td>Bump the resync counter where GTIDs change outside the binlog.</td></tr>
