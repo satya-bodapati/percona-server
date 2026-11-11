@@ -275,6 +275,14 @@ gtid_state->update_commit_group(first)                            // gtid_execut
 <tr><td>Wake stream threads</td><td>once per group, skipped when no stream is connected</td><td>same</td></tr>
 <tr><td>Find the group's end position</td><td>inside the loop that already walks the group</td><td>none added</td></tr>
 </table></div>
+<h3>Why a new mutex, when the leader already holds <code>LOCK_commit</code></h3>
+<p>The mutex is for the stream threads, not for the committers. Only one leader is in the commit stage at a time, so writers of V never compete with each other. The stream threads need it for two things:</p>
+<ul>
+<li><strong>Sleeping without missing a wake-up.</strong> A stream thread checks "has V moved past my position?" and, if not, sleeps on a condition variable. If the leader moved V and signalled between the check and the sleep, the thread would sleep through it and the GTID would wait until the next commit. A condition variable avoids this only when the check, the sleep, and the update all happen under one mutex.</li>
+<li><strong>Reading a matching pair.</strong> V is a file name and an offset. Without a lock, a thread could read the new file with the old offset during a rotation.</li>
+</ul>
+<p>That mutex could be <code>LOCK_commit</code> itself, with no new one. Then every stream thread would take <code>LOCK_commit</code> each time it checks or sleeps, and would compete with the commit leaders for the lock that the whole commit stage runs under. A separate mutex keeps consumers off the commit path's locks: the leader holds the new one for a few instructions, and a stream thread holds it only to compare positions and go to sleep.</p>
+<p>This is the arrangement replication already uses: <code>binlog_end_pos</code> has its own <code>LOCK_binlog_end_pos</code> and condition variable, separate from <code>LOCK_log</code> and <code>LOCK_sync</code>, for the same reason (binlog.cc:9775-9792, rpl_binlog_sender.cc:790-812).</p>
 <ul>
 <li>This mirrors what <code>update_binlog_end_pos</code> already does once per group for replication (:9785-9792).</li>
 <li>It happens <em>after</em> the engine commits, so it does not delay visibility or lock release.</li>
