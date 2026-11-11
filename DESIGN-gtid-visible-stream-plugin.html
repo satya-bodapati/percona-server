@@ -1,0 +1,210 @@
+<title>Visible GTID Stream Plugin</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Serif:wght@500&display=swap">
+<style>
+/* Layout: one reading column (max 46rem); figures and tables may scroll sideways inside their own box. */
+:root {
+  --bg: #f5f7f9; --surface: #ffffff; --fg: #17212b; --muted: #5a6875; --line: #d5dce3;
+  --visible: #0b7a75; --visible-soft: #d3ecea;
+  --flushed: #b26a00; --flushed-soft: #fbe6c4;
+  --race: #b3261e; --race-soft: #f9dcd9;
+  --link: #1f5fbf; --code-bg: #e9eef2;
+  --sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --display: "IBM Plex Serif", Georgia, serif;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #10161c; --surface: #18212a; --fg: #e3e9ee; --muted: #9aa8b5; --line: #2e3b47;
+  --visible: #4fc7bf; --visible-soft: #12403d;
+  --flushed: #f0b04a; --flushed-soft: #4a3610;
+  --race: #f28b82; --race-soft: #4d1f1b;
+  --link: #8ab4f8; --code-bg: #222d38; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #10161c; --surface: #18212a; --fg: #e3e9ee; --muted: #9aa8b5; --line: #2e3b47;
+  --visible: #4fc7bf; --visible-soft: #12403d;
+  --flushed: #f0b04a; --flushed-soft: #4a3610;
+  --race: #f28b82; --race-soft: #4d1f1b;
+  --link: #8ab4f8; --code-bg: #222d38; color-scheme: dark }
+
+body { background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 16px; line-height: 1.6;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 2rem 4rem; }
+main { max-width: 46rem; margin: 0 auto; display: flex; flex-direction: column; gap: 1.1rem; }
+h1 { font-family: var(--display); font-weight: 500; font-size: 2.1rem; line-height: 1.15; margin: 0; text-wrap: balance; }
+h2 { font-family: var(--display); font-weight: 500; font-size: 1.4rem; margin: 1.8rem 0 0; padding-top: 1.1rem; border-top: 1px solid var(--line); text-wrap: balance; }
+h3 { font-size: 1rem; font-weight: 600; margin: .6rem 0 0; }
+p, ul, ol { margin: 0; }
+ul, ol { padding-left: 1.3rem; display: flex; flex-direction: column; gap: .35rem; }
+a { color: var(--link); }
+.lede { font-size: 1.1rem; color: var(--muted); }
+.meta { font-family: var(--mono); font-size: .78rem; color: var(--muted); }
+code, .ref { font-family: var(--mono); font-size: .86em; background: var(--code-bg); padding: .05em .3em; border-radius: 3px; overflow-wrap: anywhere; }
+.ref { background: none; color: var(--muted); padding: 0; font-size: .78em; }
+pre { font-family: var(--mono); font-size: .82rem; line-height: 1.5; background: var(--code-bg); padding: .9rem 1rem; border-radius: 6px; overflow-x: auto; margin: 0; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .9rem; min-width: 34rem; }
+th, td { text-align: left; vertical-align: top; padding: .5rem .6rem; border-bottom: 1px solid var(--line); }
+th { font-weight: 600; font-size: .78rem; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+figure { margin: .4rem 0; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 1rem; }
+figure .scroll svg { display: block; width: 100%; min-width: 600px; height: auto; }
+figcaption { font-size: .86rem; color: var(--muted); margin-top: .6rem; }
+.summary { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.1rem; display: flex; flex-direction: column; gap: .6rem; }
+.pill { display: inline-block; font-family: var(--mono); font-size: .74rem; padding: .08rem .45rem; border-radius: 999px; white-space: nowrap; }
+.pill.req { background: var(--visible-soft); color: var(--visible); }
+.pill.any { background: var(--code-bg); color: var(--muted); }
+.pill.open { background: var(--flushed-soft); color: var(--flushed); }
+.note { border-left: 3px solid var(--flushed); padding: .1rem 0 .1rem .8rem; color: var(--muted); font-size: .93rem; }
+nav { font-size: .9rem; columns: 2 14rem; column-gap: 2rem; }
+nav a { display: block; padding: .12rem 0; text-decoration: none; }
+/* SVG */
+svg text { font-family: var(--sans); font-size: 12px; fill: var(--fg); }
+svg .m { fill: var(--muted); } svg .mono { font-family: var(--mono); font-size: 11px; }
+svg .box { fill: var(--surface); stroke: var(--fg); stroke-width: 1.2; }
+svg .bg { fill: var(--bg); stroke: var(--line); }
+svg .vis { fill: var(--visible-soft); stroke: var(--visible); stroke-width: 1.2; }
+svg .flu { fill: var(--flushed-soft); stroke: var(--flushed); stroke-width: 1.2; }
+svg .rac { fill: var(--race-soft); stroke: var(--race); stroke-width: 1; }
+svg .tv { fill: var(--visible); font-weight: 600; } svg .tf { fill: var(--flushed); font-weight: 600; } svg .tr { fill: var(--race); font-weight: 600; }
+svg .ln { stroke: var(--fg); stroke-width: 1.3; fill: none; } svg .lv { stroke: var(--visible); stroke-width: 2; fill: none; }
+svg .lf { stroke: var(--flushed); stroke-width: 1.6; fill: none; stroke-dasharray: 5 4; }
+svg .hv { fill: var(--visible); } svg .hf { fill: var(--flushed); } svg .hn { fill: var(--fg); }
+</style>
+
+<main>
+<p class="meta">Plugin design · no server change · Percona Server 8.4 and upstream MySQL · proposal, not implemented</p>
+<h1>Visible GTID Stream Plugin</h1>
+<p class="lede">A plugin that pushes each GTID to a client the moment a query on this server can see it. Installable on an unmodified server.</p>
+
+<h2 id="p1">1. The problem</h2>
+<p>ProxySQL sends a read to a replica only if the replica already has the client's last write, identified by its GTID. It learns which GTIDs a replica has from a helper that reads the replica's binlog.</p>
+<p>A transaction reaches the binlog <em>before</em> it is committed in InnoDB. So the helper reports the GTID too early, and for a short time a read sent to that replica does not see the row.</p>
+<figure>
+<div class="scroll">
+<svg viewBox="0 0 760 232" role="img" aria-label="Timeline of one commit group. Binlog readers see the GTID after flush or sync. The row is visible only after the engine commit, which is where the plugin's hook runs.">
+<defs>
+<marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" class="hn"/></marker>
+<marker id="a1v" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" class="hv"/></marker>
+<marker id="a1f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" class="hf"/></marker>
+</defs>
+<rect class="box" x="20" y="20" width="170" height="46" rx="4"/><text x="105" y="40" text-anchor="middle">1 Flush</text><text class="m" x="105" y="56" text-anchor="middle">write to binlog file</text>
+<rect class="box" x="198" y="20" width="170" height="46" rx="4"/><text x="283" y="40" text-anchor="middle">2 Sync</text><text class="m" x="283" y="56" text-anchor="middle">fsync binlog</text>
+<rect class="box" x="376" y="20" width="170" height="46" rx="4"/><text x="461" y="40" text-anchor="middle">3 Commit</text><text class="m" x="461" y="56" text-anchor="middle">commit in InnoDB</text>
+<rect class="vis" x="554" y="20" width="186" height="46" rx="4"/><text x="647" y="40" text-anchor="middle">after_commit hook</text><text class="m" x="647" y="56" text-anchor="middle">plugin is called here</text>
+<rect class="rac" x="190" y="86" width="356" height="34" rx="3"/>
+<text class="tr" x="368" y="107" text-anchor="middle">binlog reader has the GTID; a SELECT does not see the row</text>
+<path class="lf" d="M190 68 V160"/>
+<text class="tf" x="190" y="178" text-anchor="middle">today's reader</text><text class="m" x="190" y="194" text-anchor="middle">reports the GTID here</text>
+<path class="lv" d="M550 68 V160"/>
+<text class="tv" x="550" y="178" text-anchor="middle">this plugin</text><text class="m" x="550" y="194" text-anchor="middle">reports the GTID here</text>
+</svg>
+</div>
+<figcaption>The plugin reports a GTID only after the engine commit, so it is never ahead of what a query can see.</figcaption>
+</figure>
+
+<h2 id="p2">2. What we build</h2>
+<p>One plugin with three parts. The server is not changed.</p>
+<figure>
+<div class="scroll">
+<svg viewBox="0 0 760 210" role="img" aria-label="Committing sessions call the plugin's commit hook, which appends the GTID to a ring. A stream thread per client reads the ring and pushes GTID events to the client.">
+<rect class="box" x="20" y="60" width="150" height="70" rx="5"/><text x="95" y="88" text-anchor="middle">Committing sessions</text><text class="m" x="95" y="106" text-anchor="middle">clients, applier workers</text>
+<rect class="vis" x="230" y="34" width="330" height="140" rx="6"/><text class="tv" x="246" y="54">plugin</text>
+<rect class="box" x="246" y="70" width="90" height="50" rx="4"/><text x="291" y="92" text-anchor="middle">commit</text><text x="291" y="108" text-anchor="middle">hook</text>
+<rect class="box" x="356" y="70" width="90" height="50" rx="4"/><text x="401" y="92" text-anchor="middle">ring of</text><text x="401" y="108" text-anchor="middle">GTIDs</text>
+<rect class="box" x="466" y="70" width="80" height="50" rx="4"/><text x="506" y="92" text-anchor="middle">stream</text><text x="506" y="108" text-anchor="middle">loop</text>
+<text class="m" x="291" y="140" text-anchor="middle">a</text><text class="m" x="401" y="140" text-anchor="middle">b</text><text class="m" x="506" y="140" text-anchor="middle">c</text>
+<rect class="box" x="620" y="60" width="120" height="70" rx="5"/><text x="680" y="88" text-anchor="middle">Client</text><text class="m" x="680" y="106" text-anchor="middle">reader or proxy</text>
+<path class="ln" d="M170 95 H244" marker-end="url(#a1)"/><text class="m" x="207" y="86" text-anchor="middle">after commit</text>
+<path class="ln" d="M336 95 H354" marker-end="url(#a1)"/>
+<path class="ln" d="M446 95 H464" marker-end="url(#a1)"/>
+<path class="lv" d="M546 95 H616" marker-end="url(#a1v)"/><text class="tv" x="582" y="86" text-anchor="middle">push</text>
+<text class="m" x="20" y="198">a: runs on the committing thread · b: fixed size, in memory · c: runs on the client's own connection thread</text>
+</svg>
+</div>
+<figcaption>The hook only appends to the ring. The stream loop does all the sending.</figcaption>
+</figure>
+
+<h2 id="p3">3. Where the plugin learns that a GTID is committed</h2>
+<p>From the server's <code>after_commit</code> hook, the same interface semisync uses. The server calls it once per transaction, in this order:</p>
+<ol>
+<li>InnoDB commits the transaction. New queries now see its rows.</li>
+<li>The server adds the GTID to <code>gtid_executed</code>.</li>
+<li>The server calls <code>after_commit</code> and passes the transaction's GTID to the plugin.</li>
+</ol>
+<p>This order holds for client sessions and for replication applier threads, single or parallel, and with <code>binlog_order_commits</code> ON or OFF.</p>
+
+<h2 id="p4">4. From the hook to the client, without slowing commits</h2>
+<p>The hook is on the commit path, so it does almost nothing: it appends the GTID to a ring and wakes the stream loop.</p>
+<ul>
+<li><strong>The ring is bounded.</strong> Entries are numbered. When it is full, the oldest entry is overwritten. The hook never waits and never does I/O.</li>
+<li><strong>When no client is connected, the hook returns at once</strong> after one check.</li>
+<li><strong>The stream loop remembers the number of the last entry it sent.</strong> It sends what is newer and sleeps when it has caught up.</li>
+<li><strong>A slow client</strong> falls behind until its position is overwritten. The loop then sends the full set again and continues from the present. Commits are never delayed. A status counter records each such overrun.</li>
+</ul>
+
+<h2 id="p5">5. How the client connects</h2>
+<p>The client starts a normal binlog dump, as any replica or binlog reader does, with one extra variable. The server calls the plugin at the start of every dump, on that connection's thread. For a connection that set the variable, the plugin keeps the thread and runs the stream loop on it. No binlog data is sent on that connection.</p>
+<figure>
+<div class="scroll">
+<svg viewBox="0 0 760 392" role="img" aria-label="Sequence between client and server: connect, set the stream variable, start a binlog dump; the plugin takes the thread and pushes the full set, then GTID events, heartbeats, and periodic full sets, until the client closes.">
+<rect class="box" x="60" y="10" width="150" height="34" rx="4"/><text x="135" y="32" text-anchor="middle">Client</text>
+<rect class="box" x="500" y="10" width="200" height="34" rx="4"/><text x="600" y="32" text-anchor="middle">Server + plugin</text>
+<path class="ln" d="M135 44 V380"/><path class="ln" d="M600 44 V380"/>
+<path class="ln" d="M135 76 H596" marker-end="url(#a1)"/><text x="150" y="68">1. connect and log in</text>
+<path class="ln" d="M135 112 H596" marker-end="url(#a1)"/><text x="150" y="104">2. SET @visible_gtid_stream = 1</text>
+<path class="ln" d="M135 148 H596" marker-end="url(#a1)"/><text x="150" y="140">3. start binlog dump</text>
+<text class="tv" x="612" y="170">plugin keeps</text><text class="tv" x="612" y="185">this thread</text>
+<path class="lv" d="M600 200 H139" marker-end="url(#a1v)"/><text class="tv" x="150" y="192">4. full set of visible GTIDs</text>
+<path class="lv" d="M600 236 H139" marker-end="url(#a1v)"/><text class="tv" x="150" y="228">5. one GTID event per committed transaction, as it commits</text>
+<path class="lv" d="M600 254 H139" marker-end="url(#a1v)"/>
+<path class="ln" d="M600 290 H139" marker-end="url(#a1)"/><text class="m" x="150" y="282">6. heartbeat when idle</text>
+<path class="lv" d="M600 326 H139" marker-end="url(#a1v)"/><text class="tv" x="150" y="318">7. full set again, every N seconds</text>
+<path class="ln" d="M135 362 H596" marker-end="url(#a1)"/><text x="150" y="354">8. close the connection when done</text>
+</svg>
+</div>
+<figcaption>Steps 1 to 3 are standard. From step 4 on the server pushes; the client only reads.</figcaption>
+</figure>
+<ul>
+<li><strong>Real replicas are not affected.</strong> A connection without the variable is left alone and receives the binlog as always. Each connection has its own thread.</li>
+<li><strong>Security is the server's.</strong> Login, TLS and the replication privilege apply as for any replica. There is no new port.</li>
+<li><strong>Reconnect.</strong> If the connection drops or the server restarts, the client connects again. It needs no saved state because step 4 always sends the full set.</li>
+</ul>
+
+<h2 id="p6">6. What the client receives</h2>
+<p>Ordinary binlog events, built by the plugin with the server's own event code. Any binlog client library can decode them.</p>
+<div class="scroll"><table>
+<tr><th>Event</th><th>Meaning</th><th>Client does</th></tr>
+<tr><td>Previous GTIDs</td><td>everything visible on this server right now</td><td>replace its set with this one</td></tr>
+<tr><td>GTID</td><td>this transaction has just become visible</td><td>add it to the set</td></tr>
+<tr><td>Heartbeat</td><td>server is alive, nothing new</td><td>nothing</td></tr>
+</table></div>
+<p>The client keeps a set and asks "is this GTID in the set?". There is no single "last GTID", because a replica has GTIDs from several sources and a parallel applier can commit them out of numeric order.</p>
+<p>This is the same client contract as in the core design. A client written for the plugin works unchanged if the feature later moves into the server.</p>
+
+<h2 id="p7">7. What the hook misses, and how the stream stays correct</h2>
+<p>In a few rare cases a GTID becomes part of <code>gtid_executed</code> without a call to the hook:</p>
+<ul>
+<li>a transaction that changed a non-transactional table and then rolled back;</li>
+<li><code>SET GLOBAL gtid_purged</code>;</li>
+<li>a GTID committed with <code>sql_log_bin=0</code>.</li>
+</ul>
+<p>The stream covers them with step 7: every N seconds the loop sends the full set again, read from <code>gtid_executed</code>. A GTID the hook missed therefore appears after at most N seconds. The same step repairs the client's set after a ring overrun.</p>
+<p><code>RESET BINARY LOGS AND GTIDS</code> has its own hook. The plugin sends the full set immediately, and the client's set shrinks.</p>
+
+<h2 id="p8">8. Limits</h2>
+<div class="scroll"><table>
+<tr><th>Limit</th><th>Detail</th></tr>
+<tr><td>Settings</td><td><code>gtid_mode=ON</code>, binlog on, <code>log_replica_updates=ON</code> on replicas. The hook fires only for transactions written to the binlog. Otherwise the plugin refuses the stream with an error naming the setting.</td></tr>
+<tr><td>Rare cases are late</td><td>The three cases in section 7 are reported up to N seconds late. Never early.</td></tr>
+<tr><td>Installing other replication plugins</td><td>While a stream is connected, <code>INSTALL</code> or <code>UNINSTALL</code> of a replication plugin (for example semisync) waits. The plugin has a switch that disconnects all streams, to let such a statement proceed. Other replicas keep running meanwhile.</td></tr>
+<tr><td>Plugin, not component</td><td>The commit hook is offered to plugins only. The plugin is built per server version, like semisync.</td></tr>
+<tr><td>Cost of commit hooks</td><td>Once any plugin registers for commit hooks, the server calls them for every transaction. Semisync and Group Replication pay this today. To be measured.</td></tr>
+</table></div>
+
+<h2 id="p9">9. To confirm with a prototype</h2>
+<ul>
+<li>The server accepts the dump request and reaches the plugin before sending anything, for both forms of the dump command.</li>
+<li>A stream loop that stays inside the hook reacts to client disconnect, <code>KILL</code>, shutdown and plugin uninstall.</li>
+<li>The GTID passed to the hook is always the transaction's own.</li>
+<li>Overhead of the hook on a busy server, with and without a client.</li>
+</ul>
+</main>

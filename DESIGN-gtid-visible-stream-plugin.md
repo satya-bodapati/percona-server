@@ -1,199 +1,168 @@
-# Visible GTID Stream as a plugin
+# Visible GTID Stream Plugin
 
-Alternative design. No change to the core server. Proposal, not implemented; nothing was built or
-measured. Names are proposals.
+Plugin design. No server change. Percona Server 8.4 and upstream MySQL. Proposal, not implemented.
 
-The goal is the same as in `DESIGN-gtid-visible-stream-brief.md`: tell a proxy which GTIDs a query on
-this server can already see. Here the source is the `after_commit` hook and everything lives in a
-plugin that can be installed on upstream MySQL and on Percona Server.
+A plugin that pushes each GTID to a client the moment a query on this server can see it. Installable
+on an unmodified server.
 
-## 1. Constraints
+## 1. The problem
 
-- **No core change.** Only interfaces the server already offers to plugins.
-- **Plugin, not component.** The commit hooks are a plugin-only interface
-  (`register_trans_observer`, sql/replication.h:761). No component service exposes them. Semisync
-  and Group Replication use the same interface.
-- **Built per server version.** Like semisync, the plugin is compiled against the server's headers.
-  One source tree, one build per MySQL / Percona Server version.
-- **Required settings:** `gtid_mode=ON`, binlog on, `log_replica_updates=ON` on replicas. The hook
-  only fires for transactions written to the binlog. `binlog_order_commits` may be ON or OFF.
+ProxySQL sends a read to a replica only if the replica already has the client's last write,
+identified by its GTID. It learns which GTIDs a replica has from a helper that reads the replica's
+binlog.
 
-## 2. The pieces
+A transaction reaches the binlog *before* it is committed in InnoDB. So the helper reports the GTID
+too early, and for a short time a read sent to that replica does not see the row.
 
 ```
- committing sessions                    plugin                                client
- (clients, applier workers)
+ | 1 Flush              | 2 Sync       | 3 Commit          | after_commit hook
+ | write to binlog file | fsync binlog | commit in InnoDB  | plugin is called here
+                        ^                                  ^
+                        |                                  |
+                 today's reader                       this plugin
+              reports the GTID here              reports the GTID here
 
-  engine commit                                                        SELECT visible_gtid_snapshot()
-  gtid_executed updated                                                SELECT visible_gtid_next(cursor, timeout)
-        |                                                                        |
-        v                                                                        v
-  after_commit hook  ---- GTID ---->  [ bounded ring of GTIDs ]  <---- reads from its cursor,
-  (plugin callback)                     numbered 1, 2, 3, ...          sleeps when it has caught up
+                        |<-- binlog reader has the GTID; -->|
+                        |    a SELECT does not see the row  |
 ```
 
-Three parts:
+The plugin reports a GTID only after the engine commit, so it is never ahead of what a query can see.
 
-1. **A hook callback** that puts each committed GTID into a ring.
-2. **A bounded ring** in memory. Entries are numbered. Old entries are overwritten.
-3. **Two SQL functions** a client calls over a normal MySQL connection to read from the ring.
+## 2. What we build
 
-There is no new port, no new protocol and no new thread. The client's own connection thread does the
-reading and the waiting.
-
-## 3. The source: the `after_commit` hook
-
-The server calls the hook once per transaction, after the engine commit and after `gtid_executed` is
-updated (sql/binlog.cc:8992 with ordered commits, :9146 without). So a GTID seen in the hook is
-already visible to queries. This is the safe side.
-
-The hook receives the transaction's GTID, including the UUID and tag (`Trans_param.gtid_info`,
-sql/replication.h:120-150).
-
-The callback does the minimum:
+One plugin with three parts. The server is not changed.
 
 ```
-if no client has asked for data recently:  return        // one atomic read
-lock ring;  ring[next++] = gtid;  unlock ring
-wake waiting readers, if any
+                               +------------------ plugin -------------------+
+ Committing sessions           |                                             |          Client
+ (clients, applier   --------> |  commit hook --> ring of GTIDs --> stream   | -------> (reader or
+  workers)        after commit |      (a)             (b)           loop (c) |   push    proxy)
+                               +---------------------------------------------+
+
+ a: runs on the committing thread
+ b: fixed size, in memory
+ c: runs on the client's own connection thread
 ```
 
-It never does I/O and never waits for a reader. When the ring is full it overwrites the oldest entry.
+The hook only appends to the ring. The stream loop does all the sending.
 
-The ring has its own short mutex because, with `binlog_order_commits=OFF`, many sessions call the
-hook at the same time. With ordered commits only the group leader calls it.
+## 3. Where the plugin learns that a GTID is committed
 
-## 4. How a client reads
+From the server's `after_commit` hook, the same interface semisync uses. The server calls it once per
+transaction, in this order:
 
-The client holds a **cursor**: the number of the last ring entry it has seen, plus an id of this
-plugin instance. The server keeps no state per client.
+1. InnoDB commits the transaction. New queries now see its rows.
+2. The server adds the GTID to `gtid_executed`.
+3. The server calls `after_commit` and passes the transaction's GTID to the plugin.
+
+This order holds for client sessions and for replication applier threads, single or parallel, and
+with `binlog_order_commits` ON or OFF.
+
+## 4. From the hook to the client, without slowing commits
+
+The hook is on the commit path, so it does almost nothing: it appends the GTID to a ring and wakes
+the stream loop.
+
+- **The ring is bounded.** Entries are numbered. When it is full, the oldest entry is overwritten.
+  The hook never waits and never does I/O.
+- **When no client is connected, the hook returns at once** after one check.
+- **The stream loop remembers the number of the last entry it sent.** It sends what is newer and
+  sleeps when it has caught up.
+- **A slow client** falls behind until its position is overwritten. The loop then sends the full set
+  again and continues from the present. Commits are never delayed. A status counter records each
+  such overrun.
+
+## 5. How the client connects
+
+The client starts a normal binlog dump, as any replica or binlog reader does, with one extra
+variable. The server calls the plugin at the start of every dump, on that connection's thread. For a
+connection that set the variable, the plugin keeps the thread and runs the stream loop on it. No
+binlog data is sent on that connection.
 
 ```
- Client                                                     Server (plugin)
-   |                                                              |
-   |-- 1. connect and log in (normal MySQL connection) ---------->|
-   |-- 2. SELECT visible_gtid_snapshot() ------------------------>|  note ring position,
-   |<----- cursor + full set of visible GTIDs --------------------|  then copy gtid_executed
-   |                                                              |
-   |-- 3. SELECT visible_gtid_next(cursor, timeout) ------------->|  entries after cursor?
-   |                                                              |  if none: sleep until the
-   |<----- new cursor + GTIDs committed since --------------------|  hook adds one, or timeout
-   |                                                              |
-   |-- 3. again, with the new cursor ---------------------------->|
-   |<----- ... ---------------------------------------------------|
-   |                                                              |
-   |<----- "resync" (cursor too old, or instance changed) --------|
-   |-- 2. again ------------------------------------------------->|
+ Client                                                        Server + plugin
+   |                                                                 |
+   |--- 1. connect and log in -------------------------------------->|
+   |--- 2. SET @visible_gtid_stream = 1 ---------------------------->|
+   |--- 3. start binlog dump --------------------------------------->|
+   |                                                                 |  plugin keeps
+   |<-- 4. full set of visible GTIDs --------------------------------|  this thread
+   |<-- 5. one GTID event per committed transaction, as it commits --|
+   |<-- ... ---------------------------------------------------------|
+   |<-- 6. heartbeat when idle --------------------------------------|
+   |<-- 7. full set again, every N seconds --------------------------|
+   |--- 8. close the connection when done -------------------------->|
 ```
 
-- **Step 2 gives the full set.** The plugin first notes the ring position, then copies
-  `gtid_executed`. A GTID committed in between is in the set and also comes again from the ring.
-  Adding a GTID twice is harmless.
-- **Step 3 is a blocking call, not polling.** While the client waits inside the call, the server
-  answers the moment a transaction commits. If commits happen while the client is between two calls,
-  they wait in the ring and the next call returns them at once, as one batch.
-- **Timeout** (for example one second) returns an empty answer. It works as a heartbeat and lets the
-  server notice a client that has gone away.
-- **"resync"** is returned when the client's cursor has been overwritten in the ring, or the plugin
-  was restarted. The client goes back to step 2.
-- **Finishing:** the client stops calling and closes the connection. There is nothing to unregister.
+Steps 1 to 3 are standard. From step 4 on the server pushes; the client only reads.
 
-### What the client parses
+- **Real replicas are not affected.** A connection without the variable is left alone and receives
+  the binlog as always. Each connection has its own thread.
+- **Security is the server's.** Login, TLS and the replication privilege apply as for any replica.
+  There is no new port.
+- **Reconnect.** If the connection drops or the server restarts, the client connects again. It needs
+  no saved state because step 4 always sends the full set.
 
-Plain text in the standard GTID notation, which every MySQL client already handles. No binlog
-parsing.
+## 6. What the client receives
 
-| Call | Returns | Client does |
-|------|---------|-------------|
-| `visible_gtid_snapshot()` | `cursor=<id>:<n>;set=<uuid>:1-500,<uuid2>:1-90` | replace its set |
-| `visible_gtid_next(cursor, timeout)` | `cursor=<id>:<n>;gtids=<uuid>:501,<uuid>:503` | add each to its set |
-| | `cursor=<id>:<n>;gtids=` | nothing (timeout) |
-| | `resync` | call the snapshot function |
+Ordinary binlog events, built by the plugin with the server's own event code. Any binlog client
+library can decode them.
 
-The client keeps a set, as in the core design. It routes a causal read to this server only if the set
-is known and contains the GTID.
+| Event | Meaning | Client does |
+|-------|---------|-------------|
+| Previous GTIDs | everything visible on this server right now | replace its set with this one |
+| GTID | this transaction has just become visible | add it to the set |
+| Heartbeat | server is alive, nothing new | nothing |
 
-## 5. Why SQL functions and not a network stream
+The client keeps a set and asks "is this GTID in the set?". There is no single "last GTID", because a
+replica has GTIDs from several sources and a parallel applier can commit them out of numeric order.
 
-A plugin has three ways to send data to a client. Only one needs no new infrastructure.
+This is the same client contract as in the core design. A client written for the plugin works
+unchanged if the feature later moves into the server.
 
-| Way | Precedent | Verdict |
-|-----|-----------|---------|
-| Blocking SQL functions on a normal connection | Group Replication and others register functions | **Chosen.** Authentication, TLS, privileges and KILL come for free. Works from any client language. |
-| The plugin opens its own port | X Plugin, Group Replication | Possible later. The plugin must then provide its own authentication and TLS. |
-| A protocol command handed to the plugin | Clone plugin | Not available. Clone has its own command, `COM_CLONE`, built into the core (sql/sql_parse.cc:2008). The clone plugin does not open a port. A new command is a core change. |
+## 7. What the hook misses, and how the stream stays correct
 
-The replication dump command cannot be extended by a plugin either; that code is in the core.
+In a few rare cases a GTID becomes part of `gtid_executed` without a call to the hook:
 
-For ProxySQL the SQL functions are also the easier client: it already speaks the MySQL protocol, and
-it would not need a binlog parser. The separate reader process is no longer needed.
+- a transaction that changed a non-transactional table and then rolled back;
+- `SET GLOBAL gtid_purged`;
+- a GTID committed with `sql_log_bin=0`.
 
-## 6. Cases the hook misses
+The stream covers them with step 7: every N seconds the loop sends the full set again, read from
+`gtid_executed`. A GTID the hook missed therefore appears after at most N seconds. The same step
+repairs the client's set after a ring overrun.
 
-The hook is not called in these cases, although the GTID becomes part of `gtid_executed`:
+`RESET BINARY LOGS AND GTIDS` has its own hook. The plugin sends the full set immediately, and the
+client's set shrinks.
 
-| Case | How often | Handled by |
-|------|-----------|------------|
-| Transaction written to the binlog that ends in ROLLBACK (it changed a non-transactional table). sql/binlog.cc:3094-3098: the hook runs only for XA ROLLBACK. | rare | periodic resync |
-| `SET GLOBAL gtid_purged` | rare, admin action | periodic resync |
-| GTID committed with `sql_log_bin=0` | rare | periodic resync |
-| `RESET BINARY LOGS AND GTIDS` | rare, admin action | `after_reset_master` hook (sql/rpl_source.cc:1293): the plugin changes its instance id, all clients resync |
-| Plugin installed while the server runs; server restart | - | every client starts with a snapshot |
-| Binlog off or `log_replica_updates=OFF` | by configuration | not supported; the functions return an error naming the setting |
+## 8. Limits
 
-**Periodic resync** is the safety net. Every N seconds (configurable; 0 turns it off) the next call
-returns "resync", and the client fetches the full set again. This reuses the connect path, so it
-needs no extra code. A GTID missed by the hook therefore appears after at most N seconds instead of
-never. The cost is one copy of `gtid_executed` per client every N seconds.
+| Limit | Detail |
+|-------|--------|
+| Settings | `gtid_mode=ON`, binlog on, `log_replica_updates=ON` on replicas. The hook fires only for transactions written to the binlog. Otherwise the plugin refuses the stream with an error naming the setting. |
+| Rare cases are late | The three cases in section 7 are reported up to N seconds late. Never early. |
+| Installing other replication plugins | While a stream is connected, `INSTALL` or `UNINSTALL` of a replication plugin (for example semisync) waits. The plugin has a switch that disconnects all streams, to let such a statement proceed. Other replicas keep running meanwhile. |
+| Plugin, not component | The commit hook is offered to plugins only. The plugin is built per server version, like semisync. |
+| Cost of commit hooks | Once any plugin registers for commit hooks, the server calls them for every transaction. Semisync and Group Replication pay this today. To be measured. |
 
-This is the one place where the plugin design is weaker than the core design: for these rare cases
-it is late by up to N seconds, where the core design has no gap.
+## 9. To confirm with a prototype
 
-## 7. Cost and slow readers
+- The server accepts the dump request and reaches the plugin before sending anything, for both forms
+  of the dump command.
+- A stream loop that stays inside the hook reacts to client disconnect, `KILL`, shutdown and plugin
+  uninstall.
+- The GTID passed to the hook is always the transaction's own.
+- Overhead of the hook on a busy server, with and without a client.
 
-- **Hook:** one atomic read when no client is active. With a client: one short mutex, one small
-  copy, per transaction. With ordered commits the group leader does this for the whole group.
-- **Having any commit observer installed has a cost of its own.** The server calls all transaction
-  hooks (begin, before commit, after commit) for every transaction once a plugin is registered.
-  Semisync and Group Replication pay this today. It must be measured.
-- **Memory:** the ring, fixed size, for example 64k entries.
-- **Slow reader:** falls behind, its cursor is overwritten, it gets "resync" and continues from a
-  fresh snapshot. It never slows commits. A status counter records each overrun, so we can see
-  whether the ring size is right before tuning anything.
-- **Snapshot:** copies `gtid_executed`, which briefly takes the GTID lock. Done at connect and at
-  each resync, per client. Upstream already offers a function for this to plugins
-  (`get_server_encoded_gtid_executed`, include/mysql/group_replication_priv.h:143).
+## Code references (8.4, c6c14fa65a0)
 
-Status variables: active clients, GTIDs added to the ring, ring overruns, snapshots served.
-
-## 8. Compared with the core design
-
-|  | Core (last committed position) | Plugin (after_commit hook) |
-|--|--------------------------------|----------------------------|
-| Server change | small patch in the binlog code | none |
-| Installable on upstream MySQL | no | yes |
-| Complete | yes, by construction | yes, but rare cases are late by up to N seconds |
-| Queue | none; clients read the binlog | bounded ring |
-| Slow reader | further back in the file | resync from a snapshot |
-| `binlog_order_commits=OFF` | not supported | supported |
-| Binlog off | not supported | not supported |
-| Client | binlog reader library, one new option | plain SQL, two function calls |
-| Transport | replication protocol | normal MySQL connection |
-| Cost on commit | one store per commit group | one ring append per transaction, plus the general cost of commit observers |
-
-## 9. To verify before implementation
-
-- That the GTID passed to the hook is always the transaction's own. The server takes it from a
-  "last used GTID" field of the session (sql/rpl_handler.cc:806-820).
-- The cost of having a commit observer installed, on a busy server.
-- That a function blocked in a wait reacts to KILL, to shutdown and to plugin uninstall.
-- That `get_server_encoded_gtid_executed` is usable outside Group Replication on all target versions.
-- How long function results may be, for a very fragmented GTID set.
-
-## 10. Decisions
-
-1. Core design, plugin design, or plugin first as a quick path and core later.
-2. Resync period N, and whether "late by up to N seconds in rare cases" is acceptable.
-3. Privilege needed to call the functions.
-4. Whether a later version should also offer its own port speaking ProxySQL's existing GTID
-   protocol, so that ProxySQL needs no change at all.
+- Commit hook: sql/binlog.cc:8992 (ordered), :9146 (unordered); sql/rpl_handler.cc:806;
+  sql/replication.h:120-150, :270, :761.
+- Dump start hook, called on the connection's thread before anything is sent:
+  sql/rpl_binlog_sender.cc:313.
+- Precedent for a plugin reading a user variable and using the dump connection:
+  plugin/semisync/semisync_source_plugin.cc:139-144, semisync_source_ack_receiver.cc:220.
+- Hook list lock: sql/rpl_handler.cc:154-262 and the FOREACH_OBSERVER macro at :458. Hooks hold it
+  shared; plugin install and uninstall take it exclusive.
+- Rollback without a hook: sql/binlog.cc:3094-3098. Reset hook: sql/rpl_source.cc:1293.
+- Reading `gtid_executed` from a plugin: include/mysql/group_replication_priv.h:143.
