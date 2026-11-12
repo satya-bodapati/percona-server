@@ -3281,7 +3281,8 @@ static void store_key_options(THD *thd, String *packet, TABLE *table,
           append_identifier(thd, packet, k.str, k.length);
           packet->append('=');
           int err;
-          const char *endptr;
+          // my_strtoll10() reads *endptr as the end of the input
+          const char *endptr = v.str + v.length;
           my_strtoll10(v.str, &endptr, &err);
           if (err <= 0 && endptr == v.str + v.length)
             packet->append(v.str, v.length);
@@ -4779,8 +4780,7 @@ void calc_sum_of_all_status(System_status_var *to) {
 extern ST_SCHEMA_TABLE schema_tables[];
 
 /*
-  Store record to I_S table, convert HEAP table
-  to MyISAM if necessary
+  Store record to I_S table, convert HEAP table to InnoDB if necessary
 
   SYNOPSIS
     schema_table_store_record()

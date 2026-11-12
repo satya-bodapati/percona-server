@@ -47,6 +47,7 @@ vector index keeps in memory.
 
 #include "vector-common/hnsw.h"
 
+class MDL_ticket;
 class THD;
 class Flush_observer;
 
@@ -367,12 +368,13 @@ struct Vec_null_persistor {
   }
 };
 
-/** UniformRandomBitGenerator for the graph's layer draw, over InnoDB's RNG.
+/** UniformRandomBitGenerator for the graph's layer draw and for ordering
+exact duplicates during neighbor selection, over InnoDB's RNG.
 
 HNSW does not synchronise RandomEngine access, and its contract requires a
 thread-safe one once inserts may run concurrently (hnsw.h) - which
 they now may. Its default, std::default_random_engine, is not, so the graph
-would race on the RNG state inside random_layer().
+would race on the RNG state inside random_layer() and select_neighbors().
 
 ut::random_64() is thread-safe by construction rather than by locking: its
 state is `extern thread_local uint64_t random_seed` (ut0rnd.h), seeded
@@ -384,8 +386,8 @@ rest of InnoDB uses.
 The seed argument is accepted and ignored. HNSW passes one (default 42)
 because a std:: engine needs it; ut0rnd seeds itself per thread and has no
 per-object state to seed. One consequence, recorded in section 40: layer
-assignment is no longer reproducible across runs, so no test may record
-per-node `level` or `nb`. */
+assignment and the choice of duplicate neighbors are no longer reproducible
+across runs, so no test may record per-node `level` or `nb`. */
 class Vec_random_engine {
  public:
   using result_type = uint64_t;
@@ -644,16 +646,38 @@ neighbours it ended up with. No undo and no redo; the aux is new to this
 ALTER and is dropped if the ALTER fails.
 @param[in,out]  b      build state
 @param[in]      trx    the ALTER's transaction
-@param[in]      table  base table being altered
-@param[in]      thd    connection, for the aux MDL
+@param[in,out]  aux    the aux table of the index being built, opened by the
+                       caller with vec_aux_open_for_dml()
 @param[in]      observer  flushes the aux pages before the ALTER commits
 @return DB_SUCCESS or an error */
 [[nodiscard]] dberr_t vec_build_write_aux(Vec_build *b, trx_t *trx,
-                                          dict_table_t *table, THD *thd,
+                                          dict_table_t *aux,
                                           Flush_observer *observer);
 
 /** Release the build state and the graph it holds. Safe on nullptr. */
 void vec_build_free(Vec_build *b);
+
+/** Open the aux table of a vector index for one DML operation.
+
+No MDL on the aux itself: the caller holds MDL on the BASE table, and every
+DDL that can drop an aux takes exclusive base MDL first. Fast path is the
+dict cache; fall back to the DD only when it has been evicted, and then take
+MDL because the fallback can block.
+@param[in]      base      base table that owns the vector index
+@param[in]      index_id  id of the vector index
+@param[in]      thd       connection, for the fallback's MDL; nullptr allows
+                          the dict cache only
+@param[out]     mdl       MDL taken by the fallback, or nullptr
+@return the aux table, or nullptr if it could not be opened */
+[[nodiscard]] dict_table_t *vec_aux_open_for_dml(dict_table_t *base,
+                                                 space_index_t index_id,
+                                                 THD *thd, MDL_ticket **mdl);
+
+/** Close an aux table opened by vec_aux_open_for_dml().
+@param[in]      aux  the aux table
+@param[in]      thd  connection passed to vec_aux_open_for_dml()
+@param[in,out]  mdl  MDL it returned, released here */
+void vec_aux_close_for_dml(dict_table_t *aux, THD *thd, MDL_ticket **mdl);
 
 /** Add the new node for a vector-column UPDATE.
 

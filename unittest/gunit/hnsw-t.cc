@@ -1449,6 +1449,69 @@ TEST_F(HnswTest, SearchLazyLoadOomGraphPropagatesAndRetries) {
 #endif
 }
 
+/* PS-11780: A group of exact duplicates which is bigger than the layer 0
+neighbor list must not be split off from the rest of the graph. Neighbor
+selection used to fill the neighbor lists with duplicates only, dropping all
+edges between two such groups, so search could only reach the group it
+started in.
+
+Members of a group must stay reachable as well. Ties between duplicates
+used to be broken in a fixed order, so pruning kept the same duplicates in
+neighbor lists and many later ones lost all incoming edges. With random
+ties, at M == 4 an occasional duplicate still ends up unreachable, so we
+allow one miss per group.
+
+The allowed number of misses was checked with libstdc++ only. TestHnsw pins
+std::mt19937, but the std::shuffle algorithm is implementation-defined, so
+another standard library (e.g. libc++) may order duplicates differently and
+build a different graph for the same seeds. If this test fails on such a
+platform, check how many duplicates are unreachable there and adjust the
+allowed number of misses (or the seeds) accordingly. */
+static void check_duplicate_groups_reachable(size_t M, bool interleave,
+                                             uint32_t seed) {
+  constexpr size_t kDims = 2;
+  constexpr size_t kGroupSize = 40;  // Well above Mmax0 == 2 * M.
+  TestHnsw index(kDims, euclidean, M, /*ef_construction=*/16, seed);
+
+  const auto a = make_vec({1.0f, 1.0f});
+  const auto b = make_vec({9.0f, 9.0f});
+  std::vector<bool> in_a;
+  for (uint64_t i = 0; i < 2 * kGroupSize; ++i) {
+    in_a.push_back(interleave ? (i % 2 == 0) : (i < kGroupSize));
+    ASSERT_EQ(index.insert(i + 1, /*base_pk=*/i, as_bytes(in_a.back() ? a : b)),
+              HNSW_SUCCESS);
+  }
+#ifndef NDEBUG
+  EXPECT_TRUE(index.validate());
+#endif
+
+  for (const auto &query : {make_vec({2.0f, 2.0f}), make_vec({8.0f, 8.0f})}) {
+    const auto [rc, result] = index.k_nn_search(as_bytes(query), 2 * kGroupSize,
+                                                /*ef_search=*/4 * kGroupSize);
+    ASSERT_EQ(rc, HNSW_SUCCESS);
+    const size_t found_a =
+        std::count_if(result.begin(), result.end(),
+                      [&](const auto &hit) { return in_a[hit.base_pk]; });
+    const size_t found_b = result.size() - found_a;
+    // Both groups must be found, whichever one search starts in.
+    EXPECT_GE(found_a, kGroupSize - 1)
+        << "M=" << M << " interleave=" << interleave << " seed=" << seed
+        << " query=(" << query[0] << "," << query[1] << ")";
+    EXPECT_GE(found_b, kGroupSize - 1)
+        << "M=" << M << " interleave=" << interleave << " seed=" << seed
+        << " query=(" << query[0] << "," << query[1] << ")";
+  }
+}
+
+TEST_F(HnswTest, DuplicateGroupsStayReachable) {
+  for (uint32_t seed = 1; seed <= 10; ++seed) {
+    for (const size_t M : {size_t{4}, size_t{8}}) {
+      check_duplicate_groups_reachable(M, /*interleave=*/false, seed);
+      check_duplicate_groups_reachable(M, /*interleave=*/true, seed);
+    }
+  }
+}
+
 #ifndef NDEBUG
 TEST_F(HnswTest, GraphInvariants) {
   TestHnsw index(kDims, euclidean, kM, kEfConstruction);
@@ -1582,6 +1645,102 @@ TEST_F(HnswTest, LoadNodeNeighborsWrongSize) {
               LoadTestHnsw::HNSW_CORRUPTED)
         << "delta " << delta;
   }
+}
+
+/* A saved neighbour list must only name nodes that have a saved row.
+@return the first named id with no row, or 0 if there is none */
+static uint64_t first_dangling_neighbor(
+    const RecordingPersistor::Context &store) {
+  for (const auto &[id, row] : store.nodes) {
+    for (const uint64_t nb : row.neighbor_ids) {
+      if (nb != 0 && store.nodes.count(nb) == 0) return nb;
+    }
+  }
+  return 0;
+}
+
+static std::vector<float> random_point(std::mt19937 &rng) {
+  std::uniform_real_distribution<float> d(-1.0f, 1.0f);
+  return make_vec({d(rng), d(rng)});
+}
+
+/* An insert whose insert_cb fails is already linked into its neighbours'
+in-memory lists. The inserts after it save those lists, and must not save
+the failed id, which has no row. */
+TEST_F(HnswTest, InsertCbFailureLeavesNoSavedReference) {
+  RecordingPersistor::Context store;
+  store.dims = kDims;
+  LoadTestHnsw index(kDims, euclidean, kM, kEfConstruction);
+  std::mt19937 rng(7);
+  uint64_t id = 1;
+  for (; id <= 100; ++id) {
+    ASSERT_EQ(index.insert(id, id, as_bytes(random_point(rng)), &store),
+              LoadTestHnsw::HNSW_SUCCESS);
+  }
+
+  for (int round = 0; round < 10; ++round) {
+    const auto q = random_point(rng);
+    const uint64_t failed = id++;
+    store.fail_next_insert_cb = true;
+    ASSERT_EQ(index.insert(failed, failed, as_bytes(q), &store),
+              LoadTestHnsw::HNSW_ERROR_CB);
+    for (int i = 0; i < 5; ++i, ++id) {
+      ASSERT_EQ(index.insert(id, id, as_bytes(random_point(rng)), &store),
+                LoadTestHnsw::HNSW_SUCCESS);
+    }
+  }
+  EXPECT_EQ(0U, first_dangling_neighbor(store));
+}
+
+/* The same for an insert that fails while it is being linked. An insert
+links itself on each layer before it searches the next one down, and that
+search loads nodes. A load that fails there - as a spent
+innodb_hnsw_max_memory makes it - leaves the new node in the upper layers'
+lists. Every node of a cold graph is made the failing load in turn, and the
+seed varies so the new node draws different layers. */
+TEST_F(HnswTest, LoadFailureDuringInsertLeavesNoSavedReference) {
+  /* Room in the neighbour lists, so the failed node stays in one that a
+  later insert saves without pruning it. */
+  constexpr size_t kLoadM = 8;
+  RecordingPersistor::Context base;
+  base.dims = kDims;
+  std::mt19937 rng(11);
+  {
+    LoadTestHnsw built(kDims, euclidean, kLoadM, kEfConstruction);
+    for (uint64_t id = 1; id <= 150; ++id) {
+      ASSERT_EQ(built.insert(id, id, as_bytes(random_point(rng)), &base),
+                LoadTestHnsw::HNSW_SUCCESS);
+    }
+  }
+  std::uniform_real_distribution<float> near(-0.05f, 0.05f);
+
+  size_t failed_inserts = 0;
+  for (int k = 0; k < 20; ++k) {
+    const auto q = random_point(rng);
+    for (const auto &[bad_id, row] : base.nodes) {
+      if (bad_id == base.entry_point) continue;
+      RecordingPersistor::Context store = base;
+      LoadTestHnsw cold(kDims, euclidean, kLoadM, kEfConstruction, k);
+      ASSERT_EQ(cold.init_from_entry_point(store.entry_point, &store),
+                LoadTestHnsw::HNSW_SUCCESS);
+
+      store.fail_load_error_ids.insert(bad_id);
+      const auto rc = cold.insert(1000, 1000, as_bytes(q), &store);
+      store.fail_load_error_ids.clear();
+      if (rc == LoadTestHnsw::HNSW_SUCCESS) continue;
+      ASSERT_EQ(rc, LoadTestHnsw::HNSW_ERROR_CB);
+      ++failed_inserts;
+
+      for (uint64_t id = 1001; id <= 1005; ++id) {
+        const auto v = make_vec({q[0] + near(rng), q[1] + near(rng)});
+        ASSERT_EQ(cold.insert(id, id, as_bytes(v), &store),
+                  LoadTestHnsw::HNSW_SUCCESS);
+      }
+      ASSERT_EQ(0U, first_dangling_neighbor(store))
+          << "query " << k << ", failing load " << bad_id;
+    }
+  }
+  EXPECT_GT(failed_inserts, 0U);
 }
 
 }  // namespace hnsw_unittest
