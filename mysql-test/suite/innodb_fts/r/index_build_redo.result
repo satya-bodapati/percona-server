@@ -1,0 +1,223 @@
+#
+# ALTER TABLE ... ADD FULLTEXT writes the FTS aux index tables
+# fts_<table id>_<index id>_index_<n> with Btree_load, without redo.
+# Like every other bulk-loaded index, each of them must be followed by
+# an MLOG_INDEX_LOAD record for its tablespace, so that a backup tool
+# knows the tablespace was modified without redo and copies it again.
+#
+# Recovery with --debug=d,ib_log prints every redo record it scans; the
+# test looks there for an MLOG_INDEX_LOAD of each aux index space.
+#
+SET SESSION cte_max_recursion_depth = 2000;
+# latin1 sorts words by their first letter into the six aux index
+# tables: digits to index_1, A-E to index_2, F-J to index_3, K-O to
+# index_4, P-T to index_5 and U-Z to index_6. Each row has a word for
+# each of them.
+# t1: the first FULLTEXT index, which adds FTS_DOC_ID and rebuilds t1.
+CREATE TABLE t1 (id INT PRIMARY KEY, title VARCHAR(100), body TEXT) CHARSET latin1;
+# t2: a second FULLTEXT index, built without a rebuild.
+CREATE TABLE t2 (id INT PRIMARY KEY, title VARCHAR(100), body TEXT) CHARSET latin1;
+# t3: a FULLTEXT index on a table with a user FTS_DOC_ID column.
+CREATE TABLE t3 (FTS_DOC_ID BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+id INT NOT NULL, title VARCHAR(100), body TEXT, PRIMARY KEY (id),
+UNIQUE KEY FTS_DOC_ID_INDEX (FTS_DOC_ID)) CHARSET latin1;
+# t4: a FULLTEXT index with the ngram parser.
+CREATE TABLE t4 (id INT PRIMARY KEY, title VARCHAR(100), body TEXT) CHARSET latin1;
+# t5: an empty table, whose build loads no aux index table.
+CREATE TABLE t5 (id INT PRIMARY KEY, title VARCHAR(100), body TEXT) CHARSET latin1;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+WHERE n < 2000)
+SELECT n, CONCAT('title', n),
+CONCAT('9', n, 'zz apple', n, ' fig', n, ' kiwi', n, ' pear', n,
+' umbra', n, ' common')
+FROM seq;
+INSERT INTO t2 SELECT * FROM t1;
+INSERT INTO t3 (id, title, body) SELECT * FROM t1;
+INSERT INTO t4 SELECT * FROM t1;
+ALTER TABLE t2 ADD FULLTEXT KEY ft_title (title);
+Warnings:
+Warning	124	InnoDB rebuilding table to add column FTS_DOC_ID
+# Keep every record from here on in the redo log.
+SET GLOBAL innodb_log_checkpoint_now = ON;
+SET GLOBAL innodb_checkpoint_disabled = ON;
+ALTER TABLE t1 ADD FULLTEXT KEY ft (body), ALGORITHM=INPLACE;
+Warnings:
+Warning	124	InnoDB rebuilding table to add column FTS_DOC_ID
+ALTER TABLE t2 ADD FULLTEXT KEY ft (body), ALGORITHM=INPLACE;
+ALTER TABLE t3 ADD FULLTEXT KEY ft (body), ALGORITHM=INPLACE;
+ALTER TABLE t4 ADD FULLTEXT KEY ft (body) WITH PARSER ngram,
+ALGORITHM=INPLACE;
+Warnings:
+Warning	124	InnoDB rebuilding table to add column FTS_DOC_ID
+ALTER TABLE t5 ADD FULLTEXT KEY ft (body), ALGORITHM=INPLACE;
+Warnings:
+Warning	124	InnoDB rebuilding table to add column FTS_DOC_ID
+include/assert.inc [The second FULLTEXT index of t2 did not rebuild t2]
+include/assert.inc [The FULLTEXT index of t3 did not rebuild t3]
+# Kill and restart
+# The space ids of the aux index tables of index ft, in index_<n> order.
+include/assert.inc [Index ft of t1 has six aux index tables]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_1 of t1]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_2 of t1]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_3 of t1]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_4 of t1]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_5 of t1]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_6 of t1]
+include/assert.inc [Index ft of t2 has six aux index tables]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_1 of t2]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_2 of t2]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_3 of t2]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_4 of t2]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_5 of t2]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_6 of t2]
+include/assert.inc [Index ft of t3 has six aux index tables]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_1 of t3]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_2 of t3]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_3 of t3]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_4 of t3]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_5 of t3]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_6 of t3]
+include/assert.inc [Index ft of t4 has six aux index tables]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_1 of t4]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_2 of t4]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_3 of t4]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_4 of t4]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_5 of t4]
+include/assert_grep.inc [MLOG_INDEX_LOAD for index_6 of t4]
+# The recovered tables and their FULLTEXT indexes are complete.
+CHECK TABLE t1, t2, t3, t4, t5;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+test.t2	check	status	OK
+test.t3	check	status	OK
+test.t4	check	status	OK
+test.t5	check	status	OK
+# t1
+SELECT COUNT(*) FROM t1
+WHERE MATCH(body) AGAINST ('common' IN BOOLEAN MODE);
+COUNT(*)
+2000
+SELECT id FROM t1 WHERE MATCH(body) AGAINST ('917zz' IN BOOLEAN MODE)
+ORDER BY id;
+id
+17
+SELECT id FROM t1 WHERE MATCH(body) AGAINST ('apple1234' IN BOOLEAN MODE)
+ORDER BY id;
+id
+1234
+SELECT id FROM t1 WHERE MATCH(body) AGAINST ('fig1999' IN BOOLEAN MODE)
+ORDER BY id;
+id
+1999
+SELECT id FROM t1 WHERE MATCH(body) AGAINST ('kiwi555' IN BOOLEAN MODE)
+ORDER BY id;
+id
+555
+SELECT id FROM t1 WHERE MATCH(body) AGAINST ('pear1500' IN BOOLEAN MODE)
+ORDER BY id;
+id
+1500
+SELECT id FROM t1 WHERE MATCH(body) AGAINST ('umbra1001' IN BOOLEAN MODE)
+ORDER BY id;
+id
+1001
+# t2
+SELECT COUNT(*) FROM t2
+WHERE MATCH(body) AGAINST ('common' IN BOOLEAN MODE);
+COUNT(*)
+2000
+SELECT id FROM t2 WHERE MATCH(body) AGAINST ('917zz' IN BOOLEAN MODE)
+ORDER BY id;
+id
+17
+SELECT id FROM t2 WHERE MATCH(body) AGAINST ('apple1234' IN BOOLEAN MODE)
+ORDER BY id;
+id
+1234
+SELECT id FROM t2 WHERE MATCH(body) AGAINST ('fig1999' IN BOOLEAN MODE)
+ORDER BY id;
+id
+1999
+SELECT id FROM t2 WHERE MATCH(body) AGAINST ('kiwi555' IN BOOLEAN MODE)
+ORDER BY id;
+id
+555
+SELECT id FROM t2 WHERE MATCH(body) AGAINST ('pear1500' IN BOOLEAN MODE)
+ORDER BY id;
+id
+1500
+SELECT id FROM t2 WHERE MATCH(body) AGAINST ('umbra1001' IN BOOLEAN MODE)
+ORDER BY id;
+id
+1001
+# t3
+SELECT COUNT(*) FROM t3
+WHERE MATCH(body) AGAINST ('common' IN BOOLEAN MODE);
+COUNT(*)
+2000
+SELECT id FROM t3 WHERE MATCH(body) AGAINST ('917zz' IN BOOLEAN MODE)
+ORDER BY id;
+id
+17
+SELECT id FROM t3 WHERE MATCH(body) AGAINST ('apple1234' IN BOOLEAN MODE)
+ORDER BY id;
+id
+1234
+SELECT id FROM t3 WHERE MATCH(body) AGAINST ('fig1999' IN BOOLEAN MODE)
+ORDER BY id;
+id
+1999
+SELECT id FROM t3 WHERE MATCH(body) AGAINST ('kiwi555' IN BOOLEAN MODE)
+ORDER BY id;
+id
+555
+SELECT id FROM t3 WHERE MATCH(body) AGAINST ('pear1500' IN BOOLEAN MODE)
+ORDER BY id;
+id
+1500
+SELECT id FROM t3 WHERE MATCH(body) AGAINST ('umbra1001' IN BOOLEAN MODE)
+ORDER BY id;
+id
+1001
+# t4
+SELECT COUNT(*) FROM t4
+WHERE MATCH(body) AGAINST ('common' IN BOOLEAN MODE);
+COUNT(*)
+2000
+SELECT id FROM t4 WHERE MATCH(body) AGAINST ('917zz' IN BOOLEAN MODE)
+ORDER BY id;
+id
+17
+917
+1917
+SELECT id FROM t4 WHERE MATCH(body) AGAINST ('apple1234' IN BOOLEAN MODE)
+ORDER BY id;
+id
+1234
+SELECT id FROM t4 WHERE MATCH(body) AGAINST ('fig1999' IN BOOLEAN MODE)
+ORDER BY id;
+id
+1999
+SELECT id FROM t4 WHERE MATCH(body) AGAINST ('kiwi555' IN BOOLEAN MODE)
+ORDER BY id;
+id
+555
+1555
+SELECT id FROM t4 WHERE MATCH(body) AGAINST ('pear1500' IN BOOLEAN MODE)
+ORDER BY id;
+id
+1500
+SELECT id FROM t4 WHERE MATCH(body) AGAINST ('umbra1001' IN BOOLEAN MODE)
+ORDER BY id;
+id
+1001
+SELECT COUNT(*) FROM t2 WHERE MATCH(title) AGAINST ('title1777' IN BOOLEAN MODE);
+COUNT(*)
+1
+SELECT COUNT(*) FROM t5 WHERE MATCH(body) AGAINST ('common' IN BOOLEAN MODE);
+COUNT(*)
+0
+# Restart without the debug settings.
+# restart
+DROP TABLE t1, t2, t3, t4, t5;

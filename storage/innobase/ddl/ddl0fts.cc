@@ -1388,6 +1388,13 @@ dberr_t FTS::Inserter::insert(Builder *builder,
     if (ins_ctx.m_btr_bulk != nullptr) {
       err = ins_ctx.m_btr_bulk->finish(err);
       ut::delete_(ins_ctx.m_btr_bulk);
+
+      if (err == DB_SUCCESS) {
+        /* The aux index was loaded without redo. As Builder::finalize()
+        does for a B-tree index, flush it and log MLOG_INDEX_LOAD. */
+        observer->flush();
+        Builder::write_redo(aux_index);
+      }
     }
 
     trx_free_for_background(trx);

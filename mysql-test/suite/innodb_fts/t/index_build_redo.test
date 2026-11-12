@@ -1,0 +1,126 @@
+--source include/have_debug.inc
+
+--echo #
+--echo # ALTER TABLE ... ADD FULLTEXT writes the FTS aux index tables
+--echo # fts_<table id>_<index id>_index_<n> with Btree_load, without redo.
+--echo # Like every other bulk-loaded index, each of them must be followed by
+--echo # an MLOG_INDEX_LOAD record for its tablespace, so that a backup tool
+--echo # knows the tablespace was modified without redo and copies it again.
+--echo #
+--echo # Recovery with --debug=d,ib_log prints every redo record it scans; the
+--echo # test looks there for an MLOG_INDEX_LOAD of each aux index space.
+--echo #
+
+SET SESSION cte_max_recursion_depth = 2000;
+
+--echo # latin1 sorts words by their first letter into the six aux index
+--echo # tables: digits to index_1, A-E to index_2, F-J to index_3, K-O to
+--echo # index_4, P-T to index_5 and U-Z to index_6. Each row has a word for
+--echo # each of them.
+--let $columns = (id INT PRIMARY KEY, title VARCHAR(100), body TEXT) CHARSET latin1
+
+--echo # t1: the first FULLTEXT index, which adds FTS_DOC_ID and rebuilds t1.
+eval CREATE TABLE t1 $columns;
+--echo # t2: a second FULLTEXT index, built without a rebuild.
+eval CREATE TABLE t2 $columns;
+--echo # t3: a FULLTEXT index on a table with a user FTS_DOC_ID column.
+CREATE TABLE t3 (FTS_DOC_ID BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  id INT NOT NULL, title VARCHAR(100), body TEXT, PRIMARY KEY (id),
+  UNIQUE KEY FTS_DOC_ID_INDEX (FTS_DOC_ID)) CHARSET latin1;
+--echo # t4: a FULLTEXT index with the ngram parser.
+eval CREATE TABLE t4 $columns;
+--echo # t5: an empty table, whose build loads no aux index table.
+eval CREATE TABLE t5 $columns;
+
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+                            WHERE n < 2000)
+  SELECT n, CONCAT('title', n),
+         CONCAT('9', n, 'zz apple', n, ' fig', n, ' kiwi', n, ' pear', n,
+                ' umbra', n, ' common')
+  FROM seq;
+INSERT INTO t2 SELECT * FROM t1;
+INSERT INTO t3 (id, title, body) SELECT * FROM t1;
+INSERT INTO t4 SELECT * FROM t1;
+ALTER TABLE t2 ADD FULLTEXT KEY ft_title (title);
+
+--echo # Keep every record from here on in the redo log.
+SET GLOBAL innodb_log_checkpoint_now = ON;
+SET GLOBAL innodb_checkpoint_disabled = ON;
+
+--let $tid_t2 = `SELECT TABLE_ID FROM INFORMATION_SCHEMA.INNODB_TABLES WHERE NAME = 'test/t2'`
+--let $tid_t3 = `SELECT TABLE_ID FROM INFORMATION_SCHEMA.INNODB_TABLES WHERE NAME = 'test/t3'`
+ALTER TABLE t1 ADD FULLTEXT KEY ft (body), ALGORITHM=INPLACE;
+ALTER TABLE t2 ADD FULLTEXT KEY ft (body), ALGORITHM=INPLACE;
+ALTER TABLE t3 ADD FULLTEXT KEY ft (body), ALGORITHM=INPLACE;
+ALTER TABLE t4 ADD FULLTEXT KEY ft (body) WITH PARSER ngram,
+  ALGORITHM=INPLACE;
+ALTER TABLE t5 ADD FULLTEXT KEY ft (body), ALGORITHM=INPLACE;
+
+--let $tid_t2_after = `SELECT TABLE_ID FROM INFORMATION_SCHEMA.INNODB_TABLES WHERE NAME = 'test/t2'`
+--let $assert_text = The second FULLTEXT index of t2 did not rebuild t2
+--let $assert_cond = $tid_t2 = $tid_t2_after
+--source include/assert.inc
+--let $tid_t3_after = `SELECT TABLE_ID FROM INFORMATION_SCHEMA.INNODB_TABLES WHERE NAME = 'test/t3'`
+--let $assert_text = The FULLTEXT index of t3 did not rebuild t3
+--let $assert_cond = $tid_t3 = $tid_t3_after
+--source include/assert.inc
+
+--let $aux_space_query = SELECT GROUP_CONCAT(s.SPACE ORDER BY s.NAME) FROM INFORMATION_SCHEMA.INNODB_TABLESPACES s, INFORMATION_SCHEMA.INNODB_TABLES t, INFORMATION_SCHEMA.INNODB_INDEXES i WHERE i.TABLE_ID = t.TABLE_ID AND i.NAME = 'ft' AND s.NAME LIKE CONCAT('test/fts\\_', LPAD(LOWER(HEX(t.TABLE_ID)), 16, '0'), '\\_', LPAD(LOWER(HEX(i.INDEX_ID)), 16, '0'), '\\_index\\_%') AND t.NAME =
+
+--let $log_file = $MYSQLTEST_VARDIR/log/index_build_redo.err
+--let $restart_parameters = restart: --debug=d,ib_log --log-error=$log_file
+--let $do_not_echo_parameters = 1
+--source include/kill_and_restart_mysqld.inc
+
+--let $assert_file = $log_file
+--let $assert_count_condition = >= 1
+
+--echo # The space ids of the aux index tables of index ft, in index_<n> order.
+--let $t = 1
+while ($t <= 4) {
+  --let $aux_spaces = `$aux_space_query 'test/t$t'`
+  --let $assert_text = Index ft of t$t has six aux index tables
+  --let $assert_cond = [SELECT 1 + LENGTH("$aux_spaces") - LENGTH(REPLACE("$aux_spaces", ",", ""))] = 6
+  --source include/assert.inc
+
+  --let $n = 1
+  while ($n <= 6) {
+    --let $space = `SELECT SUBSTRING_INDEX(SUBSTRING_INDEX('$aux_spaces', ',', $n), ',', -1)`
+    --let $assert_text = MLOG_INDEX_LOAD for index_$n of t$t
+    --let $assert_select = log rec MLOG_INDEX_LOAD len [0-9]+ page $space:
+    --source include/assert_grep.inc
+    --inc $n
+  }
+  --inc $t
+}
+
+--let $assert_count_condition =
+
+--echo # The recovered tables and their FULLTEXT indexes are complete.
+CHECK TABLE t1, t2, t3, t4, t5;
+
+--let $t = 1
+while ($t <= 4) {
+  --echo # t$t
+  eval SELECT COUNT(*) FROM t$t
+    WHERE MATCH(body) AGAINST ('common' IN BOOLEAN MODE);
+  --let $w = 1
+  while ($w <= 6) {
+    --let $word = `SELECT ELT($w, '917zz', 'apple1234', 'fig1999', 'kiwi555', 'pear1500', 'umbra1001')`
+    eval SELECT id FROM t$t WHERE MATCH(body) AGAINST ('$word' IN BOOLEAN MODE)
+      ORDER BY id;
+    --inc $w
+  }
+  --inc $t
+}
+SELECT COUNT(*) FROM t2 WHERE MATCH(title) AGAINST ('title1777' IN BOOLEAN MODE);
+SELECT COUNT(*) FROM t5 WHERE MATCH(body) AGAINST ('common' IN BOOLEAN MODE);
+
+--echo # Restart without the debug settings.
+--let $restart_parameters = restart
+--let $do_not_echo_parameters =
+--source include/restart_mysqld.inc
+
+DROP TABLE t1, t2, t3, t4, t5;
+--remove_file $log_file
