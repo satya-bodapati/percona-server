@@ -33,8 +33,11 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "arch0page.h"
 #include "arch0recv.h"
 #include "clone0clone.h"
+#include "current_thd.h"
+#include "debug_sync.h"
 #include "log0buf.h"
 #include "log0chkp.h"
+#include "sql_thd_internal_api.h"
 #include "srv0start.h"
 
 #ifdef UNIV_DEBUG
@@ -51,8 +54,18 @@ uint ARCH_PAGE_FILE_DATA_CAPACITY =
 os_event_t page_archiver_thread_event;
 
 /** Archiver background thread */
+#ifdef UNIV_DEBUG
+/** State of the debug keyword page_archiver_wait_for_full_ring: 0 until a
+page writer finds no free block, 1 when one does, 2 once the archiver has
+signalled the test. */
+static std::atomic<int> page_archiver_full_ring_state{0};
+#endif /* UNIV_DEBUG */
+
 void page_archiver_thread() {
   bool page_wait = false;
+
+  /* Needed to signal debug sync points from this thread. */
+  ut_d(THD *thd = create_internal_thd());
 
   Arch_Group::init_dblwr_file_ctx(
       ARCH_DBLWR_DIR, ARCH_DBLWR_FILE, ARCH_DBLWR_NUM_FILES,
@@ -73,6 +86,8 @@ void page_archiver_thread() {
       os_event_reset(page_archiver_thread_event);
     }
   }
+
+  ut_d(destroy_internal_thd(thd));
 }
 
 void Arch_Reset_File::init() {
@@ -1314,6 +1329,12 @@ bool Arch_Block::add_page(buf_page_t *page, Arch_Page_Pos *pos) {
     return (false);
   }
 
+  /* Make a block full after one page ID. */
+  if (DBUG_EVALUATE_IF("page_archiver_one_page_per_block", m_data_len > 0,
+                       false)) {
+    return (false);
+  }
+
   data_ptr = m_data + pos->m_offset;
 
   /* Write serialized page ID: tablespace ID and offset */
@@ -1742,7 +1763,33 @@ void Arch_Page_Sys::track_page(buf_page_t *bpage, lsn_t track_lsn,
         break;
       }
 
-      /* Current block is full. Move to next block. */
+      /* The current block is full. It stays active until the buffer of the
+      next block is free, so that the write position always names the block
+      in its buffer, also while this thread waits without the mutex. */
+      Arch_Page_Pos next_pos = m_write_pos;
+      next_pos.set_next();
+
+      Arch_Block *next_blk = m_data.get_block(&next_pos, ARCH_DATA_BLOCK);
+
+      if (next_blk->get_state() == ARCH_BLOCK_READY_TO_FLUSH) {
+        DBUG_EXECUTE_IF("page_archiver_wait_for_full_ring", {
+          int no_writer_waits = 0;
+          page_archiver_full_ring_state.compare_exchange_strong(no_writer_waits,
+                                                                1);
+        });
+
+        /* Wait until the archiver writes the block in the next buffer. The
+        wait releases the operation mutex, so read the state again after
+        it. */
+        auto cbk = [next_blk] {
+          return next_blk->get_state() == ARCH_BLOCK_READY_TO_FLUSH;
+        };
+
+        count = wait_flush_archiver(cbk) ? 0 : 2;
+        continue;
+      }
+
+      /* Move to the next block. */
       cur_blk->end_write();
 
       m_write_pos.set_next();
@@ -1780,7 +1827,10 @@ void Arch_Page_Sys::track_page(buf_page_t *bpage, lsn_t track_lsn,
 
       ut_a(cur_blk->get_state() == ARCH_BLOCK_READY_TO_FLUSH);
 
-      auto cbk = std::bind(&Arch_Block::is_flushable, *cur_blk);
+      /* Wait until the archiver writes the block. */
+      auto cbk = [cur_blk] {
+        return cur_blk->get_state() == ARCH_BLOCK_READY_TO_FLUSH;
+      };
 
       /* Might release operation mutex temporarily. Need to
       loop again verifying the state. */
@@ -2882,6 +2932,36 @@ bool Arch_Page_Sys::archive(bool *wait) {
   ut_ad(m_state == ARCH_STATE_ACTIVE || m_state == ARCH_STATE_PREPARE_IDLE);
 
   auto set_idle = (m_state == ARCH_STATE_PREPARE_IDLE);
+
+  /* Write no block until a page writer finds no free block. Then signal
+  page_archiver_writer_waits and wait for page_archiver_write_blocks. The
+  state starts again once the keyword is removed. */
+  ut_d(if (!DBUG_EVALUATE_IF("page_archiver_wait_for_full_ring", true, false)) {
+    page_archiver_full_ring_state = 0;
+  });
+
+  DBUG_EXECUTE_IF("page_archiver_wait_for_full_ring", {
+    while (page_archiver_full_ring_state == 0 && m_state == ARCH_STATE_ACTIVE &&
+           srv_shutdown_state.load() < SRV_SHUTDOWN_CLEANUP) {
+      arch_oper_mutex_exit();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      arch_oper_mutex_enter();
+    }
+
+    if (page_archiver_full_ring_state == 1) {
+      arch_oper_mutex_exit();
+
+      const char act[] =
+          "now SIGNAL page_archiver_writer_waits "
+          "WAIT_FOR page_archiver_write_blocks";
+      assert(opt_debug_sync_timeout > 0);
+      assert(!debug_sync_set_action(current_thd, STRING_WITH_LEN(act)));
+      page_archiver_full_ring_state = 2;
+
+      arch_oper_mutex_enter();
+    }
+  });
+
   arch_oper_mutex_exit();
 
   db_err = flush_blocks(wait);
