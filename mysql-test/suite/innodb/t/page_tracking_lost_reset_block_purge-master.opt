@@ -1,0 +1,2 @@
+--debug=+d,page_archiver_simulate_more_archived_files
+--innodb_buffer_pool_size=256M
