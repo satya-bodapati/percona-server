@@ -702,11 +702,7 @@ dberr_t Arch_File_Ctx::Recovery::parse_stop_points(bool last_file,
     return DB_CORRUPTION;
   }
 
-  /* m_stop_points is indexed by file index. Purged files hold no tracked
-  LSN, so they get a stop LSN below all of them. */
-  ut_ad(m_file_ctx.m_stop_points.size() <= m_file_ctx.m_index);
-  m_file_ctx.m_stop_points.resize(m_file_ctx.m_index, 0);
-  m_file_ctx.m_stop_points.push_back(stop_lsn);
+  m_file_ctx.update_stop_point(m_file_ctx.m_index, stop_lsn);
 
   if (last_file) {
     info.m_last_stop_lsn = stop_lsn;
@@ -801,7 +797,8 @@ dberr_t Arch_File_Ctx::Recovery::parse_reset_points(
         return DB_CORRUPTION;
       }
 
-      pos.m_block_num = mach_read_from_2(buf1 + length);
+      pos.m_block_num =
+          Arch_Block::read_reset_block_num(buf1 + length, file_index);
       length += ARCH_PAGE_FILE_HEADER_RESET_BLOCK_NUM_SIZE;
 
       pos.m_offset = mach_read_from_2(buf1 + length);
