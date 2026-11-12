@@ -357,13 +357,13 @@ dberr_t Arch_Group::open_file(Arch_Page_Pos write_pos, bool create_new) {
 }
 
 void Arch_File_Ctx::update_stop_point(uint file_index, lsn_t stop_lsn) {
-  auto last_point_index = m_stop_points.size() - 1;
-
-  if (!m_stop_points.size() || last_point_index != file_index) {
-    m_stop_points.push_back(stop_lsn);
-  } else {
-    m_stop_points[last_point_index] = stop_lsn;
+  /* m_stop_points is indexed by file index. Purged files hold no tracked
+  LSN, so they get a stop LSN below all of them. */
+  if (m_stop_points.size() <= file_index) {
+    m_stop_points.resize(file_index + 1, 0);
   }
+
+  m_stop_points[file_index] = stop_lsn;
 }
 
 void Arch_File_Ctx::save_reset_point_in_mem(lsn_t lsn, Arch_Page_Pos pos) {
