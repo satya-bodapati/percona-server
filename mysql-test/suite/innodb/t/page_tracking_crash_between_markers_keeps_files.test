@@ -1,0 +1,38 @@
+# A crash between the two markers of a new page tracking group must keep
+# the files of the group.
+#
+# mysqlbackup_page_track_set(1) of a new durable group writes the reset block
+# to ib_page_0 and then creates the 'active' and 'durable' markers.
+# crash_between_page_archiver_markers kills the server after the first
+# marker. Recovery deletes the last file of a group that is not durable.
+
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+let MYSQLD_DATADIR = `SELECT @@datadir`;
+
+INSTALL COMPONENT 'file://component_mysqlbackup';
+
+SET GLOBAL debug = '+d,crash_between_page_archiver_markers';
+--source include/expect_crash.inc
+--error CR_SERVER_LOST
+SELECT mysqlbackup_page_track_set(1);
+
+--source include/start_mysqld.inc
+
+--echo #
+--echo # The group keeps ib_page_0 and is durable
+--echo #
+--perl
+  my @files = glob("$ENV{MYSQLD_DATADIR}#ib_archive/page_group_*/ib_page_0");
+  my @durable = glob("$ENV{MYSQLD_DATADIR}#ib_archive/page_group_*/durable");
+  print "Groups with ib_page_0: " . scalar(@files) . "\n";
+  print "Groups with a durable marker: " . scalar(@durable) . "\n";
+  die "The files of the group were deleted\n" unless @files && @durable;
+EOF
+
+--echo #
+--echo # Cleanup
+--echo #
+UNINSTALL COMPONENT 'file://component_mysqlbackup';
+--force-rmdir $MYSQLD_DATADIR/#ib_archive
