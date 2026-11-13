@@ -453,6 +453,14 @@ class Arch_Block {
   @return file index */
   static uint get_file_index(uint64_t block_num, Arch_Blk_Type type);
 
+  /** Read the block number of a reset point from a reset block. A reset
+  point is in a data block of the file of its reset block, which stores the
+  low 16 bits of the block number.
+  @param[in]  entry       block number of the reset point in the reset block
+  @param[in]  file_index  index of the file of the reset block
+  @return block number of the reset point */
+  static uint64_t read_reset_block_num(const byte *entry, uint file_index);
+
   /** Get block type from the block header.
   @param[in]     block   block from where to get the type
   @return block type */

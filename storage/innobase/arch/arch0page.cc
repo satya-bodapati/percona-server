@@ -696,7 +696,8 @@ bool Arch_File_Ctx::validate_reset_block_in_file(pfs_os_file_t file,
 
     start_point = reset_file.m_start_point.at(index);
 
-    uint64_t block_num = mach_read_from_2(block_data + length);
+    uint64_t block_num =
+        Arch_Block::read_reset_block_num(block_data + length, file_index);
     length += ARCH_PAGE_FILE_HEADER_RESET_BLOCK_NUM_SIZE;
 
     uint64_t block_offset = mach_read_from_2(block_data + length);
@@ -1198,6 +1199,19 @@ uint Arch_Block::get_file_index(uint64_t block_num, Arch_Blk_Type type) {
   return file_index;
 }
 
+uint64_t Arch_Block::read_reset_block_num(const byte *entry, uint file_index) {
+  /* A file holds fewer than 2^16 data blocks, so the low 16 bits select one
+  block of the file. */
+  static_assert((ARCH_PAGE_BLK_SIZE - ARCH_PAGE_BLK_HEADER_LENGTH) /
+                    ARCH_BLK_PAGE_ID_SIZE <=
+                0x10000);
+
+  const uint64_t first_block =
+      static_cast<uint64_t>(file_index) * ARCH_PAGE_FILE_DATA_CAPACITY;
+
+  return first_block + ((mach_read_from_2(entry) - first_block) & 0xFFFF);
+}
+
 Arch_Blk_Type Arch_Block::get_type(byte *block) {
   return static_cast<Arch_Blk_Type>(
       mach_read_from_1(block + ARCH_PAGE_BLK_HEADER_TYPE_OFFSET));
@@ -1452,7 +1466,11 @@ void Arch_Block::add_reset(lsn_t reset_lsn, Arch_Page_Pos reset_pos) {
 
   ut_ad(m_data_len >= ARCH_PAGE_FILE_HEADER_RESET_LSN_SIZE);
 
-  mach_write_to_2(buf + m_data_len, reset_pos.m_block_num);
+  /* Only the low 16 bits of the block number fit. The reset point is in a
+  data block of this file, so read_reset_block_num() finds the block from
+  the file index. */
+  ut_ad(get_file_index(reset_pos.m_block_num, ARCH_DATA_BLOCK) == m_number);
+  mach_write_to_2(buf + m_data_len, reset_pos.m_block_num & 0xFFFF);
   m_data_len += ARCH_PAGE_FILE_HEADER_RESET_BLOCK_NUM_SIZE;
 
   mach_write_to_2(buf + m_data_len, reset_pos.m_offset);

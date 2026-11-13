@@ -801,7 +801,8 @@ dberr_t Arch_File_Ctx::Recovery::parse_reset_points(
         return DB_CORRUPTION;
       }
 
-      pos.m_block_num = mach_read_from_2(buf1 + length);
+      pos.m_block_num =
+          Arch_Block::read_reset_block_num(buf1 + length, file_index);
       length += ARCH_PAGE_FILE_HEADER_RESET_BLOCK_NUM_SIZE;
 
       pos.m_offset = mach_read_from_2(buf1 + length);
