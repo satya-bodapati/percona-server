@@ -1,0 +1,44 @@
+# A crash between the 'active' and the 'durable' markers of a new page
+# tracking group must not stop the server from starting.
+#
+# crash_between_page_archiver_markers kills the server in
+# mysqlbackup_page_track_set(1) after it creates one marker of the new group
+# and before it creates the other. At the next start, recovery removes the
+# files of a group that is not durable.
+
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+
+let MYSQLD_DATADIR = `SELECT @@datadir`;
+
+# Recovery deletes the file of the group and tries to remove its directory,
+# which still holds the 'active' marker.
+call mtr.add_suppression("Operating system error number 39 in a file operation");
+call mtr.add_suppression("Error number 39 means 'Directory not empty'");
+call mtr.add_suppression("'rmdir' returned OS error 139");
+
+INSTALL COMPONENT 'file://component_mysqlbackup';
+
+SET GLOBAL debug = '+d,crash_between_page_archiver_markers';
+--source include/expect_crash.inc
+--error CR_SERVER_LOST
+SELECT mysqlbackup_page_track_set(1);
+
+--echo #
+--echo # The server starts
+--echo #
+--source include/start_mysqld.inc
+
+--echo #
+--echo # Page tracking starts and stops
+--echo #
+--disable_result_log
+SELECT mysqlbackup_page_track_set(1);
+SELECT mysqlbackup_page_track_set(0);
+--enable_result_log
+
+--echo #
+--echo # Cleanup
+--echo #
+UNINSTALL COMPONENT 'file://component_mysqlbackup';
+--force-rmdir $MYSQLD_DATADIR/#ib_archive

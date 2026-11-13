@@ -2688,6 +2688,7 @@ int Arch_Page_Sys::start(Arch_Group **group, lsn_t *start_lsn,
   if (!recovery) {
     if (is_durable && !restart) {
       m_current_group->mark_active();
+      DBUG_EXECUTE_IF("crash_between_page_archiver_markers", DBUG_SUICIDE(););
       m_current_group->mark_durable();
     }
 
