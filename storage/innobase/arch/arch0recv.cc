@@ -391,6 +391,41 @@ dberr_t Arch_Group::Recovery::cleanup_if_required(Arch_Recv_Group_Info &info) {
   return err;
 }
 
+/** Keep the files of a page-tracking group that recovery does not load, and
+mark the group inactive. The group object is freed.
+@param[in]      group           group that recovery does not load
+@param[in]      group_info      recovery information of the group */
+static void quarantine_group(Arch_Group *group,
+                             const Arch_Recv_Group_Info &group_info) {
+  /* We want to prevent deleting page-tracking group directories with
+  durable file marker during recovery. We do this by bumping up
+  the counter of clients referencing the group for durable archiving. */
+  if (group_info.m_durable) {
+    group->set_durable();
+  }
+
+  /* The group's data files are preserved for manual inspection, but the
+  group must not be treated as active on subsequent restarts. Otherwise
+  every recovery would replay the shared (possibly stale) doublewrite
+  buffer into the preserved files, and a doublewrite belonging to a newer
+  active group could be spliced into this group's files. Deleting the
+  'active' marker leaves the data files intact while quarantining the
+  group. */
+  if (group_info.m_active) {
+    int mark_err = group->mark_inactive();
+
+    if (mark_err != 0) {
+      ib::error(ER_IB_MSG_17)
+          << "Page archiver: failed to remove the 'active' marker of the "
+             "corrupted page-tracking group "
+          << ARCH_PAGE_DIR << group_info.m_start_lsn << ".";
+    }
+  }
+
+  group->disable(LSN_MAX);
+  ut::delete_(group);
+}
+
 dberr_t Arch_Page_Sys::Recovery::recover() {
   dberr_t err = DB_SUCCESS;
   uint num_active [[maybe_unused]] = 0;
@@ -416,34 +451,10 @@ dberr_t Arch_Page_Sys::Recovery::recover() {
 
     err = group->recover(group_info, &m_dblwr_ctx);
 
-    if (err != DB_SUCCESS) {
-      /* We want to prevent deleting page-tracking group directories with
-      durable file marker during recovery. We do this by bumping up
-      the counter of clients referencing the group for durable archiving. */
-      if (group_info.m_durable) {
-        group->set_durable();
-      }
-
-      /* The group's data files are preserved for manual inspection, but the
-      group must not be treated as active on subsequent restarts. Otherwise
-      every recovery would replay the shared (possibly stale) doublewrite
-      buffer into the preserved files, and a doublewrite belonging to a newer
-      active group could be spliced into this group's files. Deleting the
-      'active' marker leaves the data files intact while quarantining the
-      group. */
-      if (group_info.m_active) {
-        int mark_err = group->mark_inactive();
-
-        if (mark_err != 0) {
-          ib::error(ER_IB_MSG_17)
-              << "Page archiver: failed to remove the 'active' marker of the "
-                 "corrupted page-tracking group "
-              << ARCH_PAGE_DIR << group_info.m_start_lsn << ".";
-        }
-      }
-
-      group->disable(LSN_MAX);
-      ut::delete_(group);
+    /* Arch_Group::recover() returns DB_SUCCESS for a group whose files
+    cleanup removed. Such a group has no reset point to load. */
+    if (err != DB_SUCCESS || group_info.m_num_files == 0) {
+      quarantine_group(group, group_info);
       err = DB_SUCCESS;
       continue;
     }
@@ -469,6 +480,19 @@ dberr_t Arch_Page_Sys::Recovery::load_archiver() {
     auto &info = info_map->second;
 
     if (info.m_group == nullptr) {
+      continue;
+    }
+
+    /* recovery_load_and_start() resumes an active group from its last reset
+    point. Arch_Group::recover() rejects an active group without one. */
+    ut_ad(!info.m_active || !info.m_last_reset_file.m_start_point.empty());
+
+    if (info.m_active && info.m_last_reset_file.m_start_point.empty()) {
+      ib::error(ER_IB_MSG_17)
+          << "Page archiver: active page-tracking group " << ARCH_PAGE_DIR
+          << info.m_start_lsn << " has no reset point. It is not loaded.";
+      quarantine_group(info.m_group, info);
+      info.m_group = nullptr;
       continue;
     }
 

@@ -1,0 +1,20 @@
+call mtr.add_suppression("Operating system error number 39 in a file operation");
+call mtr.add_suppression("Error number 39 means 'Directory not empty'");
+call mtr.add_suppression("'rmdir' returned OS error 139");
+INSTALL COMPONENT 'file://component_mysqlbackup';
+SET GLOBAL debug = '+d,crash_between_page_archiver_markers';
+SELECT mysqlbackup_page_track_set(1);
+ERROR HY000: Lost connection to MySQL server during query
+#
+# The server starts
+#
+# restart
+#
+# Page tracking starts and stops
+#
+SELECT mysqlbackup_page_track_set(1);
+SELECT mysqlbackup_page_track_set(0);
+#
+# Cleanup
+#
+UNINSTALL COMPONENT 'file://component_mysqlbackup';
