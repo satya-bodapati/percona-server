@@ -194,7 +194,9 @@ dberr_t Arch_Group::write_to_file(Arch_File_Ctx *from_file, byte *from_buffer,
 
   if (m_file_ctx.is_closed()) {
     /* First file in the archive group. */
-    ut_ad(m_file_ctx.get_count() == 0);
+    ut_ad(
+        m_file_ctx.get_count() == 0 ||
+        DBUG_EVALUATE_IF("page_archiver_start_group_at_file_33", true, false));
 
     DBUG_EXECUTE_IF("crash_before_archive_file_creation", DBUG_SUICIDE(););
 

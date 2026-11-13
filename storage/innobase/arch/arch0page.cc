@@ -2532,6 +2532,19 @@ int Arch_Page_Sys::start(Arch_Group **group, lsn_t *start_lsn,
     m_last_lsn = log_sys_lsn;
     m_last_reset_file_index = 0;
 
+    uint first_file_index = 0;
+
+    /* Start the group at a block number that does not fit in 16 bits. */
+    DBUG_EXECUTE_IF("page_archiver_start_group_at_file_33", {
+      first_file_index = 33;
+      m_write_pos.m_block_num = static_cast<uint64_t>(first_file_index) *
+                                ARCH_PAGE_FILE_DATA_CAPACITY;
+      m_last_pos = m_write_pos;
+      m_flush_pos = m_write_pos;
+      m_reset_pos.m_block_num = first_file_index;
+      m_last_reset_file_index = first_file_index;
+    });
+
     m_current_group = ut::new_withkey<Arch_Group>(
         ut::make_psi_memory_key(mem_key_archive), log_sys_lsn,
         ARCH_PAGE_FILE_HDR_SIZE, &m_mutex);
@@ -2549,8 +2562,9 @@ int Arch_Page_Sys::start(Arch_Group **group, lsn_t *start_lsn,
         static_cast<uint64_t>(ARCH_PAGE_BLK_SIZE) * ARCH_PAGE_FILE_CAPACITY;
 
     /* Initialize archiver file context. */
-    auto db_err = m_current_group->init_file_ctx(
-        ARCH_DIR, ARCH_PAGE_DIR, ARCH_PAGE_FILE, 0, new_file_size, 0);
+    auto db_err =
+        m_current_group->init_file_ctx(ARCH_DIR, ARCH_PAGE_DIR, ARCH_PAGE_FILE,
+                                       first_file_index, new_file_size, 0);
 
     if (db_err != DB_SUCCESS) {
       arch_oper_mutex_exit();
@@ -2559,6 +2573,19 @@ int Arch_Page_Sys::start(Arch_Group **group, lsn_t *start_lsn,
       my_error(ER_OUTOFMEMORY, MYF(0), sizeof(Arch_File_Ctx));
       return (ER_OUTOFMEMORY);
     }
+
+    /* The files before the first file do not exist, as after a purge: stop
+    LSN 0. */
+    DBUG_EXECUTE_IF("page_archiver_start_group_at_file_33", {
+      Arch_Page_Pos pos;
+      pos.init();
+
+      for (uint file_index = 0; file_index < first_file_index; ++file_index) {
+        pos.m_block_num =
+            static_cast<uint64_t>(file_index) * ARCH_PAGE_FILE_DATA_CAPACITY;
+        m_current_group->update_stop_point(pos, 0);
+      }
+    });
 
     m_group_list.push_back(m_current_group);
 
