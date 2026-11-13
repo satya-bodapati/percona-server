@@ -1,0 +1,112 @@
+# The reset point of a new page tracking group must be on disk when
+# mysqlbackup_page_track_set(1) returns, so that the server restarts after a
+# crash.
+#
+# mysqlbackup_page_track_set(1) creates a group and saves its start as a reset
+# point in the reset block of ib_page_0. The data block that holds the reset
+# LSN can fill up while the page archiver writes the reset point.
+#
+# page_archiver_hold_reset_flush holds the archiver after it has taken the
+# reset point to write, until the writer has moved past the data block of the
+# reset point, and signals page_archiver_reset_flush_held when it starts
+# holding.
+#
+# After a kill and a restart, the group starts at the returned LSN, the reset
+# block of ib_page_0 has the reset point, and page tracking starts again.
+
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/not_valgrind.inc
+--source include/have_innodb_16k.inc
+
+--disable_query_log
+call mtr.add_suppression("Page archiver");
+--enable_query_log
+
+let MYSQLD_DATADIR = `SELECT @@datadir`;
+
+INSTALL COMPONENT 'file://component_mysqlbackup';
+
+# About 6000 pages: more than the 2044 page IDs that fit in one data block.
+CREATE TABLE t1 (id INT PRIMARY KEY, pad VARCHAR(7000)) ENGINE=InnoDB;
+SET SESSION cte_max_recursion_depth = 12000;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+                            WHERE n < 12000)
+  SELECT n, REPEAT('a', 7000) FROM seq;
+
+# Keep the updated pages dirty until page tracking has started.
+SET GLOBAL innodb_page_cleaner_disabled_debug = ON;
+UPDATE t1 SET pad = REPEAT('b', 7000);
+
+SET GLOBAL DEBUG = '+d,page_archiver_hold_reset_flush';
+
+--connect (con1, localhost, root)
+--send SELECT mysqlbackup_page_track_set(1) INTO @reset_lsn
+
+--connection default
+# The archiver has taken the reset point to write.
+SET DEBUG_SYNC = 'now WAIT_FOR page_archiver_reset_flush_held';
+
+# Flush the dirty pages so that the data block with the reset LSN fills up.
+SET GLOBAL innodb_page_cleaner_disabled_debug = OFF;
+SET GLOBAL innodb_buf_flush_list_now = ON;
+
+--connection con1
+--reap
+--let $reset_lsn = `SELECT @reset_lsn`
+--disconnect con1
+
+--connection default
+SET GLOBAL DEBUG = '-d,page_archiver_hold_reset_flush';
+SET DEBUG_SYNC = 'RESET';
+
+if ($reset_lsn <= 0)
+{
+  --echo mysqlbackup_page_track_set(1): $reset_lsn
+  --die Page tracking did not start
+}
+
+# Wait for the first data block to reach ib_page_0.
+perl;
+my @f;
+for (1 .. 300) {
+  @f = glob("$ENV{MYSQLD_DATADIR}/#ib_archive/page_group_*/ib_page_0");
+  last if @f == 1 && -s $f[0] > 16384;
+  select(undef, undef, undef, 0.1);
+}
+die "ib_page_0 has no data block\n" unless @f == 1 && -s $f[0] > 16384;
+EOF
+
+--source include/kill_and_restart_mysqld.inc
+
+--echo #
+--echo # The group starts at the returned reset point after the restart
+--echo #
+--let $start_lsn = `SELECT mysqlbackup_page_track_get_start_lsn()`
+if ($start_lsn != $reset_lsn)
+{
+  --echo Start LSN after the restart: $start_lsn, returned: $reset_lsn
+  --die The group does not start at the returned reset point
+}
+
+--let $reset_file_index = 0
+--let $data_blocks_per_file = 2043
+--source suite/innodb/include/page_tracking_check_reset_point.inc
+
+--echo #
+--echo # Page tracking starts again
+--echo #
+--let $next_lsn = `SELECT mysqlbackup_page_track_set(1)`
+if ($next_lsn <= 0)
+{
+  --echo mysqlbackup_page_track_set(1): $next_lsn
+  --die Page tracking did not start after the restart
+}
+
+DROP TABLE t1;
+--disable_result_log
+SELECT mysqlbackup_page_track_set(0);
+--enable_result_log
+UNINSTALL COMPONENT 'file://component_mysqlbackup';
+--force-rmdir $MYSQLD_DATADIR/#ib_archive

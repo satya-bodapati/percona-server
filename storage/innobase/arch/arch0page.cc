@@ -1408,6 +1408,18 @@ dberr_t Arch_Block::flush(Arch_Group *file_group, Arch_Blk_Flush_Type type) {
   dberr_t err = DB_SUCCESS;
   uint32_t checksum;
 
+  /* Fail or skip the writes of the reset block. */
+  DBUG_EXECUTE_IF("page_archiver_reset_block_write_error", {
+    if (m_type == ARCH_RESET_BLOCK) {
+      return (DB_IO_ERROR);
+    }
+  });
+  DBUG_EXECUTE_IF("page_archiver_skip_reset_block_write", {
+    if (m_type == ARCH_RESET_BLOCK) {
+      return (DB_SUCCESS);
+    }
+  });
+
   checksum = ut_crc32(m_data + ARCH_PAGE_BLK_HEADER_LENGTH, m_data_len);
 
   /* Update block's header. */
@@ -2926,6 +2938,29 @@ dberr_t Arch_Page_Sys::flush_blocks(bool *wait) {
         (flush_blk_num_with_lsn == ARCH_UNKNOWN_BLOCK ||
          request_blk_num_with_lsn > flush_blk_num_with_lsn);
 
+    /* Hold the reset block flush until the writer has moved past the current
+    block, so that the block is no longer active when it is flushed. */
+    DBUG_EXECUTE_IF("page_archiver_hold_reset_flush", {
+      if (reset_block_flush) {
+        const char act[] = "now SIGNAL page_archiver_reset_flush_held";
+        assert(opt_debug_sync_timeout > 0);
+        assert(!debug_sync_set_action(current_thd, STRING_WITH_LEN(act)));
+      }
+
+      while (reset_block_flush &&
+             srv_shutdown_state.load() < SRV_SHUTDOWN_CLEANUP) {
+        arch_oper_mutex_enter();
+        const bool moved = m_write_pos.m_block_num > cur_pos.m_block_num;
+        arch_oper_mutex_exit();
+
+        if (moved) {
+          break;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    });
+
     /* We do partial flush only if we're explicitly requested to flush. */
     if (data_block_flush || reset_block_flush) {
       err = flush_active_block(cur_pos, reset_block_flush);
@@ -3178,6 +3213,9 @@ bool Arch_Page_Sys::save_reset_point(bool is_durable) {
 }
 
 bool Arch_Page_Sys::wait_for_reset_info_flush(uint64_t request_blk) {
+  /* Time out at once. */
+  DBUG_EXECUTE_IF("page_archiver_reset_wait_timeout", return (false););
+
   auto ARCH_UNKNOWN_BLOCK = std::numeric_limits<uint64_t>::max();
 
   auto cbk = [&] {

@@ -1,0 +1,122 @@
+# Recovery must not load an active page tracking group whose files have no
+# reset point, such as one written by a server that lost the reset block.
+#
+# page_archiver_skip_reset_block_write makes the page archiver skip every write
+# of a reset block, so the reset block of ib_page_0 stays zero-filled. After a
+# kill, recovery rejects the group, keeps its files and removes its active
+# marker, and page tracking starts a new group, which clone can use. The next
+# restart leaves the rejected group as it is.
+
+--source include/have_debug.inc
+--source include/not_valgrind.inc
+--source include/have_clone_plugin.inc
+
+--disable_query_log
+call mtr.add_suppression("\\[InnoDB\\] .*[Pp]age archiver");
+--enable_query_log
+
+let MYSQLD_DATADIR = `SELECT @@datadir`;
+
+INSTALL COMPONENT 'file://component_mysqlbackup';
+
+CREATE TABLE t1 (id INT PRIMARY KEY, pad VARCHAR(1000)) ENGINE=InnoDB;
+INSERT INTO t1 VALUES (1, REPEAT('a', 1000));
+
+SET GLOBAL DEBUG = '+d,page_archiver_skip_reset_block_write';
+--let $reset_lsn = `SELECT mysqlbackup_page_track_set(1)`
+SET GLOBAL DEBUG = '-d,page_archiver_skip_reset_block_write';
+
+if ($reset_lsn <= 0)
+{
+  --echo mysqlbackup_page_track_set(1): $reset_lsn
+  --die Page tracking did not start
+}
+
+# Wait for the first data block to reach ib_page_0.
+perl;
+my @f;
+for (1 .. 300) {
+  @f = glob("$ENV{MYSQLD_DATADIR}/#ib_archive/page_group_*/ib_page_0");
+  last if @f == 1 && -s $f[0] > 16384;
+  select(undef, undef, undef, 0.1);
+}
+die "ib_page_0 has no data block\n" unless @f == 1 && -s $f[0] > 16384;
+EOF
+
+# Count the rejections logged before this restart. The error log can hold
+# earlier runs of the test.
+--perl
+  open(my $log, '<', "$ENV{MYSQLTEST_VARDIR}/log/mysqld.1.err") or die;
+  my $count = grep { /has no reset point/ } <$log>;
+  open(my $out, '>', "$ENV{MYSQLTEST_VARDIR}/tmp/rejections_before") or die;
+  print $out $count;
+EOF
+
+--source include/kill_and_restart_mysqld.inc
+
+--echo # Recovery rejects the group
+--let SEARCH_FILE = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let SEARCH_PATTERN = has no reset point
+--source include/search_pattern.inc
+
+--echo # The group keeps its files and is no longer active
+let OLD_GROUP = $MYSQLD_DATADIR#ib_archive/page_group_$reset_lsn;
+--perl
+  my $dir = $ENV{OLD_GROUP};
+  opendir(my $dh, $dir) or die "$dir: $!\n";
+  my @files = sort grep { !/^\./ } readdir($dh);
+  print "Old group: @files\n";
+  die "ib_page_0 is missing\n" unless -s "$dir/ib_page_0";
+  use Digest::MD5;
+  open(my $fh, '<:raw', "$dir/ib_page_0") or die;
+  open(my $out, '>', "$ENV{MYSQLTEST_VARDIR}/tmp/old_group_md5") or die;
+  print $out Digest::MD5->new->addfile($fh)->hexdigest;
+EOF
+
+--echo # Page tracking starts a new group
+--let $start_lsn = `SELECT mysqlbackup_page_track_set(1)`
+if ($start_lsn <= $reset_lsn)
+{
+  --echo New start LSN: $start_lsn, old: $reset_lsn
+  --die Page tracking did not start a new group
+}
+
+--echo # Clone works
+--replace_result $CLONE_PLUGIN CLONE_PLUGIN
+--eval INSTALL PLUGIN clone SONAME '$CLONE_PLUGIN'
+--let $CLONE_DATADIR = $MYSQL_TMP_DIR/data_new
+--replace_result $CLONE_DATADIR CLONE_DATADIR
+--eval CLONE LOCAL DATA DIRECTORY = '$CLONE_DATADIR'
+UNINSTALL PLUGIN clone;
+--force-rmdir $CLONE_DATADIR
+
+--echo # The next restart leaves the old group as it is
+--source include/restart_mysqld.inc
+--perl
+  my $dir = $ENV{OLD_GROUP};
+  opendir(my $dh, $dir) or die "$dir: $!\n";
+  my @files = sort grep { !/^\./ } readdir($dh);
+  print "Old group: @files\n";
+  use Digest::MD5;
+  open(my $fh, '<:raw', "$dir/ib_page_0") or die "ib_page_0: $!\n";
+  open(my $in, '<', "$ENV{MYSQLTEST_VARDIR}/tmp/old_group_md5") or die;
+  my $before = <$in>;
+  die "ib_page_0 changed\n" unless Digest::MD5->new->addfile($fh)->hexdigest eq $before;
+  open(my $log, '<', "$ENV{MYSQLTEST_VARDIR}/log/mysqld.1.err") or die;
+  my $count = grep { /has no reset point/ } <$log>;
+  open(my $before_in, '<', "$ENV{MYSQLTEST_VARDIR}/tmp/rejections_before") or die;
+  $count -= <$before_in>;
+  die "Recovery rejected the group $count times\n" unless $count == 1;
+EOF
+--remove_file $MYSQLTEST_VARDIR/tmp/old_group_md5
+--remove_file $MYSQLTEST_VARDIR/tmp/rejections_before
+
+--echo #
+--echo # Cleanup
+--echo #
+--disable_result_log
+SELECT mysqlbackup_page_track_set(0);
+--enable_result_log
+DROP TABLE t1;
+UNINSTALL COMPONENT 'file://component_mysqlbackup';
+--force-rmdir $MYSQLD_DATADIR/#ib_archive
