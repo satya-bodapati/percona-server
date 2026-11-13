@@ -34,6 +34,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #define ARCH_ARCH_INCLUDE
 
 #include <mysql/components/services/page_track_service.h>
+#include <atomic>
 #include <list>
 #include "buf0buf.h" /* buf_page_t */
 #include "ut0mem.h"
@@ -719,6 +720,11 @@ class Arch_File_Ctx {
   @return true if the search was successful. */
   bool find_reset_point(lsn_t check_lsn, Arch_Point &reset_point);
 
+  /** Get the LSN of the newest reset point in a block up to a block number.
+  @param[in]    block_num       block number
+  @return reset LSN, or LSN_MAX if there is no such reset point */
+  lsn_t get_reset_lsn_up_to(uint64_t block_num) const;
+
   /** Find the first stop LSN that is greater than the given LSN and fetch
   the stop point.
   @param[in]    group           the group whose stop_point we're interested in
@@ -1066,6 +1072,13 @@ class Arch_Group {
     return (m_file_ctx.find_reset_point(check_lsn, reset_point));
   }
 
+  /** Get the LSN of the newest reset point in a block up to a block number.
+  @param[in]    block_num       block number
+  @return reset LSN, or LSN_MAX if there is no such reset point */
+  lsn_t get_reset_lsn_up_to(uint64_t block_num) const {
+    return (m_file_ctx.get_reset_lsn_up_to(block_num));
+  }
+
   /** Find the first stop LSN that is greater than the given LSN and fetch
   the stop point.
   @param[in]    check_lsn       LSN to be searched against
@@ -1113,6 +1126,10 @@ class Arch_Group {
   bool is_durable_client_active() const {
     return (m_num_active != m_ref_count);
   }
+
+  /** Check if any client is active.
+  @return true if any client is attached and not stopped, else false */
+  bool is_client_active() const { return (m_num_active > 0); }
 
   /** Check if any client requires durable archiving.
   @return true if there is at least 1 client that requires durable archiving*/
@@ -1556,6 +1573,9 @@ struct ArchPageData {
     return (m_partial_flush_block);
   }
 
+  /** @return temporary block used to copy the reset block for its flush. */
+  Arch_Block *get_reset_flush_block() const { return (m_reset_flush_block); }
+
   /** Vector of data blocks */
   Arch_Block_Vec m_data_blocks{};
 
@@ -1564,6 +1584,9 @@ struct ArchPageData {
 
   /** Temporary block used to copy active block for partial flush. */
   Arch_Block *m_partial_flush_block{nullptr};
+
+  /** Temporary block used to copy the reset block for its flush. */
+  Arch_Block *m_reset_flush_block{nullptr};
 
   /** Block size in bytes */
   uint m_block_size{};
@@ -1667,8 +1690,9 @@ class Arch_Page_Sys {
   /** Wait for reset info to be flushed to disk.
   @param[in]    request_block   block number until which blocks need to be
   flushed
+  @param[out]   is_timeout      true if the wait timed out
   @return true if flushed, else false */
-  bool wait_for_reset_info_flush(uint64_t request_block);
+  bool wait_for_reset_info_flush(uint64_t request_block, bool &is_timeout);
 
   /** Get the group which has tracked pages between the start_id and stop_id.
   @param[in,out]        start_id        start LSN from which tracked pages are
@@ -1829,20 +1853,30 @@ class Arch_Page_Sys {
   @return error code */
   dberr_t flush_inactive_blocks(Arch_Page_Pos &cur_pos, Arch_Page_Pos end_pos);
 
-  /** Do a partial flush of the current active block
-  @param[in]    cur_pos position of block which needs to be flushed
-  @param[in]    partial_reset_block_flush       true if reset block needs to be
-  flushed
-  @return error code */
-  dberr_t flush_active_block(Arch_Page_Pos cur_pos,
-                             bool partial_reset_block_flush);
+  /** Disable page tracking when no client is active, and let the archiver
+  write the last block and go idle. Must hold m_mutex.
+  @param[out]   stop_pos        position where tracking stopped, or nullptr
+  @return true if the archiver goes idle, false if it has aborted */
+  bool prepare_idle(Arch_Page_Pos *stop_pos);
+
+  /** Check if the reset block holds reset points that are not on disk.
+  Must hold the operation mutex.
+  @return true if the reset block needs to be flushed */
+  bool is_reset_block_dirty() const;
+
+  /** Get the newest reset LSN of the current group whose reset block is on
+  disk. Must hold the operation mutex.
+  @return reset LSN, or LSN_MAX if no reset point is on disk */
+  lsn_t get_durable_reset_lsn() const;
 
  private:
   /** Mutex protecting concurrent start, stop operations */
   ib_mutex_t m_mutex;
 
-  /** Archiver system state. */
-  Arch_State m_state{ARCH_STATE_INIT};
+  /** Archiver system state. After startup it is changed under the
+  operation mutex, and a read without that mutex is only a hint that is
+  checked again under it. */
+  std::atomic<Arch_State> m_state{ARCH_STATE_INIT};
 
   /** List of log archive groups */
   Arch_Grp_List m_group_list{};

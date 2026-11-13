@@ -1,0 +1,61 @@
+INSTALL COMPONENT 'file://component_mysqlbackup';
+CREATE TABLE t1 (id INT PRIMARY KEY, pad VARCHAR(7000)) ENGINE=InnoDB;
+SET SESSION cte_max_recursion_depth = 12000;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq
+WHERE n < 12000)
+SELECT n, REPEAT('a', 7000) FROM seq;
+SELECT mysqlbackup_page_track_set(1);
+#
+# The wait for the reset block times out
+#
+UPDATE t1 SET pad = REPEAT('b', 7000);
+SET GLOBAL innodb_buf_flush_list_now = ON;
+SET GLOBAL DEBUG = '+d,page_archiver_reset_wait_timeout';
+SELECT mysqlbackup_page_track_set(1);
+ERROR HY000: Internal error: Page Archiver wait too long
+SET GLOBAL DEBUG = '-d,page_archiver_reset_wait_timeout';
+# Page tracking starts after the error
+SELECT mysqlbackup_page_track_set(1) > 0;
+mysqlbackup_page_track_set(1) > 0
+1
+#
+# A durable start after a clean restart attaches to the recovered reset
+# point
+#
+# restart
+#
+# The page archiver fails to write the reset block
+#
+UPDATE t1 SET pad = REPEAT('c', 7000);
+SET GLOBAL innodb_buf_flush_list_now = ON;
+SET GLOBAL DEBUG = '+d,page_archiver_reset_block_write_error';
+SELECT mysqlbackup_page_track_set(1);
+ERROR 70100: Query execution was interrupted
+SET GLOBAL DEBUG = '-d,page_archiver_reset_block_write_error';
+# The page archiver has stopped; page tracking starts after a restart
+# restart
+SELECT mysqlbackup_page_track_set(1) > 0;
+mysqlbackup_page_track_set(1) > 0
+1
+#
+# The wait of the first start of a group times out
+#
+SELECT mysqlbackup_page_track_set(0);
+SET GLOBAL DEBUG = '+d,page_archiver_reset_wait_timeout';
+SELECT mysqlbackup_page_track_set(1);
+ERROR HY000: Internal error: Page Archiver wait too long
+SET GLOBAL DEBUG = '-d,page_archiver_reset_wait_timeout';
+# Page tracking stops: changed pages are not archived
+UPDATE t1 SET pad = REPEAT('d', 7000);
+SET GLOBAL innodb_buf_flush_list_now = ON;
+# Page tracking starts again
+SELECT mysqlbackup_page_track_set(1) > 0;
+mysqlbackup_page_track_set(1) > 0
+1
+#
+# Cleanup
+#
+SELECT mysqlbackup_page_track_set(0);
+DROP TABLE t1;
+UNINSTALL COMPONENT 'file://component_mysqlbackup';

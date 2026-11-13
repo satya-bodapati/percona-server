@@ -314,6 +314,12 @@ dberr_t Arch_Group::Recovery::replace_pages_from_dblwr(
     }
   }
 
+  /* The archiver thread clears the doublewrite file when it starts, so the
+  repaired blocks must be on disk before. */
+  if (err == DB_SUCCESS) {
+    file_ctx.flush();
+  }
+
   return err;
 }
 
@@ -561,6 +567,16 @@ dberr_t Arch_Group::recover(Arch_Recv_Group_Info &group_info,
 
   if (err != DB_SUCCESS) {
     return err;
+  }
+
+  /* An active group resumes from the last reset point of its files. A last
+  file without a reset point keeps the reset point of an earlier file. */
+  if (group_info.m_active &&
+      group_info.m_last_reset_file.m_start_point.empty()) {
+    ib::error(ER_IB_MSG_17)
+        << "Page archiver: active page-tracking group " << ARCH_PAGE_DIR
+        << group_info.m_start_lsn << " has no reset point.";
+    return DB_CORRUPTION;
   }
 
   if (!group_info.m_active) {
