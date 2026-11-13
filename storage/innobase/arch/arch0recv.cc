@@ -185,62 +185,76 @@ void Arch_Page_Sys::Recovery::print() {
 }
 #endif
 
+/** Read the number in the name of an archive entry.
+@param[in]      path    path of the entry
+@param[in]      prefix  prefix of the name
+@param[out]     number  number that follows the prefix
+@return true if the name is the prefix followed by decimal digits only */
+static bool read_arch_name_number(const std::string &path, const char *prefix,
+                                  uint64_t &number) {
+  const auto name = path.substr(path.find_last_of(OS_PATH_SEPARATOR) + 1);
+  const size_t prefix_len = strlen(prefix);
+
+  if (name.size() <= prefix_len || name.compare(0, prefix_len, prefix) != 0 ||
+      name.find_first_not_of("0123456789", prefix_len) != std::string::npos) {
+    return false;
+  }
+
+  try {
+    number = std::stoull(name.substr(prefix_len));
+  } catch (const std::out_of_range &) {
+    return false;
+  }
+
+  return true;
+}
+
 void Arch_Page_Sys::Recovery::read_group_dirs(const std::string file_path) {
   if (file_path.find(ARCH_PAGE_DIR) == std::string::npos) {
     return;
   }
 
-  try {
-    size_t pos = file_path.find(ARCH_PAGE_DIR);
+  uint64_t start_lsn;
 
-    lsn_t start_lsn = static_cast<lsn_t>(
-        std::stoull(file_path.substr(pos + strlen(ARCH_PAGE_DIR))));
-
-    auto &group_info = m_dir_group_info_map[file_path];
-
-    group_info.m_start_lsn = start_lsn;
-
-  } catch (const std::exception &) {
-    ib::error(ER_IB_ERR_PAGE_ARCH_INVALID_FORMAT) << ARCH_PAGE_FILE;
+  if (!read_arch_name_number(file_path, ARCH_PAGE_DIR, start_lsn)) {
+    ib::warn(ER_IB_MSG_17) << "Page archiver: ignoring " << file_path
+                           << ", which is not a page-tracking group directory.";
     return;
   }
+
+  m_dir_group_info_map[file_path].m_start_lsn = start_lsn;
 }
 
 void Arch_Page_Sys::Recovery::read_group_files(const std::string dir_path,
                                                const std::string file_path) {
-  if (file_path.find(ARCH_PAGE_FILE) == std::string::npos &&
-      file_path.find(ARCH_PAGE_GROUP_ACTIVE_FILE_NAME) == std::string::npos &&
-      file_path.find(ARCH_PAGE_GROUP_DURABLE_FILE_NAME) == std::string::npos) {
-    return;
-  }
-
   auto &info = m_dir_group_info_map[dir_path];
 
-  if (file_path.find(ARCH_PAGE_GROUP_ACTIVE_FILE_NAME) != std::string::npos) {
+  const auto name =
+      file_path.substr(file_path.find_last_of(OS_PATH_SEPARATOR) + 1);
+
+  if (name == ARCH_PAGE_GROUP_ACTIVE_FILE_NAME) {
     info.m_active = true;
     return;
   }
 
-  if (file_path.find(ARCH_PAGE_GROUP_DURABLE_FILE_NAME) != std::string::npos) {
+  if (name == ARCH_PAGE_GROUP_DURABLE_FILE_NAME) {
     info.m_durable = true;
+    return;
+  }
+
+  uint64_t file_index;
+
+  if (!read_arch_name_number(file_path, ARCH_PAGE_FILE, file_index) ||
+      file_index > std::numeric_limits<uint>::max()) {
+    ib::warn(ER_IB_MSG_17) << "Page archiver: ignoring " << file_path
+                           << ", which is not a page-tracking file.";
     return;
   }
 
   info.m_num_files += 1;
 
-  /* Fetch start index. */
-  try {
-    size_t found = file_path.find(ARCH_PAGE_FILE);
-
-    size_t file_index = static_cast<uint>(
-        std::stoi(file_path.substr(found + strlen(ARCH_PAGE_FILE))));
-
-    if (info.m_file_start_index > file_index) {
-      info.m_file_start_index = file_index;
-    }
-  } catch (const std::exception &) {
-    ib::error(ER_IB_ERR_PAGE_ARCH_INVALID_FORMAT) << ARCH_PAGE_FILE;
-    return;
+  if (info.m_file_start_index > file_index) {
+    info.m_file_start_index = static_cast<uint>(file_index);
   }
 }
 

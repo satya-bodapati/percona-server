@@ -11,6 +11,8 @@
 
 let MYSQLD_DATADIR = `SELECT @@datadir`;
 
+call mtr.add_suppression("Page archiver: ignoring .*page_group_[0-9]+\\.hidden, which is not a page-tracking group directory");
+
 INSTALL COMPONENT 'file://component_mysqlbackup';
 CREATE TABLE t1 (id INT AUTO_INCREMENT PRIMARY KEY, b VARCHAR(1000))
   ENGINE=InnoDB;
