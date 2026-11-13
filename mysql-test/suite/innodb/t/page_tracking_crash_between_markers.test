@@ -3,8 +3,10 @@
 #
 # crash_between_page_archiver_markers kills the server in
 # mysqlbackup_page_track_set(1) after it creates one marker of the new group
-# and before it creates the other. At the next start, recovery removes the
-# files of a group that is not durable.
+# and before it creates the other. An older server created 'active' first,
+# so the test turns 'durable' into 'active' to leave the group as such a
+# server leaves it. At the next start, recovery removes the files of a group
+# that is not durable.
 
 --source include/have_debug.inc
 --source include/not_valgrind.inc
@@ -23,6 +25,13 @@ SET GLOBAL debug = '+d,crash_between_page_archiver_markers';
 --source include/expect_crash.inc
 --error CR_SERVER_LOST
 SELECT mysqlbackup_page_track_set(1);
+
+--perl
+  foreach my $durable (glob("$ENV{MYSQLD_DATADIR}#ib_archive/page_group_*/durable")) {
+    (my $active = $durable) =~ s/durable$/active/;
+    rename($durable, $active) or die "rename $durable: $!\n";
+  }
+EOF
 
 --echo #
 --echo # The server starts

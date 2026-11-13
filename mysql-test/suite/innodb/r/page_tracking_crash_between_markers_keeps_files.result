@@ -1,0 +1,14 @@
+INSTALL COMPONENT 'file://component_mysqlbackup';
+SET GLOBAL debug = '+d,crash_between_page_archiver_markers';
+SELECT mysqlbackup_page_track_set(1);
+ERROR HY000: Lost connection to MySQL server during query
+# restart
+#
+# The group keeps ib_page_0 and is durable
+#
+Groups with ib_page_0: 1
+Groups with a durable marker: 1
+#
+# Cleanup
+#
+UNINSTALL COMPONENT 'file://component_mysqlbackup';
