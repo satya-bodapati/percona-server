@@ -1946,6 +1946,9 @@ dberr_t srv_start(bool create_new_db) {
       particular, that we can call peek_unassigned_lsn() in buf_page_lsn_check
       after reads. However in srv_read_only_mode, the background threads will
       not be started. */
+      DBUG_EXECUTE_IF("ib_delay_before_redo_start",
+                      std::this_thread::sleep_for(std::chrono::seconds(2)););
+
       const auto start_result = ib::redo::handler->start_writing(recovered_lsn);
       if (start_result != ib::redo::Status::SUCCESS) {
         ut_ad(start_result == ib::redo::Status::WRITE_ERROR);

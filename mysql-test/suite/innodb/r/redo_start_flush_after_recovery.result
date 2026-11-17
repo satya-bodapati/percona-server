@@ -1,0 +1,26 @@
+#
+# PS-12043: crash recovery ends (recv_recovery_on = false) before
+# srv_start() calls ib::redo::Handler::start_writing(recovered_lsn), which
+# moves the redo LSNs to the end of the recovered log. A recovered dirty
+# page written in between requests persisting redo beyond the end of the
+# log and fails with "end_lsn <= log_get_lsn(log)" in log_write_up_to().
+# With --innodb-lru-threads=ON the LRU manager threads flush during
+# recovery and in between. A recovered page needs no redo persisted,
+# because its redo was read from disc.
+#
+CREATE TABLE t1 (a INT PRIMARY KEY, b VARCHAR(512)) ENGINE=InnoDB;
+# Keep the redo of the inserts after the checkpoint, so that recovery
+# applies it and leaves dirty pages in the buffer pool.
+SET GLOBAL innodb_checkpoint_disabled = ON;
+SET GLOBAL innodb_page_cleaner_disabled_debug = ON;
+# Delay start_writing() for 2 seconds, longer than the longest LRU manager
+# sleep, so that every LRU manager runs before it.
+# Kill and restart: --debug=d,ib_delay_before_redo_start
+SELECT COUNT(*), SUM(LENGTH(b)) FROM t1;
+COUNT(*)	SUM(LENGTH(b))
+16384	8388608
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+# restart
