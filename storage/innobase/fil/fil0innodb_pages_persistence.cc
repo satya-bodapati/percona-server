@@ -193,6 +193,11 @@ Pages_persistence::recover_pages(Lsn &flushed_lsn) {
     return ut::Unexpected(Status::IO_ERROR);
   }
 
+  /* The pages recovery changed stay dirty after recv_recovery_from_checkpoint_
+  finish(), and may be written before srv_start() calls start_writing(). Their
+  redo was read from disc, so tell the handler it is persisted. */
+  handler->recovered_up_to(recv_sys->recovered_lsn);
+
   if (handler->get_capabilities().supports_clone) {
     arch_page_sys->post_recovery_init();
   }

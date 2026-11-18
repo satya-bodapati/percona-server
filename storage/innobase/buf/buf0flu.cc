@@ -980,13 +980,13 @@ static void buf_flush_write_block_low(buf_page_t *bpage, buf_flush_t flush_type,
     want those calls because they would have bad impact on the counter
     of calls, which is monitored to save CPU on spinning in log threads.
 
-    The peek_first_nonpersisted_lsn() and persist_smaller_than() shouldn't be
-    called before start_writing(). See comment in log_write_up_to() for more
-    explanation why we can skip the call when recv_recovery_is_on() == true.
-    Recovery ends before start_writing() is called, and the pages it modified
-    stay dirty. Their redo, up to recv_sys->recovered_lsn, was read from disc,
-    so it is persisted and these pages need no call either. */
-    if (!recv_recovery_is_on() && flush_to_lsn > recv_sys->recovered_lsn &&
+    The persist_smaller_than() fails before start_writing(). See comment in
+    log_write_up_to() for more explanation why we can skip the call when
+    recv_recovery_is_on() == true. After recovery and before start_writing(),
+    only the pages recovery changed are dirty, and
+    peek_first_nonpersisted_lsn() returns the end of the recovered log, so
+    persist_smaller_than() is not called for them. */
+    if (!recv_recovery_is_on() &&
         ib::redo::handler->peek_first_nonpersisted_lsn() < flush_to_lsn) {
       ib::redo::must_succeed(
           ib::redo::handler->persist_smaller_than(

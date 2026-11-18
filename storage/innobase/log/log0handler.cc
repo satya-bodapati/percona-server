@@ -475,6 +475,13 @@ void Handler::stop_writing() { log_stop_background_threads(*log_sys); }
 
 Status Handler::persist_smaller_than(Lsn end_lsn, Durability desired_guarantee,
                                      Origin origin) {
+  /* start_writing() sets log.sn. During recovery log_write_up_to() persists
+  nothing. */
+  if (log_sys->sn.load() == 0 && !recv_recovery_is_on()) {
+    ut_d(ut_error);
+    return Status::WRONG_STATE;
+  }
+
   auto wait_stats = log_write_up_to(
       *log_sys, end_lsn, desired_guarantee == Durability::FULLY_PERSISTED);
   switch (origin) {
@@ -703,6 +710,19 @@ Status Handler::read(Lsn start_lsn, Buffer &buffer) {
 Lsn Handler::peek_first_unassigned_lsn() { return log_get_lsn(*log_sys); }
 Lsn Handler::peek_first_nonpersisted_lsn() {
   return log_sys->flushed_to_disk_lsn.load();
+}
+
+void Handler::recovered_up_to(Lsn end_lsn) {
+  /* Only before start_writing(), which sets log.sn. */
+  if (log_sys->sn.load() != 0) {
+    ut_d(ut_error);
+    return;
+  }
+
+  /* The recovered log is written and flushed up to end_lsn. start_writing()
+  sets both again when it starts writing at end_lsn. */
+  log_sys->write_lsn.store(end_lsn);
+  log_sys->flushed_to_disk_lsn.store(end_lsn);
 }
 
 Status Handler::persist_available(const Origin &origin) {

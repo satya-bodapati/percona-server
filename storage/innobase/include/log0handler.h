@@ -84,6 +84,7 @@ class Handler final : public Handler_interface {
   [[nodiscard]] Lsn peek_first_unassigned_lsn() override;
 
   [[nodiscard]] Lsn peek_first_nonpersisted_lsn() override;
+  void recovered_up_to(Lsn end_lsn) override;
 
   [[nodiscard]] Lsn compute_end_lsn(Lsn start_lsn,
                                     size_t data_len) const override;

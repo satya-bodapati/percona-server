@@ -722,14 +722,24 @@ class Handler_interface {
   happened-before the call to this function, then the return value must be at
   least end_lsn.
 
-  The caller must call start_writing(lsn) before calling this function,
-  otherwise it may return Status::WRONG_STATE. This is because at least in some
-  possible implementations, the exact lsn at which persisted fragment of the log
-  ends can only be established by performing recovery (reading through whole log
-  til its end), and this is expensive, and requires cooperation with the caller.
+  Until the caller calls start_writing(lsn) or recovered_up_to(lsn), the
+  returned value may be 0. This is because at least in some possible
+  implementations, the exact lsn at which persisted fragment of the log ends can
+  only be established by performing recovery (reading through whole log til its
+  end), and this is expensive, and requires cooperation with the caller.
 
   */
   [[nodiscard]] virtual Lsn peek_first_nonpersisted_lsn() = 0;
+
+  /** Informs the Redo Log Handler that the caller has performed recovery using
+  read() API, and has identified end_lsn as the end of the last complete mtr.
+  The log up to end_lsn is persisted, so peek_first_nonpersisted_lsn() returns
+  end_lsn from now on, until start_writing(). Recovery ends before the caller
+  calls start_writing(), and the pages it changed may be written in between.
+  It must be called before start_writing().
+
+  @param[in]  end_lsn  The end of the last complete mtr found by recovery */
+  virtual void recovered_up_to(Lsn end_lsn) = 0;
 
   /* An asynchronous permission to delete a prefix of the Log up to but not
   including align_down_to_known_boundary(needed_lsn) [That is, the byte at
