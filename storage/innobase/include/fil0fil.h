@@ -97,7 +97,7 @@ and during file discovery to open an undo tablespace before the DD is
 recovered and available. */
 static constexpr char undo_space_name[] = "innodb_undo";
 
-extern volatile bool recv_recovery_on;
+extern std::atomic<bool> recv_recovery_on;
 
 /** Initial size of an UNDO tablespace when it is created new
 or truncated under low load.

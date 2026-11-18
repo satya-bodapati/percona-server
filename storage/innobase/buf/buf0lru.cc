@@ -618,7 +618,7 @@ loop:
     if (srv_debug_monitor_printed) DBUG_SET("-d,simulate_lack_of_pages");
 
   } else if (DBUG_EVALUATE_IF("simulate_recovery_lack_of_pages",
-                              recv_recovery_on, false)) {
+                              recv_recovery_is_on(), false)) {
     block = NULL;
 
     if (srv_debug_monitor_printed) {

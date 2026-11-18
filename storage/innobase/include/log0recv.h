@@ -34,6 +34,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #ifndef log0recv_h
 #define log0recv_h
 
+#include <atomic>
+
 #include "buf0types.h"
 #include "dict0types.h"
 #include "hash0hash.h"
@@ -588,7 +590,7 @@ extern recv_sys_t *recv_sys;
 /** true when applying redo log records during crash recovery; false
 otherwise.  Note that this is false while a background thread is
 rolling back incomplete transactions. */
-extern volatile bool recv_recovery_on;
+extern std::atomic<bool> recv_recovery_on;
 
 /** true when recv_init_crash_recovery() has been called. */
 extern bool recv_needed_recovery;

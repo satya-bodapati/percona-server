@@ -105,8 +105,10 @@ recv_sys_t *recv_sys = nullptr;
 
 /** true when applying redo log records during crash recovery; false
 otherwise.  Note that this is false while a background thread is
-rolling back incomplete transactions. */
-volatile bool recv_recovery_on;
+rolling back incomplete transactions. Page flushing threads read it, and
+must see the state set before it changed, such as the persisted LSN set by
+ib::redo::Handler_interface::recovered_up_to() before recovery ends. */
+std::atomic<bool> recv_recovery_on{false};
 
 /* It's preferable for performance to read more in single IO, and also to avoid
 resizing the buffer too often. If buffer size is less than 2KB, resize. */
