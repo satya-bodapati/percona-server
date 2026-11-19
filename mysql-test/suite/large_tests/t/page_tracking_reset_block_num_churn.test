@@ -1,0 +1,251 @@
+# The reset block of a page tracking file stores 2 bytes for the block number
+# of each reset point. A file holds 2043 data blocks, so block 65536 is in
+# ib_page_32.
+#
+# The test reaches it without test options: a page is tracked at its first
+# write after each reset point, and t1 has 262144 pages of 4 KiB, two rows per
+# page. 4 connections update one row of each page in a loop, the page cleaners
+# write each dirty page at once, and a reset point is taken every second, so
+# each reset point tracks all pages of t1 again. The test stops when
+# ib_page_33 exists, restarts the server and reads the changed pages since the
+# last reset point, which is above block 65535. Then it takes a reset point
+# in the first blocks of the newest file, as a backup tool does, writes pages,
+# and restarts again. Each read after a restart must return the page IDs of
+# the same read before it.
+#
+# Without the fix, recovery reads only the low 16 bits of the block number:
+# with the corruption checks of PS-11202 it reports "references an invalid
+# block" and drops the group; without them the read after the restart starts
+# at a wrong block, and the second restart reads past the end of the newest
+# file and fails.
+#
+# The test writes about 140 million pages: about 10 minutes on 16 CPUs with
+# the vardir in memory. It needs 4 GB in the vardir. To run it:
+#   ./mtr --suite=large_tests --big-test --mem page_tracking_reset_block_num_churn
+# On slower storage, raise --testcase-timeout (60 minutes in the -master.opt
+# file).
+
+--source include/big_test.inc
+--source include/not_valgrind.inc
+--source include/not_parallel.inc
+# The test restarts the server.
+--source include/testdb_only.inc
+# Binary logging is off: the test updates 262144 rows every second.
+--source include/not_log_bin.inc
+
+# Two rows per page need 4 KiB pages, set in the -master.opt file.
+if (`SELECT @@innodb_page_size != 4096`)
+{
+  --skip Needs innodb_page_size=4k
+}
+
+let MYSQLD_DATADIR = `SELECT @@datadir`;
+--let $current_lsn = SELECT JSON_EXTRACT(STORAGE_ENGINES, CONCAT(CHAR(36 USING utf8mb4), '.InnoDB.LSN')) FROM performance_schema.log_status
+--let $checkpoint_lsn = SELECT JSON_EXTRACT(STORAGE_ENGINES, CONCAT(CHAR(36 USING utf8mb4), '.InnoDB.LSN_checkpoint')) FROM performance_schema.log_status
+# A checkpoint can take minutes on slower storage.
+--let $explicit_default_wait_timeout = 300
+--let $wait_timeout = 300
+
+INSTALL COMPONENT 'file://component_mysqlbackup';
+
+# Each row takes a little less than half of a 4 KiB page: two rows per page.
+CREATE TABLE t1 (id INT PRIMARY KEY, c INT NOT NULL, pad VARCHAR(1792) NOT NULL)
+  ENGINE=InnoDB CHARSET=latin1;
+CREATE TABLE stop_churn (stop INT NOT NULL) ENGINE=InnoDB;
+INSERT INTO stop_churn VALUES (0);
+
+SET SESSION cte_max_recursion_depth = 524289;
+INSERT INTO t1
+  WITH RECURSIVE q(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM q WHERE n < 524288)
+  SELECT n, 0, REPEAT('x', 1792) FROM q;
+
+# Updates one row of each page in [lo, hi] until stop_churn.stop is set.
+DELIMITER //;
+CREATE PROCEDURE churn(lo INT, hi INT)
+BEGIN
+  DECLARE st INT DEFAULT 0;
+  WHILE st = 0 DO
+    UPDATE t1 SET c = c + 1 WHERE id BETWEEN lo AND hi AND (id & 1) = 0;
+    SELECT stop INTO st FROM stop_churn;
+  END WHILE;
+END//
+DELIMITER ;//
+
+--let $group_lsn = `SELECT mysqlbackup_page_track_set(1)`
+--let $group_dir = $MYSQLD_DATADIR#ib_archive/page_group_$group_lsn
+# In the vardir of the worker, where LOAD_FILE() can read it.
+--let $listing = $MYSQLTEST_VARDIR/page_tracking_files.txt
+--list_files_write_file $listing $group_dir ib_page_33
+if (`SELECT LOAD_FILE('$listing') IS NULL`)
+{
+  --die LOAD_FILE() cannot read $listing
+}
+
+--echo #
+--echo # Take a reset point every second until ib_page_33 exists
+--echo #
+--let $i = 0
+while ($i < 4)
+{
+  --connect (con$i, localhost, root,,)
+  --let $lo = `SELECT $i * 131072 + 1`
+  --let $hi = `SELECT ($i + 1) * 131072`
+  --send_eval CALL churn($lo, $hi)
+  --inc $i
+}
+--connection default
+
+--let $have_file = 0
+while (!$have_file)
+{
+  --let $last_lsn = `SELECT mysqlbackup_page_track_set(1)`
+  --sleep 1
+  --list_files_write_file $listing $group_dir ib_page_33
+  --let $have_file = `SELECT IFNULL(LOAD_FILE('$listing') LIKE '%ib_page_33%', 0)`
+}
+--remove_file $listing
+
+UPDATE stop_churn SET stop = 1;
+--let $i = 0
+while ($i < 4)
+{
+  --connection con$i
+  --reap
+  --disconnect con$i
+  --inc $i
+}
+--connection default
+
+--echo #
+--echo # Changed pages since the last reset point, before the restart
+--echo #
+# A page written before $end_lsn is tracked once the checkpoint reaches
+# $end_lsn.
+--let $end_lsn = `$current_lsn`
+--let $wait_condition = SELECT ($checkpoint_lsn) >= $end_lsn
+--source include/wait_condition.inc
+SET GLOBAL mysqlbackup.backupid = "1";
+--disable_query_log
+--eval SELECT mysqlbackup_page_track_get_changed_pages($last_lsn, $end_lsn) AS result
+--enable_query_log
+
+--source include/restart_mysqld.inc
+
+--echo #
+--echo # The same after the restart
+--echo #
+SET GLOBAL mysqlbackup.backupid = "2";
+--disable_query_log
+--eval SELECT mysqlbackup_page_track_get_changed_pages($last_lsn, $end_lsn) AS result
+--enable_query_log
+# The next mysqlbackup.backupid removes the file of this read: keep a copy,
+# or only the size of a read that returns too many page IDs.
+--perl
+  use File::Copy;
+  my $dir = "$ENV{MYSQLD_DATADIR}#meb";
+  if (-e "$dir/2.idx") {
+    my $size = -s "$dir/2.idx";
+    if ($size <= (-s "$dir/1.idx") + 2 * 2044 * 8) {
+      copy("$dir/2.idx", "$ENV{MYSQL_TMP_DIR}/2.idx") or die "cannot copy 2.idx: $!\n";
+    } else {
+      open(my $fh, '>', "$ENV{MYSQL_TMP_DIR}/2.size") or die "cannot write 2.size: $!\n";
+      print $fh $size;
+      close($fh);
+    }
+  }
+EOF
+
+--echo #
+--echo # A reset point in the newest file, and a second restart
+--echo #
+# 2048 new pages: more than one block of page IDs after the last reset point,
+# so that the reset point is not merged with it.
+CREATE TABLE t2 (id INT PRIMARY KEY, c INT NOT NULL, pad VARCHAR(1792) NOT NULL)
+  ENGINE=InnoDB CHARSET=latin1;
+INSERT INTO t2 SELECT * FROM t1 WHERE id <= 4096;
+--let $lsn = `$current_lsn`
+--let $wait_condition = SELECT ($checkpoint_lsn) >= $lsn
+--source include/wait_condition.inc
+
+--let $new_lsn = `SELECT mysqlbackup_page_track_set(1)`
+if (`SELECT $new_lsn <= $last_lsn`)
+{
+  --die No new reset point was taken
+}
+
+UPDATE t2 SET c = c + 1 WHERE (id & 1) = 0;
+--let $end_lsn = `$current_lsn`
+--let $wait_condition = SELECT ($checkpoint_lsn) >= $end_lsn
+--source include/wait_condition.inc
+SET GLOBAL mysqlbackup.backupid = "3";
+--disable_query_log
+--eval SELECT mysqlbackup_page_track_get_changed_pages($new_lsn, $end_lsn) AS result
+--enable_query_log
+
+--source include/restart_mysqld.inc
+
+SET GLOBAL mysqlbackup.backupid = "4";
+--disable_query_log
+--eval SELECT mysqlbackup_page_track_get_changed_pages($new_lsn, $end_lsn) AS result
+--enable_query_log
+
+--let $assert_text = Recovery reads every reset point
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_select = Page archiver: reset point in page-tracking file .* references an invalid block
+--let $assert_count = 0
+--let $assert_only_after = CURRENT_TEST: large_tests.page_tracking_reset_block_num_churn
+--source include/assert_grep.inc
+
+# A read after a restart returns the page IDs of the same read before it. It
+# can also return the rest of the block it ended in and the next block: the
+# read ends at the first block whose stop LSN is above the end LSN. A read
+# from a wrong block returns other page IDs.
+--perl
+  my $dir = "$ENV{MYSQLD_DATADIR}#meb";
+  my $tmp = $ENV{MYSQL_TMP_DIR};
+  my %file = (1 => "$dir/1.idx", 2 => "$tmp/2.idx",
+              3 => "$dir/3.idx", 4 => "$dir/4.idx");
+  sub size_of {
+    my ($read) = @_;
+    if ($read == 2 && -e "$tmp/2.size") {
+      open(my $fh, '<', "$tmp/2.size") or die "cannot read 2.size: $!\n";
+      my $size = <$fh>;
+      close($fh);
+      return $size;
+    }
+    die "no page IDs in read $read\n" unless -s $file{$read};
+    return -s $file{$read};
+  }
+  foreach my $pair ([1, 2], [3, 4]) {
+    my ($r1, $r2) = @$pair;
+    my ($size1, $size2) = (size_of($r1), size_of($r2));
+    die sprintf("read %d returns %d page IDs, read %d returns %d\n",
+                $r2, $size2 / 8, $r1, $size1 / 8)
+      if $size2 < $size1 || $size2 - $size1 > 2 * 2044 * 8;
+    my ($before, $after);
+    foreach my $f ([$r1, \$before], [$r2, \$after]) {
+      open(my $fh, '<:raw', $file{$f->[0]}) or die "cannot read read $f->[0]: $!\n";
+      local $/;
+      ${$f->[1]} = <$fh>;
+      close($fh);
+    }
+    die "read $r2 does not return the page IDs of read $r1\n"
+      unless substr($after, 0, length($before)) eq $before;
+  }
+EOF
+
+--echo #
+--echo # Cleanup
+--echo #
+--disable_result_log
+SELECT mysqlbackup_page_track_set(0);
+--enable_result_log
+DROP PROCEDURE churn;
+DROP TABLE t1, t2, stop_churn;
+UNINSTALL COMPONENT 'file://component_mysqlbackup';
+--remove_file $MYSQL_TMP_DIR/2.idx
+# The page archiver closes its files at shutdown.
+--source include/shutdown_mysqld.inc
+--force-rmdir $MYSQLD_DATADIR/#ib_archive
+--force-rmdir $MYSQLD_DATADIR/#meb
+--source include/start_mysqld.inc
