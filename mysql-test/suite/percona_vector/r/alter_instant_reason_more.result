@@ -1,0 +1,43 @@
+#
+# ALGORITHM=INSTANT refusals for ALTERs that add the first vector
+# index together with something else.
+#
+CREATE TABLE t (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4) NOT NULL,
+g POINT NOT NULL SRID 0, txt VARCHAR(10), k INT);
+# Generic error: no reason applies to INSTANT.
+ALTER TABLE t ADD VECTOR KEY vk (v) TYPE hnsw (M = 8), ADD KEY kk (k),
+ALGORITHM=INSTANT;
+ERROR 0A000: ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE.
+ALTER TABLE t ADD VECTOR KEY vk (v) TYPE hnsw (M = 8), DROP COLUMN k,
+ALGORITHM=INSTANT;
+ERROR 0A000: ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE.
+ALTER TABLE t ADD VECTOR KEY vk (v) TYPE hnsw (M = 8), FORCE,
+ALGORITHM=INSTANT;
+ERROR 0A000: ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE.
+ALTER TABLE t ADD VECTOR KEY vk (v) TYPE hnsw (M = 8),
+ADD FULLTEXT KEY ft (txt), ALGORITHM=INSTANT;
+ERROR 0A000: ALGORITHM=INSTANT is not supported for this operation. Try ALGORITHM=COPY/INPLACE.
+# A reason set by another part of the ALTER is kept, the same one
+# the ALTER reports without the vector index.
+ALTER TABLE t ADD SPATIAL KEY sg (g), ALGORITHM=INSTANT;
+ERROR 0A000: ALGORITHM=INSTANT is not supported. Reason: Do not support online operation on table with GIS index. Try ALGORITHM=COPY/INPLACE.
+ALTER TABLE t ADD VECTOR KEY vk (v) TYPE hnsw (M = 8),
+ADD SPATIAL KEY sg (g), ALGORITHM=INSTANT;
+ERROR 0A000: ALGORITHM=INSTANT is not supported. Reason: Do not support online operation on table with GIS index. Try ALGORITHM=COPY/INPLACE.
+ALTER TABLE t ADD COLUMN ai INT AUTO_INCREMENT, ADD UNIQUE KEY (ai),
+ALGORITHM=INSTANT;
+ERROR 0A000: ALGORITHM=INSTANT is not supported. Reason: Adding an auto-increment column requires a lock. Try ALGORITHM=COPY/INPLACE.
+ALTER TABLE t ADD VECTOR KEY vk (v) TYPE hnsw (M = 8),
+ADD COLUMN ai INT AUTO_INCREMENT, ADD UNIQUE KEY (ai), ALGORITHM=INSTANT;
+ERROR 0A000: ALGORITHM=INSTANT is not supported. Reason: Adding an auto-increment column requires a lock. Try ALGORITHM=COPY/INPLACE.
+# Other algorithms keep the LOCK=NONE reason.
+ALTER TABLE t ADD VECTOR KEY vk (v) TYPE hnsw (M = 8), LOCK=NONE;
+ERROR 0A000: LOCK=NONE is not supported. Reason: InnoDB does not support LOCK=NONE on a table with a vector index. Try LOCK=SHARED.
+ALTER TABLE t ADD VECTOR KEY vk (v) TYPE hnsw (M = 8), ALGORITHM=INPLACE,
+LOCK=SHARED;
+# Table has a vector index: the INSTANT reason.
+ALTER TABLE t DROP KEY vk, ALGORITHM=INSTANT;
+ERROR 0A000: ALGORITHM=INSTANT is not supported. Reason: InnoDB does not support ALGORITHM=INSTANT on a table with a vector index. Try ALGORITHM=COPY/INPLACE.
+ALTER TABLE t ADD SPATIAL KEY sg (g), ALGORITHM=INSTANT;
+ERROR 0A000: ALGORITHM=INSTANT is not supported. Reason: InnoDB does not support ALGORITHM=INSTANT on a table with a vector index. Try ALGORITHM=COPY/INPLACE.
+DROP TABLE t;

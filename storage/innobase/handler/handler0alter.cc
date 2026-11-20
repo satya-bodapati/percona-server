@@ -1390,6 +1390,16 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
 
   m_prebuilt->trx->will_lock++;
 
+  /* The reason the vector index branches below give for refusing
+  LOCK=NONE. ALGORITHM=INSTANT is refused before LOCK is considered, and
+  this reason does not explain that, so it gets none: the server reports
+  its generic error, as for an ordinary ADD INDEX. */
+  const char *const vec_nolock_reason =
+      is_instant_requested
+          ? nullptr
+          : innobase_get_err_msg(
+                ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_NOLOCK);
+
   /* A table with a vector index can be rebuilt in place. The rebuild
   recreates every index on the new table, the vector index among them, so
   the graph and a new aux are built from the copied rows, with their labels
@@ -1433,8 +1443,7 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
       ha_alter_info->unsupported_reason =
           innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_GIS);
     } else if (innobase_vector_exist(altered_table)) {
-      ha_alter_info->unsupported_reason = innobase_get_err_msg(
-          ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_NOLOCK);
+      ha_alter_info->unsupported_reason = vec_nolock_reason;
     } else {
       ha_alter_info->unsupported_reason =
           innobase_get_err_msg(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_FTS);
@@ -1485,8 +1494,7 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
         /* Without this the server prints "ALGORITHM=INPLACE is not
         supported. Reason:" and then nothing, because every other branch
         here sets a reason and this one did not. */
-        ha_alter_info->unsupported_reason = innobase_get_err_msg(
-            ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_NOLOCK);
+        ha_alter_info->unsupported_reason = vec_nolock_reason;
         online = false;
         break;
       }
@@ -1507,27 +1515,14 @@ enum_alter_inplace_result ha_innobase::check_if_supported_inplace_alter(
   row_log_apply to insert each applied row into the new graph, and the
   first ADD's labels to come from the row log as well as the scan. */
   if (online && innobase_vector_exist(altered_table)) {
-    ha_alter_info->unsupported_reason = innobase_get_err_msg(
-        ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_NOLOCK);
+    ha_alter_info->unsupported_reason = vec_nolock_reason;
     online = false;
   }
 
-  /* The branches above set the LOCK=NONE reason whatever was requested,
-  which is the wrong one to report for ALGORITHM=INSTANT:
-
-  - If the table already has a vector index, INSTANT was refused for that
-    (vec_refuses_instant), so report it.
-  - Otherwise, if the ALTER adds the first vector index, INSTANT was
-    refused because InnoDB cannot add any index instantly. Clear the
-    reason, so the server reports its generic error, as it does for an
-    ordinary ADD INDEX. */
-  if (is_instant_requested) {
-    if (vec_refuses_instant) {
-      ha_alter_info->unsupported_reason = innobase_get_err_msg(
-          ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_INSTANT);
-    } else if (innobase_vector_exist(altered_table)) {
-      ha_alter_info->unsupported_reason = nullptr;
-    }
+  /* ALGORITHM=INSTANT refused because of an existing vector index. */
+  if (is_instant_requested && vec_refuses_instant) {
+    ha_alter_info->unsupported_reason = innobase_get_err_msg(
+        ER_ALTER_OPERATION_NOT_SUPPORTED_REASON_VECTOR_INSTANT);
   }
 
   return online ? HA_ALTER_INPLACE_NO_LOCK_AFTER_PREPARE
