@@ -1,0 +1,15 @@
+--initialize --innodb_page_size=4k
+--testcase-timeout=60
+--innodb-buffer-pool-size=1536M
+--innodb-buffer-pool-instances=8
+--innodb-buffer-pool-chunk-size=64M
+--innodb-page-cleaners=4
+--innodb-io-capacity=400000
+--innodb-io-capacity-max=800000
+--innodb-flush-neighbors=0
+--innodb-max-dirty-pages-pct=0
+--innodb-max-dirty-pages-pct-lwm=0
+--innodb-doublewrite=OFF
+--innodb-flush-log-at-trx-commit=0
+--innodb-redo-log-capacity=512M
+--skip-log-bin
