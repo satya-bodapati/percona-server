@@ -24,10 +24,8 @@ ALTER TABLE t ADD COLUMN c INT, ALGORITHM=INPLACE, LOCK=NONE;
 DROP TABLE t;
 
 --echo #
---echo # PS-11590 follow-up: adding the first vector index with
---echo # ALGORITHM=INSTANT is refused with the generic error, like any other
---echo # ADD INDEX - no LOCK=NONE reason and no claim that the table already
---echo # has a vector index.
+--echo # Adding the first vector index with ALGORITHM=INSTANT gets no vector
+--echo # reason: the LOCK=NONE one does not apply to INSTANT.
 --echo #
 CREATE TABLE t2 (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(4) NOT NULL);
 --error ER_ALTER_OPERATION_NOT_SUPPORTED
