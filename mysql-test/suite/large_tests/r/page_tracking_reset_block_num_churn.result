@@ -1,0 +1,61 @@
+INSTALL COMPONENT 'file://component_mysqlbackup';
+CREATE TABLE t1 (id INT PRIMARY KEY, c INT NOT NULL, pad VARCHAR(1792) NOT NULL)
+ENGINE=InnoDB CHARSET=latin1;
+CREATE TABLE stop_churn (stop INT NOT NULL) ENGINE=InnoDB;
+INSERT INTO stop_churn VALUES (0);
+SET SESSION cte_max_recursion_depth = 524289;
+INSERT INTO t1
+WITH RECURSIVE q(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM q WHERE n < 524288)
+SELECT n, 0, REPEAT('x', 1792) FROM q;
+CREATE PROCEDURE churn(lo INT, hi INT)
+BEGIN
+DECLARE st INT DEFAULT 0;
+WHILE st = 0 DO
+UPDATE t1 SET c = c + 1 WHERE id BETWEEN lo AND hi AND (id & 1) = 0;
+SELECT stop INTO st FROM stop_churn;
+END WHILE;
+END//
+#
+# Take a reset point every second until ib_page_33 exists
+#
+CALL churn(1, 131072);
+CALL churn(131073, 262144);
+CALL churn(262145, 393216);
+CALL churn(393217, 524288);
+UPDATE stop_churn SET stop = 1;
+#
+# Changed pages since the last reset point, before the restart
+#
+SET GLOBAL mysqlbackup.backupid = "1";
+result
+0
+# restart
+#
+# The same after the restart
+#
+SET GLOBAL mysqlbackup.backupid = "2";
+result
+0
+#
+# A reset point in the newest file, and a second restart
+#
+CREATE TABLE t2 (id INT PRIMARY KEY, c INT NOT NULL, pad VARCHAR(1792) NOT NULL)
+ENGINE=InnoDB CHARSET=latin1;
+INSERT INTO t2 SELECT * FROM t1 WHERE id <= 4096;
+UPDATE t2 SET c = c + 1 WHERE (id & 1) = 0;
+SET GLOBAL mysqlbackup.backupid = "3";
+result
+0
+# restart
+SET GLOBAL mysqlbackup.backupid = "4";
+result
+0
+include/assert_grep.inc [Recovery reads every reset point]
+#
+# Cleanup
+#
+SELECT mysqlbackup_page_track_set(0);
+DROP PROCEDURE churn;
+DROP TABLE t1, t2, stop_churn;
+UNINSTALL COMPONENT 'file://component_mysqlbackup';
+# restart
