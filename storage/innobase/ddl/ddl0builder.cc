@@ -908,25 +908,10 @@ dberr_t Builder::init(Cursor &cursor, size_t n_threads) noexcept {
       return get_error();
     }
 
-    size_t flush_queue_size{};
-    bool allocate_in_pages{};
-    ddl_bulk::Loader::get_queue_size(subtree_memory(), n_threads,
-                                     flush_queue_size, allocate_in_pages);
-
-    /* The new index holds about as much data as the old one. */
-    auto old_index = m_ctx.m_old_table->first_index();
-    mtr_t mtr;
-    mtr.start();
-    mtr_s_lock(dict_index_get_lock(old_index), &mtr, UT_LOCATION_HERE);
-    const auto n_pages = btr_get_size(old_index, BTR_TOTAL_SIZE, &mtr);
-    mtr.commit();
-
-    const size_t data_size =
-        n_pages == ULINT_UNDEFINED ? 0 : n_pages * UNIV_PAGE_SIZE;
-
-    const auto extend_size =
-        m_extent_allocator->init(m_index->table, m_index, m_ctx.m_trx,
-                                 data_size, n_threads, allocate_in_pages);
+    /* A scan range is a sub-tree of the old index, usually far smaller than
+    an extent, so allocate the pages of each sub-tree one by one. */
+    const auto extend_size = m_extent_allocator->init(
+        m_index->table, m_index, m_ctx.m_trx, 0, n_threads, true);
 
     space->begin_bulk_operation(extend_size);
     fil_space_release(space);
