@@ -1090,6 +1090,11 @@ void Parallel_reader::worker(Parallel_reader::Thread_ctx *thread_ctx) {
     }
   }
 
+  if (err == DB_SUCCESS) {
+    /* A Ctx start or finish callback may have failed. */
+    err = cb_err;
+  }
+
   if (err != DB_SUCCESS && !is_error_set()) {
     /* Set the "global" error state. */
     set_error_state(err);
