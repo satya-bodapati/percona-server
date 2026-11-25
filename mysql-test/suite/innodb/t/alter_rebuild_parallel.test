@@ -105,6 +105,42 @@ SET GLOBAL DEBUG = '-d,builder_add_row_trigger_error';
 --eval $checksum t1
 CHECK TABLE t1;
 
+--echo # A sub-tree fails to finish, as on a full disk.
+SET GLOBAL DEBUG = '+d,builder_subtree_finish_trigger_error';
+--error ER_RECORD_FILE_FULL
+ALTER TABLE t1 ENGINE=InnoDB, ALGORITHM=INPLACE;
+SET GLOBAL DEBUG = '-d,builder_subtree_finish_trigger_error';
+--eval $checksum t1
+CHECK TABLE t1;
+
+--echo #
+--echo # A record that does not fit in a page fails the rebuild with the same
+--echo # error with one scan thread and with the sub-trees.
+--echo #
+CREATE TABLE t6 (id INT PRIMARY KEY, c0 CHAR(200) NOT NULL DEFAULT '')
+  ENGINE=InnoDB CHARSET=latin1;
+INSERT INTO t6 (id)
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 20000)
+  SELECT n FROM seq;
+SET SESSION innodb_strict_mode = OFF;
+let $add_columns = ADD COLUMN c1 CHAR(255) NOT NULL DEFAULT 'a';
+let $i = 2;
+while ($i <= 40) {
+  let $add_columns = $add_columns, ADD COLUMN c$i CHAR(255) NOT NULL DEFAULT 'a';
+  inc $i;
+}
+SET SESSION innodb_parallel_read_threads = 1;
+--disable_warnings
+--error ER_TOO_BIG_ROWSIZE
+--eval ALTER TABLE t6 $add_columns, ALGORITHM=INPLACE
+SET SESSION innodb_parallel_read_threads = 4;
+--error ER_TOO_BIG_ROWSIZE
+--eval ALTER TABLE t6 $add_columns, ALGORITHM=INPLACE
+--enable_warnings
+SET SESSION innodb_strict_mode = DEFAULT;
+SELECT COUNT(*) FROM t6;
+DROP TABLE t6;
+
 --echo #
 --echo # Empty table.
 --echo #

@@ -891,7 +891,7 @@ dberr_t Builder::init(Cursor &cursor, size_t n_threads) noexcept {
     /* Parallel_cursor::scan() reads with more than one thread only when the
     sub-trees can be built in parallel. */
     ut_ad(can_build_subtrees());
-    ut_a(m_extent_allocator == nullptr);
+    ut_ad(m_extent_allocator == nullptr);
 
     m_extent_allocator = ut::new_withkey<Btree_multi::Bulk_extent_allocator>(
         ut::make_psi_memory_key(mem_key_ddl));
@@ -1025,6 +1025,11 @@ dberr_t Builder::subtree_insert(size_t thread_id) noexcept {
   while (err == DB_SUCCESS && (err = cursor.fetch(dtuple)) == DB_SUCCESS) {
     err = subtree->insert(dtuple, 0);
 
+    if (err == DB_BULK_TOO_BIG_RECORD) {
+      /* No field could be stored off-page to fit the record in a page. */
+      err = DB_TOO_BIG_RECORD;
+    }
+
     if (err == DB_SUCCESS) {
       err = cursor.next();
     }
@@ -1057,6 +1062,12 @@ dberr_t Builder::subtree_finish(Cursor &cursor, size_t thread_id) noexcept {
     }
   }
 
+  DBUG_EXECUTE_IF("builder_subtree_finish_trigger_error", {
+    if (err == DB_SUCCESS) {
+      err = DB_OUT_OF_FILE_SPACE;
+    }
+  });
+
   key_buffer->clear();
 
   thread_ctx->m_subtree = nullptr;
@@ -1076,12 +1087,22 @@ dberr_t Builder::subtree_finish(Cursor &cursor, size_t thread_id) noexcept {
 }
 
 dberr_t Builder::merge_subtrees() noexcept {
-  ut_a(builds_subtrees());
+  ut_ad(builds_subtrees());
+
+  for (auto thread_ctx : m_thread_ctxs) {
+    /* The scan finishes the sub-tree of every range it reads. An open
+    sub-tree here would leave its rows out of the index. */
+    ut_ad(thread_ctx->m_subtree == nullptr);
+
+    if (thread_ctx->m_subtree != nullptr) {
+      set_error(DB_ERROR);
+      return get_error();
+    }
+  }
 
   Btree_multi::Btree_load::Merger::Btree_loads subtrees{};
 
   for (auto thread_ctx : m_thread_ctxs) {
-    ut_a(thread_ctx->m_subtree == nullptr);
     subtrees.insert(subtrees.end(), thread_ctx->m_subtrees.begin(),
                     thread_ctx->m_subtrees.end());
     thread_ctx->m_subtrees.clear();
