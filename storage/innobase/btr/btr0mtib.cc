@@ -2061,6 +2061,14 @@ dberr_t Btree_load::finish(bool is_err, const bool subtree) noexcept {
     err = load_root_page(last_page_no);
   }
 
+  /* The cached extents and page loads of the levels are only used to build
+  the tree. Free them, so that a finished sub-tree that waits for
+  Merger::merge() holds only its boundary page numbers. */
+  for (auto level_ctx : m_level_ctxs) {
+    Level_ctx::destroy(level_ctx);
+  }
+  m_level_ctxs.clear();
+
   /* Ensure that remaining pages modified without redo log is flushed here. */
   ut_d(dict_sync_check check(true));
   ut_ad(!sync_check_iterate(check));
