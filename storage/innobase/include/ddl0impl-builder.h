@@ -33,6 +33,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #define ddl0impl_builder_h
 
 #include "btr0load.h"
+#include "btr0mtib.h"
 #include "ddl0impl-buffer.h"
 #include "ddl0impl-file-reader.h"
 #include "row0pread.h"
@@ -173,6 +174,37 @@ struct Builder {
     return m_ctx.m_skip_pk_sort && m_sort_index->is_clustered();
   }
 
+  /** Check if the clustered index, whose rows arrive in key order, can be
+  built by the parallel scan threads as one sub-tree per scan range. The
+  sub-trees are linked together after the scan. This needs the scan ranges to
+  map to disjoint key ranges of the new index and no row to be rejected as a
+  duplicate, so the primary key must be unchanged and no AUTO_INCREMENT
+  column added.
+  @return true if the sub-trees can be built in parallel. */
+  [[nodiscard]] bool can_build_subtrees() const noexcept;
+
+  /** Start a sub-tree for the scan range that a thread starts to read.
+  @param[in] thread_id          ID of the scan thread.
+  @return DB_SUCCESS or error code. */
+  [[nodiscard]] dberr_t subtree_start(size_t thread_id) noexcept;
+
+  /** Insert the rows that a thread has buffered from its scan range into the
+  range's sub-tree and finish the sub-tree.
+  @param[in,out] cursor         Current scan cursor.
+  @param[in] thread_id          ID of the scan thread.
+  @return DB_SUCCESS or error code. */
+  [[nodiscard]] dberr_t subtree_finish(Cursor &cursor,
+                                       size_t thread_id) noexcept;
+
+  /** Link the sub-trees built by the scan threads into the index.
+  @return DB_SUCCESS or error code. */
+  [[nodiscard]] dberr_t merge_subtrees() noexcept;
+
+  /** @return true if the index is built as one sub-tree per scan range. */
+  [[nodiscard]] bool builds_subtrees() const noexcept {
+    return m_extent_allocator != nullptr;
+  }
+
   /** FTS: Sort and insert the rows read.
   @return DB_SUCCESS or error code. */
   [[nodiscard]] dberr_t fts_sort_and_build() noexcept;
@@ -286,6 +318,13 @@ struct Builder {
 
     /** For compressing operations. It is lazy initialized. */
     mem_heap_t *m_compress_heap;
+
+    /** Sub-tree of the scan range that the thread is reading, see
+    Builder::can_build_subtrees(). */
+    Btree_multi::Btree_load *m_subtree{};
+
+    /** Sub-trees of the scan ranges that the thread has finished. */
+    Btree_multi::Btree_load::Merger::Btree_loads m_subtrees{};
   };
 
   using Allocator = ut::allocator<Thread_ctx *>;
@@ -344,6 +383,17 @@ struct Builder {
   @return DB_SUCCESS or error code. */
   [[nodiscard]] dberr_t bulk_add_row(Cursor &cursor, Row &row, size_t thread_id,
                                      Latch_release &&latch_release) noexcept;
+
+  /** Insert the rows in a thread's key buffer into the thread's sub-tree.
+  @param[in] thread_id          ID of the scan thread.
+  @return DB_SUCCESS or error code. */
+  [[nodiscard]] dberr_t subtree_insert(size_t thread_id) noexcept;
+
+  /** @return memory to use for building the sub-trees; the same as bulk load,
+  see ha_innobase::bulk_load_available_memory(). */
+  [[nodiscard]] static size_t subtree_memory() noexcept {
+    return srv_buf_pool_size / 4;
+  }
 
   /** Clear the heap used for virtual columns. */
   void clear_virtual_heap() noexcept { m_v_heap.clear(); }
@@ -481,6 +531,10 @@ struct Builder {
   /** Cluster index bulk load instance to use, direct insert without
   a file sort. */
   Btree_load *m_btr_load{};
+
+  /** Extent allocator shared by the sub-trees when the clustered index is
+  built as one sub-tree per scan range, nullptr otherwise. */
+  Btree_multi::Bulk_extent_allocator *m_extent_allocator{};
 
   /** Stage per builder. */
   Alter_stage *m_local_stage{};

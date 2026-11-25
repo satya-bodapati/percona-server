@@ -32,6 +32,7 @@ Created 2020-11-01 by Sunny Bains. */
 #include <debug_sync.h>
 #include <mutex>
 #include "clone0api.h"
+#include "ddl0bulk.h"
 #include "ddl0fts.h"
 #include "ddl0impl-builder.h"
 #include "ddl0impl-compare.h"
@@ -641,6 +642,16 @@ Builder::Thread_ctx::~Thread_ctx() noexcept {
   if (m_compress_heap != nullptr) {
     mem_heap_free(m_compress_heap);
   }
+
+  if (m_subtree != nullptr) {
+    /* The scan stopped on an error inside the range. Stop the flusher. */
+    static_cast<void>(m_subtree->finish(true, true));
+    m_subtrees.push_back(m_subtree);
+  }
+
+  for (auto subtree : m_subtrees) {
+    ut::delete_(subtree);
+  }
 }
 
 Builder::Builder(ddl::Context &ctx, Loader &loader, size_t i) noexcept
@@ -675,6 +686,18 @@ Builder::~Builder() noexcept {
   if (m_btr_load != nullptr) {
     ut::delete_(m_btr_load);
     m_btr_load = nullptr;
+  }
+
+  if (m_extent_allocator != nullptr) {
+    /* The sub-trees are freed with the thread states above. */
+    ut::delete_(m_extent_allocator);
+    m_extent_allocator = nullptr;
+
+    auto space = fil_space_acquire_silent(m_index->space);
+    if (space != nullptr) {
+      space->end_bulk_operation();
+      fil_space_release(space);
+    }
   }
 
   /* Normally released by vec_build(); still set if the build errored out
@@ -864,7 +887,55 @@ dberr_t Builder::init(Cursor &cursor, size_t n_threads) noexcept {
     }
   }
 
-  if (is_skip_file_sort()) {
+  if (is_skip_file_sort() && n_threads > 1) {
+    /* Parallel_cursor::scan() reads with more than one thread only when the
+    sub-trees can be built in parallel. */
+    ut_ad(can_build_subtrees());
+    ut_a(m_extent_allocator == nullptr);
+
+    m_extent_allocator = ut::new_withkey<Btree_multi::Bulk_extent_allocator>(
+        ut::make_psi_memory_key(mem_key_ddl));
+
+    auto space = fil_space_acquire_silent(m_index->space);
+
+    if (m_extent_allocator == nullptr || space == nullptr) {
+      if (space != nullptr) {
+        fil_space_release(space);
+      }
+      set_error(m_extent_allocator == nullptr ? DB_OUT_OF_MEMORY
+                                              : DB_TABLESPACE_NOT_FOUND);
+      set_next_state();
+      return get_error();
+    }
+
+    size_t flush_queue_size{};
+    bool allocate_in_pages{};
+    ddl_bulk::Loader::get_queue_size(subtree_memory(), n_threads,
+                                     flush_queue_size, allocate_in_pages);
+
+    /* The new index holds about as much data as the old one. */
+    auto old_index = m_ctx.m_old_table->first_index();
+    mtr_t mtr;
+    mtr.start();
+    mtr_s_lock(dict_index_get_lock(old_index), &mtr, UT_LOCATION_HERE);
+    const auto n_pages = btr_get_size(old_index, BTR_TOTAL_SIZE, &mtr);
+    mtr.commit();
+
+    const size_t data_size =
+        n_pages == ULINT_UNDEFINED ? 0 : n_pages * UNIV_PAGE_SIZE;
+
+    const auto extend_size =
+        m_extent_allocator->init(m_index->table, m_index, m_ctx.m_trx,
+                                 data_size, n_threads, allocate_in_pages);
+
+    space->begin_bulk_operation(extend_size);
+    fil_space_release(space);
+
+    if (extend_size > 0) {
+      m_extent_allocator->start();
+    }
+
+  } else if (is_skip_file_sort()) {
     ut_a(m_btr_load == nullptr);
     const auto trx_id = m_ctx.m_trx->id;
     auto observer = m_ctx.flush_observer();
@@ -883,6 +954,172 @@ dberr_t Builder::init(Cursor &cursor, size_t n_threads) noexcept {
   ut_a(get_state() != State::INIT);
 
   return DB_SUCCESS;
+}
+
+bool Builder::can_build_subtrees() const noexcept {
+  ut_ad(is_skip_file_sort());
+
+  const auto table = m_index->table;
+
+  if (m_ctx.m_col_map == nullptr || m_ctx.m_add_autoinc != ULINT_UNDEFINED ||
+      table->is_temporary() || dict_table_in_shared_tablespace(table) ||
+      dict_tf_get_rec_format(table->flags) != REC_FORMAT_DYNAMIC) {
+    return false;
+  }
+
+  const auto old_index = m_ctx.m_old_table->first_index();
+
+  if (dict_index_is_auto_gen_clust(old_index) ||
+      dict_index_is_auto_gen_clust(m_index)) {
+    return false;
+  }
+
+  const auto n_uniq = dict_index_get_n_unique(m_index);
+
+  if (n_uniq != dict_index_get_n_unique(old_index)) {
+    return false;
+  }
+
+  for (size_t i = 0; i < n_uniq; ++i) {
+    const auto old_field = old_index->get_field(i);
+    const auto new_field = m_index->get_field(i);
+
+    if (m_ctx.m_col_map[old_field->col->ind] != new_field->col->ind ||
+        old_field->prefix_len != new_field->prefix_len ||
+        old_field->is_ascending != new_field->is_ascending) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+dberr_t Builder::subtree_start(size_t thread_id) noexcept {
+  auto thread_ctx = m_thread_ctxs[thread_id];
+
+  ut_ad(thread_ctx->m_subtree == nullptr);
+  ut_ad(thread_ctx->m_key_buffer->empty());
+
+  size_t flush_queue_size{};
+  bool allocate_in_pages{};
+  ddl_bulk::Loader::get_queue_size(subtree_memory(), m_thread_ctxs.size(),
+                                   flush_queue_size, allocate_in_pages);
+
+  /* The constructor starts the sub-tree's flusher thread. Keep the sub-tree
+  in the thread state, so that finish() stops it even if init() fails. */
+  thread_ctx->m_subtree = ut::new_withkey<Btree_multi::Btree_load>(
+      ut::make_psi_memory_key(mem_key_ddl), m_index, m_ctx.m_trx, thread_id,
+      flush_queue_size, *m_extent_allocator);
+
+  auto err = thread_ctx->m_subtree == nullptr ? DB_OUT_OF_MEMORY
+                                              : thread_ctx->m_subtree->init();
+
+  if (err != DB_SUCCESS) {
+    set_error(err);
+  }
+
+  return get_error();
+}
+
+dberr_t Builder::subtree_insert(size_t thread_id) noexcept {
+  auto thread_ctx = m_thread_ctxs[thread_id];
+  auto subtree = thread_ctx->m_subtree;
+
+  /* Rows are only added between subtree_start() and subtree_finish(). */
+  ut_ad(subtree != nullptr);
+
+  if (subtree == nullptr) {
+    return DB_ERROR;
+  }
+
+  Key_sort_buffer_cursor cursor(this, thread_ctx->m_key_buffer);
+
+  auto err = cursor.open();
+  dtuple_t *dtuple{};
+
+  while (err == DB_SUCCESS && (err = cursor.fetch(dtuple)) == DB_SUCCESS) {
+    err = subtree->insert(dtuple, 0);
+
+    if (err == DB_SUCCESS) {
+      err = cursor.next();
+    }
+  }
+
+  return err == DB_END_OF_INDEX ? DB_SUCCESS : err;
+}
+
+dberr_t Builder::subtree_finish(Cursor &cursor, size_t thread_id) noexcept {
+  auto thread_ctx = m_thread_ctxs[thread_id];
+  auto subtree = thread_ctx->m_subtree;
+
+  if (subtree == nullptr) {
+    /* subtree_start() failed. */
+    return get_error();
+  }
+
+  auto key_buffer = thread_ctx->m_key_buffer;
+  auto err = get_error();
+
+  if (err == DB_SUCCESS && !key_buffer->empty()) {
+    err = key_buffer_sort(thread_id);
+
+    if (err == DB_SUCCESS) {
+      err = insert_direct(cursor, thread_id);
+    }
+
+    if (err == DB_SUCCESS) {
+      m_ctx.note_max_trx_id(key_buffer->m_index);
+    }
+  }
+
+  key_buffer->clear();
+
+  thread_ctx->m_subtree = nullptr;
+  thread_ctx->m_subtrees.push_back(subtree);
+
+  const auto finish_err = subtree->finish(err != DB_SUCCESS, true);
+
+  if (err == DB_SUCCESS) {
+    err = finish_err;
+  }
+
+  if (err != DB_SUCCESS) {
+    set_error(err);
+  }
+
+  return get_error();
+}
+
+dberr_t Builder::merge_subtrees() noexcept {
+  ut_a(builds_subtrees());
+
+  Btree_multi::Btree_load::Merger::Btree_loads subtrees{};
+
+  for (auto thread_ctx : m_thread_ctxs) {
+    ut_a(thread_ctx->m_subtree == nullptr);
+    subtrees.insert(subtrees.end(), thread_ctx->m_subtrees.begin(),
+                    thread_ctx->m_subtrees.end());
+    thread_ctx->m_subtrees.clear();
+  }
+
+  m_extent_allocator->stop();
+
+  Btree_multi::Btree_load::Merger merger(m_thread_ctxs.size(), subtrees,
+                                         m_index, m_ctx.m_trx);
+
+  /* Orders the sub-trees by their first key, frees the empty ones and links
+  the rest under the index root page. */
+  auto err = merger.merge(true);
+
+  for (auto subtree : subtrees) {
+    ut::delete_(subtree);
+  }
+
+  if (err != DB_SUCCESS) {
+    set_error(err);
+  }
+
+  return get_error();
 }
 
 void Builder::fts_add_doc_id(dfield_t *dst, const dict_field_t *src,
@@ -1378,6 +1615,10 @@ dberr_t Builder::insert_direct(Cursor &cursor, size_t thread_id) noexcept {
     }
   }
 
+  if (builds_subtrees()) {
+    return subtree_insert(thread_id);
+  }
+
   DBUG_EXECUTE_IF("builder_insert_direct_no_builder",
                   { static_cast<void>(handle_error(DB_ERROR)); });
 
@@ -1539,7 +1780,9 @@ dberr_t Builder::add_to_key_buffer(Copy_ctx &ctx,
     return err;
   }
 
-  if (is_skip_file_sort()) {
+  /* The sub-trees are built only when the primary key is unchanged, so the
+  rows cannot have duplicates. */
+  if (is_skip_file_sort() && !builds_subtrees()) {
     ut_a(!key_buffer->empty());
     auto &fields = key_buffer->back();
 
@@ -1596,8 +1839,10 @@ dberr_t Builder::bulk_add_row(Cursor &cursor, Row &row, size_t thread_id,
       }
       /* Need to make room, flush the current key buffer to disk and retry. */
       ut_a(!key_buffer->empty());
-    } else if (unlikely(thread_ctx->m_n_recs == 0 && key_buffer->empty())) {
-      /* Table is empty. */
+    } else if (unlikely(key_buffer->empty() &&
+                        (thread_ctx->m_n_recs == 0 || builds_subtrees()))) {
+      /* Table is empty, or subtree_finish() has already inserted the rows of
+      the thread's last scan range. */
       return DB_END_OF_INDEX;
     }
 
@@ -2156,6 +2401,12 @@ dberr_t Builder::finalize(bool apply_log) noexcept {
 
   dberr_t err = DB_SUCCESS;
   auto space_id = get_space_id();
+
+  if (builds_subtrees()) {
+    /* The sub-tree flushers wrote the leaf extents to the file directly,
+    without redo log. Sync them before MLOG_INDEX_LOAD is written. */
+    fil_flush(space_id);
+  }
 
   Clone_notify notifier(Clone_notify::Type::SPACE_ALTER_INPLACE_BULK, space_id,
                         false);

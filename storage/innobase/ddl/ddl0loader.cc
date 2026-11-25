@@ -460,6 +460,14 @@ dberr_t Loader::scan_and_build_indexes() noexcept {
     /* Close the mtr and release any locks, wait for FTS etc. */
     err = cursor->finish(err);
 
+    /* Link the sub-trees that the scan threads built. Merging reports errors
+    with my_error(), so it runs here in the connection thread. */
+    for (auto builder : m_builders) {
+      if (err == DB_SUCCESS && builder->builds_subtrees()) {
+        err = builder->merge_subtrees();
+      }
+    }
+
     DBUG_EXECUTE_IF("force_virtual_col_build_fail",
                     err = DB_COMPUTE_VALUE_FAILED;);
 

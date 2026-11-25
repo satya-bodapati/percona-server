@@ -201,10 +201,10 @@ bool Loader::Thread_data::set_source_table_data(
                              source_table_data.range.second);
 }
 
-void Loader::get_queue_size(size_t memory, size_t &flush_queue_size,
-                            bool &allocate_in_pages) const {
+void Loader::get_queue_size(size_t memory, size_t n_threads,
+                            size_t &flush_queue_size, bool &allocate_in_pages) {
   allocate_in_pages = false;
-  size_t memory_per_thread = memory / m_num_threads;
+  size_t memory_per_thread = memory / n_threads;
 
   const size_t extent_size = FSP_EXTENT_SIZE * UNIV_PAGE_SIZE;
   const size_t memory_in_extents = memory_per_thread / extent_size;
@@ -235,7 +235,7 @@ dberr_t Loader::begin(const row_prebuilt_t *prebuilt, size_t data_size,
 
   m_queue_size = 2;
   bool in_pages = false;
-  get_queue_size(memory, m_queue_size, in_pages);
+  get_queue_size(memory, m_num_threads, m_queue_size, in_pages);
 
   /* Initialize thread specific data and create sub-tree loaders. */
   for (size_t index = 0; index < m_num_threads; ++index) {

@@ -1,0 +1,167 @@
+SET SESSION innodb_parallel_read_threads = 4;
+SET SESSION cte_max_recursion_depth = 100000;
+#
+# Off-page LOBs, JSON and a primary key with a descending column.
+#
+CREATE TABLE t1 (
+id INT NOT NULL,
+k INT NOT NULL,
+a VARCHAR(100),
+b LONGTEXT,
+c JSON,
+PRIMARY KEY (id, k DESC),
+KEY ka (a)
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 30000)
+SELECT n, n % 3, REPEAT(CHAR(97 + n % 26), n % 100),
+IF(n % 50 = 0, REPEAT('b', 20000 + n), REPEAT('c', n % 300)),
+JSON_OBJECT('n', n, 'pad', REPEAT('j', n % 200))
+FROM seq;
+SELECT COUNT(*), BIT_XOR(CRC32(CONCAT_WS('#', id, k, a, CRC32(b), c))) AS crc FROM t1;
+COUNT(*)	crc
+30000	1217301111
+Pattern "Merging [0-9]+ subtrees created by 4 threads" not found
+ALTER TABLE t1 ENGINE=InnoDB, ALGORITHM=INPLACE;
+SELECT COUNT(*), BIT_XOR(CRC32(CONCAT_WS('#', id, k, a, CRC32(b), c))) AS crc FROM t1;
+COUNT(*)	crc
+30000	1217301111
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# The clustered index was built from more than one sub-tree.
+Pattern "Merging ([2-9]|[1-9][0-9]+) subtrees created by 4 threads" found
+# ADD COLUMN and DROP COLUMN rebuild the table in primary key order.
+ALTER TABLE t1 ADD COLUMN d INT NOT NULL DEFAULT 7, ALGORITHM=INPLACE;
+SELECT COUNT(*), SUM(d) FROM t1;
+COUNT(*)	SUM(d)
+30000	210000
+ALTER TABLE t1 DROP COLUMN d, ALGORITHM=INPLACE;
+SELECT COUNT(*), BIT_XOR(CRC32(CONCAT_WS('#', id, k, a, CRC32(b), c))) AS crc FROM t1;
+COUNT(*)	crc
+30000	1217301111
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+# OPTIMIZE TABLE.
+OPTIMIZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	optimize	note	Table does not support optimize, doing recreate + analyze instead
+test.t1	optimize	status	OK
+SELECT COUNT(*), BIT_XOR(CRC32(CONCAT_WS('#', id, k, a, CRC32(b), c))) AS crc FROM t1;
+COUNT(*)	crc
+30000	1217301111
+#
+# Online rebuild with concurrent DML. t2 gets the same DML without a
+# rebuild.
+#
+CREATE TABLE t2 LIKE t1;
+INSERT INTO t2 SELECT * FROM t1;
+SET DEBUG_SYNC = 'ddl_after_scan SIGNAL scanned WAIT_FOR dml_done';
+ALTER TABLE t1 ENGINE=InnoDB, ALGORITHM=INPLACE, LOCK=NONE;
+SET DEBUG_SYNC = 'now WAIT_FOR scanned';
+DELETE FROM t1 WHERE id BETWEEN 100 AND 200;
+DELETE FROM t2 WHERE id BETWEEN 100 AND 200;
+UPDATE t1 SET b = REPEAT('u', 30000) WHERE id % 1000 = 0;
+UPDATE t2 SET b = REPEAT('u', 30000) WHERE id % 1000 = 0;
+INSERT INTO t1 VALUES (40000, 1, 'new', REPEAT('n', 25000), '{"n": 40000}');
+INSERT INTO t2 VALUES (40000, 1, 'new', REPEAT('n', 25000), '{"n": 40000}');
+SET DEBUG_SYNC = 'now SIGNAL dml_done';
+SET DEBUG_SYNC = 'RESET';
+SELECT COUNT(*), BIT_XOR(CRC32(CONCAT_WS('#', id, k, a, CRC32(b), c))) AS crc FROM t1;
+COUNT(*)	crc
+29900	3566829578
+SELECT COUNT(*), BIT_XOR(CRC32(CONCAT_WS('#', id, k, a, CRC32(b), c))) AS crc FROM t2;
+COUNT(*)	crc
+29900	3566829578
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t2;
+#
+# An error while the scan threads build the sub-trees leaves the table
+# unchanged.
+#
+# The scan threads take the global debug settings.
+SET GLOBAL DEBUG = '+d,builder_add_row_trigger_error';
+ALTER TABLE t1 ENGINE=InnoDB, ALGORITHM=INPLACE;
+ERROR HY000: Creating index 'PRIMARY' required more than 'innodb_online_alter_log_max_size' bytes of modification log. Please try again.
+SET GLOBAL DEBUG = '-d,builder_add_row_trigger_error';
+SELECT COUNT(*), BIT_XOR(CRC32(CONCAT_WS('#', id, k, a, CRC32(b), c))) AS crc FROM t1;
+COUNT(*)	crc
+29900	3566829578
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+#
+# Empty table.
+#
+CREATE TABLE t3 (id INT PRIMARY KEY, b LONGTEXT) ENGINE=InnoDB;
+ALTER TABLE t3 ENGINE=InnoDB, ALGORITHM=INPLACE;
+SELECT COUNT(*) FROM t3;
+COUNT(*)
+0
+CHECK TABLE t3;
+Table	Op	Msg_type	Msg_text
+test.t3	check	status	OK
+DROP TABLE t3;
+#
+# Rebuilds that build the clustered index with one thread.
+#
+# Dropping the last primary key column keeps the order and reports the
+# duplicate row.
+CREATE TABLE t4 (id INT NOT NULL, k INT NOT NULL, b TEXT,
+PRIMARY KEY (id, k)) ENGINE=InnoDB;
+INSERT INTO t4
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 20000)
+SELECT n, 1, REPEAT('x', n % 500) FROM seq;
+INSERT INTO t4 VALUES (15000, 2, 'dup');
+ALTER TABLE t4 DROP PRIMARY KEY, ADD PRIMARY KEY (id), ALGORITHM=INPLACE;
+ERROR 23000: Duplicate entry '15000' for key 't4.PRIMARY'
+DELETE FROM t4 WHERE k = 2;
+ALTER TABLE t4 DROP PRIMARY KEY, ADD PRIMARY KEY (id), ALGORITHM=INPLACE;
+SELECT COUNT(*), BIT_XOR(CRC32(CONCAT_WS('#', id, k, b))) AS crc FROM t4;
+COUNT(*)	crc
+20000	530646861
+CHECK TABLE t4;
+Table	Op	Msg_type	Msg_text
+test.t4	check	status	OK
+# Added AUTO_INCREMENT column gets values in primary key order.
+ALTER TABLE t4 ADD COLUMN ai INT NOT NULL AUTO_INCREMENT UNIQUE, ALGORITHM=INPLACE;
+SELECT COUNT(*) FROM t4 WHERE ai <> id;
+COUNT(*)
+0
+DROP TABLE t4;
+# No primary key, and ROW_FORMAT=COMPACT.
+CREATE TABLE t5 (id INT NOT NULL, b TEXT) ENGINE=InnoDB;
+INSERT INTO t5
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 20000)
+SELECT n, REPEAT('x', n % 500) FROM seq;
+ALTER TABLE t5 ENGINE=InnoDB, ALGORITHM=INPLACE;
+SELECT COUNT(*), BIT_XOR(CRC32(CONCAT_WS('#', id, b))) AS crc FROM t5;
+COUNT(*)	crc
+20000	889748938
+ALTER TABLE t5 ADD PRIMARY KEY (id), ROW_FORMAT=COMPACT, ALGORITHM=INPLACE;
+ALTER TABLE t5 ENGINE=InnoDB, ALGORITHM=INPLACE;
+SELECT COUNT(*), BIT_XOR(CRC32(CONCAT_WS('#', id, b))) AS crc FROM t5;
+COUNT(*)	crc
+20000	889748938
+CHECK TABLE t5;
+Table	Op	Msg_type	Msg_text
+test.t5	check	status	OK
+DROP TABLE t5;
+#
+# Crash right after the rebuild. Recovery starts from a checkpoint before
+# the rebuild.
+#
+SET GLOBAL innodb_purge_stop_now = ON;
+SET GLOBAL innodb_checkpoint_disabled = ON;
+ALTER TABLE t1 ENGINE=InnoDB, ALGORITHM=INPLACE;
+# Kill and restart
+SELECT COUNT(*), BIT_XOR(CRC32(CONCAT_WS('#', id, k, a, CRC32(b), c))) AS crc FROM t1;
+COUNT(*)	crc
+29900	3566829578
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;

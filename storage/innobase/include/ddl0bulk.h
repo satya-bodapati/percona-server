@@ -365,6 +365,15 @@ class Loader {
   /** @return index name where the data is being loaded. */
   const char *get_index_name() const { return m_index->name(); }
 
+  /** Calculate the flush queue size to be used based on the available memory.
+  @param[in] memory total buffer pool memory to use
+  @param[in] n_threads number of threads loading sub-trees
+  @param[out] flush_queue_size calculated queue size
+  @param[out] allocate_in_pages true if need to allocate in pages
+                                false if need to allocate in extents */
+  static void get_queue_size(size_t memory, size_t n_threads,
+                             size_t &flush_queue_size, bool &allocate_in_pages);
+
  private:
   /** Ensure that dict_sys->row_id is greater than max rowid used in bulk
   load of this table.
@@ -374,14 +383,6 @@ class Loader {
   /** Merge the sub-trees to build the cluster index.
   @return innodb error code. */
   dberr_t merge_subtrees();
-
-  /** Calculate the flush queue size to be used based on the available memory.
-  @param[in] memory total buffer pool memory to use
-  @param[out] flush_queue_size calculated queue size
-  @param[out] allocate_in_pages true if need to allocate in pages
-                                false if need to allocate in extents */
-  void get_queue_size(size_t memory, size_t &flush_queue_size,
-                      bool &allocate_in_pages) const;
 
  private:
   /** Number of threads for bulk loading. */

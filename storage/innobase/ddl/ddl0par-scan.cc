@@ -109,11 +109,11 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
 
     if (use_n_threads > 1) {
       for (auto &builder : builders) {
-        if (builder->is_skip_file_sort() || builder->is_spatial_index()) {
-          /* Note: Parallel scan will break the order. If in the future we
-          decide to force a parallel scan then we will need to force a file
-          sort later. Or, figure out how to "stitch" the lists together after
-          the dumping the rows from the scan. */
+        if ((builder->is_skip_file_sort() && !builder->can_build_subtrees()) ||
+            builder->is_spatial_index()) {
+          /* Note: Parallel scan will break the order. A clustered index
+          that skips the file sort is built in parallel only as one sub-tree
+          per scan range, which are linked after the scan. */
           m_single_threaded_mode = true;
           break;
         }
@@ -294,6 +294,16 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
         thd->variables.sql_mode = caller_thd->variables.sql_mode;
         ut_d(Sync_point::clone_from(caller_thd);)
       }
+    } else if (thread_ctx->get_state() == Parallel_reader::State::CTX) {
+      /* The thread starts reading a new key range. */
+      for (auto builder : builders) {
+        if (builder->builds_subtrees()) {
+          const auto err = builder->subtree_start(thread_ctx->m_thread_id);
+          if (err != DB_SUCCESS) {
+            return err;
+          }
+        }
+      }
     }
     return DB_SUCCESS;
   });
@@ -367,7 +377,14 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
       }
 
       case Parallel_reader::State::CTX:
-        return DB_SUCCESS;
+        /* The thread finished reading a key range. No page latches are held
+        here, the range's mtr is committed. */
+        for (auto builder : builders) {
+          if (err == DB_SUCCESS && builder->builds_subtrees()) {
+            err = builder->subtree_finish(*this, thread_id);
+          }
+        }
+        return err;
 
       case Parallel_reader::State::UNKNOWN:
         ut_error;

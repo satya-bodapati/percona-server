@@ -1,0 +1,165 @@
+#
+# A table rebuild that keeps the primary key order (OPTIMIZE TABLE,
+# ALTER TABLE ... ENGINE=InnoDB, ADD/DROP COLUMN) builds the clustered index
+# with the parallel scan threads, one sub-tree per scan range, and links the
+# sub-trees after the scan. Rebuilds that change the primary key, add an
+# AUTO_INCREMENT column, have no primary key or use another row format than
+# DYNAMIC build it with one thread.
+#
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/have_innodb_16k.inc
+
+--let $error_log= $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let SEARCH_FILE= $error_log
+
+SET SESSION innodb_parallel_read_threads = 4;
+SET SESSION cte_max_recursion_depth = 100000;
+
+--echo #
+--echo # Off-page LOBs, JSON and a primary key with a descending column.
+--echo #
+CREATE TABLE t1 (
+  id INT NOT NULL,
+  k INT NOT NULL,
+  a VARCHAR(100),
+  b LONGTEXT,
+  c JSON,
+  PRIMARY KEY (id, k DESC),
+  KEY ka (a)
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
+
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 30000)
+  SELECT n, n % 3, REPEAT(CHAR(97 + n % 26), n % 100),
+         IF(n % 50 = 0, REPEAT('b', 20000 + n), REPEAT('c', n % 300)),
+         JSON_OBJECT('n', n, 'pad', REPEAT('j', n % 200))
+  FROM seq;
+
+let $checksum = SELECT COUNT(*), BIT_XOR(CRC32(CONCAT_WS('#', id, k, a, CRC32(b), c))) AS crc FROM;
+
+--eval $checksum t1
+
+--let SEARCH_PATTERN= Merging [0-9]+ subtrees created by 4 threads
+--source include/search_pattern.inc
+
+ALTER TABLE t1 ENGINE=InnoDB, ALGORITHM=INPLACE;
+
+--eval $checksum t1
+CHECK TABLE t1;
+--echo # The clustered index was built from more than one sub-tree.
+--let SEARCH_PATTERN= Merging ([2-9]|[1-9][0-9]+) subtrees created by 4 threads
+--source include/search_pattern.inc
+
+--echo # ADD COLUMN and DROP COLUMN rebuild the table in primary key order.
+ALTER TABLE t1 ADD COLUMN d INT NOT NULL DEFAULT 7, ALGORITHM=INPLACE;
+SELECT COUNT(*), SUM(d) FROM t1;
+ALTER TABLE t1 DROP COLUMN d, ALGORITHM=INPLACE;
+--eval $checksum t1
+CHECK TABLE t1;
+
+--echo # OPTIMIZE TABLE.
+OPTIMIZE TABLE t1;
+--eval $checksum t1
+
+--echo #
+--echo # Online rebuild with concurrent DML. t2 gets the same DML without a
+--echo # rebuild.
+--echo #
+CREATE TABLE t2 LIKE t1;
+INSERT INTO t2 SELECT * FROM t1;
+
+--connect (con1, localhost, root,,)
+
+--connection default
+SET DEBUG_SYNC = 'ddl_after_scan SIGNAL scanned WAIT_FOR dml_done';
+--send ALTER TABLE t1 ENGINE=InnoDB, ALGORITHM=INPLACE, LOCK=NONE
+
+--connection con1
+SET DEBUG_SYNC = 'now WAIT_FOR scanned';
+DELETE FROM t1 WHERE id BETWEEN 100 AND 200;
+DELETE FROM t2 WHERE id BETWEEN 100 AND 200;
+UPDATE t1 SET b = REPEAT('u', 30000) WHERE id % 1000 = 0;
+UPDATE t2 SET b = REPEAT('u', 30000) WHERE id % 1000 = 0;
+INSERT INTO t1 VALUES (40000, 1, 'new', REPEAT('n', 25000), '{"n": 40000}');
+INSERT INTO t2 VALUES (40000, 1, 'new', REPEAT('n', 25000), '{"n": 40000}');
+SET DEBUG_SYNC = 'now SIGNAL dml_done';
+
+--connection default
+--reap
+SET DEBUG_SYNC = 'RESET';
+--eval $checksum t1
+--eval $checksum t2
+CHECK TABLE t1;
+DROP TABLE t2;
+
+--echo #
+--echo # An error while the scan threads build the sub-trees leaves the table
+--echo # unchanged.
+--echo #
+--echo # The scan threads take the global debug settings.
+SET GLOBAL DEBUG = '+d,builder_add_row_trigger_error';
+--error ER_INNODB_ONLINE_LOG_TOO_BIG
+ALTER TABLE t1 ENGINE=InnoDB, ALGORITHM=INPLACE;
+SET GLOBAL DEBUG = '-d,builder_add_row_trigger_error';
+--eval $checksum t1
+CHECK TABLE t1;
+
+--echo #
+--echo # Empty table.
+--echo #
+CREATE TABLE t3 (id INT PRIMARY KEY, b LONGTEXT) ENGINE=InnoDB;
+ALTER TABLE t3 ENGINE=InnoDB, ALGORITHM=INPLACE;
+SELECT COUNT(*) FROM t3;
+CHECK TABLE t3;
+DROP TABLE t3;
+
+--echo #
+--echo # Rebuilds that build the clustered index with one thread.
+--echo #
+--echo # Dropping the last primary key column keeps the order and reports the
+--echo # duplicate row.
+CREATE TABLE t4 (id INT NOT NULL, k INT NOT NULL, b TEXT,
+                 PRIMARY KEY (id, k)) ENGINE=InnoDB;
+INSERT INTO t4
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 20000)
+  SELECT n, 1, REPEAT('x', n % 500) FROM seq;
+INSERT INTO t4 VALUES (15000, 2, 'dup');
+--error ER_DUP_ENTRY
+ALTER TABLE t4 DROP PRIMARY KEY, ADD PRIMARY KEY (id), ALGORITHM=INPLACE;
+DELETE FROM t4 WHERE k = 2;
+ALTER TABLE t4 DROP PRIMARY KEY, ADD PRIMARY KEY (id), ALGORITHM=INPLACE;
+SELECT COUNT(*), BIT_XOR(CRC32(CONCAT_WS('#', id, k, b))) AS crc FROM t4;
+CHECK TABLE t4;
+
+--echo # Added AUTO_INCREMENT column gets values in primary key order.
+ALTER TABLE t4 ADD COLUMN ai INT NOT NULL AUTO_INCREMENT UNIQUE, ALGORITHM=INPLACE;
+SELECT COUNT(*) FROM t4 WHERE ai <> id;
+DROP TABLE t4;
+
+--echo # No primary key, and ROW_FORMAT=COMPACT.
+CREATE TABLE t5 (id INT NOT NULL, b TEXT) ENGINE=InnoDB;
+INSERT INTO t5
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 20000)
+  SELECT n, REPEAT('x', n % 500) FROM seq;
+ALTER TABLE t5 ENGINE=InnoDB, ALGORITHM=INPLACE;
+SELECT COUNT(*), BIT_XOR(CRC32(CONCAT_WS('#', id, b))) AS crc FROM t5;
+ALTER TABLE t5 ADD PRIMARY KEY (id), ROW_FORMAT=COMPACT, ALGORITHM=INPLACE;
+ALTER TABLE t5 ENGINE=InnoDB, ALGORITHM=INPLACE;
+SELECT COUNT(*), BIT_XOR(CRC32(CONCAT_WS('#', id, b))) AS crc FROM t5;
+CHECK TABLE t5;
+DROP TABLE t5;
+
+--echo #
+--echo # Crash right after the rebuild. Recovery starts from a checkpoint before
+--echo # the rebuild.
+--echo #
+SET GLOBAL innodb_purge_stop_now = ON;
+SET GLOBAL innodb_checkpoint_disabled = ON;
+ALTER TABLE t1 ENGINE=InnoDB, ALGORITHM=INPLACE;
+--source include/kill_and_restart_mysqld.inc
+--eval $checksum t1
+CHECK TABLE t1;
+
+DROP TABLE t1;
+--disconnect con1
