@@ -108,7 +108,12 @@ Bulk_flusher::~Bulk_flusher() {
 
 void Bulk_flusher::wait_to_stop() {
   ut_ad(m_flush_thread.joinable());
-  m_stop.store(true);
+  {
+    /* Set under m_mutex so that wait() cannot miss the notification. */
+    std::lock_guard lk(m_mutex);
+    m_stop.store(true);
+  }
+  m_condition.notify_one();
   m_flush_thread.join();
   ut_ad(m_priv_queue.empty());
   ut_ad(m_queue.empty());
@@ -285,7 +290,7 @@ void Bulk_flusher::wait() {
   {
     std::unique_lock lk(m_mutex);
     m_condition.wait_for(lk, s_sleep_duration,
-                         [&]() { return !m_queue.empty(); });
+                         [&]() { return !m_queue.empty() || m_stop.load(); });
   }
   auto end_time = std::chrono::steady_clock::now();
 
