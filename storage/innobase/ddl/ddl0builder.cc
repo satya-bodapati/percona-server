@@ -1009,6 +1009,11 @@ dberr_t Builder::bulk_build(Merge_cursor &cursor,
   Btree_multi::Btree_load loader(m_index, m_ctx.m_trx, m_id, flush_queue_size,
                                  allocator);
 
+  /* The merge cursor returns the rows in order and reports duplicates. Its
+  check lets a unique index have many NULL keys, which the order check of
+  the loader would report as duplicates. */
+  loader.disable_check_order();
+
   auto err = loader.init();
 
   if (err == DB_SUCCESS && total_rows > 0) {
