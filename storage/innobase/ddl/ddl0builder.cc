@@ -941,14 +941,106 @@ dberr_t Builder::init(Cursor &cursor, size_t n_threads) noexcept {
   return DB_SUCCESS;
 }
 
+bool Builder::use_bulk_loader() const noexcept {
+  const auto table = m_index->table;
+
+  return !table->is_temporary() && !dict_table_in_shared_tablespace(table) &&
+         dict_tf_get_rec_format(table->flags) == REC_FORMAT_DYNAMIC &&
+         !table->has_row_versions() && !table->has_instant_cols();
+}
+
+dberr_t Builder::bulk_insert(Btree_load::Cursor &cursor,
+                             Btree_multi::Btree_load &loader) noexcept {
+  dberr_t err;
+  dtuple_t *dtuple{};
+  uint64_t interrupt_check{};
+  auto observer = m_ctx.m_trx->flush_observer;
+
+  while ((err = cursor.fetch(dtuple)) == DB_SUCCESS) {
+    if (cursor.duplicates_detected()) {
+      err = DB_DUPLICATE_KEY;
+      break;
+    }
+
+    err = loader.insert(dtuple, 0);
+
+    if (err == DB_BULK_TOO_BIG_RECORD) {
+      /* No field could be stored off-page to fit the record in a page. */
+      err = DB_TOO_BIG_RECORD;
+    }
+
+    if (err != DB_SUCCESS) {
+      break;
+    }
+
+    err = cursor.next();
+
+    if (err != DB_SUCCESS) {
+      break;
+    }
+
+    IF_ENABLED("ddl_btree_load_interrupt",
+               interrupt_check = TRX_INTERRUPTED_CHECK;);
+
+    if (!(interrupt_check++ % TRX_INTERRUPTED_CHECK) &&
+        observer->check_interrupted()) {
+      err = DB_INTERRUPTED;
+      break;
+    }
+  }
+
+  return err == DB_END_OF_INDEX ? DB_SUCCESS : err;
+}
+
+dberr_t Builder::bulk_build(Merge_cursor &cursor,
+                            uint64_t total_rows) noexcept {
+  /* Allocate the pages one by one, as Btree_load does, so that the index
+  takes the same space. */
+  Btree_multi::Bulk_extent_allocator allocator;
+  static_cast<void>(
+      allocator.init(m_index->table, m_index, m_ctx.m_trx, 0, 1, true));
+
+  size_t flush_queue_size{};
+  bool allocate_in_pages{};
+  ddl_bulk::Loader::get_queue_size(subtree_memory(), m_ctx.m_indexes.size(),
+                                   flush_queue_size, allocate_in_pages);
+
+  /* The constructor starts the flusher thread, finish() stops it. */
+  Btree_multi::Btree_load loader(m_index, m_ctx.m_trx, m_id, flush_queue_size,
+                                 allocator);
+
+  auto err = loader.init();
+
+  if (err == DB_SUCCESS && total_rows > 0) {
+    err = cursor.open();
+
+    if (err == DB_SUCCESS) {
+      err = bulk_insert(cursor, loader);
+      ut_ad(err != DB_SUCCESS || total_rows == cursor.get_n_rows());
+    } else if (err == DB_END_OF_INDEX) {
+      err = DB_SUCCESS;
+    }
+
+    if (err == DB_SUCCESS && cursor.get_err() != DB_END_OF_INDEX) {
+      err = cursor.get_err();
+    }
+  }
+
+  if (err == DB_SUCCESS) {
+    /* Concurrent DML can abort the online build of the index. */
+    err = m_ctx.check_state_of_online_build_log();
+  }
+
+  const auto finish_err = loader.finish(err != DB_SUCCESS, false);
+
+  return err == DB_SUCCESS ? finish_err : err;
+}
+
 bool Builder::can_build_subtrees() const noexcept {
   ut_ad(is_skip_file_sort());
 
-  const auto table = m_index->table;
-
   if (m_ctx.m_col_map == nullptr || m_ctx.m_add_autoinc != ULINT_UNDEFINED ||
-      table->is_temporary() || dict_table_in_shared_tablespace(table) ||
-      dict_tf_get_rec_format(table->flags) != REC_FORMAT_DYNAMIC) {
+      !use_bulk_loader()) {
     return false;
   }
 
@@ -1020,22 +1112,8 @@ dberr_t Builder::subtree_insert(size_t thread_id) noexcept {
   Key_sort_buffer_cursor cursor(this, thread_ctx->m_key_buffer);
 
   auto err = cursor.open();
-  dtuple_t *dtuple{};
 
-  while (err == DB_SUCCESS && (err = cursor.fetch(dtuple)) == DB_SUCCESS) {
-    err = subtree->insert(dtuple, 0);
-
-    if (err == DB_BULK_TOO_BIG_RECORD) {
-      /* No field could be stored off-page to fit the record in a page. */
-      err = DB_TOO_BIG_RECORD;
-    }
-
-    if (err == DB_SUCCESS) {
-      err = cursor.next();
-    }
-  }
-
-  return err == DB_END_OF_INDEX ? DB_SUCCESS : err;
+  return err == DB_SUCCESS ? bulk_insert(cursor, *subtree) : err;
 }
 
 dberr_t Builder::subtree_finish(Cursor &cursor, size_t thread_id) noexcept {
@@ -2203,6 +2281,22 @@ dberr_t Builder::btree_build() noexcept {
     total_rows += thread_ctx->m_n_recs;
   }
 
+  if (use_bulk_loader()) {
+    err = bulk_build(cursor, total_rows);
+
+    if (err != DB_SUCCESS) {
+      set_error(err);
+    }
+
+    set_next_state();
+
+    if (err == DB_SUCCESS) {
+      m_loader.add_task(Loader::Task{this});
+    }
+
+    return get_error();
+  }
+
   Btree_load btr_load(m_index, m_ctx.m_trx->id, observer);
 
   dberr_t cursor_err{DB_SUCCESS};
@@ -2408,11 +2502,10 @@ dberr_t Builder::finalize(bool apply_log) noexcept {
   dberr_t err = DB_SUCCESS;
   auto space_id = get_space_id();
 
-  if (builds_subtrees()) {
-    /* The sub-tree flushers wrote the leaf extents to the file directly,
-    without redo log. Sync them before MLOG_INDEX_LOAD is written. */
-    fil_flush(space_id);
-  }
+  /* The index pages were written without redo log, by the flush observer or
+  directly to the file by the Btree_multi flushers. Sync them before
+  MLOG_INDEX_LOAD is written. */
+  fil_flush(space_id);
 
   Clone_notify notifier(Clone_notify::Type::SPACE_ALTER_INPLACE_BULK, space_id,
                         false);

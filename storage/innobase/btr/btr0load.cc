@@ -1297,10 +1297,6 @@ dberr_t Btree_load::finish(dberr_t err) noexcept {
   return err;
 }
 
-/** The transaction interrupted check is expensive, we check after this
-many rows. */
-static constexpr uint64_t TRX_INTERRUPTED_CHECK = 25000;
-
 dberr_t Btree_load::build(Cursor &cursor) noexcept {
   dberr_t err;
   dtuple_t *dtuple{};

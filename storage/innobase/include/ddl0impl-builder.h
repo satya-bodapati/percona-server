@@ -47,6 +47,7 @@ namespace ddl {
 // Forward declaration.
 struct Copy_ctx;
 struct File_cursor;
+struct Merge_cursor;
 class RTree_inserter;
 
 /** For loading indexes. */
@@ -388,6 +389,24 @@ struct Builder {
   @param[in] thread_id          ID of the scan thread.
   @return DB_SUCCESS or error code. */
   [[nodiscard]] dberr_t subtree_insert(size_t thread_id) noexcept;
+
+  /** @return true if the index can be built with Btree_multi::Btree_load,
+  whose flusher writes the leaf pages to the file during the build. */
+  [[nodiscard]] bool use_bulk_loader() const noexcept;
+
+  /** Insert the rows of a cursor into a Btree_multi::Btree_load.
+  @param[in,out] cursor         Rows in index order.
+  @param[in,out] loader         Loader of the index or of a sub-tree.
+  @return DB_SUCCESS or error code. */
+  [[nodiscard]] dberr_t bulk_insert(Btree_load::Cursor &cursor,
+                                    Btree_multi::Btree_load &loader) noexcept;
+
+  /** Build the index from the sorted files with Btree_multi::Btree_load.
+  @param[in,out] cursor         Merges the sorted files.
+  @param[in] total_rows         Number of rows in the files.
+  @return DB_SUCCESS or error code. */
+  [[nodiscard]] dberr_t bulk_build(Merge_cursor &cursor,
+                                   uint64_t total_rows) noexcept;
 
   /** @return memory to use for building the sub-trees; the same as bulk load,
   see ha_innobase::bulk_load_available_memory(). */

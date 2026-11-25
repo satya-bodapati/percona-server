@@ -45,6 +45,10 @@ this program; if not, write to the Free Software Foundation, Inc.,
 // Forward declaration.
 class Page_load;
 
+/** The transaction interrupted check is expensive, we check after this
+many rows. */
+constexpr uint64_t TRX_INTERRUPTED_CHECK = 25000;
+
 /** @note We should call commit(false) for a Page_load object, which is not in
 m_page_loaders after page_commit, and we will commit or abort Page_load
 objects in function "finish". */
