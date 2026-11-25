@@ -6,6 +6,9 @@
 
 --enable_connect_log
 --connect (con1, localhost, root,,)
+--echo # The debug sync points and ddl_buf_add_two act on this session's
+--echo # thread, so the rebuild scans the table in this thread.
+SET SESSION innodb_parallel_read_threads = 1;
 
 --DELIMITER //
 
