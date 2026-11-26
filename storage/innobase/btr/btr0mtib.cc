@@ -3770,6 +3770,10 @@ void Btree_load::split_leftmost(buf_block_t *&block, size_t level,
       split_leftmost(parent_block, 1 + level, new_node_ptr, mtr, highest_level);
     } else {
       btr_set_min_rec_mark(inserted, mtr);
+      /* The node pointer of the full block is no longer the first record. It
+      has the minimum record mark if split_leftmost() above put it first in a
+      new parent page. */
+      btr_unset_min_rec_mark(parent_block, page_rec_get_next(inserted), mtr);
     }
   }
 

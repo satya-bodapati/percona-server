@@ -1468,6 +1468,10 @@ dberr_t Parallel_reader::Scan_ctx::partition(
   /* Leaf pages in the last range, for m_config.m_min_leaves. */
   size_t n_leaves{};
 
+  /* Partition down to the leaf pages. */
+  DBUG_EXECUTE_IF("parallel_reader_range_per_leaf",
+                  split_level = std::numeric_limits<size_t>::max(););
+
   err = create_ranges(scan_range, m_config.m_index->page, 0, split_level,
                       ranges, n_leaves, &mtr);
 
@@ -1478,6 +1482,16 @@ dberr_t Parallel_reader::Scan_ctx::partition(
     ranges.pop_back();
     ranges.back().second = last.second;
   }
+
+  /* Read the second half of the ranges as one range. */
+  DBUG_EXECUTE_IF("parallel_reader_join_tail_ranges", {
+    const auto n_keep = (ranges.size() + 1) / 2;
+    while (ranges.size() > n_keep) {
+      const auto last = ranges.back();
+      ranges.pop_back();
+      ranges.back().second = last.second;
+    }
+  });
 
   if (err == DB_SUCCESS && scan_range.m_end != nullptr && !ranges.empty()) {
     auto &iter = ranges.back().second;

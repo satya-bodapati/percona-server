@@ -1,0 +1,39 @@
+#
+# A rebuild with parallel scan threads builds one sub-tree per scan range
+# and links the sub-trees into one tree. Here the second half of the ranges
+# is read as one range, so its sub-tree of kb is two levels taller than the
+# sub-trees on its left. Their node pointers go into the leftmost page of the
+# tall sub-tree below its root. When that page is full, a new leftmost page
+# starts, and the node pointer of the full page goes back into the parent
+# with the key of its new first record. The keys get shorter as they grow, so
+# that node pointer can be longer than the one it replaces and need a new
+# parent page too.
+#
+--source include/have_debug.inc
+--source include/have_innodb_16k.inc
+
+CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY,
+                 b VARCHAR(3000) CHARACTER SET latin1 NOT NULL, KEY kb (b))
+  ENGINE=InnoDB ROW_FORMAT=DYNAMIC STATS_AUTO_RECALC=0;
+
+SET SESSION cte_max_recursion_depth = 100000;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 40000)
+  SELECT n, CONCAT(LPAD(n, 8, '0'), REPEAT('x', 2980 - FLOOR(n * 2800 / 40000)))
+  FROM seq;
+
+SET @old_fill_factor = @@GLOBAL.innodb_fill_factor;
+SET GLOBAL innodb_fill_factor = 100;
+SET SESSION debug = '+d,parallel_reader_range_per_leaf,parallel_reader_join_tail_ranges';
+SET SESSION innodb_parallel_read_threads = 4;
+OPTIMIZE TABLE t1;
+SET SESSION debug = '-d,parallel_reader_range_per_leaf,parallel_reader_join_tail_ranges';
+SET GLOBAL innodb_fill_factor = @old_fill_factor;
+
+CHECK TABLE t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb);
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b < LPAD(20000, 8, '0');
+SELECT id FROM t1 FORCE INDEX (kb) WHERE b LIKE CONCAT(LPAD(2, 8, '0'), '%');
+SELECT id FROM t1 FORCE INDEX (kb) WHERE b LIKE CONCAT(LPAD(39999, 8, '0'), '%');
+
+DROP TABLE t1;
