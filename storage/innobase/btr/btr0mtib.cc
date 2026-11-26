@@ -3107,6 +3107,16 @@ dberr_t Btree_load::Merger::subtree_link_levels(size_t &highest_level) {
 #endif /* UNIV_DEBUG */
 
         ut::delete_(subtree_1);
+
+        /* The sub-tree on the left of subtree_1 is now next to subtree_2. If
+        it is shorter, subtree_2 takes it in this pass too, so that a tall
+        sub-tree takes all the shorter sub-trees on its left in one pass and
+        not in one pass each. */
+        if (!to_list->empty() &&
+            to_list->back()->get_root_level() < subtree_2->get_root_level()) {
+          from_list->push_front(to_list->back());
+          to_list->pop_back();
+        }
       } else if (level_1 > level_2) {
         /* Left subtree is taller. */
         const page_no_t l_page_no = subtree_1->m_last_page_nos[level_2 + 1];
