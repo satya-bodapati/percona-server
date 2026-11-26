@@ -166,7 +166,8 @@ Table	Op	Msg_type	Msg_text
 test.t5	optimize	note	Table does not support optimize, doing recreate + analyze instead
 test.t5	optimize	status	OK
 SET SESSION innodb_parallel_read_threads = 4;
-Pattern "Allocate by Extent" found
+# The rebuilds with two threads are the ones of t5.
+Pattern "Allocate by Extent.*threads: 2 Extend" found
 SELECT (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t5 FORCE INDEX (PRIMARY)) = (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t5 FORCE INDEX (kb)) AS same_entries, (SELECT COUNT(*) FROM t5 FORCE INDEX (PRIMARY) WHERE b BETWEEN 'k' AND 'p') = (SELECT COUNT(*) FROM t5 FORCE INDEX (kb) WHERE b BETWEEN 'k' AND 'p') AS same_range, (SELECT COUNT(*) FROM t5) AS n_rows;
 same_entries	same_range	n_rows
 1	1	60000

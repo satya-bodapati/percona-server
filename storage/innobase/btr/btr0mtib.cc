@@ -2266,26 +2266,19 @@ uint64_t Bulk_extent_allocator::init(dict_table_t *table, dict_index_t *index,
   m_trx = trx;
   auto size_extent = size / (FSP_EXTENT_SIZE * UNIV_PAGE_SIZE);
 
-  /* We try to cache about eight extents per thread. The value is further
-  adjusted based on total load size. */
-  size_t cache_size = 8 * num_threads;
-
-  /* Cached extent would cause extra allocation. We define two limits here.
-  cache_min: About 1.5% of actual data size to load */
-  size_t cache_min = size_extent / 64;
-  cache_size = std::max(cache_min, cache_size);
-
-  /* cache_max: For small data loads, we allow not beyond 6% */
-  size_t cache_max = 4 * cache_min;
-  cache_size = std::min(cache_max, cache_size);
+  /* Cache two extents per thread: the allocator thread refills the cache when
+  half of it is taken. The file is extended for every cached extent, and the
+  extents that no loader takes are given back to the segment only in stop(),
+  so a larger cache leaves more free space in the file. */
+  const size_t cache_size =
+      std::min(std::max(size_t{4}, 2 * num_threads), S_MAX_RANGES);
 
   /* Switch to page based allocation without cache if there is less data than
-  two extents per thread. */
-  if (in_pages || size_extent < 2 * num_threads || size_extent < 4) {
+  the cache holds. */
+  if (in_pages || size_extent < cache_size) {
     std::ostringstream mesg_strm_1;
-    mesg_strm_1 << "Innodb:  Allocate by Page, cache: " << cache_size
-                << " [min: " << cache_min << ", max: " << cache_max
-                << "] threads: " << num_threads;
+    mesg_strm_1 << "Innodb:  Allocate by Page, data: " << size_extent
+                << " extents, threads: " << num_threads;
     ib::info(ER_BULK_LOADER_INFO, mesg_strm_1.str().c_str());
 
     m_type = Type::PAGE;
@@ -2293,20 +2286,13 @@ uint64_t Bulk_extent_allocator::init(dict_table_t *table, dict_index_t *index,
   }
   m_type = Type::EXTENT;
 
-  /* At least two extents per thread, so that the threads seldom wait. */
-  cache_size = std::max(cache_size, std::max(size_t{4}, 2 * num_threads));
-
   auto extend_size = std::min(S_BULK_EXTEND_SIZE_MAX, cache_size);
   uint64_t extend_bytes = extend_size * FSP_EXTENT_SIZE * UNIV_PAGE_SIZE;
 
   /* Only the leaf pages are allocated in extents. The non-leaf pages of a
-  level are few, and take single pages (Btree_load::alloc_extent()). Hard
-  limit: 2K * 1M = 2G. */
-  const size_t leaf_size = std::min(cache_size, S_MAX_RANGES);
-  const size_t non_leaf_size = 0;
-
-  m_leaf_extents.init(leaf_size);
-  m_non_leaf_extents.init(non_leaf_size);
+  level are few, and take single pages (Btree_load::alloc_extent()). */
+  m_leaf_extents.init(cache_size);
+  m_non_leaf_extents.init(0);
 
   m_consumer_wait_count = 0;
   m_allocator_wait_count = 0;
@@ -2316,9 +2302,9 @@ uint64_t Bulk_extent_allocator::init(dict_table_t *table, dict_index_t *index,
 
   std::ostringstream mesg_strm_2;
   mesg_strm_2 << "Innodb:  Allocate by Extent, cache: " << cache_size
-              << " [min: " << cache_min << ", max: " << cache_max
-              << "] [leaf: " << leaf_size << ", non-leaf: " << non_leaf_size
-              << "] threads: " << num_threads << " Extend: " << extend_size;
+              << ", data: " << size_extent
+              << " extents, threads: " << num_threads
+              << " Extend: " << extend_size;
   ib::info(ER_BULK_LOADER_INFO, mesg_strm_2.str().c_str());
 
   return extend_bytes;
@@ -2343,6 +2329,9 @@ void Bulk_extent_allocator::stop() {
   m_allocator_condition.notify_one();
   m_thread.join();
 
+  const size_t n_unused =
+      m_leaf_extents.m_num_allocated - m_leaf_extents.m_num_consumed;
+
   /* An allocated extent is marked used as a whole. Give the cached extents
   that no loader took back to the leaf segment. */
   while (m_leaf_extents.m_num_consumed < m_leaf_extents.m_num_allocated) {
@@ -2356,10 +2345,8 @@ void Bulk_extent_allocator::stop() {
   const size_t consumer_wait_ms = m_consumer_wait_time.count() / 1000;
 
   std::ostringstream mesg_strm_1;
-  mesg_strm_1 << "Innodb: Allocated, Leaf: " << m_leaf_extents.m_num_consumed
-              << " | " << m_leaf_extents.m_num_allocated
-              << " Non Leaf: " << m_non_leaf_extents.m_num_consumed << " | "
-              << m_non_leaf_extents.m_num_allocated
+  mesg_strm_1 << "Innodb: Allocated, Leaf: " << m_leaf_extents.m_num_allocated
+              << ", not used and freed: " << n_unused
               << ", Wait Stat allocator: " << allocator_wait_ms << " ms | "
               << m_allocator_wait_count << " consumer(s): " << consumer_wait_ms
               << " ms | " << m_consumer_wait_count;

@@ -211,8 +211,8 @@ class Parallel_reader {
     size_t m_partition_id{std::numeric_limits<size_t>::max()};
 
     /** If not zero, a range covers at least this many leaf pages, as counted
-    on the pages above the leaves, and a range is never split into single
-    leaf pages. A build of one sub-tree per range sets it, so that the leaf
+    on the pages above the leaves, unless the index has fewer, and ranges are
+    not split. A build of one sub-tree per range sets it, so that the leaf
     pages of each sub-tree fill at least one extent. */
     size_t m_min_leaves{0};
   };

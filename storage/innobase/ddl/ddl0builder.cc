@@ -919,12 +919,17 @@ dberr_t Builder::init(Cursor &cursor, size_t n_threads) noexcept {
     mtr_t mtr;
     mtr.start();
     mtr.s_lock(dict_index_get_lock(source), UT_LOCATION_HERE);
-    auto root = btr_root_get(source, &mtr);
+    /* With innodb_corrupt_table_action, a corrupt root is not returned: the
+    pages are then allocated one by one. */
+    const auto root = btr_root_block_get(source, RW_SX_LATCH, &mtr);
     ulint n_used{};
     const size_t size =
-        fseg_n_reserved_pages(root + PAGE_HEADER + PAGE_BTR_SEG_LEAF, &n_used,
-                              &mtr) *
-        UNIV_PAGE_SIZE;
+        root == nullptr
+            ? 0
+            : fseg_n_reserved_pages(
+                  buf_block_get_frame(root) + PAGE_HEADER + PAGE_BTR_SEG_LEAF,
+                  &n_used, &mtr) *
+                  UNIV_PAGE_SIZE;
     mtr.commit();
 
     const auto extend_size = m_extent_allocator->init(

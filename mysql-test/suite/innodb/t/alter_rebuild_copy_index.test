@@ -155,7 +155,8 @@ SET SESSION innodb_parallel_read_threads = 2;
 OPTIMIZE TABLE t5;
 SET SESSION innodb_parallel_read_threads = 4;
 --let SEARCH_FILE= $MYSQLTEST_VARDIR/log/mysqld.1.err
---let SEARCH_PATTERN= Allocate by Extent
+--echo # The rebuilds with two threads are the ones of t5.
+--let SEARCH_PATTERN= Allocate by Extent.*threads: 2 Extend
 --source include/search_pattern.inc
 --eval $t5_check
 CHECK TABLE t5;

@@ -1542,8 +1542,10 @@ dberr_t Parallel_reader::Scan_ctx::create_contexts(const Ranges &ranges) {
       split_point = n;
     }
 
-    if (m_config.m_min_leaves > 0 && m_depth < SPLIT_THRESHOLD) {
-      /* A range of a tree this shallow splits into single leaf pages. */
+    if (m_config.m_min_leaves > 0) {
+      /* A split range would not keep the minimum: in a tree of SPLIT_THRESHOLD
+      levels it splits into single leaf pages, in a deeper tree its last part
+      can be one leaf page. */
       split_point = ranges.size();
     }
   }
