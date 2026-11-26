@@ -1976,7 +1976,10 @@ std::string Btree_load::print_pages_in_level(const size_t level) const {
     byte *first_rec = page_rec_get_next(infimum);
     bool is_min_rec = rec_get_info_bits(first_rec, page_is_comp(frame)) &
                       REC_INFO_MIN_REC_FLAG;
-    ut_ad(level == 0 || i > 0 || is_min_rec);
+    /* Only the leftmost page of a level starts with the minimum record. A
+    sub-tree that was linked to sub-trees on its left does not have it. */
+    ut_ad(level == 0 || i > 0 || is_min_rec ||
+          btr_page_get_prev(frame, &mtr) != FIL_NULL);
     if (unlikely(is_min_rec)) {
       sout << "min_rec, ";
     }
@@ -3589,8 +3592,8 @@ void Btree_load::split_leftmost(buf_block_t *&block, size_t level,
                                                 local_heap.get(), level);
   new_node_ptr->set_min_rec_flag();
   if (level == root_level) {
-    /* Add a new level */
-    page_no_t old_root = m_first_page_nos[level];
+    /* Add a new level above the full block, which was the root. */
+    const page_no_t old_root = page_no;
     const page_id_t old_root_pageid(m_index->space, old_root);
     /* Allocate a new page at the given level. */
     auto new_root_block =

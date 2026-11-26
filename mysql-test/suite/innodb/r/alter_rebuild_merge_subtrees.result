@@ -1,0 +1,28 @@
+CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY,
+b VARCHAR(3000) CHARACTER SET latin1 NOT NULL, KEY kb (b))
+ENGINE=InnoDB ROW_FORMAT=DYNAMIC STATS_AUTO_RECALC=0;
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 4000)
+SELECT n, CONCAT(LPAD(n, 8, '0'), REPEAT('x', 2900)) FROM seq;
+SET @old_fill_factor = @@GLOBAL.innodb_fill_factor;
+SET GLOBAL innodb_fill_factor = 100;
+SET SESSION innodb_parallel_read_threads = 4;
+OPTIMIZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	optimize	note	Table does not support optimize, doing recreate + analyze instead
+test.t1	optimize	status	OK
+SET GLOBAL innodb_fill_factor = @old_fill_factor;
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb);
+COUNT(*)
+4000
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b < CONCAT(LPAD(2000, 8, '0'), 'x');
+COUNT(*)
+1999
+SELECT id FROM t1 FORCE INDEX (kb) WHERE b = CONCAT(LPAD(3999, 8, '0'), REPEAT('x', 2900));
+id
+3999
+DROP TABLE t1;

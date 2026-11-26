@@ -1,0 +1,32 @@
+#
+# A rebuild with parallel scan threads builds one sub-tree per scan range
+# and links the sub-trees into one tree. With keys of about 3000 bytes a
+# page holds five records, so the sub-trees of kb differ in height: a
+# sub-tree grows a level when the shorter sub-tree on its right is linked
+# to it, and the sub-trees on its left then go into its new root until that
+# root is full and a level is added above it. Full pages are needed for
+# this, so the fill factor is 100.
+#
+--source include/have_innodb_16k.inc
+
+CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY,
+                 b VARCHAR(3000) CHARACTER SET latin1 NOT NULL, KEY kb (b))
+  ENGINE=InnoDB ROW_FORMAT=DYNAMIC STATS_AUTO_RECALC=0;
+
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 4000)
+  SELECT n, CONCAT(LPAD(n, 8, '0'), REPEAT('x', 2900)) FROM seq;
+
+SET @old_fill_factor = @@GLOBAL.innodb_fill_factor;
+SET GLOBAL innodb_fill_factor = 100;
+SET SESSION innodb_parallel_read_threads = 4;
+OPTIMIZE TABLE t1;
+SET GLOBAL innodb_fill_factor = @old_fill_factor;
+
+CHECK TABLE t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb);
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b < CONCAT(LPAD(2000, 8, '0'), 'x');
+SELECT id FROM t1 FORCE INDEX (kb) WHERE b = CONCAT(LPAD(3999, 8, '0'), REPEAT('x', 2900));
+
+DROP TABLE t1;
