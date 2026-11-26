@@ -1,0 +1,156 @@
+#
+# A table rebuild that keeps the primary key builds each secondary index that
+# the old table has with the same definition from that old index: the
+# parallel scan threads read the old index and build one sub-tree per scan
+# range, which are linked after the scan. An online rebuild reads the old
+# index in the read view of the rebuild. t2 is t1 without rebuilds and is
+# read to check t1.
+#
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/have_innodb_16k.inc
+
+SET SESSION innodb_parallel_read_threads = 4;
+SET SESSION cte_max_recursion_depth = 100000;
+
+CREATE TABLE t1 (
+  id INT NOT NULL PRIMARY KEY,
+  a INT NOT NULL,
+  b VARCHAR(200),
+  u INT,
+  t TEXT,
+  KEY ka (a),
+  KEY kb (b(20), a DESC),
+  UNIQUE KEY ku (u),
+  KEY kt (t(10))
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
+
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 30000)
+  SELECT n, n % 1000, REPEAT(CHAR(97 + n % 26), n % 150),
+         IF(n % 3 = 0, NULL, n),
+         IF(n % 500 = 0, REPEAT(CHAR(65 + n % 26), 20000),
+            REPEAT(CHAR(65 + n % 26), n % 40))
+  FROM seq;
+CREATE TABLE t2 LIKE t1;
+INSERT INTO t2 SELECT * FROM t1;
+
+--echo # The unique index ku has many NULL keys.
+OPTIMIZE TABLE t1;
+--let $tbl= t1
+--source suite/innodb/include/alter_rebuild_copy_index.inc
+--let $tbl= t2
+--source suite/innodb/include/alter_rebuild_copy_index.inc
+CHECK TABLE t1;
+
+--echo #
+--echo # The rebuilds that copy indexes fail on the first copied record.
+--echo #
+--echo # The scan threads take the global debug settings.
+SET GLOBAL DEBUG = '+d,builder_copy_rec_trigger_error';
+--error ER_RECORD_FILE_FULL
+ALTER TABLE t1 ENGINE=InnoDB, ALGORITHM=INPLACE;
+--error ER_RECORD_FILE_FULL
+ALTER TABLE t1 ENGINE=InnoDB, ALGORITHM=INPLACE, LOCK=SHARED;
+--error ER_RECORD_FILE_FULL
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=INPLACE;
+
+--echo # One scan thread builds every index from the clustered index.
+SET SESSION innodb_parallel_read_threads = 1;
+ALTER TABLE t1 ENGINE=InnoDB, ALGORITHM=INPLACE;
+SET SESSION innodb_parallel_read_threads = 4;
+
+--echo # With the primary key (a, id), ka (a) and kb (b(20), a DESC) keep their
+--echo # entries (a, id) and (b, a, id).
+--error ER_RECORD_FILE_FULL
+ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY (a, id), ALGORITHM=INPLACE;
+
+--echo # Rebuilds that change the entries of every secondary index, and a new
+--echo # index that has no old index.
+CREATE TABLE t3 (id INT NOT NULL PRIMARY KEY, a INT NOT NULL, c INT NOT NULL,
+                 KEY ka (a)) ENGINE=InnoDB;
+INSERT INTO t3
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 20000)
+  SELECT n, n % 100, n % 7 FROM seq;
+ALTER TABLE t3 DROP PRIMARY KEY, ADD PRIMARY KEY (c, id), ALGORITHM=INPLACE;
+ALTER TABLE t3 MODIFY a INT NULL, ALGORITHM=INPLACE;
+ALTER TABLE t3 DROP INDEX ka, ADD COLUMN d INT NOT NULL DEFAULT 5,
+  ADD INDEX kd (d, a), ALGORITHM=INPLACE;
+--error ER_RECORD_FILE_FULL
+ALTER TABLE t3 ENGINE=InnoDB, ALGORITHM=INPLACE;
+SET GLOBAL DEBUG = '-d,builder_copy_rec_trigger_error';
+SELECT COUNT(*), SUM(a), SUM(c), SUM(d) FROM t3 FORCE INDEX (kd);
+CHECK TABLE t3;
+DROP TABLE t3;
+
+--let $tbl= t1
+--source suite/innodb/include/alter_rebuild_copy_index.inc
+CHECK TABLE t1;
+
+--echo #
+--echo # Online rebuild with DML committed after the read view of the rebuild
+--echo # was created. The old indexes have delete-marked entries that the read
+--echo # view sees and new entries that it does not see.
+--echo #
+--connect (con1, localhost, root,,)
+
+--connection default
+SET DEBUG_SYNC = 'innodb_inplace_alter_table_enter SIGNAL entered WAIT_FOR dml_done';
+--send OPTIMIZE TABLE t1
+
+--connection con1
+SET DEBUG_SYNC = 'now WAIT_FOR entered';
+--let $tbl= t1
+--source suite/innodb/include/alter_rebuild_copy_index_dml.inc
+--let $tbl= t2
+--source suite/innodb/include/alter_rebuild_copy_index_dml.inc
+SET DEBUG_SYNC = 'now SIGNAL dml_done';
+
+--connection default
+--reap
+SET DEBUG_SYNC = 'RESET';
+--let $tbl= t1
+--source suite/innodb/include/alter_rebuild_copy_index.inc
+--let $tbl= t2
+--source suite/innodb/include/alter_rebuild_copy_index.inc
+CHECK TABLE t1;
+
+--echo #
+--echo # A rebuild without a read view skips the delete-marked entries of the
+--echo # old indexes. Purge is stopped to keep them.
+--echo #
+SET GLOBAL innodb_purge_stop_now = ON;
+DELETE FROM t1 WHERE id BETWEEN 7000 AND 7500;
+DELETE FROM t2 WHERE id BETWEEN 7000 AND 7500;
+UPDATE t1 SET a = a + 3, u = u + 400000 WHERE id BETWEEN 8000 AND 8200;
+UPDATE t2 SET a = a + 3, u = u + 400000 WHERE id BETWEEN 8000 AND 8200;
+ALTER TABLE t1 ENGINE=InnoDB, ALGORITHM=INPLACE, LOCK=SHARED;
+--let $tbl= t1
+--source suite/innodb/include/alter_rebuild_copy_index.inc
+--let $tbl= t2
+--source suite/innodb/include/alter_rebuild_copy_index.inc
+CHECK TABLE t1;
+
+--echo #
+--echo # Empty table.
+--echo #
+CREATE TABLE t4 LIKE t1;
+OPTIMIZE TABLE t4;
+CHECK TABLE t4;
+DROP TABLE t4;
+
+--echo #
+--echo # Crash right after the rebuild. Recovery starts from a checkpoint before
+--echo # the rebuild.
+--echo #
+SET GLOBAL innodb_checkpoint_disabled = ON;
+OPTIMIZE TABLE t1;
+--source include/kill_and_restart_mysqld.inc
+--let $tbl= t1
+--source suite/innodb/include/alter_rebuild_copy_index.inc
+--let $tbl= t2
+--source suite/innodb/include/alter_rebuild_copy_index.inc
+CHECK TABLE t1;
+
+DROP TABLE t1, t2;
+--disconnect con1

@@ -887,10 +887,11 @@ dberr_t Builder::init(Cursor &cursor, size_t n_threads) noexcept {
     }
   }
 
-  if (is_skip_file_sort() && n_threads > 1) {
+  if (n_threads > 1 &&
+      (is_skip_file_sort() || old_index_to_copy() != nullptr)) {
     /* Parallel_cursor::scan() reads with more than one thread only when the
-    sub-trees can be built in parallel. */
-    ut_ad(can_build_subtrees());
+    sub-trees of the clustered index can be built in parallel. */
+    ut_ad(!is_skip_file_sort() || can_build_subtrees());
     ut_ad(m_extent_allocator == nullptr);
 
     m_extent_allocator = ut::new_withkey<Btree_multi::Bulk_extent_allocator>(
@@ -1058,15 +1059,23 @@ bool Builder::can_build_subtrees() const noexcept {
 
   const auto n_uniq = dict_index_get_n_unique(m_index);
 
-  if (n_uniq != dict_index_get_n_unique(old_index)) {
-    return false;
-  }
+  return n_uniq == dict_index_get_n_unique(old_index) &&
+         has_same_fields(old_index, n_uniq);
+}
 
-  for (size_t i = 0; i < n_uniq; ++i) {
+bool Builder::has_same_fields(const dict_index_t *old_index,
+                              size_t n_fields) const noexcept {
+  const auto col_map = m_ctx.m_col_map;
+
+  for (size_t i = 0; i < n_fields; ++i) {
     const auto old_field = old_index->get_field(i);
     const auto new_field = m_index->get_field(i);
+    const auto old_col = old_field->col;
+    const auto new_col = new_field->col;
 
-    if (m_ctx.m_col_map[old_field->col->ind] != new_field->col->ind ||
+    if (col_map[old_col->ind] != new_col->ind ||
+        old_col->mtype != new_col->mtype ||
+        old_col->prtype != new_col->prtype || old_col->len != new_col->len ||
         old_field->prefix_len != new_field->prefix_len ||
         old_field->is_ascending != new_field->is_ascending) {
       return false;
@@ -1080,7 +1089,6 @@ dberr_t Builder::subtree_start(size_t thread_id) noexcept {
   auto thread_ctx = m_thread_ctxs[thread_id];
 
   ut_ad(thread_ctx->m_subtree == nullptr);
-  ut_ad(thread_ctx->m_key_buffer->empty());
 
   size_t flush_queue_size{};
   bool allocate_in_pages{};
@@ -1092,6 +1100,12 @@ dberr_t Builder::subtree_start(size_t thread_id) noexcept {
   thread_ctx->m_subtree = ut::new_withkey<Btree_multi::Btree_load>(
       ut::make_psi_memory_key(mem_key_ddl), m_index, m_ctx.m_trx, thread_id,
       flush_queue_size, *m_extent_allocator);
+
+  if (thread_ctx->m_subtree != nullptr && !m_index->is_clustered()) {
+    /* The entries come in index order. The order check of the loader would
+    report the NULL keys of a unique index as duplicates. */
+    thread_ctx->m_subtree->disable_check_order();
+  }
 
   auto err = thread_ctx->m_subtree == nullptr ? DB_OUT_OF_MEMORY
                                               : thread_ctx->m_subtree->init();
@@ -1105,36 +1119,32 @@ dberr_t Builder::subtree_start(size_t thread_id) noexcept {
 
 dberr_t Builder::subtree_insert(size_t thread_id) noexcept {
   auto thread_ctx = m_thread_ctxs[thread_id];
-  auto subtree = thread_ctx->m_subtree;
 
-  /* Rows are only added between subtree_start() and subtree_finish(). */
-  ut_ad(subtree != nullptr);
+  if (thread_ctx->m_subtree == nullptr) {
+    const auto err = subtree_start(thread_id);
 
-  if (subtree == nullptr) {
-    return DB_ERROR;
+    if (err != DB_SUCCESS) {
+      return err;
+    }
   }
 
   Key_sort_buffer_cursor cursor(this, thread_ctx->m_key_buffer);
 
   auto err = cursor.open();
 
-  return err == DB_SUCCESS ? bulk_insert(cursor, *subtree) : err;
+  return err == DB_SUCCESS ? bulk_insert(cursor, *thread_ctx->m_subtree) : err;
 }
 
 dberr_t Builder::subtree_finish(Cursor &cursor, size_t thread_id) noexcept {
   auto thread_ctx = m_thread_ctxs[thread_id];
-  auto subtree = thread_ctx->m_subtree;
-
-  if (subtree == nullptr) {
-    /* subtree_start() failed. */
-    return get_error();
-  }
-
   auto key_buffer = thread_ctx->m_key_buffer;
   auto err = get_error();
 
   if (err == DB_SUCCESS && !key_buffer->empty()) {
-    err = key_buffer_sort(thread_id);
+    /* The entries of a copied index come in index order. */
+    if (!copies_old_index()) {
+      err = key_buffer_sort(thread_id);
+    }
 
     if (err == DB_SUCCESS) {
       err = insert_direct(cursor, thread_id);
@@ -1145,13 +1155,23 @@ dberr_t Builder::subtree_finish(Cursor &cursor, size_t thread_id) noexcept {
     }
   }
 
+  key_buffer->clear();
+
+  auto subtree = thread_ctx->m_subtree;
+
+  if (subtree == nullptr) {
+    /* The range had no rows for the index. */
+    if (err != DB_SUCCESS) {
+      set_error(err);
+    }
+    return get_error();
+  }
+
   DBUG_EXECUTE_IF("builder_subtree_finish_trigger_error", {
     if (err == DB_SUCCESS) {
       err = DB_OUT_OF_FILE_SPACE;
     }
   });
-
-  key_buffer->clear();
 
   thread_ctx->m_subtree = nullptr;
   thread_ctx->m_subtrees.push_back(subtree);
@@ -1209,6 +1229,86 @@ dberr_t Builder::merge_subtrees() noexcept {
   }
 
   return get_error();
+}
+
+dict_index_t *Builder::old_index_to_copy() const noexcept {
+  /* Copy only between tables with a user primary key, as the clustered index
+  sub-trees do: the entries of a table without one end with DB_ROW_ID. */
+  if (m_ctx.m_col_map == nullptr || m_index->is_clustered() ||
+      is_vector_index() ||
+      (m_index->type &
+       (DICT_FTS | DICT_SPATIAL | DICT_VIRTUAL | DICT_MULTI_VALUE)) != 0 ||
+      !use_bulk_loader() ||
+      dict_index_is_auto_gen_clust(m_ctx.m_old_table->first_index()) ||
+      dict_index_is_auto_gen_clust(m_ctx.m_new_table->first_index())) {
+    return nullptr;
+  }
+
+  /* The fields of a secondary index end with the primary key columns that it
+  does not have, so an index with the same fields has the same entries even if
+  the primary key changes. DICT_CORRUPT is a type flag, so a corrupted old
+  index does not match. */
+  for (auto old_index = m_ctx.m_old_table->first_index()->next();
+       old_index != nullptr; old_index = old_index->next()) {
+    if (old_index->type == m_index->type &&
+        old_index->n_fields == m_index->n_fields &&
+        old_index->n_uniq == m_index->n_uniq && old_index->is_committed() &&
+        !dict_index_is_online_ddl(old_index) &&
+        has_same_fields(old_index, m_index->n_fields)) {
+      return old_index;
+    }
+  }
+
+  return nullptr;
+}
+
+dberr_t Builder::copy_rec(Cursor &cursor, const dict_index_t *old_index,
+                          const rec_t *rec, const ulint *offsets,
+                          mem_heap_t *heap, size_t thread_id,
+                          Latch_release &&latch_release) noexcept {
+  ut_ad(copies_old_index());
+
+  DBUG_EXECUTE_IF("builder_copy_rec_trigger_error", {
+    set_error(DB_OUT_OF_FILE_SPACE);
+    return get_error();
+  });
+
+  auto key_buffer = m_thread_ctxs[thread_id]->m_key_buffer;
+  const auto n_fields = dict_index_get_n_fields(m_index);
+  /* The size of the old record, for the memory use of the key buffer. */
+  const auto size = rec_offs_size(offsets);
+  auto entry = row_rec_to_index_entry_low(rec, old_index, offsets, heap);
+
+  if (!key_buffer->will_fit(size)) {
+    /* The entry points into the page, copy it before the latches are
+    released. */
+    entry = dtuple_copy(entry, heap);
+
+    for (size_t i = 0; i < n_fields; ++i) {
+      dfield_dup(dtuple_get_nth_field(entry, i), heap);
+    }
+
+    auto err = latch_release();
+
+    if (err == DB_SUCCESS) {
+      err = insert_direct(cursor, thread_id);
+    }
+
+    key_buffer->clear();
+
+    if (err != DB_SUCCESS) {
+      set_error(err);
+      return get_error();
+    }
+  }
+
+  auto fields = key_buffer->alloc(n_fields);
+
+  memcpy(fields, entry->fields, n_fields * sizeof(*fields));
+  key_buffer->m_dtuples.push_back(fields);
+  key_buffer->deep_copy(n_fields, size);
+
+  return DB_SUCCESS;
 }
 
 void Builder::fts_add_doc_id(dfield_t *dst, const dict_field_t *src,
@@ -1679,8 +1779,8 @@ dberr_t Builder::handle_error(dberr_t err) noexcept {
 }
 
 dberr_t Builder::insert_direct(Cursor &cursor, size_t thread_id) noexcept {
-  ut_a(m_id == 0);
-  ut_ad(is_skip_file_sort());
+  ut_a(m_id == 0 || copies_old_index());
+  ut_ad(is_skip_file_sort() || copies_old_index());
   ut_a(!is_fts_index());
   ut_a(m_ctx.m_trx->id > 0);
   ut_a(!is_spatial_index());
@@ -2651,7 +2751,7 @@ void Builder::set_next_state() noexcept {
         set_state(State::VEC_BUILD);
       } else if (is_fts_index()) {
         set_state(State::FTS_SORT_AND_BUILD);
-      } else if (!is_skip_file_sort()) {
+      } else if (!is_skip_file_sort() && !builds_subtrees()) {
         set_state(State::SETUP_SORT);
       } else {
         set_state(State::FINISH);

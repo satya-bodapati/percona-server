@@ -136,6 +136,10 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
 
   Builders batch_insert{};
 
+  /* Builders of the indexes built from the rows of the clustered index. The
+  others copy an index of the old table. */
+  Builders row_builders{};
+
   for (auto &builder : builders) {
     auto err = builder->init(*this, use_n_threads);
     if (err != DB_SUCCESS) {
@@ -144,6 +148,10 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
 
     if (builder->is_spatial_index()) {
       batch_insert.push_back(builder);
+    }
+
+    if (!builder->copies_old_index()) {
+      row_builders.push_back(builder);
     }
   }
 
@@ -237,7 +245,7 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
     bool latches_released{};
     const auto thread_id = thread_ctx->m_thread_id;
 
-    for (auto builder : builders) {
+    for (auto builder : row_builders) {
       const auto err = builder->add_row(*this, row, thread_id, [&]() {
         if (!latches_released &&
             thread_ctx->get_state() != Parallel_reader::State::THREAD) {
@@ -293,16 +301,6 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
 #endif
         thd->variables.sql_mode = caller_thd->variables.sql_mode;
         ut_d(Sync_point::clone_from(caller_thd);)
-      }
-    } else if (thread_ctx->get_state() == Parallel_reader::State::CTX) {
-      /* The thread starts reading a new key range. */
-      for (auto builder : builders) {
-        if (builder->builds_subtrees()) {
-          const auto err = builder->subtree_start(thread_ctx->m_thread_id);
-          if (err != DB_SUCCESS) {
-            return err;
-          }
-        }
       }
     }
     return DB_SUCCESS;
@@ -378,7 +376,8 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
 
       case Parallel_reader::State::CTX:
         /* The thread finished reading a key range. No page latches are held
-        here, the range's mtr is committed. */
+        here, the range's mtr is committed. The first insert of the range
+        started the sub-tree of each index that got rows from it. */
         for (auto builder : builders) {
           if (err == DB_SUCCESS && builder->builds_subtrees()) {
             err = builder->subtree_finish(*this, thread_id);
@@ -439,6 +438,40 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
 
         return err;
       });
+
+  /* Each index built from an index of the old table is read by its own scan,
+  with the read view of the clustered index scan. */
+  for (auto builder : builders) {
+    if (err != DB_SUCCESS || !builder->copies_old_index()) {
+      continue;
+    }
+
+    const auto old_index = builder->old_index_to_copy();
+    Parallel_reader::Config copy_config(FULL_SCAN, old_index);
+
+    err = reader.add_scan(
+        m_ctx.m_online ? m_ctx.m_trx : nullptr, copy_config,
+        [&, builder, old_index](const Parallel_reader::Ctx *read_ctx) {
+          const auto thread_ctx = read_ctx->thread_ctx();
+          const auto thread_id = read_ctx->thread_id();
+          bool latches_released{};
+
+          const auto err = builder->copy_rec(
+              *this, old_index, read_ctx->m_rec, read_ctx->m_offsets,
+              m_heaps[thread_id], thread_id, [&]() {
+                thread_ctx->save_current_user_record_as_last_processed();
+                latches_released = true;
+                return DB_SUCCESS;
+              });
+
+          if (latches_released) {
+            /* Resume from the savepoint (above). */
+            thread_ctx->restore_to_last_processed_user_record();
+          }
+
+          return err;
+        });
+  }
 
   if (err == DB_SUCCESS) {
     err = reader.run(n_threads);

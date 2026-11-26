@@ -184,10 +184,34 @@ struct Builder {
   @return true if the sub-trees can be built in parallel. */
   [[nodiscard]] bool can_build_subtrees() const noexcept;
 
-  /** Start a sub-tree for the scan range that a thread starts to read.
+  /** Find the index of the old table that holds the same entries as the
+  secondary index to build: the same flags and the same fields, which end
+  with the primary key columns that the index does not have. The index is
+  then built from that index instead of the clustered index, without a sort.
+  @return the old index, or nullptr if there is none or it cannot be copied. */
+  [[nodiscard]] dict_index_t *old_index_to_copy() const noexcept;
+
+  /** @return true if the secondary index is built from the old index, one
+  sub-tree per scan range of the old index. */
+  [[nodiscard]] bool copies_old_index() const noexcept {
+    return builds_subtrees() && !is_skip_file_sort();
+  }
+
+  /** Add a record of the old index to the thread's key buffer. When the
+  buffer is full, insert it into the thread's sub-tree.
+  @param[in,out] cursor         Current scan cursor.
+  @param[in] old_index          Index returned by old_index_to_copy().
+  @param[in] rec                Record of old_index, S-latched by the scan.
+  @param[in] offsets            Record offsets.
+  @param[in,out] heap           Heap for transient copies of the record.
   @param[in] thread_id          ID of the scan thread.
+  @param[in,out] latch_release  Called before the sub-tree insert, to release
+                                the latches of the scan.
   @return DB_SUCCESS or error code. */
-  [[nodiscard]] dberr_t subtree_start(size_t thread_id) noexcept;
+  [[nodiscard]] dberr_t copy_rec(Cursor &cursor, const dict_index_t *old_index,
+                                 const rec_t *rec, const ulint *offsets,
+                                 mem_heap_t *heap, size_t thread_id,
+                                 Latch_release &&latch_release) noexcept;
 
   /** Insert the rows that a thread has buffered from its scan range into the
   range's sub-tree and finish the sub-tree.
@@ -385,7 +409,21 @@ struct Builder {
   [[nodiscard]] dberr_t bulk_add_row(Cursor &cursor, Row &row, size_t thread_id,
                                      Latch_release &&latch_release) noexcept;
 
-  /** Insert the rows in a thread's key buffer into the thread's sub-tree.
+  /** Check if the first fields of an index of the old table are the fields
+  of the index to build: the same columns, column types, prefixes and order.
+  @param[in] old_index          Index of the old table.
+  @param[in] n_fields           Number of fields to compare.
+  @return true if the fields are the same. */
+  [[nodiscard]] bool has_same_fields(const dict_index_t *old_index,
+                                     size_t n_fields) const noexcept;
+
+  /** Start a sub-tree for the scan range that a thread reads.
+  @param[in] thread_id          ID of the scan thread.
+  @return DB_SUCCESS or error code. */
+  [[nodiscard]] dberr_t subtree_start(size_t thread_id) noexcept;
+
+  /** Insert the rows in a thread's key buffer into the thread's sub-tree,
+  which is started by the first insert of a scan range.
   @param[in] thread_id          ID of the scan thread.
   @return DB_SUCCESS or error code. */
   [[nodiscard]] dberr_t subtree_insert(size_t thread_id) noexcept;

@@ -1,0 +1,171 @@
+SET SESSION innodb_parallel_read_threads = 4;
+SET SESSION cte_max_recursion_depth = 100000;
+CREATE TABLE t1 (
+id INT NOT NULL PRIMARY KEY,
+a INT NOT NULL,
+b VARCHAR(200),
+u INT,
+t TEXT,
+KEY ka (a),
+KEY kb (b(20), a DESC),
+UNIQUE KEY ku (u),
+KEY kt (t(10))
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 30000)
+SELECT n, n % 1000, REPEAT(CHAR(97 + n % 26), n % 150),
+IF(n % 3 = 0, NULL, n),
+IF(n % 500 = 0, REPEAT(CHAR(65 + n % 26), 20000),
+REPEAT(CHAR(65 + n % 26), n % 40))
+FROM seq;
+CREATE TABLE t2 LIKE t1;
+INSERT INTO t2 SELECT * FROM t1;
+# The unique index ku has many NULL keys.
+OPTIMIZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	optimize	note	Table does not support optimize, doing recreate + analyze instead
+test.t1	optimize	status	OK
+SELECT (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t1 FORCE INDEX (ka)) AS ka, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t1 FORCE INDEX (kb)) AS kb, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, IFNULL(u, -1))))) FROM t1 FORCE INDEX (ku)) AS ku, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b BETWEEN 'k' AND 'p') AS kb_range, (SELECT COUNT(*) FROM t1 FORCE INDEX (kt) WHERE t BETWEEN 'K' AND 'P') AS kt_range, (SELECT COUNT(*) FROM t1 FORCE INDEX (ku) WHERE u IS NULL) AS ku_null;
+ka	kb	ku	kb_range	kt_range	ku_null
+30000:2933325353	30000:2933325353	30000:2355272739	5740	5664	10000
+SELECT (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t2 FORCE INDEX (ka)) AS ka, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t2 FORCE INDEX (kb)) AS kb, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, IFNULL(u, -1))))) FROM t2 FORCE INDEX (ku)) AS ku, (SELECT COUNT(*) FROM t2 FORCE INDEX (kb) WHERE b BETWEEN 'k' AND 'p') AS kb_range, (SELECT COUNT(*) FROM t2 FORCE INDEX (kt) WHERE t BETWEEN 'K' AND 'P') AS kt_range, (SELECT COUNT(*) FROM t2 FORCE INDEX (ku) WHERE u IS NULL) AS ku_null;
+ka	kb	ku	kb_range	kt_range	ku_null
+30000:2933325353	30000:2933325353	30000:2355272739	5740	5664	10000
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+#
+# The rebuilds that copy indexes fail on the first copied record.
+#
+# The scan threads take the global debug settings.
+SET GLOBAL DEBUG = '+d,builder_copy_rec_trigger_error';
+ALTER TABLE t1 ENGINE=InnoDB, ALGORITHM=INPLACE;
+ERROR HY000: The table 't1' is full
+ALTER TABLE t1 ENGINE=InnoDB, ALGORITHM=INPLACE, LOCK=SHARED;
+ERROR HY000: The table 't1' is full
+ALTER TABLE t1 ADD COLUMN c INT, ALGORITHM=INPLACE;
+ERROR HY000: The table 't1' is full
+# One scan thread builds every index from the clustered index.
+SET SESSION innodb_parallel_read_threads = 1;
+ALTER TABLE t1 ENGINE=InnoDB, ALGORITHM=INPLACE;
+SET SESSION innodb_parallel_read_threads = 4;
+# With the primary key (a, id), ka (a) and kb (b(20), a DESC) keep their
+# entries (a, id) and (b, a, id).
+ALTER TABLE t1 DROP PRIMARY KEY, ADD PRIMARY KEY (a, id), ALGORITHM=INPLACE;
+ERROR HY000: The table 't1' is full
+# Rebuilds that change the entries of every secondary index, and a new
+# index that has no old index.
+CREATE TABLE t3 (id INT NOT NULL PRIMARY KEY, a INT NOT NULL, c INT NOT NULL,
+KEY ka (a)) ENGINE=InnoDB;
+INSERT INTO t3
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 20000)
+SELECT n, n % 100, n % 7 FROM seq;
+ALTER TABLE t3 DROP PRIMARY KEY, ADD PRIMARY KEY (c, id), ALGORITHM=INPLACE;
+ALTER TABLE t3 MODIFY a INT NULL, ALGORITHM=INPLACE;
+ALTER TABLE t3 DROP INDEX ka, ADD COLUMN d INT NOT NULL DEFAULT 5,
+ADD INDEX kd (d, a), ALGORITHM=INPLACE;
+ALTER TABLE t3 ENGINE=InnoDB, ALGORITHM=INPLACE;
+ERROR HY000: The table 't3' is full
+SET GLOBAL DEBUG = '-d,builder_copy_rec_trigger_error';
+SELECT COUNT(*), SUM(a), SUM(c), SUM(d) FROM t3 FORCE INDEX (kd);
+COUNT(*)	SUM(a)	SUM(c)	SUM(d)
+20000	990000	59998	100000
+CHECK TABLE t3;
+Table	Op	Msg_type	Msg_text
+test.t3	check	status	OK
+DROP TABLE t3;
+SELECT (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t1 FORCE INDEX (ka)) AS ka, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t1 FORCE INDEX (kb)) AS kb, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, IFNULL(u, -1))))) FROM t1 FORCE INDEX (ku)) AS ku, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b BETWEEN 'k' AND 'p') AS kb_range, (SELECT COUNT(*) FROM t1 FORCE INDEX (kt) WHERE t BETWEEN 'K' AND 'P') AS kt_range, (SELECT COUNT(*) FROM t1 FORCE INDEX (ku) WHERE u IS NULL) AS ku_null;
+ka	kb	ku	kb_range	kt_range	ku_null
+30000:2933325353	30000:2933325353	30000:2355272739	5740	5664	10000
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+#
+# Online rebuild with DML committed after the read view of the rebuild
+# was created. The old indexes have delete-marked entries that the read
+# view sees and new entries that it does not see.
+#
+SET DEBUG_SYNC = 'innodb_inplace_alter_table_enter SIGNAL entered WAIT_FOR dml_done';
+OPTIMIZE TABLE t1;
+SET DEBUG_SYNC = 'now WAIT_FOR entered';
+# DML on t1.
+# Key updates. The old entries are delete-marked.
+# Deletes.
+# Deletes and inserts of the same primary keys with other keys.
+# Unique keys set to NULL and from NULL.
+# A key update to a value that is equal in the collation.
+# Rows with an off-page column whose index entry is unchanged.
+# New rows.
+# DML on t2.
+# Key updates. The old entries are delete-marked.
+# Deletes.
+# Deletes and inserts of the same primary keys with other keys.
+# Unique keys set to NULL and from NULL.
+# A key update to a value that is equal in the collation.
+# Rows with an off-page column whose index entry is unchanged.
+# New rows.
+SET DEBUG_SYNC = 'now SIGNAL dml_done';
+Table	Op	Msg_type	Msg_text
+test.t1	optimize	note	Table does not support optimize, doing recreate + analyze instead
+test.t1	optimize	status	OK
+SET DEBUG_SYNC = 'RESET';
+SELECT (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t1 FORCE INDEX (ka)) AS ka, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t1 FORCE INDEX (kb)) AS kb, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, IFNULL(u, -1))))) FROM t1 FORCE INDEX (ku)) AS ku, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b BETWEEN 'k' AND 'p') AS kb_range, (SELECT COUNT(*) FROM t1 FORCE INDEX (kt) WHERE t BETWEEN 'K' AND 'P') AS kt_range, (SELECT COUNT(*) FROM t1 FORCE INDEX (ku) WHERE u IS NULL) AS ku_null;
+ka	kb	ku	kb_range	kt_range	ku_null
+30199:2713694070	30199:2713694070	30199:2155136579	6167	6085	10150
+SELECT (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t2 FORCE INDEX (ka)) AS ka, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t2 FORCE INDEX (kb)) AS kb, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, IFNULL(u, -1))))) FROM t2 FORCE INDEX (ku)) AS ku, (SELECT COUNT(*) FROM t2 FORCE INDEX (kb) WHERE b BETWEEN 'k' AND 'p') AS kb_range, (SELECT COUNT(*) FROM t2 FORCE INDEX (kt) WHERE t BETWEEN 'K' AND 'P') AS kt_range, (SELECT COUNT(*) FROM t2 FORCE INDEX (ku) WHERE u IS NULL) AS ku_null;
+ka	kb	ku	kb_range	kt_range	ku_null
+30199:2713694070	30199:2713694070	30199:2155136579	6167	6085	10150
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+#
+# A rebuild without a read view skips the delete-marked entries of the
+# old indexes. Purge is stopped to keep them.
+#
+SET GLOBAL innodb_purge_stop_now = ON;
+DELETE FROM t1 WHERE id BETWEEN 7000 AND 7500;
+DELETE FROM t2 WHERE id BETWEEN 7000 AND 7500;
+UPDATE t1 SET a = a + 3, u = u + 400000 WHERE id BETWEEN 8000 AND 8200;
+UPDATE t2 SET a = a + 3, u = u + 400000 WHERE id BETWEEN 8000 AND 8200;
+ALTER TABLE t1 ENGINE=InnoDB, ALGORITHM=INPLACE, LOCK=SHARED;
+SELECT (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t1 FORCE INDEX (ka)) AS ka, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t1 FORCE INDEX (kb)) AS kb, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, IFNULL(u, -1))))) FROM t1 FORCE INDEX (ku)) AS ku, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b BETWEEN 'k' AND 'p') AS kb_range, (SELECT COUNT(*) FROM t1 FORCE INDEX (kt) WHERE t BETWEEN 'K' AND 'P') AS kt_range, (SELECT COUNT(*) FROM t1 FORCE INDEX (ku) WHERE u IS NULL) AS ku_null;
+ka	kb	ku	kb_range	kt_range	ku_null
+29698:500850875	29698:500850875	29698:3341027539	6070	5989	9983
+SELECT (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t2 FORCE INDEX (ka)) AS ka, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t2 FORCE INDEX (kb)) AS kb, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, IFNULL(u, -1))))) FROM t2 FORCE INDEX (ku)) AS ku, (SELECT COUNT(*) FROM t2 FORCE INDEX (kb) WHERE b BETWEEN 'k' AND 'p') AS kb_range, (SELECT COUNT(*) FROM t2 FORCE INDEX (kt) WHERE t BETWEEN 'K' AND 'P') AS kt_range, (SELECT COUNT(*) FROM t2 FORCE INDEX (ku) WHERE u IS NULL) AS ku_null;
+ka	kb	ku	kb_range	kt_range	ku_null
+29698:500850875	29698:500850875	29698:3341027539	6070	5989	9983
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+#
+# Empty table.
+#
+CREATE TABLE t4 LIKE t1;
+OPTIMIZE TABLE t4;
+Table	Op	Msg_type	Msg_text
+test.t4	optimize	note	Table does not support optimize, doing recreate + analyze instead
+test.t4	optimize	status	OK
+CHECK TABLE t4;
+Table	Op	Msg_type	Msg_text
+test.t4	check	status	OK
+DROP TABLE t4;
+#
+# Crash right after the rebuild. Recovery starts from a checkpoint before
+# the rebuild.
+#
+SET GLOBAL innodb_checkpoint_disabled = ON;
+OPTIMIZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	optimize	note	Table does not support optimize, doing recreate + analyze instead
+test.t1	optimize	status	OK
+# Kill and restart
+SELECT (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t1 FORCE INDEX (ka)) AS ka, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t1 FORCE INDEX (kb)) AS kb, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, IFNULL(u, -1))))) FROM t1 FORCE INDEX (ku)) AS ku, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b BETWEEN 'k' AND 'p') AS kb_range, (SELECT COUNT(*) FROM t1 FORCE INDEX (kt) WHERE t BETWEEN 'K' AND 'P') AS kt_range, (SELECT COUNT(*) FROM t1 FORCE INDEX (ku) WHERE u IS NULL) AS ku_null;
+ka	kb	ku	kb_range	kt_range	ku_null
+29698:500850875	29698:500850875	29698:3341027539	6070	5989	9983
+SELECT (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t2 FORCE INDEX (ka)) AS ka, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t2 FORCE INDEX (kb)) AS kb, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, IFNULL(u, -1))))) FROM t2 FORCE INDEX (ku)) AS ku, (SELECT COUNT(*) FROM t2 FORCE INDEX (kb) WHERE b BETWEEN 'k' AND 'p') AS kb_range, (SELECT COUNT(*) FROM t2 FORCE INDEX (kt) WHERE t BETWEEN 'K' AND 'P') AS kt_range, (SELECT COUNT(*) FROM t2 FORCE INDEX (ku) WHERE u IS NULL) AS ku_null;
+ka	kb	ku	kb_range	kt_range	ku_null
+29698:500850875	29698:500850875	29698:3341027539	6070	5989	9983
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1, t2;
