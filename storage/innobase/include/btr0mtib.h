@@ -699,6 +699,12 @@ class Bulk_flusher {
   @return the maximum allowed queue size. */
   size_t get_max_queue_size() const { return m_max_queue_size; }
 
+  /** @return true if no extent waits in the queue to be written. */
+  bool is_queue_empty() const {
+    std::lock_guard<std::mutex> guard(m_mutex);
+    return m_queue.empty();
+  }
+
   /** Destructor. */
   ~Bulk_flusher();
 
@@ -1114,7 +1120,14 @@ class Btree_load : private ut::Non_copyable {
                                             page_no_t &last_page_no) noexcept;
 
  public:
-  /** Allocate an extent.
+  /** Wait while the buffer pool has no room for the frames of one more
+  extent and frames come back from the flushers of the loaders.
+  @return true if the buffer pool has room, false if waiting does not give
+  frames back */
+  bool wait_for_extent_frames();
+
+  /** Allocate an extent, or a single page when the buffer pool has no room
+  for the frames of an extent.
   @param[in,out]  page_range  the range of pages allocated.
   @param[in]  level  btree level for which pages are allocated.
   @return status code. */

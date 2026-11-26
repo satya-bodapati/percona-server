@@ -628,7 +628,57 @@ dberr_t Page_extent::destroy() {
   return DB_SUCCESS;
 }
 
+/** Free and LRU pages that a bulk loader keeps in a buffer pool instance
+when it takes frames. The loader holds its pages in BUF_BLOCK_MEMORY frames,
+which are neither in the free list nor in the LRU list until its flusher has
+written them. When the free and LRU pages of an instance fall below a third of
+it, InnoDB warns about memory that is not data pages, and below a twentieth it
+stops the server. The loader keeps a third and the pages of an extent.
+@param[in]      buf_pool        buffer pool instance
+@param[out]     n_free_lru      free and LRU pages of the instance
+@return true if the instance keeps that many free and LRU pages */
+static bool buf_pool_has_room(const buf_pool_t *buf_pool, size_t &n_free_lru) {
+  n_free_lru = UT_LIST_GET_LEN(buf_pool->free) + UT_LIST_GET_LEN(buf_pool->LRU);
+
+  return n_free_lru >= buf_pool->curr_size / 3 + FSP_EXTENT_SIZE;
+}
+
+/** Check buf_pool_has_room() for every buffer pool instance.
+@param[out]     n_free_lru      free and LRU pages of all instances
+@return true if every instance keeps its free and LRU pages */
+static bool buf_pool_has_room(size_t &n_free_lru) {
+  bool has_room = true;
+  n_free_lru = 0;
+
+  for (ulint i = 0; i < srv_buf_pool_instances; ++i) {
+    size_t n{};
+
+    if (!buf_pool_has_room(buf_pool_from_array(i), n)) {
+      has_room = false;
+    }
+    n_free_lru += n;
+  }
+
+  return has_room;
+}
+
 dberr_t Level_ctx::alloc_page_num(page_no_t &page_no) {
+  /* The pages of an extent are in one buffer pool instance. */
+  size_t n_free_lru{};
+
+  if (m_level == 0 && !m_extent_full && m_page_extent->is_any_used() &&
+      !buf_pool_has_room(
+          buf_pool_get(page_id_t(m_index->space, m_page_extent->m_page_no)),
+          n_free_lru) &&
+      !m_btree_load->wait_for_extent_frames()) {
+    /* Each page takes a frame of the buffer pool until the extent is
+    written, and the buffer pool has no room. End the extent at its last used
+    page, so that it is written and its frames are given back. */
+    m_btree_load->free_unused_pages(m_page_extent);
+    m_page_extent->m_range.second = m_page_extent->m_page_no;
+    m_extent_full = true;
+  }
+
   if (m_extent_full) {
     dberr_t err = alloc_extent();
     if (err != DB_SUCCESS) {
@@ -745,11 +795,47 @@ void Level_ctx::free_page_load() {
   m_page_load = nullptr;
 }
 
+bool Btree_load::wait_for_extent_frames() {
+  size_t n_free_lru{};
+
+  if (buf_pool_has_room(n_free_lru)) {
+    return true;
+  }
+
+  /* The flushers of all loaders write their queued extents and give their
+  frames back. Wait while frames come back or the flusher of this loader has
+  extents to write. Otherwise the frames are held by pages being filled, or by
+  memory that is not data pages, and waiting does not give them back. */
+  bool has_room{};
+  bool came_back{};
+
+  if (m_fn_wait_begin) {
+    m_fn_wait_begin();
+  }
+
+  do {
+    std::ignore = trigger_flusher();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+
+    const auto n_before = n_free_lru;
+    has_room = buf_pool_has_room(n_free_lru);
+    came_back = n_free_lru > n_before;
+  } while (!has_room && (came_back || !m_bulk_flusher.is_queue_empty()));
+
+  if (m_fn_wait_end) {
+    m_fn_wait_end();
+  }
+
+  return has_room;
+}
+
 dberr_t Btree_load::alloc_extent(Page_range_t &page_range, size_t level) {
   bool is_leaf = (level == 0);
   /* A non-leaf level takes single pages: it has too few pages to fill
-  extents. */
-  auto err = m_allocator.allocate(is_leaf, !is_leaf, page_range,
+  extents. A leaf level takes a single page when the buffer pool has no room
+  for the frames of an extent. */
+  const bool alloc_page = !is_leaf || !wait_for_extent_frames();
+  auto err = m_allocator.allocate(is_leaf, alloc_page, page_range,
                                   m_fn_wait_begin, m_fn_wait_end);
   if (err != DB_SUCCESS) {
     return err;

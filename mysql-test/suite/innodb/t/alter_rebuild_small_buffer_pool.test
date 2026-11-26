@@ -1,0 +1,25 @@
+#
+# A rebuild with parallel scan threads builds the sub-trees of the primary
+# key and of kb at the same time. The leaf pages of each sub-tree take whole
+# extents, and a sub-tree holds the pages of its extents in frames of the
+# buffer pool until its flusher writes them. With a buffer pool of 24 MB and
+# 16 threads, a sub-tree waits for the flushers before each page and ends its
+# extent early when no frames come back, instead of filling the buffer pool.
+#
+--source include/have_innodb_16k.inc
+
+CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY,
+                 b VARCHAR(3000) CHARACTER SET latin1 NOT NULL, KEY kb (b))
+  ENGINE=InnoDB ROW_FORMAT=DYNAMIC STATS_AUTO_RECALC=0;
+
+SET SESSION cte_max_recursion_depth = 100000;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 30000)
+  SELECT n, CONCAT(LPAD(n, 8, '0'), REPEAT('x', 2900)) FROM seq;
+
+SET SESSION innodb_parallel_read_threads = 16;
+OPTIMIZE TABLE t1;
+CHECK TABLE t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb);
+
+DROP TABLE t1;
