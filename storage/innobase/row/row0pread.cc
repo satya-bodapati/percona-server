@@ -1340,6 +1340,9 @@ dberr_t Parallel_reader::Scan_ctx::create_ranges(const Scan_range &scan_range,
 
   Savepoints savepoints{};
 
+  /* Leaf pages in the last range, for m_config.m_min_leaves. */
+  size_t n_leaves{};
+
   while (!page_cur_is_after_last(&page_cursor)) {
     const auto rec = page_cur_get_rec(&page_cursor);
 
@@ -1398,7 +1401,24 @@ dberr_t Parallel_reader::Scan_ctx::create_ranges(const Scan_range &scan_range,
     }
 
     if (!page_rec_is_supremum(page_cur_get_rec(&level_page_cursor))) {
-      create_range(ranges, level_page_cursor, mtr);
+      /* The first page that start_range() latched is the root of the range's
+      sub-tree. A sub-tree whose root is above level 1 is taken to cover the
+      minimum. */
+      const auto sub_root =
+          savepoints.empty() ? block : savepoints.front().second;
+      const auto sub_level = btr_page_get_level(buf_block_get_frame(sub_root));
+      const size_t sub_leaves =
+          sub_level == 0   ? 1
+          : sub_level == 1 ? page_get_n_recs(buf_block_get_frame(sub_root))
+                           : m_config.m_min_leaves;
+
+      if (n_leaves < m_config.m_min_leaves && !ranges.empty()) {
+        /* Extend the last range over this sub-tree. */
+        n_leaves += sub_leaves;
+      } else {
+        create_range(ranges, level_page_cursor, mtr);
+        n_leaves = sub_leaves;
+      }
     }
 
     /* We've created the persistent cursor, safe to release S latches on
@@ -1433,6 +1453,14 @@ dberr_t Parallel_reader::Scan_ctx::create_ranges(const Scan_range &scan_range,
 
   if (heap != nullptr) {
     mem_heap_free(heap);
+  }
+
+  if (depth == 0 && split_level == 0 && ranges.size() > 1 &&
+      n_leaves < m_config.m_min_leaves) {
+    /* The last range is too small: the range before it reads it too. */
+    const auto last = ranges.back();
+    ranges.pop_back();
+    ranges.back().second = last.second;
   }
 
   return (DB_SUCCESS);
@@ -1512,6 +1540,11 @@ dberr_t Parallel_reader::Scan_ctx::create_contexts(const Ranges &ranges) {
       /* If the tree is not very deep then don't split. For smaller tables
       it is more expensive to split because we end up traversing more blocks*/
       split_point = n;
+    }
+
+    if (m_config.m_min_leaves > 0 && m_depth < SPLIT_THRESHOLD) {
+      /* A range of a tree this shallow splits into single leaf pages. */
+      split_point = ranges.size();
     }
   }
 

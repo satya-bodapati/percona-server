@@ -393,6 +393,14 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
 
   Parallel_reader::Config config(FULL_SCAN, index());
 
+  for (auto builder : row_builders) {
+    if (builder->builds_subtrees()) {
+      /* Each scan range is built into a sub-tree, whose leaf pages take whole
+      extents. */
+      config.m_min_leaves = FSP_EXTENT_SIZE;
+    }
+  }
+
   /* Called for each row during the scan. */
   auto err = reader.add_scan(
       /* Ignore read views for non-online scans. */
@@ -448,6 +456,7 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
 
     const auto old_index = builder->old_index_to_copy();
     Parallel_reader::Config copy_config(FULL_SCAN, old_index);
+    copy_config.m_min_leaves = FSP_EXTENT_SIZE;
 
     err = reader.add_scan(
         m_ctx.m_online ? m_ctx.m_trx : nullptr, copy_config,

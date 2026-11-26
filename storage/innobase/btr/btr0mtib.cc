@@ -747,8 +747,10 @@ void Level_ctx::free_page_load() {
 
 dberr_t Btree_load::alloc_extent(Page_range_t &page_range, size_t level) {
   bool is_leaf = (level == 0);
-  auto err = m_allocator.allocate(is_leaf, false, page_range, m_fn_wait_begin,
-                                  m_fn_wait_end);
+  /* A non-leaf level takes single pages: it has too few pages to fill
+  extents. */
+  auto err = m_allocator.allocate(is_leaf, !is_leaf, page_range,
+                                  m_fn_wait_begin, m_fn_wait_end);
   if (err != DB_SUCCESS) {
     return err;
   }
@@ -1741,10 +1743,16 @@ dberr_t Btree_load::prepare_space(Page_load *&page_loader, size_t level,
   return DB_SUCCESS;
 }
 
+void Btree_load::free_unused_pages(const Page_extent *page_extent) {
+  m_allocator.free_pages(page_extent->is_leaf(),
+                         {page_extent->m_page_no, page_extent->m_range.second});
+}
+
 void Btree_load::add_to_bulk_flusher(Page_extent *page_extent) {
   ut_ad(page_extent != nullptr);
   ut_ad(page_extent->is_any_used());
 
+  free_unused_pages(page_extent);
   m_bulk_flusher.add(page_extent, m_fn_wait_begin, m_fn_wait_end);
 }
 
@@ -1770,6 +1778,7 @@ void Btree_load::add_to_bulk_flusher(bool finish) {
     auto page_extent = m_extents_tracked.front();
     m_extents_tracked.pop_front();
     if (page_extent->is_fully_used() || finish) {
+      free_unused_pages(page_extent);
       m_bulk_flusher.add(page_extent, m_fn_wait_begin, m_fn_wait_end);
     } else {
       m_extents_tracked.push_back(page_extent);
@@ -2270,9 +2279,9 @@ uint64_t Bulk_extent_allocator::init(dict_table_t *table, dict_index_t *index,
   size_t cache_max = 4 * cache_min;
   cache_size = std::min(cache_max, cache_size);
 
-  /* Switch to page based allocation without cache if the number is less than
+  /* Switch to page based allocation without cache if there is less data than
   two extents per thread. */
-  if (in_pages || cache_size < 2 * num_threads || cache_size < 4) {
+  if (in_pages || size_extent < 2 * num_threads || size_extent < 4) {
     std::ostringstream mesg_strm_1;
     mesg_strm_1 << "Innodb:  Allocate by Page, cache: " << cache_size
                 << " [min: " << cache_min << ", max: " << cache_max
@@ -2284,21 +2293,17 @@ uint64_t Bulk_extent_allocator::init(dict_table_t *table, dict_index_t *index,
   }
   m_type = Type::EXTENT;
 
+  /* At least two extents per thread, so that the threads seldom wait. */
+  cache_size = std::max(cache_size, std::max(size_t{4}, 2 * num_threads));
+
   auto extend_size = std::min(S_BULK_EXTEND_SIZE_MAX, cache_size);
   uint64_t extend_bytes = extend_size * FSP_EXTENT_SIZE * UNIV_PAGE_SIZE;
 
-  /* Divide between leaf and non-leaf extents. */
-  const size_t min_size = 2;
-  size_t non_leaf_size = cache_size / 16;
-  non_leaf_size = std::max(min_size, non_leaf_size);
-
-  size_t leaf_size =
-      cache_size > non_leaf_size ? (cache_size - non_leaf_size) : 0;
-  leaf_size = std::max(min_size, leaf_size);
-
-  /* Hard limit: 2K * 1M = 2G for each of leaf and non-leaf segments. */
-  leaf_size = std::min(leaf_size, S_MAX_RANGES);
-  non_leaf_size = std::min(non_leaf_size, S_MAX_RANGES);
+  /* Only the leaf pages are allocated in extents. The non-leaf pages of a
+  level are few, and take single pages (Btree_load::alloc_extent()). Hard
+  limit: 2K * 1M = 2G. */
+  const size_t leaf_size = std::min(cache_size, S_MAX_RANGES);
+  const size_t non_leaf_size = 0;
 
   m_leaf_extents.init(leaf_size);
   m_non_leaf_extents.init(non_leaf_size);
@@ -2337,6 +2342,15 @@ void Bulk_extent_allocator::stop() {
 
   m_allocator_condition.notify_one();
   m_thread.join();
+
+  /* An allocated extent is marked used as a whole. Give the cached extents
+  that no loader took back to the leaf segment. */
+  while (m_leaf_extents.m_num_consumed < m_leaf_extents.m_num_allocated) {
+    Page_range_t range;
+    bool trigger{};
+    static_cast<void>(m_leaf_extents.get_range(range, trigger));
+    free_pages(true, range);
+  }
 
   const size_t allocator_wait_ms = m_allocator_wait_time.count() / 1000;
   const size_t consumer_wait_ms = m_consumer_wait_time.count() / 1000;
@@ -2399,6 +2413,31 @@ dberr_t Bulk_extent_allocator::allocate_page(bool is_leaf,
     fil_space_release_free_extents(space_id, n_reserved);
   }
   return DB_SUCCESS;
+}
+
+void Bulk_extent_allocator::free_pages(bool is_leaf,
+                                       const Page_range_t &range) {
+  if (range.first >= range.second) {
+    return;
+  }
+
+  log_free_check();
+  mtr_t mtr;
+  mtr.start();
+  mtr.x_lock(dict_index_get_lock(m_index), UT_LOCATION_HERE);
+
+  page_t *root = btr_root_get(m_index, &mtr);
+
+  const size_t header_offset = is_leaf ? PAGE_BTR_SEG_LEAF : PAGE_BTR_SEG_TOP;
+  fseg_header_t *seg_header = root + PAGE_HEADER + header_offset;
+
+  /* The pages were never written, so fseg_free_page() only changes the
+  extent descriptor and the segment. */
+  for (page_no_t page_no = range.first; page_no < range.second; ++page_no) {
+    fseg_free_page(seg_header, m_index->space, page_no, false, &mtr);
+  }
+
+  mtr.commit();
 }
 
 dberr_t Bulk_extent_allocator::allocate_extent(bool is_leaf, mtr_t &mtr,

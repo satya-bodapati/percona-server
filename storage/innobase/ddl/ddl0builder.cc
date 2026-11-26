@@ -909,10 +909,26 @@ dberr_t Builder::init(Cursor &cursor, size_t n_threads) noexcept {
       return get_error();
     }
 
-    /* A scan range is a sub-tree of the old index, usually far smaller than
-    an extent, so allocate the pages of each sub-tree one by one. */
+    /* The leaf pages of each sub-tree take whole extents: a scan range covers
+    at least one extent of leaf pages (Parallel_reader::Config::m_min_leaves).
+    The leaf segment of the index that is read sizes the cache of extents.
+    btr_get_size() refuses an index in online DDL, which the old clustered
+    index of an online rebuild is, though its tree is complete. */
+    const auto source = is_skip_file_sort() ? m_ctx.m_old_table->first_index()
+                                            : old_index_to_copy();
+    mtr_t mtr;
+    mtr.start();
+    mtr.s_lock(dict_index_get_lock(source), UT_LOCATION_HERE);
+    auto root = btr_root_get(source, &mtr);
+    ulint n_used{};
+    const size_t size =
+        fseg_n_reserved_pages(root + PAGE_HEADER + PAGE_BTR_SEG_LEAF, &n_used,
+                              &mtr) *
+        UNIV_PAGE_SIZE;
+    mtr.commit();
+
     const auto extend_size = m_extent_allocator->init(
-        m_index->table, m_index, m_ctx.m_trx, 0, n_threads, true);
+        m_index->table, m_index, m_ctx.m_trx, size, n_threads, false);
 
     space->begin_bulk_operation(extend_size);
     fil_space_release(space);

@@ -140,17 +140,42 @@ CHECK TABLE t4;
 DROP TABLE t4;
 
 --echo #
+--echo # Indexes of more than two extents per thread: the leaf pages of each
+--echo # sub-tree take whole extents, and each scan range covers at least one
+--echo # extent of leaf pages.
+--echo #
+CREATE TABLE t5 (id INT NOT NULL PRIMARY KEY, a INT NOT NULL,
+                 b VARCHAR(250) NOT NULL, KEY kb (b(100), a)) ENGINE=InnoDB;
+INSERT INTO t5
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 60000)
+  SELECT n, n % 997, CONCAT(REPEAT(CHAR(97 + n % 26), 100), REPEAT('x', 100 + n % 50))
+  FROM seq;
+let $t5_check = SELECT (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t5 FORCE INDEX (PRIMARY)) = (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t5 FORCE INDEX (kb)) AS same_entries, (SELECT COUNT(*) FROM t5 FORCE INDEX (PRIMARY) WHERE b BETWEEN 'k' AND 'p') = (SELECT COUNT(*) FROM t5 FORCE INDEX (kb) WHERE b BETWEEN 'k' AND 'p') AS same_range, (SELECT COUNT(*) FROM t5) AS n_rows;
+SET SESSION innodb_parallel_read_threads = 2;
+OPTIMIZE TABLE t5;
+SET SESSION innodb_parallel_read_threads = 4;
+--let SEARCH_FILE= $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let SEARCH_PATTERN= Allocate by Extent
+--source include/search_pattern.inc
+--eval $t5_check
+CHECK TABLE t5;
+
+--echo #
 --echo # Crash right after the rebuild. Recovery starts from a checkpoint before
 --echo # the rebuild.
 --echo #
 SET GLOBAL innodb_checkpoint_disabled = ON;
 OPTIMIZE TABLE t1;
+SET SESSION innodb_parallel_read_threads = 2;
+OPTIMIZE TABLE t5;
 --source include/kill_and_restart_mysqld.inc
 --let $tbl= t1
 --source suite/innodb/include/alter_rebuild_copy_index.inc
 --let $tbl= t2
 --source suite/innodb/include/alter_rebuild_copy_index.inc
 CHECK TABLE t1;
+--eval $t5_check
+CHECK TABLE t5;
 
-DROP TABLE t1, t2;
+DROP TABLE t1, t2, t5;
 --disconnect con1

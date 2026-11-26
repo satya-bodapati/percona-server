@@ -232,6 +232,9 @@ struct Page_extent {
   @return true if it is a blob extent. */
   bool is_blob() const { return m_is_blob; }
 
+  /** @return true if this extent belongs to the leaf segment. */
+  bool is_leaf() const { return m_is_leaf; }
+
   /** Free the BUF_BLOCK_MEMORY blocks used by this extent. */
   void free_memory_blocks();
 
@@ -504,8 +507,15 @@ class Bulk_extent_allocator {
   /* Start extent allocator thread. */
   void start();
 
-  /** Stop extent allocator thread, if active. */
+  /** Stop extent allocator thread, if active, and give the pages of the
+  cached extents that were not used back to the segment. */
   void stop();
+
+  /** Give pages that were allocated but are not used back to the segment.
+  The caller must hold no latches.
+  @param[in] is_leaf true if leaf segment, otherwise non-leaf segment
+  @param[in] range pages to free, [first, second) */
+  void free_pages(bool is_leaf, const Page_range_t &range);
 
   /** Allocate a page range - currently ans Extent.
   @param[in] is_leaf true if leaf segment, otherwise non-leaf segment
@@ -1206,6 +1216,12 @@ class Btree_load : private ut::Non_copyable {
   /** Add the given page extent object to the bulk flusher.
   @param[in]  page_extent the extent to be flushed. */
   void add_to_bulk_flusher(Page_extent *page_extent);
+
+  /** Give the pages of an extent after its last used page back to the
+  segment. Only the last extent of a level or of the blobs has such pages,
+  and they are never written.
+  @param[in]  page_extent the extent that goes to the bulk flusher. */
+  void free_unused_pages(const Page_extent *page_extent);
 
   /** Check if transparent page compression (TPC) is enabled.
   @return true if TPC is enabled. */

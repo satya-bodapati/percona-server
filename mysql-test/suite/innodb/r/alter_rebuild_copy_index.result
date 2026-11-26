@@ -150,6 +150,30 @@ Table	Op	Msg_type	Msg_text
 test.t4	check	status	OK
 DROP TABLE t4;
 #
+# Indexes of more than two extents per thread: the leaf pages of each
+# sub-tree take whole extents, and each scan range covers at least one
+# extent of leaf pages.
+#
+CREATE TABLE t5 (id INT NOT NULL PRIMARY KEY, a INT NOT NULL,
+b VARCHAR(250) NOT NULL, KEY kb (b(100), a)) ENGINE=InnoDB;
+INSERT INTO t5
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 60000)
+SELECT n, n % 997, CONCAT(REPEAT(CHAR(97 + n % 26), 100), REPEAT('x', 100 + n % 50))
+FROM seq;
+SET SESSION innodb_parallel_read_threads = 2;
+OPTIMIZE TABLE t5;
+Table	Op	Msg_type	Msg_text
+test.t5	optimize	note	Table does not support optimize, doing recreate + analyze instead
+test.t5	optimize	status	OK
+SET SESSION innodb_parallel_read_threads = 4;
+Pattern "Allocate by Extent" found
+SELECT (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t5 FORCE INDEX (PRIMARY)) = (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t5 FORCE INDEX (kb)) AS same_entries, (SELECT COUNT(*) FROM t5 FORCE INDEX (PRIMARY) WHERE b BETWEEN 'k' AND 'p') = (SELECT COUNT(*) FROM t5 FORCE INDEX (kb) WHERE b BETWEEN 'k' AND 'p') AS same_range, (SELECT COUNT(*) FROM t5) AS n_rows;
+same_entries	same_range	n_rows
+1	1	60000
+CHECK TABLE t5;
+Table	Op	Msg_type	Msg_text
+test.t5	check	status	OK
+#
 # Crash right after the rebuild. Recovery starts from a checkpoint before
 # the rebuild.
 #
@@ -158,6 +182,11 @@ OPTIMIZE TABLE t1;
 Table	Op	Msg_type	Msg_text
 test.t1	optimize	note	Table does not support optimize, doing recreate + analyze instead
 test.t1	optimize	status	OK
+SET SESSION innodb_parallel_read_threads = 2;
+OPTIMIZE TABLE t5;
+Table	Op	Msg_type	Msg_text
+test.t5	optimize	note	Table does not support optimize, doing recreate + analyze instead
+test.t5	optimize	status	OK
 # Kill and restart
 SELECT (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t1 FORCE INDEX (ka)) AS ka, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t1 FORCE INDEX (kb)) AS kb, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, IFNULL(u, -1))))) FROM t1 FORCE INDEX (ku)) AS ku, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b BETWEEN 'k' AND 'p') AS kb_range, (SELECT COUNT(*) FROM t1 FORCE INDEX (kt) WHERE t BETWEEN 'K' AND 'P') AS kt_range, (SELECT COUNT(*) FROM t1 FORCE INDEX (ku) WHERE u IS NULL) AS ku_null;
 ka	kb	ku	kb_range	kt_range	ku_null
@@ -168,4 +197,10 @@ ka	kb	ku	kb_range	kt_range	ku_null
 CHECK TABLE t1;
 Table	Op	Msg_type	Msg_text
 test.t1	check	status	OK
-DROP TABLE t1, t2;
+SELECT (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t5 FORCE INDEX (PRIMARY)) = (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t5 FORCE INDEX (kb)) AS same_entries, (SELECT COUNT(*) FROM t5 FORCE INDEX (PRIMARY) WHERE b BETWEEN 'k' AND 'p') = (SELECT COUNT(*) FROM t5 FORCE INDEX (kb) WHERE b BETWEEN 'k' AND 'p') AS same_range, (SELECT COUNT(*) FROM t5) AS n_rows;
+same_entries	same_range	n_rows
+1	1	60000
+CHECK TABLE t5;
+Table	Op	Msg_type	Msg_text
+test.t5	check	status	OK
+DROP TABLE t1, t2, t5;

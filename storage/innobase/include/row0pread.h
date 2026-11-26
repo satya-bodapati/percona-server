@@ -209,6 +209,12 @@ class Parallel_reader {
     /** Partition id if the index to be scanned belongs to a partitioned table,
     else std::numeric_limits<size_t>::max(). */
     size_t m_partition_id{std::numeric_limits<size_t>::max()};
+
+    /** If not zero, a range covers at least this many leaf pages, as counted
+    on the pages above the leaves, and a range is never split into single
+    leaf pages. A build of one sub-tree per range sets it, so that the leaf
+    pages of each sub-tree fill at least one extent. */
+    size_t m_min_leaves{0};
   };
 
   /** Thread related context information. */
