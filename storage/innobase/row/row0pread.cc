@@ -1485,7 +1485,7 @@ dberr_t Parallel_reader::Scan_ctx::partition(
 
   /* Read the second half of the ranges as one range. */
   DBUG_EXECUTE_IF("parallel_reader_join_tail_ranges", {
-    const auto n_keep = (ranges.size() + 1) / 2;
+    const auto n_keep = ranges.size() / 2 + 1;
     while (ranges.size() > n_keep) {
       const auto last = ranges.back();
       ranges.pop_back();
