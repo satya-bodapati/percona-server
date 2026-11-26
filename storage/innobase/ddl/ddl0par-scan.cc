@@ -398,6 +398,7 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
       /* Each scan range is built into a sub-tree, whose leaf pages take whole
       extents. */
       config.m_min_leaves = FSP_EXTENT_SIZE;
+      DBUG_EXECUTE_IF("ddl_scan_no_min_leaves", config.m_min_leaves = 0;);
     }
   }
 

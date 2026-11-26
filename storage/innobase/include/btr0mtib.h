@@ -1126,6 +1126,13 @@ class Btree_load : private ut::Non_copyable {
   frames back */
   bool wait_for_extent_frames();
 
+  /** End an extent at its last used page when the buffer pool has no room for
+  the frames of its other pages and waiting does not give frames back. Its
+  unused pages go back to the segment.
+  @param[in,out]  page_extent  extent whose pages are being filled
+  @return true if the extent was ended */
+  bool end_extent_if_no_room(Page_extent *page_extent);
+
   /** Allocate an extent, or a single page when the buffer pool has no room
   for the frames of an extent.
   @param[in,out]  page_range  the range of pages allocated.

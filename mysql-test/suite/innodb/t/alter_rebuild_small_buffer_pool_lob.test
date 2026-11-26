@@ -1,0 +1,27 @@
+#
+# A rebuild with parallel scan threads writes the external fields of each
+# sub-tree to extents of blob pages, and a sub-tree holds the pages of these
+# extents in frames of the buffer pool until its flusher writes them. Each
+# leaf page is read as one range here, so that 16 threads build sub-trees with
+# many external fields at the same time in a buffer pool of 24 MB.
+#
+--source include/have_debug.inc
+--source include/have_innodb_16k.inc
+
+CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY, c LONGTEXT NOT NULL)
+  ENGINE=InnoDB ROW_FORMAT=DYNAMIC STATS_AUTO_RECALC=0;
+
+SET SESSION cte_max_recursion_depth = 100000;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 12000)
+  SELECT n, REPEAT(LPAD(n, 10, '0'), 3000) FROM seq;
+
+SET SESSION debug = '+d,parallel_reader_range_per_leaf,ddl_scan_no_min_leaves';
+SET SESSION innodb_parallel_read_threads = 16;
+OPTIMIZE TABLE t1;
+SET SESSION debug = '-d,parallel_reader_range_per_leaf,ddl_scan_no_min_leaves';
+
+CHECK TABLE t1;
+SELECT COUNT(*), SUM(LENGTH(c)), SUM(c = REPEAT(LPAD(id, 10, '0'), 3000)) FROM t1;
+
+DROP TABLE t1;
