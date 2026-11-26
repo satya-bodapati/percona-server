@@ -162,26 +162,12 @@ static bool row_sel_sec_rec_is_for_blob(
   return (!cmp_data_data(mtype, prtype, true, buf, len, sec_field, sec_len));
 }
 
-/** Returns true if the user-defined column values in a secondary index record
-are alphabetically the same as the corresponding columns in the clustered
-index record.
-NOTE: the comparison is NOT done as a binary comparison, but character
-fields are compared with collation!
-@param[in]      sec_rec         secondary index record
-@param[in]      sec_index       secondary index
-@param[in]      clust_rec       clustered index record;
-                                must be protected by a page s-latch
-@param[in]      clust_index     clustered index
-@param[in]      thr             query thread
-@param[out]     is_equal        set to true if the secondary record is equal
-to the corresponding fields in the clustered record, when compared with
-                                collation; false if not equal or if the
-clustered record has been marked for deletion; only valid if DB_SUCCESS was
-returned
-@return DB_SUCCESS or error code */
-static dberr_t row_sel_sec_rec_is_for_clust_rec(
-    const rec_t *sec_rec, const dict_index_t *sec_index, const rec_t *clust_rec,
-    const dict_index_t *clust_index, que_thr_t *thr, bool &is_equal) {
+dberr_t row_sel_sec_rec_is_for_clust_rec(const rec_t *sec_rec,
+                                         const dict_index_t *sec_index,
+                                         const rec_t *clust_rec,
+                                         const dict_index_t *clust_index,
+                                         trx_t *trx, que_thr_t *thr,
+                                         bool &is_equal) {
   const byte *sec_field;
   ulint sec_len;
   const byte *clust_field;
@@ -192,7 +178,6 @@ static dberr_t row_sel_sec_rec_is_for_clust_rec(
   ulint sec_offsets_[REC_OFFS_SMALL_SIZE];
   ulint *clust_offs = clust_offsets_;
   ulint *sec_offs = sec_offsets_;
-  trx_t *trx = thr_get_trx(thr);
   dberr_t err = DB_SUCCESS;
   const dict_table_t *const table = clust_index->table;
 
@@ -233,6 +218,7 @@ static dberr_t row_sel_sec_rec_is_for_clust_rec(
     /* For virtual column, its value will need to be
     reconstructed from base column in cluster index */
     if (col->is_virtual()) {
+      ut_ad(thr != nullptr);
       const dict_v_col_t *v_col = reinterpret_cast<const dict_v_col_t *>(col);
 
       const dtuple_t *const row =
@@ -241,7 +227,7 @@ static dberr_t row_sel_sec_rec_is_for_clust_rec(
 
       const dfield_t *const vfield = innobase_get_computed_value(
           &thr->prebuilt->blob_heap, row, v_col, table, &heap, heap,
-          thr_get_trx(thr)->mysql_thd, thr->prebuilt->m_mysql_table);
+          trx->mysql_thd, thr->prebuilt->m_mysql_table);
 
       if (vfield == nullptr) {
         /* This may happen e.g. when this statement is executed in
@@ -922,7 +908,7 @@ static inline bool row_sel_test_other_conds(
       bool rec_equal;
 
       err = row_sel_sec_rec_is_for_clust_rec(rec, plan->index, clust_rec, index,
-                                             thr, rec_equal);
+                                             thr_get_trx(thr), thr, rec_equal);
       if (err != DB_SUCCESS) {
         goto err_exit;
       } else if (!rec_equal) {
@@ -3175,7 +3161,7 @@ non-clustered index. Does the necessary locking.
       bool rec_equal;
 
       err = row_sel_sec_rec_is_for_clust_rec(rec, sec_index, clust_rec,
-                                             clust_index, thr, rec_equal);
+                                             clust_index, trx, thr, rec_equal);
       if (err != DB_SUCCESS) {
         goto err_exit;
       } else if (!rec_equal) {

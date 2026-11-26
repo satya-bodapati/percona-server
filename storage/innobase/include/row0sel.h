@@ -85,6 +85,30 @@ are not covered by current key.
 void row_sel_copy_cached_fields_for_mysql(byte *buf, const byte *cached_rec,
                                           row_prebuilt_t *prebuilt);
 
+/** Returns true if the user-defined column values in a secondary index record
+are alphabetically the same as the corresponding columns in the clustered
+index record.
+NOTE: the comparison is NOT done as a binary comparison, but character
+fields are compared with collation!
+@param[in]      sec_rec         secondary index record
+@param[in]      sec_index       secondary index
+@param[in]      clust_rec       clustered index record;
+                                must be protected by a page s-latch
+@param[in]      clust_index     clustered index
+@param[in]      trx             transaction
+@param[in]      thr             query thread, used only for virtual columns;
+                                may be nullptr if sec_index has none
+@param[out]     is_equal        set to true if the secondary record is equal
+to the corresponding fields in the clustered record, when compared with
+                                collation; false if not equal or if the
+clustered record has been marked for deletion; only valid if DB_SUCCESS was
+returned
+@return DB_SUCCESS or error code */
+[[nodiscard]] dberr_t row_sel_sec_rec_is_for_clust_rec(
+    const rec_t *sec_rec, const dict_index_t *sec_index, const rec_t *clust_rec,
+    const dict_index_t *clust_index, trx_t *trx, que_thr_t *thr,
+    bool &is_equal);
+
 // clang-format off
 /** Convert a row in the Innobase format to a row in the MySQL format.
 Note that the template in prebuilt may advise us to copy only a few

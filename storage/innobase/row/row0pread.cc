@@ -34,10 +34,12 @@ Created 2018-01-27 by Sunny Bains */
 
 #include "btr0pcur.h"
 #include "dict0dict.h"
+#include "lock0lock.h"
 #include "os0thread-create.h"
 #include "row0mysql.h"
 #include "row0pread.h"
 #include "row0row.h"
+#include "row0sel.h"
 #include "row0vers.h"
 #include "ut0new.h"
 
@@ -639,6 +641,67 @@ dberr_t PCursor::move_to_next_block(dict_index_t *index) {
   return move_to_next_block_at_level_one(index);
 }
 
+/** Check if a read view sees a secondary index record, by the version of its
+clustered index record that the read view sees, as row_search_mvcc() does.
+@param[in]      rec             secondary index record, S-latched in mtr
+@param[in]      index           secondary index
+@param[in]      trx             transaction with the read view
+@param[in,out]  mtr             mini-transaction, the clustered index leaf page
+                                is latched and released in it
+@return true if the read view sees the record. */
+static bool sec_rec_is_visible(const rec_t *rec, dict_index_t *index,
+                               trx_t *trx, mtr_t *mtr) {
+  auto clust_index = index->table->first_index();
+  auto view = trx->read_view;
+  Scoped_heap heap(1024, UT_LOCATION_HERE);
+  auto ref = row_build_row_ref(ROW_COPY_POINTERS, index, rec, heap.get());
+
+  btr_pcur_t pcur;
+  pcur.open(clust_index, 0, ref, PAGE_CUR_LE, BTR_SEARCH_LEAF, mtr,
+            UT_LOCATION_HERE);
+
+  const rec_t *clust_rec = pcur.get_rec();
+  bool is_visible{};
+
+  /* A delete-marked secondary index record may have no clustered index
+  record: the rollback of an insert removed it. */
+  if (page_rec_is_user_rec(clust_rec) &&
+      pcur.get_low_match() >= dict_index_get_n_unique(clust_index)) {
+    auto heap_ptr = heap.get();
+    auto offsets =
+        rec_get_offsets(clust_rec, clust_index, nullptr, ULINT_UNDEFINED,
+                        UT_LOCATION_HERE, &heap_ptr);
+    rec_t *old_vers{};
+
+    if (!lock_clust_rec_cons_read_sees(clust_rec, clust_index, offsets, view)) {
+      static_cast<void>(row_vers_build_for_consistent_read(
+          clust_rec, mtr, clust_index, &offsets, view, &heap_ptr, heap_ptr,
+          &old_vers, nullptr, nullptr));
+      clust_rec = old_vers;
+    }
+
+    if (clust_rec == nullptr) {
+      /* The row was inserted after the read view was created. */
+    } else if (old_vers == nullptr &&
+               !rec_get_deleted_flag(rec, dict_table_is_comp(index->table))) {
+      /* The read view sees the latest version of the row, and the record
+      belongs to it. */
+      is_visible = true;
+    } else {
+      /* The record may belong to another version of the row. Only a
+      virtual column can fail the comparison. */
+      const auto err = row_sel_sec_rec_is_for_clust_rec(
+          rec, index, clust_rec, clust_index, trx, nullptr, is_visible);
+      ut_ad(err == DB_SUCCESS);
+    }
+  }
+
+  btr_leaf_page_release(pcur.get_block(), BTR_SEARCH_LEAF, mtr);
+  pcur.close();
+
+  return is_visible;
+}
+
 bool Parallel_reader::Scan_ctx::check_visibility(const rec_t *&rec,
                                                  ulint *&offsets,
                                                  mem_heap_t *&heap,
@@ -676,9 +739,11 @@ bool Parallel_reader::Scan_ctx::check_visibility(const rec_t *&rec,
           return (false);
         }
       }
-    } else {
-      /* Secondary index scan not supported yet. */
-      ut_error;
+    } else if (m_trx->isolation_level > TRX_ISO_READ_UNCOMMITTED &&
+               !lock_sec_rec_cons_read_sees(rec, m_config.m_index, view)) {
+      /* Transactions that the read view does not see modified the page. A
+      delete-marked record may still be in the read view. */
+      return sec_rec_is_visible(rec, m_config.m_index, m_trx, mtr);
     }
   }
 
