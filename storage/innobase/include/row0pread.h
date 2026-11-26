@@ -211,9 +211,9 @@ class Parallel_reader {
     size_t m_partition_id{std::numeric_limits<size_t>::max()};
 
     /** If not zero, a range covers at least this many leaf pages, as counted
-    on the pages above the leaves, unless the index has fewer, and ranges are
-    not split. A build of one sub-tree per range sets it, so that the leaf
-    pages of each sub-tree fill at least one extent. */
+    on the pages above the leaves, unless the index has fewer, and a range is
+    never split into single leaf pages. A build of one sub-tree per range sets
+    it, so that the leaf pages of each sub-tree fill at least one extent. */
     size_t m_min_leaves{0};
   };
 
@@ -596,10 +596,12 @@ class Parallel_reader::Scan_ctx {
   @param[in]      depth         Sub-range current level.
   @param[in]      split_level   Sub-range starting level (0 == root).
   @param[in,out]  ranges        Ranges to scan.
+  @param[in,out]  n_leaves      Leaf pages in the last range, for
+                                Config::m_min_leaves.
   @param[in,out]  mtr           Mini-transaction */
   dberr_t create_ranges(const Scan_range &scan_range, page_no_t page_no,
                         size_t depth, const size_t split_level, Ranges &ranges,
-                        mtr_t *mtr);
+                        size_t &n_leaves, mtr_t *mtr);
 
   /** Build a dtuple_t from rec_t.
   @param[in]      rec           Build the dtuple from this record.

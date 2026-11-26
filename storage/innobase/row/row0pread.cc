@@ -1279,11 +1279,9 @@ void Parallel_reader::Scan_ctx::create_range(Ranges &ranges,
   ranges.push_back(Range(iter, std::make_shared<Iter>()));
 }
 
-dberr_t Parallel_reader::Scan_ctx::create_ranges(const Scan_range &scan_range,
-                                                 page_no_t page_no,
-                                                 size_t depth,
-                                                 const size_t split_level,
-                                                 Ranges &ranges, mtr_t *mtr) {
+dberr_t Parallel_reader::Scan_ctx::create_ranges(
+    const Scan_range &scan_range, page_no_t page_no, size_t depth,
+    const size_t split_level, Ranges &ranges, size_t &n_leaves, mtr_t *mtr) {
   ut_ad(index_s_own());
   ut_a(page_no != FIL_NULL);
 
@@ -1340,9 +1338,6 @@ dberr_t Parallel_reader::Scan_ctx::create_ranges(const Scan_range &scan_range,
 
   Savepoints savepoints{};
 
-  /* Leaf pages in the last range, for m_config.m_min_leaves. */
-  size_t n_leaves{};
-
   while (!page_cur_is_after_last(&page_cursor)) {
     const auto rec = page_cur_get_rec(&page_cursor);
 
@@ -1371,7 +1366,8 @@ dberr_t Parallel_reader::Scan_ctx::create_ranges(const Scan_range &scan_range,
 
       if (depth < split_level) {
         /* Need to create a range starting at a lower level in the tree. */
-        create_ranges(scan_range, page_no, depth + 1, split_level, ranges, mtr);
+        create_ranges(scan_range, page_no, depth + 1, split_level, ranges,
+                      n_leaves, mtr);
 
         page_cur_move_to_next(&page_cursor);
         continue;
@@ -1455,14 +1451,6 @@ dberr_t Parallel_reader::Scan_ctx::create_ranges(const Scan_range &scan_range,
     mem_heap_free(heap);
   }
 
-  if (depth == 0 && split_level == 0 && ranges.size() > 1 &&
-      n_leaves < m_config.m_min_leaves) {
-    /* The last range is too small: the range before it reads it too. */
-    const auto last = ranges.back();
-    ranges.pop_back();
-    ranges.back().second = last.second;
-  }
-
   return (DB_SUCCESS);
 }
 
@@ -1477,8 +1465,19 @@ dberr_t Parallel_reader::Scan_ctx::partition(
 
   dberr_t err{DB_SUCCESS};
 
+  /* Leaf pages in the last range, for m_config.m_min_leaves. */
+  size_t n_leaves{};
+
   err = create_ranges(scan_range, m_config.m_index->page, 0, split_level,
-                      ranges, &mtr);
+                      ranges, n_leaves, &mtr);
+
+  if (err == DB_SUCCESS && ranges.size() > 1 &&
+      n_leaves < m_config.m_min_leaves) {
+    /* The last range is too small: the range before it reads it too. */
+    const auto last = ranges.back();
+    ranges.pop_back();
+    ranges.back().second = last.second;
+  }
 
   if (err == DB_SUCCESS && scan_range.m_end != nullptr && !ranges.empty()) {
     auto &iter = ranges.back().second;
@@ -1542,10 +1541,8 @@ dberr_t Parallel_reader::Scan_ctx::create_contexts(const Ranges &ranges) {
       split_point = n;
     }
 
-    if (m_config.m_min_leaves > 0) {
-      /* A split range would not keep the minimum: in a tree of SPLIT_THRESHOLD
-      levels it splits into single leaf pages, in a deeper tree its last part
-      can be one leaf page. */
+    if (m_config.m_min_leaves > 0 && m_depth < SPLIT_THRESHOLD) {
+      /* A range of a tree this shallow splits into single leaf pages. */
       split_point = ranges.size();
     }
   }
