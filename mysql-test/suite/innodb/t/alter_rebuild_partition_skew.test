@@ -1,0 +1,48 @@
+#
+# A rebuild with parallel scan threads builds one sub-tree per scan range. The
+# primary key below is short for most rows and long for the last ones, so a
+# page on level 1 points to about 100 leaf pages at the start and to about 8
+# at the end. The ranges are made of leaf pages, not of the pages on level 1,
+# so that the sub-trees have about the same number of pages.
+#
+--source include/have_debug.inc
+--source include/have_innodb_16k.inc
+
+CREATE TABLE t1 (id VARCHAR(2000) CHARACTER SET latin1 NOT NULL PRIMARY KEY,
+                 c VARCHAR(3000) CHARACTER SET latin1 NOT NULL)
+  ENGINE=InnoDB ROW_FORMAT=DYNAMIC STATS_AUTO_RECALC=0;
+
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 8000)
+  SELECT IF(n <= 7000, LPAD(n, 8, '0'), CONCAT(LPAD(n, 8, '0'), REPEAT('k', 1900))),
+         REPEAT('x', 2900) FROM seq;
+
+SET SESSION innodb_parallel_read_threads = 2;
+OPTIMIZE TABLE t1;
+
+--let MYSQLD_LOG = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--perl
+  use strict;
+  my $log = $ENV{'MYSQLD_LOG'};
+  open(my $fh, '<', $log) or die "cannot open $log";
+  my @pages;
+  my $in_test = 0;
+  while (my $line = <$fh>) {
+    $in_test = 1 if $line =~ /CURRENT_TEST: innodb.alter_rebuild_partition_skew/;
+    next unless $in_test;
+    push @pages, $1 if $line =~ /index=PRIMARY, height=\d+, n_extents=\d+, n_pages=(\d+)/;
+  }
+  close($fh);
+  # The last sub-tree takes what is left: compare the others.
+  pop @pages;
+  my @sorted = sort { $a <=> $b } @pages;
+  my $balanced = @sorted >= 2 && $sorted[-1] <= 2 * $sorted[0];
+  print "Sub-trees of the primary key have about the same number of pages: ",
+        ($balanced ? "yes" : "no: @pages"), "\n";
+EOF
+
+CHECK TABLE t1;
+SELECT COUNT(*) FROM t1;
+
+DROP TABLE t1;

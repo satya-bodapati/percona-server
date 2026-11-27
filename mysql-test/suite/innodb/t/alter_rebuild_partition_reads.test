@@ -3,7 +3,7 @@
 # thread starts. It reads only the pages above the units it counts and the
 # pages that start a range, not every leaf page or every page on level 1 of
 # the index. With keys of about 3000 bytes a page holds five records, so kb
-# has about 1600 pages on level 1.
+# has about 1600 pages on level 1 and about 2000 pages above the leaf pages.
 #
 --source include/have_debug.inc
 --source include/have_debug_sync.inc
@@ -33,8 +33,8 @@ let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'Innodb_buffer_pool_read_r
 SET DEBUG_SYNC = 'now SIGNAL scan';
 SET DEBUG_SYNC = 'now WAIT_FOR partitioned';
 let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'Innodb_buffer_pool_read_requests', Value, 1);
---let $assert_text = Making the ranges takes far fewer page requests than the pages on level 1 of kb
---let $assert_cond = $after - $before < 1000
+--let $assert_text = Making the ranges takes fewer page requests than the pages above the leaf pages of kb
+--let $assert_cond = $after - $before < 2000
 --source include/assert.inc
 SET DEBUG_SYNC = 'now SIGNAL go';
 

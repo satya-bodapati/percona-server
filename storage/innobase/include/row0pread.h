@@ -612,7 +612,7 @@ class Parallel_reader::Scan_ctx {
                                    Leaf_sample &sample, mtr_t *mtr) const;
 
   /** Partition the B+Tree for a build of one sub-tree per range. A range is a
-  run of units: the pages of the highest level that has at least twice
+  run of units: the pages of the highest level that has at least 16 times
   SUBTREE_RANGES_PER_THREAD pages per thread, or the leaf pages. With the
   root latched, count the units on the pages above them, and give each range
   the units of SUBTREE_RANGES_PER_THREAD ranges per thread, but about

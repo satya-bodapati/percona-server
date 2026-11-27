@@ -1,0 +1,21 @@
+CREATE TABLE t1 (id VARCHAR(2000) CHARACTER SET latin1 NOT NULL PRIMARY KEY,
+c VARCHAR(3000) CHARACTER SET latin1 NOT NULL)
+ENGINE=InnoDB ROW_FORMAT=DYNAMIC STATS_AUTO_RECALC=0;
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 8000)
+SELECT IF(n <= 7000, LPAD(n, 8, '0'), CONCAT(LPAD(n, 8, '0'), REPEAT('k', 1900))),
+REPEAT('x', 2900) FROM seq;
+SET SESSION innodb_parallel_read_threads = 2;
+OPTIMIZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	optimize	note	Table does not support optimize, doing recreate + analyze instead
+test.t1	optimize	status	OK
+Sub-trees of the primary key have about the same number of pages: yes
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+8000
+DROP TABLE t1;

@@ -1605,8 +1605,10 @@ dberr_t Parallel_reader::Scan_ctx::partition_for_subtrees(
       SUBTREE_RANGES_PER_THREAD * std::max(max_threads(), size_t{1});
 
   /* A range is a run of units: the pages of the highest level that has at
-  least 2 * n_wanted pages, or the leaf pages. Each level above it has fewer
-  pages, so that counting reads fewer than 2 * n_wanted pages per level. */
+  least 16 * n_wanted pages, or the leaf pages. Each level above it has fewer
+  pages, so that counting reads fewer than 16 * n_wanted pages per level, and
+  a range has 16 units or more, so that units that cover different numbers of
+  leaf pages even out. */
   size_t unit_level = root_level - 1;
   size_t n_units = page_get_n_recs(buf_block_get_frame(root));
   /* Pages on the level above the units. */
@@ -1617,9 +1619,9 @@ dberr_t Parallel_reader::Scan_ctx::partition_for_subtrees(
   bool per_leaf{};
   DBUG_EXECUTE_IF("parallel_reader_range_per_leaf", per_leaf = true;);
 
-  /* With fewer than 2 * n_wanted units, the units of a range would be too
+  /* With fewer than 16 * n_wanted units, the units of a range would be too
   large: go down a level. */
-  while (unit_level > 0 && (n_units < 2 * n_wanted || per_leaf)) {
+  while (unit_level > 0 && (n_units < 16 * n_wanted || per_leaf)) {
     --unit_level;
     n_above = n_units;
     sample = Leaf_sample(n_above);
