@@ -645,21 +645,25 @@ dberr_t PCursor::move_to_next_block(dict_index_t *index) {
 
 /** Check if a read view sees a secondary index record, by the version of its
 clustered index record that the read view sees, as row_search_mvcc() does.
-@param[in]      rec             secondary index record, S-latched in mtr
+The clustered index record is looked up in a mini-transaction of its own, as
+in row_vers_impl_x_locked(): the mini-transaction of the scan stays on the
+pages of the scan.
+@param[in]      rec             secondary index record, S-latched by the scan
 @param[in]      index           secondary index
 @param[in]      trx             transaction with the read view
-@param[in,out]  mtr             mini-transaction, the clustered index leaf page
-                                is latched and released in it
 @return true if the read view sees the record. */
 static bool sec_rec_is_visible(const rec_t *rec, dict_index_t *index,
-                               trx_t *trx, mtr_t *mtr) {
+                               trx_t *trx) {
   auto clust_index = index->table->first_index();
   auto view = trx->read_view;
   Scoped_heap heap(1024, UT_LOCATION_HERE);
   auto ref = row_build_row_ref(ROW_COPY_POINTERS, index, rec, heap.get());
 
+  mtr_t mtr;
+  mtr.start();
+
   btr_pcur_t pcur;
-  pcur.open(clust_index, 0, ref, PAGE_CUR_LE, BTR_SEARCH_LEAF, mtr,
+  pcur.open(clust_index, 0, ref, PAGE_CUR_LE, BTR_SEARCH_LEAF, &mtr,
             UT_LOCATION_HERE);
 
   const rec_t *clust_rec = pcur.get_rec();
@@ -677,7 +681,7 @@ static bool sec_rec_is_visible(const rec_t *rec, dict_index_t *index,
 
     if (!lock_clust_rec_cons_read_sees(clust_rec, clust_index, offsets, view)) {
       static_cast<void>(row_vers_build_for_consistent_read(
-          clust_rec, mtr, clust_index, &offsets, view, &heap_ptr, heap_ptr,
+          clust_rec, &mtr, clust_index, &offsets, view, &heap_ptr, heap_ptr,
           &old_vers, nullptr, nullptr));
       clust_rec = old_vers;
     }
@@ -698,8 +702,8 @@ static bool sec_rec_is_visible(const rec_t *rec, dict_index_t *index,
     }
   }
 
-  btr_leaf_page_release(pcur.get_block(), BTR_SEARCH_LEAF, mtr);
   pcur.close();
+  mtr.commit();
 
   return is_visible;
 }
@@ -745,7 +749,7 @@ bool Parallel_reader::Scan_ctx::check_visibility(const rec_t *&rec,
                !lock_sec_rec_cons_read_sees(rec, m_config.m_index, view)) {
       /* Transactions that the read view does not see modified the page. A
       delete-marked record may still be in the read view. */
-      return sec_rec_is_visible(rec, m_config.m_index, m_trx, mtr);
+      return sec_rec_is_visible(rec, m_config.m_index, m_trx);
     }
   }
 
