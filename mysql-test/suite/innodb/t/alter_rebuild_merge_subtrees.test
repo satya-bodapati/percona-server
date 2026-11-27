@@ -20,7 +20,7 @@ INSERT INTO t1
 
 SET @old_fill_factor = @@GLOBAL.innodb_fill_factor;
 SET GLOBAL innodb_fill_factor = 100;
-SET SESSION innodb_parallel_read_threads = 4;
+SET SESSION innodb_parallel_read_threads = 2;
 OPTIMIZE TABLE t1;
 SET GLOBAL innodb_fill_factor = @old_fill_factor;
 

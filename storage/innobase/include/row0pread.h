@@ -111,6 +111,11 @@ class Parallel_reader {
   spawned. */
   constexpr static size_t MAX_TOTAL_THREADS{MAX_THREADS + MAX_RESERVED_THREADS};
 
+  /** Ranges per thread of a build of one sub-tree per range: enough for the
+  threads to share the work when the ranges hold different amounts of live
+  records, and few enough that each sub-tree is large. */
+  constexpr static size_t SUBTREE_RANGES_PER_THREAD{4};
+
   using Links = std::vector<page_no_t, ut::allocator<page_no_t>>;
 
   // Forward declaration.
@@ -210,10 +215,11 @@ class Parallel_reader {
     else std::numeric_limits<size_t>::max(). */
     size_t m_partition_id{std::numeric_limits<size_t>::max()};
 
-    /** If not zero, a range covers at least this many leaf pages, as counted
-    on the pages above the leaves, unless the index has fewer, and a range is
-    never split into single leaf pages. A build of one sub-tree per range sets
-    it, so that the leaf pages of each sub-tree fill at least one extent. */
+    /** If not zero, the scan is a build of one sub-tree per range
+    (Scan_ctx::partition_for_subtrees()), and a range covers at least this
+    many leaf pages, as counted on the pages above the leaves, unless the
+    index has fewer. A build sets it so that the leaf pages of each sub-tree
+    fill at least one extent. */
     size_t m_min_leaves{0};
   };
 
@@ -562,6 +568,15 @@ class Parallel_reader::Scan_ctx {
   @return the partition scan ranges. */
   dberr_t partition(const Scan_range &scan_range, Ranges &ranges,
                     size_t split_level);
+
+  /** Partition the B+Tree for a build of one sub-tree per range: partition
+  at deeper levels until there are SUBTREE_RANGES_PER_THREAD ranges per
+  thread, then read neighbouring ranges as one, so that there are that many
+  ranges and they are not split later.
+  @param[in]      scan_range    Range for partitioning.
+  @param[in,out]  ranges        Ranges to scan.
+  @return DB_SUCCESS or error code. */
+  dberr_t partition_for_subtrees(const Scan_range &scan_range, Ranges &ranges);
 
   /** Find the page number of the node that contains the search key. If the
   key is null then we assume -infinity.

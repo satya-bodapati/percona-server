@@ -1514,6 +1514,50 @@ dberr_t Parallel_reader::Scan_ctx::partition(
   return (err);
 }
 
+dberr_t Parallel_reader::Scan_ctx::partition_for_subtrees(
+    const Scan_range &scan_range, Ranges &ranges) {
+  ut_ad(m_config.m_min_leaves > 0);
+
+  const size_t n_wanted =
+      SUBTREE_RANGES_PER_THREAD * std::max(max_threads(), size_t{1});
+
+  auto err = partition(scan_range, ranges, 0);
+
+  /* Partition one level deeper while that gives more ranges. */
+  for (size_t level = 1; err == DB_SUCCESS && ranges.size() < n_wanted;
+       ++level) {
+    Ranges deeper{};
+
+    err = partition(scan_range, deeper, level);
+
+    if (err != DB_SUCCESS || deeper.size() <= ranges.size()) {
+      break;
+    }
+    ranges = std::move(deeper);
+  }
+
+  if (err != DB_SUCCESS || ranges.size() <= n_wanted) {
+    return err;
+  }
+
+  /* Read neighbouring ranges as one. The end of a range is the start of the
+  next one, so a joined range ends where its last range ends. */
+  Ranges joined{};
+
+  joined.reserve(n_wanted);
+
+  for (size_t i = 0; i < n_wanted; ++i) {
+    const auto first = ranges.size() * i / n_wanted;
+    const auto last = ranges.size() * (i + 1) / n_wanted - 1;
+
+    joined.push_back(Range(ranges[first].first, ranges[last].second));
+  }
+
+  ranges = std::move(joined);
+
+  return DB_SUCCESS;
+}
+
 dberr_t Parallel_reader::Scan_ctx::create_context(const Range &range,
                                                   bool split) {
   auto ctx_id = m_reader->m_ctx_id.fetch_add(1, std::memory_order_relaxed);
@@ -1555,8 +1599,8 @@ dberr_t Parallel_reader::Scan_ctx::create_contexts(const Ranges &ranges) {
       split_point = n;
     }
 
-    if (m_config.m_min_leaves > 0 && m_depth < SPLIT_THRESHOLD) {
-      /* A range of a tree this shallow splits into single leaf pages. */
+    if (m_config.m_min_leaves > 0) {
+      /* partition_for_subtrees() made the ranges of the sub-trees. */
       split_point = ranges.size();
     }
   }
@@ -1719,7 +1763,9 @@ dberr_t Parallel_reader::add_scan(trx_t *trx,
   dberr_t err{DB_SUCCESS};
 
   /* Split at the root node (level == 0). */
-  err = scan_ctx->partition(config.m_scan_range, ranges, 0);
+  err = config.m_min_leaves > 0
+            ? scan_ctx->partition_for_subtrees(config.m_scan_range, ranges)
+            : scan_ctx->partition(config.m_scan_range, ranges, 0);
 
   if (ranges.empty() || err != DB_SUCCESS) {
     /* Table is empty. */

@@ -5,7 +5,7 @@ SET SESSION cte_max_recursion_depth = 100000;
 INSERT INTO t1
 WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 30000)
 SELECT n, CONCAT(LPAD(n, 8, '0'), REPEAT('x', 2900)) FROM seq;
-SET SESSION innodb_parallel_read_threads = 16;
+SET SESSION innodb_parallel_read_threads = 32;
 OPTIMIZE TABLE t1;
 Table	Op	Msg_type	Msg_text
 test.t1	optimize	note	Table does not support optimize, doing recreate + analyze instead
