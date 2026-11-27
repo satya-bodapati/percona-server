@@ -819,7 +819,8 @@ bool Btree_load::wait_for_extent_frames() {
 }
 
 bool Btree_load::end_extent_if_no_room(Page_extent *page_extent) {
-  /* The pages of an extent are in one buffer pool instance. */
+  /* The frame of the next page comes from the buffer pool instance of that
+  page. */
   size_t n_free_lru{};
 
   if (!page_extent->is_any_used() || page_extent->is_fully_used() ||
@@ -4023,14 +4024,17 @@ dberr_t Blob_inserter::close_blob(Blob_context blob_ctx, lob::ref_t &ref) {
   ut_ad(handle == m_blob_handle.get());
   handle->close(ref);
 
-  /* Check if any extents can be added to the bulk flusher. The first page of
-  the blob is written, so that its extent can end here. */
+  /* Check if any extents can be added to the bulk flusher. The first page and
+  the data pages of the blob are written, so that their extents can end
+  here. */
   if (m_page_extent_first->is_fully_used() ||
       m_btree_load.end_extent_if_no_room(m_page_extent_first)) {
     m_btree_load.add_to_bulk_flusher(m_page_extent_first);
     m_page_extent_first = nullptr;
   }
-  if (m_page_extent_data != nullptr && m_page_extent_data->is_fully_used()) {
+  if (m_page_extent_data != nullptr &&
+      (m_page_extent_data->is_fully_used() ||
+       m_btree_load.end_extent_if_no_room(m_page_extent_data))) {
     m_btree_load.add_to_bulk_flusher(m_page_extent_data);
     m_page_extent_data = nullptr;
   }
