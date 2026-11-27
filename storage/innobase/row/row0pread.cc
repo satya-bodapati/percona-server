@@ -1575,6 +1575,21 @@ size_t Parallel_reader::Scan_ctx::count_units(const buf_block_t *block,
   return n_units;
 }
 
+size_t Parallel_reader::Scan_ctx::root_level() const {
+  const auto index = m_config.m_index;
+
+  mtr_t mtr;
+  mtr.start();
+
+  const auto root =
+      block_get_s_latched(page_id_t(index->space, index->page), &mtr, __LINE__);
+  const size_t level = btr_page_get_level(buf_block_get_frame(root));
+
+  mtr.commit();
+
+  return level;
+}
+
 dberr_t Parallel_reader::Scan_ctx::partition_for_subtrees(
     const Scan_range &scan_range, Ranges &ranges) {
   ut_ad(m_config.m_min_leaves > 0);
@@ -1583,18 +1598,36 @@ dberr_t Parallel_reader::Scan_ctx::partition_for_subtrees(
   ut_ad(scan_range.m_start == nullptr && scan_range.m_end == nullptr);
   ut_ad(index_s_own());
 
+  /* The root can be raised or lowered between counting the units and making
+  the ranges, which partition() would then make one level too high or too low.
+  Make them again a few times, and keep the last ranges: they are only larger
+  or smaller. */
+  for (size_t n_tries = 1;; ++n_tries) {
+    size_t counted_level{};
+
+    const auto err = cut_subtree_ranges(scan_range, ranges, counted_level);
+
+    if (err != DB_SUCCESS || n_tries == 3 || counted_level == root_level()) {
+      return err;
+    }
+
+    ranges.clear();
+  }
+}
+
+dberr_t Parallel_reader::Scan_ctx::cut_subtree_ranges(
+    const Scan_range &scan_range, Ranges &ranges, size_t &root_level) {
   const auto index = m_config.m_index;
 
   /* The root stays latched while the units are counted, so that the levels
-  of the tree do not change while they are counted. If the root is raised
-  before partition() latches it again, the ranges are only larger. */
+  of the tree do not change while they are counted. */
   mtr_t mtr;
   mtr.start();
   mtr.set_log_mode(MTR_LOG_NO_REDO);
 
   const auto root =
       block_get_s_latched(page_id_t(index->space, index->page), &mtr, __LINE__);
-  const size_t root_level = btr_page_get_level(buf_block_get_frame(root));
+  root_level = btr_page_get_level(buf_block_get_frame(root));
 
   if (root_level == 0) {
     mtr.commit();
@@ -1658,6 +1691,8 @@ dberr_t Parallel_reader::Scan_ctx::partition_for_subtrees(
   const auto min_units =
       std::max((m_config.m_min_leaves + leaves_per_unit - 1) / leaves_per_unit,
                (n_units + n_wanted - 1) / n_wanted);
+
+  DEBUG_SYNC_C("parallel_reader_units_counted");
 
   return partition(scan_range, ranges, root_level - unit_level - 1, min_units);
 }

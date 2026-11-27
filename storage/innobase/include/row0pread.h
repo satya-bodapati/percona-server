@@ -611,17 +611,30 @@ class Parallel_reader::Scan_ctx {
   [[nodiscard]] size_t count_units(const buf_block_t *block, size_t unit_level,
                                    Leaf_sample &sample, mtr_t *mtr) const;
 
+  /** @return the level of the root page of the index. */
+  [[nodiscard]] size_t root_level() const;
+
+  /** Partition the B+Tree for a build of one sub-tree per range with
+  cut_subtree_ranges(), again if the root changed its level meanwhile. The
+  ranges are not split later.
+  @param[in]      scan_range    Range for partitioning.
+  @param[in,out]  ranges        Ranges to scan.
+  @return DB_SUCCESS or error code. */
+  dberr_t partition_for_subtrees(const Scan_range &scan_range, Ranges &ranges);
+
   /** Partition the B+Tree for a build of one sub-tree per range. A range is a
   run of units: the pages of the highest level that has at least 16 times
   SUBTREE_RANGES_PER_THREAD pages per thread, or the leaf pages. With the
   root latched, count the units on the pages above them, and give each range
   the units of SUBTREE_RANGES_PER_THREAD ranges per thread, but about
   Config::m_min_leaves leaf pages or more. Only the units that start a range
-  are read. The ranges are not split later.
+  are read.
   @param[in]      scan_range    Range for partitioning.
   @param[in,out]  ranges        Ranges to scan.
+  @param[out]     root_level    level of the root when the units were counted
   @return DB_SUCCESS or error code. */
-  dberr_t partition_for_subtrees(const Scan_range &scan_range, Ranges &ranges);
+  dberr_t cut_subtree_ranges(const Scan_range &scan_range, Ranges &ranges,
+                             size_t &root_level);
 
   /** Find the page number of the node that contains the search key. If the
   key is null then we assume -infinity.

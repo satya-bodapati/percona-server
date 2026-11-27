@@ -1,0 +1,87 @@
+#
+# A rebuild with parallel scan threads counts the pages below the root of the
+# primary key with the root latched, and then makes one scan range per sub-tree
+# from the level that it counted. When an insert raises the root in between,
+# the ranges are made again from the new root, so that there are still several
+# sub-trees.
+#
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/have_innodb_16k.inc
+--source include/count_sessions.inc
+
+# A node pointer has about 110 bytes, so that the root holds about 145 of
+# them, and a leaf page holds 5 rows. 500 rows fill 100 leaf pages below the
+# root, and 500 more rows need more node pointers than the root can hold.
+# t0 gets the same rows as t1, to show the levels of t1.
+CREATE TABLE t0 (id VARCHAR(100) CHARACTER SET latin1 NOT NULL PRIMARY KEY,
+                 c VARCHAR(3000) CHARACTER SET latin1 NOT NULL)
+  ENGINE=InnoDB ROW_FORMAT=DYNAMIC STATS_PERSISTENT=1 STATS_AUTO_RECALC=0;
+CREATE TABLE t1 LIKE t0;
+
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t0
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 500)
+  SELECT LPAD(n, 100, '0'), REPEAT('x', 3000) FROM seq;
+INSERT INTO t1 SELECT * FROM t0;
+
+# All pages of t0 are in the buffer pool, and n_leaf_pages counts the leaf
+# pages in use.
+--let $non_leaf_pages = SELECT COUNT(*) - (SELECT stat_value FROM mysql.innodb_index_stats WHERE table_name = 't0' AND index_name = 'PRIMARY' AND stat_name = 'n_leaf_pages') AS non_leaf_pages FROM information_schema.INNODB_BUFFER_PAGE WHERE TABLE_NAME = '`test`.`t0`' AND INDEX_NAME = 'PRIMARY'
+
+--echo # The root is the only page above the leaf pages.
+--disable_result_log
+ANALYZE TABLE t0;
+--enable_result_log
+--eval $non_leaf_pages
+
+--echo # The next 500 rows raise the root: more pages above the leaf pages.
+INSERT INTO t0
+  WITH RECURSIVE seq(n) AS (SELECT 501 UNION ALL SELECT n + 1 FROM seq WHERE n < 1000)
+  SELECT LPAD(n, 100, '0'), REPEAT('x', 3000) FROM seq;
+--disable_result_log
+ANALYZE TABLE t0;
+--enable_result_log
+--eval $non_leaf_pages
+DROP TABLE t0;
+
+--echo # Raise the root of t1 after the rebuild counted the pages below it.
+SET SESSION innodb_parallel_read_threads = 2;
+SET DEBUG_SYNC = 'parallel_reader_units_counted SIGNAL counted WAIT_FOR raised';
+--send OPTIMIZE TABLE t1
+
+--connect (con1, localhost, root,,)
+SET DEBUG_SYNC = 'now WAIT_FOR counted';
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 501 UNION ALL SELECT n + 1 FROM seq WHERE n < 1000)
+  SELECT LPAD(n, 100, '0'), REPEAT('x', 3000) FROM seq;
+SET DEBUG_SYNC = 'now SIGNAL raised';
+--disconnect con1
+
+--connection default
+--reap
+SET DEBUG_SYNC = 'RESET';
+
+--let MYSQLD_LOG = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--perl
+  use strict;
+  my $log = $ENV{'MYSQLD_LOG'};
+  open(my $fh, '<', $log) or die "cannot open $log";
+  my $n_subtrees = 0;
+  my $in_test = 0;
+  while (my $line = <$fh>) {
+    $in_test = 1 if $line =~ /CURRENT_TEST: innodb.alter_rebuild_partition_root_raised/;
+    next unless $in_test;
+    ++$n_subtrees if $line =~ /index=PRIMARY, height=\d+, n_extents=\d+, n_pages=\d+/;
+  }
+  close($fh);
+  print "The primary key is built as several sub-trees: ",
+        ($n_subtrees >= 2 ? "yes" : "no: $n_subtrees"), "\n";
+EOF
+
+CHECK TABLE t1;
+SELECT COUNT(*) FROM t1;
+
+DROP TABLE t1;
+--source include/wait_until_count_sessions.inc

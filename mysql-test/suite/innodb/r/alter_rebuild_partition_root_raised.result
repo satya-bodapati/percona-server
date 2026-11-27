@@ -1,0 +1,45 @@
+CREATE TABLE t0 (id VARCHAR(100) CHARACTER SET latin1 NOT NULL PRIMARY KEY,
+c VARCHAR(3000) CHARACTER SET latin1 NOT NULL)
+ENGINE=InnoDB ROW_FORMAT=DYNAMIC STATS_PERSISTENT=1 STATS_AUTO_RECALC=0;
+CREATE TABLE t1 LIKE t0;
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t0
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 500)
+SELECT LPAD(n, 100, '0'), REPEAT('x', 3000) FROM seq;
+INSERT INTO t1 SELECT * FROM t0;
+# The root is the only page above the leaf pages.
+ANALYZE TABLE t0;
+SELECT COUNT(*) - (SELECT stat_value FROM mysql.innodb_index_stats WHERE table_name = 't0' AND index_name = 'PRIMARY' AND stat_name = 'n_leaf_pages') AS non_leaf_pages FROM information_schema.INNODB_BUFFER_PAGE WHERE TABLE_NAME = '`test`.`t0`' AND INDEX_NAME = 'PRIMARY';
+non_leaf_pages
+1
+# The next 500 rows raise the root: more pages above the leaf pages.
+INSERT INTO t0
+WITH RECURSIVE seq(n) AS (SELECT 501 UNION ALL SELECT n + 1 FROM seq WHERE n < 1000)
+SELECT LPAD(n, 100, '0'), REPEAT('x', 3000) FROM seq;
+ANALYZE TABLE t0;
+SELECT COUNT(*) - (SELECT stat_value FROM mysql.innodb_index_stats WHERE table_name = 't0' AND index_name = 'PRIMARY' AND stat_name = 'n_leaf_pages') AS non_leaf_pages FROM information_schema.INNODB_BUFFER_PAGE WHERE TABLE_NAME = '`test`.`t0`' AND INDEX_NAME = 'PRIMARY';
+non_leaf_pages
+4
+DROP TABLE t0;
+# Raise the root of t1 after the rebuild counted the pages below it.
+SET SESSION innodb_parallel_read_threads = 2;
+SET DEBUG_SYNC = 'parallel_reader_units_counted SIGNAL counted WAIT_FOR raised';
+OPTIMIZE TABLE t1;
+SET DEBUG_SYNC = 'now WAIT_FOR counted';
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 501 UNION ALL SELECT n + 1 FROM seq WHERE n < 1000)
+SELECT LPAD(n, 100, '0'), REPEAT('x', 3000) FROM seq;
+SET DEBUG_SYNC = 'now SIGNAL raised';
+Table	Op	Msg_type	Msg_text
+test.t1	optimize	note	Table does not support optimize, doing recreate + analyze instead
+test.t1	optimize	status	OK
+SET DEBUG_SYNC = 'RESET';
+The primary key is built as several sub-trees: yes
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT COUNT(*) FROM t1;
+COUNT(*)
+1000
+DROP TABLE t1;
