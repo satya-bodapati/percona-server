@@ -565,14 +565,23 @@ class Parallel_reader::Scan_ctx {
   @param[in] scan_range Range for partitioning.
   @param[in,out]  ranges        Ranges to scan.
   @param[in] split_level  Sub-range required level (0 == root).
+  @param[in] min_leaves   If not zero, a range covers at least this many leaf
+                          pages, as counted on the pages above the leaves,
+                          unless the index has fewer.
   @return the partition scan ranges. */
   dberr_t partition(const Scan_range &scan_range, Ranges &ranges,
-                    size_t split_level);
+                    size_t split_level, size_t min_leaves);
 
-  /** Partition the B+Tree for a build of one sub-tree per range: partition
-  at deeper levels until there are SUBTREE_RANGES_PER_THREAD ranges per
-  thread, then read neighbouring ranges as one, so that there are that many
-  ranges and they are not split later.
+  /** Count the leaf pages of the index from the node pointers on level 1.
+  @param[out]  root_level  level of the root page
+  @return number of leaf pages */
+  [[nodiscard]] size_t count_leaf_pages(size_t &root_level) const;
+
+  /** Partition the B+Tree for a build of one sub-tree per range: count the
+  leaf pages, and start a range at every leaf page that follows the leaf
+  pages of SUBTREE_RANGES_PER_THREAD ranges per thread, but at least
+  Config::m_min_leaves. Only the leaf pages that start a range are read. The
+  ranges are not split later.
   @param[in]      scan_range    Range for partitioning.
   @param[in,out]  ranges        Ranges to scan.
   @return DB_SUCCESS or error code. */
@@ -612,11 +621,13 @@ class Parallel_reader::Scan_ctx {
   @param[in]      split_level   Sub-range starting level (0 == root).
   @param[in,out]  ranges        Ranges to scan.
   @param[in,out]  n_leaves      Leaf pages in the last range, for
-                                Config::m_min_leaves.
+                                min_leaves.
+  @param[in]      min_leaves    If not zero, a range covers at least this many
+                                leaf pages.
   @param[in,out]  mtr           Mini-transaction */
   dberr_t create_ranges(const Scan_range &scan_range, page_no_t page_no,
                         size_t depth, const size_t split_level, Ranges &ranges,
-                        size_t &n_leaves, mtr_t *mtr);
+                        size_t &n_leaves, size_t min_leaves, mtr_t *mtr);
 
   /** Build a dtuple_t from rec_t.
   @param[in]      rec           Build the dtuple from this record.

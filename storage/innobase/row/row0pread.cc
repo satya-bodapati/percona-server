@@ -161,7 +161,8 @@ dberr_t Parallel_reader::Ctx::split() {
   m_scan_ctx->index_s_lock();
 
   Parallel_reader::Scan_ctx::Ranges ranges{};
-  m_scan_ctx->partition(scan_range, ranges, 1);
+  m_scan_ctx->partition(scan_range, ranges, 1,
+                        m_scan_ctx->m_config.m_min_leaves);
 
   if (!ranges.empty()) {
     ranges.back().second = m_range.second;
@@ -1281,7 +1282,8 @@ void Parallel_reader::Scan_ctx::create_range(Ranges &ranges,
 
 dberr_t Parallel_reader::Scan_ctx::create_ranges(
     const Scan_range &scan_range, page_no_t page_no, size_t depth,
-    const size_t split_level, Ranges &ranges, size_t &n_leaves, mtr_t *mtr) {
+    const size_t split_level, Ranges &ranges, size_t &n_leaves,
+    const size_t min_leaves, mtr_t *mtr) {
   ut_ad(index_s_own());
   ut_a(page_no != FIL_NULL);
 
@@ -1367,8 +1369,15 @@ dberr_t Parallel_reader::Scan_ctx::create_ranges(
       if (depth < split_level) {
         /* Need to create a range starting at a lower level in the tree. */
         create_ranges(scan_range, page_no, depth + 1, split_level, ranges,
-                      n_leaves, mtr);
+                      n_leaves, min_leaves, mtr);
 
+        page_cur_move_to_next(&page_cursor);
+        continue;
+      }
+
+      if (at_level == 1 && n_leaves < min_leaves && !ranges.empty()) {
+        /* The last range reads this leaf page too, so it is not read here. */
+        ++n_leaves;
         page_cur_move_to_next(&page_cursor);
         continue;
       }
@@ -1406,9 +1415,9 @@ dberr_t Parallel_reader::Scan_ctx::create_ranges(
       const size_t sub_leaves =
           sub_level == 0   ? 1
           : sub_level == 1 ? page_get_n_recs(buf_block_get_frame(sub_root))
-                           : m_config.m_min_leaves;
+                           : min_leaves;
 
-      if (n_leaves < m_config.m_min_leaves && !ranges.empty()) {
+      if (n_leaves < min_leaves && !ranges.empty()) {
         /* Extend the last range over this sub-tree. */
         n_leaves += sub_leaves;
       } else {
@@ -1456,7 +1465,7 @@ dberr_t Parallel_reader::Scan_ctx::create_ranges(
 
 dberr_t Parallel_reader::Scan_ctx::partition(
     const Scan_range &scan_range, Parallel_reader::Scan_ctx::Ranges &ranges,
-    size_t split_level) {
+    size_t split_level, const size_t min_leaves) {
   ut_ad(index_s_own());
 
   mtr_t mtr;
@@ -1465,7 +1474,7 @@ dberr_t Parallel_reader::Scan_ctx::partition(
 
   dberr_t err{DB_SUCCESS};
 
-  /* Leaf pages in the last range, for m_config.m_min_leaves. */
+  /* Leaf pages in the last range, for min_leaves. */
   size_t n_leaves{};
 
   /* Partition down to the leaf pages. */
@@ -1473,10 +1482,9 @@ dberr_t Parallel_reader::Scan_ctx::partition(
                   split_level = std::numeric_limits<size_t>::max(););
 
   err = create_ranges(scan_range, m_config.m_index->page, 0, split_level,
-                      ranges, n_leaves, &mtr);
+                      ranges, n_leaves, min_leaves, &mtr);
 
-  if (err == DB_SUCCESS && ranges.size() > 1 &&
-      n_leaves < m_config.m_min_leaves) {
+  if (err == DB_SUCCESS && ranges.size() > 1 && n_leaves < min_leaves) {
     /* The last range is too small: the range before it reads it too. */
     const auto last = ranges.back();
     ranges.pop_back();
@@ -1514,48 +1522,90 @@ dberr_t Parallel_reader::Scan_ctx::partition(
   return (err);
 }
 
+size_t Parallel_reader::Scan_ctx::count_leaf_pages(size_t &root_level) const {
+  const auto index = m_config.m_index;
+
+  mtr_t mtr;
+  mtr.start();
+
+  auto block =
+      block_get_s_latched(page_id_t(index->space, index->page), &mtr, __LINE__);
+
+  root_level = btr_page_get_level(buf_block_get_frame(block));
+
+  if (root_level == 0) {
+    mtr.commit();
+    return 1;
+  }
+
+  /* Go down the leftmost node pointers to level 1, one page per
+  mini-transaction. The caller holds the index S-lock, so the tree does not
+  change. */
+  mem_heap_t *heap{};
+
+  while (btr_page_get_level(buf_block_get_frame(block)) > 1) {
+    const auto rec =
+        page_rec_get_next(page_get_infimum_rec(buf_block_get_frame(block)));
+
+    const auto offsets = rec_get_offsets(rec, index, nullptr, ULINT_UNDEFINED,
+                                         UT_LOCATION_HERE, &heap);
+
+    const auto child = btr_node_ptr_get_child_page_no(rec, offsets);
+
+    mtr.commit();
+    mtr.start();
+
+    block = block_get_s_latched(page_id_t(index->space, child), &mtr, __LINE__);
+  }
+
+  if (heap != nullptr) {
+    mem_heap_free(heap);
+  }
+
+  /* Each node pointer on level 1 points to one leaf page. */
+  size_t n_leaves{};
+
+  for (;;) {
+    const auto frame = buf_block_get_frame(block);
+    const auto next = btr_page_get_next(frame, &mtr);
+
+    n_leaves += page_get_n_recs(frame);
+
+    mtr.commit();
+
+    if (next == FIL_NULL) {
+      break;
+    }
+
+    mtr.start();
+
+    block = block_get_s_latched(page_id_t(index->space, next), &mtr, __LINE__);
+  }
+
+  return n_leaves;
+}
+
 dberr_t Parallel_reader::Scan_ctx::partition_for_subtrees(
     const Scan_range &scan_range, Ranges &ranges) {
   ut_ad(m_config.m_min_leaves > 0);
+  ut_ad(m_config.m_read_level == 0);
+  /* count_leaf_pages() counts the leaf pages of the whole index. */
+  ut_ad(scan_range.m_start == nullptr && scan_range.m_end == nullptr);
+  ut_ad(index_s_own());
+
+  size_t root_level{};
+
+  const auto n_leaves = count_leaf_pages(root_level);
 
   const size_t n_wanted =
       SUBTREE_RANGES_PER_THREAD * std::max(max_threads(), size_t{1});
 
-  auto err = partition(scan_range, ranges, 0);
+  /* The ranges start at leaf pages that the pages on level 1 point to, and
+  each range has about the same number of leaf pages. */
+  const auto min_leaves = std::max(m_config.m_min_leaves, n_leaves / n_wanted);
 
-  /* Partition one level deeper while that gives more ranges. */
-  for (size_t level = 1; err == DB_SUCCESS && ranges.size() < n_wanted;
-       ++level) {
-    Ranges deeper{};
-
-    err = partition(scan_range, deeper, level);
-
-    if (err != DB_SUCCESS || deeper.size() <= ranges.size()) {
-      break;
-    }
-    ranges = std::move(deeper);
-  }
-
-  if (err != DB_SUCCESS || ranges.size() <= n_wanted) {
-    return err;
-  }
-
-  /* Read neighbouring ranges as one. The end of a range is the start of the
-  next one, so a joined range ends where its last range ends. */
-  Ranges joined{};
-
-  joined.reserve(n_wanted);
-
-  for (size_t i = 0; i < n_wanted; ++i) {
-    const auto first = ranges.size() * i / n_wanted;
-    const auto last = ranges.size() * (i + 1) / n_wanted - 1;
-
-    joined.push_back(Range(ranges[first].first, ranges[last].second));
-  }
-
-  ranges = std::move(joined);
-
-  return DB_SUCCESS;
+  return partition(scan_range, ranges, root_level == 0 ? 0 : root_level - 1,
+                   min_leaves);
 }
 
 dberr_t Parallel_reader::Scan_ctx::create_context(const Range &range,
@@ -1765,7 +1815,8 @@ dberr_t Parallel_reader::add_scan(trx_t *trx,
   /* Split at the root node (level == 0). */
   err = config.m_min_leaves > 0
             ? scan_ctx->partition_for_subtrees(config.m_scan_range, ranges)
-            : scan_ctx->partition(config.m_scan_range, ranges, 0);
+            : scan_ctx->partition(config.m_scan_range, ranges, 0,
+                                  config.m_min_leaves);
 
   if (ranges.empty() || err != DB_SUCCESS) {
     /* Table is empty. */
