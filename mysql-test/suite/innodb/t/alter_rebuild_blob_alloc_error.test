@@ -1,0 +1,27 @@
+#
+# A rebuild with parallel scan threads writes the external fields of each
+# sub-tree to extents of blob pages, and reuses the extents its flusher has
+# written. When no extent can be allocated, the rebuild fails with the error
+# and the table is unchanged.
+#
+--source include/have_debug.inc
+--source include/have_innodb_16k.inc
+
+CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY, c LONGTEXT NOT NULL)
+  ENGINE=InnoDB ROW_FORMAT=DYNAMIC STATS_AUTO_RECALC=0;
+
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 3000)
+  SELECT n, REPEAT(LPAD(n, 10, '0'), 3000) FROM seq;
+
+SET SESSION innodb_parallel_read_threads = 4;
+# The scan threads allocate the blob pages.
+SET GLOBAL debug = '+d,bulk_blob_extent_alloc_fail';
+OPTIMIZE TABLE t1;
+SET GLOBAL debug = '-d,bulk_blob_extent_alloc_fail';
+
+CHECK TABLE t1;
+SELECT COUNT(*), SUM(LENGTH(c)), SUM(c = REPEAT(LPAD(id, 10, '0'), 3000)) FROM t1;
+
+DROP TABLE t1;

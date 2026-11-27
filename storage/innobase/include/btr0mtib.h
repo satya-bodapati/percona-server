@@ -856,16 +856,19 @@ class Blob_inserter {
   dberr_t close_blob(Blob_context blob_ctx, lob::ref_t &ref);
 
   /** Allocate a LOB first page
-  @return a LOB first page. */
-  Page_load *alloc_first_page();
+  @param[out]  err  error code if no page is allocated
+  @return a LOB first page, or nullptr. */
+  Page_load *alloc_first_page(dberr_t &err);
 
   /** Allocate a data page
-  @return a LOB data page. */
-  Page_load *alloc_data_page();
+  @param[out]  err  error code if no page is allocated
+  @return a LOB data page, or nullptr. */
+  Page_load *alloc_data_page(dberr_t &err);
 
   /** Allocate a LOB index page.
-  @return a LOB index page. */
-  Page_load *alloc_index_page();
+  @param[out]  err  error code if no page is allocated
+  @return a LOB index page, or nullptr. */
+  Page_load *alloc_index_page(dberr_t &err);
 
   /** Get the current transaction id.
   @return the current transaction id. */
@@ -876,7 +879,17 @@ class Blob_inserter {
   }
 
  private:
-  Page_load *alloc_page_from_extent(Page_extent *&m_page_extent);
+  /** Allocate a page from an extent of blob pages, and the extent first if
+  there is none.
+  @param[in,out]  m_page_extent  extent of blob pages, or nullptr
+  @param[out]     err            error code if no page is allocated
+  @return the page, or nullptr. */
+  Page_load *alloc_page_from_extent(Page_extent *&m_page_extent, dberr_t &err);
+
+  /** Allocate the pages of an extent of blob pages.
+  @param[out]  err  error code if no extent is allocated
+  @return the extent, or nullptr. */
+  Page_extent *alloc_blob_extent(dberr_t &err);
 
   Page_extent *alloc_free_extent();
 
@@ -1556,9 +1569,9 @@ class Page_load : private ut::Non_copyable {
                               size_t rec_size) const noexcept;
 
   /** Store externally the first possible field of the given tuple.
-  @return true if a field was stored externally, false if it was not possible
-  to store any of the fields externally. */
-  [[nodiscard]] bool make_ext(dtuple_t *tuple);
+  @return DB_SUCCESS if a field was stored externally, DB_BULK_TOO_BIG_RECORD
+  if no field can be stored externally, or the error of storing it. */
+  [[nodiscard]] dberr_t make_ext(dtuple_t *tuple);
 
   /** Get node pointer
   @return node pointer */

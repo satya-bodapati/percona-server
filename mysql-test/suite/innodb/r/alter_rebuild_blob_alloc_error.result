@@ -1,0 +1,23 @@
+CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY, c LONGTEXT NOT NULL)
+ENGINE=InnoDB ROW_FORMAT=DYNAMIC STATS_AUTO_RECALC=0;
+SET SESSION cte_max_recursion_depth = 10000;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 3000)
+SELECT n, REPEAT(LPAD(n, 10, '0'), 3000) FROM seq;
+SET SESSION innodb_parallel_read_threads = 4;
+SET GLOBAL debug = '+d,bulk_blob_extent_alloc_fail';
+OPTIMIZE TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	optimize	note	Table does not support optimize, doing recreate + analyze instead
+test.t1	optimize	error	The table 't1' is full
+test.t1	optimize	status	Operation failed
+Warnings:
+Error	1114	The table 't1' is full
+SET GLOBAL debug = '-d,bulk_blob_extent_alloc_fail';
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT COUNT(*), SUM(LENGTH(c)), SUM(c = REPEAT(LPAD(id, 10, '0'), 3000)) FROM t1;
+COUNT(*)	SUM(LENGTH(c))	SUM(c = REPEAT(LPAD(id, 10, '0'), 3000))
+3000	90000000	3000
+DROP TABLE t1;

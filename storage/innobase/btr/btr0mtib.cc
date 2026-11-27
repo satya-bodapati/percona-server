@@ -1664,22 +1664,23 @@ bool Page_load::is_space_available(size_t rec_size) const noexcept {
   return true;
 }
 
-bool Page_load::make_ext(dtuple_t *tuple) {
+dberr_t Page_load::make_ext(dtuple_t *tuple) {
   auto dfield = tuple->choose_ext(m_index);
 
-  if (dfield != nullptr) {
-    byte buf[lob::ref_t::SIZE];
-    lob::ref_t ref(buf);
-    auto err = m_btree_load->insert_blob(ref, dfield);
-    if (err == DB_SUCCESS) {
-      memcpy(dfield->data, buf, lob::ref_t::SIZE);
-      dfield->len = lob::ref_t::SIZE;
-      dfield_set_ext(dfield);
-      return true;
-    }
+  if (dfield == nullptr) {
+    return DB_BULK_TOO_BIG_RECORD;
   }
 
-  return false;
+  byte buf[lob::ref_t::SIZE];
+  lob::ref_t ref(buf);
+  auto err = m_btree_load->insert_blob(ref, dfield);
+  if (err != DB_SUCCESS) {
+    return err;
+  }
+  memcpy(dfield->data, buf, lob::ref_t::SIZE);
+  dfield->len = lob::ref_t::SIZE;
+  dfield_set_ext(dfield);
+  return DB_SUCCESS;
 }
 
 bool Page_load::need_ext(const dtuple_t *tuple,
@@ -1951,8 +1952,9 @@ dberr_t Btree_load::insert(dtuple_t *tuple, size_t level) noexcept {
   while (page_loader->need_ext(tuple, rec_size)) {
     /* The record is so big that we have to store some fields
     externally on separate database pages. */
-    if (!page_loader->make_ext(tuple)) {
-      return DB_BULK_TOO_BIG_RECORD;
+    err = page_loader->make_ext(tuple);
+    if (err != DB_SUCCESS) {
+      return err;
     }
     rec_size = rec_get_converted_size(m_index, tuple);
   }
@@ -3882,7 +3884,8 @@ class Blob_handle {
 };
 
 inline Page_load *Blob_handle::alloc_first_page() {
-  m_first_page_load = m_blob_inserter.alloc_first_page();
+  dberr_t err{DB_SUCCESS};
+  m_first_page_load = m_blob_inserter.alloc_first_page(err);
   return m_first_page_load;
 }
 
@@ -3905,13 +3908,21 @@ dberr_t Blob_inserter::init() {
 dberr_t Blob_handle::extend() {
   ut_ad(m_first_page_load->is_memory());
 
+  dberr_t err{DB_SUCCESS};
+
   /* Allocate a data page. */
-  m_data_page_load = m_blob_inserter.alloc_data_page();
+  m_data_page_load = m_blob_inserter.alloc_data_page(err);
+  if (m_data_page_load == nullptr) {
+    return err;
+  }
   m_data_page.init(m_data_page_load);
 
   flst_node_t *node = m_first_page.alloc_index_entry();
   if (node == nullptr) {
-    m_node_page_load = m_blob_inserter.alloc_index_page();
+    m_node_page_load = m_blob_inserter.alloc_index_page(err);
+    if (m_node_page_load == nullptr) {
+      return err;
+    }
     m_node_page.init(m_node_page_load, m_first_page);
     node = m_first_page.alloc_index_entry();
     if (node == nullptr) {
@@ -3937,7 +3948,11 @@ dberr_t Blob_handle::extend() {
 
 dberr_t Blob_handle::open(lob::ref_t &ref) {
   ut_ad(m_first_page_load == nullptr);
-  m_first_page_load = m_blob_inserter.alloc_first_page();
+  dberr_t err{DB_SUCCESS};
+  m_first_page_load = m_blob_inserter.alloc_first_page(err);
+  if (m_first_page_load == nullptr) {
+    return err;
+  }
   m_first_page.init(m_first_page_load);
   m_blob_length = 0;
   is_first_page = true;
@@ -4061,17 +4076,44 @@ Page_extent *Blob_inserter::alloc_free_extent() {
   return extent;
 }
 
-Page_load *Blob_inserter::alloc_page_from_extent(Page_extent *&m_page_extent) {
+Page_extent *Blob_inserter::alloc_blob_extent(dberr_t &err) {
+  auto extent = alloc_free_extent();
+  ut_a(extent != nullptr);
+  const size_t leaf_level = 0;
+  bool fail{false};
+#ifdef UNIV_DEBUG
+  {
+    /* Fail after some extents, so that the free queue holds extents that
+    were written. */
+    static std::atomic<size_t> n_allocated{};
+    DBUG_EXECUTE_IF("bulk_blob_extent_alloc_fail",
+                    fail = n_allocated.fetch_add(1) >= 8;);
+  }
+#endif /* UNIV_DEBUG */
+  err = fail ? DB_OUT_OF_FILE_SPACE
+             : m_btree_load.alloc_extent(extent->m_range, leaf_level);
+  if (err != DB_SUCCESS) {
+    /* An extent from the free queue still has the pages of its last use,
+    which are written: give it back unused. */
+    m_btree_load.m_bulk_flusher.add_to_free_queue(extent);
+    return nullptr;
+  }
+  extent->init();
+  extent->set_blob();
+  return extent;
+}
+
+Page_load *Blob_inserter::alloc_page_from_extent(Page_extent *&m_page_extent,
+                                                 dberr_t &err) {
   if (m_page_extent == nullptr) {
-    m_page_extent = alloc_free_extent();
-    ut_a(m_page_extent != nullptr);
-    const size_t leaf_level = 0;
-    m_btree_load.alloc_extent(m_page_extent->m_range, leaf_level);
-    m_page_extent->init();
-    m_page_extent->set_blob();
+    m_page_extent = alloc_blob_extent(err);
+    if (m_page_extent == nullptr) {
+      return nullptr;
+    }
   }
   page_no_t page_no = m_page_extent->alloc();
   if (unlikely(page_no == FIL_NULL)) {
+    err = DB_OUT_OF_FILE_SPACE;
     return nullptr;
   }
 
@@ -4083,7 +4125,7 @@ Page_load *Blob_inserter::alloc_page_from_extent(Page_extent *&m_page_extent) {
   }
   ut_ad(m_page_extent->is_any_used());
 
-  auto err = page_load->init_mem_blob(page_no, m_page_extent);
+  err = page_load->init_mem_blob(page_no, m_page_extent);
   if (err != DB_SUCCESS) {
     return nullptr;
   }
@@ -4093,34 +4135,32 @@ Page_load *Blob_inserter::alloc_page_from_extent(Page_extent *&m_page_extent) {
   return page_load;
 }
 
-Page_load *Blob_inserter::alloc_first_page() {
-  return alloc_page_from_extent(m_page_extent_first);
+Page_load *Blob_inserter::alloc_first_page(dberr_t &err) {
+  return alloc_page_from_extent(m_page_extent_first, err);
 }
 
-Page_load *Blob_inserter::alloc_index_page() {
+Page_load *Blob_inserter::alloc_index_page(dberr_t &err) {
   Page_extent *extent{nullptr};
   if (m_index_extents.empty() || m_index_extents.back()->is_fully_used()) {
-    extent = alloc_free_extent();
-    ut_a(extent != nullptr);
-    const size_t leaf_level = 0;
-    m_btree_load.alloc_extent(extent->m_range, leaf_level);
-    extent->init();
-    extent->set_blob();
+    extent = alloc_blob_extent(err);
+    if (extent == nullptr) {
+      return nullptr;
+    }
     m_index_extents.push_back(extent);
   } else {
     extent = m_index_extents.back();
   }
-  return alloc_page_from_extent(extent);
+  return alloc_page_from_extent(extent, err);
 }
 
-Page_load *Blob_inserter::alloc_data_page() {
+Page_load *Blob_inserter::alloc_data_page(dberr_t &err) {
   if (m_page_extent_data != nullptr &&
       (m_page_extent_data->is_fully_used() ||
        m_btree_load.end_extent_if_no_room(m_page_extent_data))) {
     m_btree_load.add_to_bulk_flusher(m_page_extent_data);
     m_page_extent_data = nullptr;
   }
-  return alloc_page_from_extent(m_page_extent_data);
+  return alloc_page_from_extent(m_page_extent_data, err);
 }
 
 void Blob_inserter::finish() {
