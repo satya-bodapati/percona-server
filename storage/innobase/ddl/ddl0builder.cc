@@ -910,7 +910,8 @@ dberr_t Builder::init(Cursor &cursor, size_t n_threads) noexcept {
     }
 
     /* The leaf pages of each sub-tree take whole extents: a scan range covers
-    at least one extent of leaf pages (Parallel_reader::Config::m_min_leaves).
+    about one extent of leaf pages or more
+    (Parallel_reader::Config::m_min_leaves).
     The leaf segment of the index that is read sizes the cache of extents.
     btr_get_size() refuses an index in online DDL, which the old clustered
     index of an online rebuild is, though its tree is complete. */

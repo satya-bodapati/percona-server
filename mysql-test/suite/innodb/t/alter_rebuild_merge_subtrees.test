@@ -1,33 +1,42 @@
 #
 # A rebuild with parallel scan threads builds one sub-tree per scan range
 # and links the sub-trees into one tree. With keys of about 3000 bytes a
-# page holds five records, so the sub-trees of kb differ in height: a
-# sub-tree grows a level when the shorter sub-tree on its right is linked
-# to it, and the sub-trees on its left then go into its new root until that
-# root is full and a level is added above it. Full pages are needed for
-# this, so the fill factor is 100.
+# page holds five records. Each leaf page of the old index is read as one
+# range, except the second half, which is read as one range, so that the
+# last sub-tree of kb is one level taller than the sub-trees on its left.
+# Their node pointers go into its root until the root is full and a level is
+# added above it. Full pages are needed for this, so the fill factor is 100.
 #
+--source include/have_debug.inc
 --source include/have_innodb_16k.inc
 
 CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY,
                  b VARCHAR(3000) CHARACTER SET latin1 NOT NULL, KEY kb (b))
   ENGINE=InnoDB ROW_FORMAT=DYNAMIC STATS_AUTO_RECALC=0;
 
-SET SESSION cte_max_recursion_depth = 10000;
 INSERT INTO t1
-  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 10000)
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 30)
   SELECT n, CONCAT(LPAD(n, 8, '0'), REPEAT('x', 2900)) FROM seq;
 
 SET @old_fill_factor = @@GLOBAL.innodb_fill_factor;
 SET GLOBAL innodb_fill_factor = 100;
+SET SESSION debug = '+d,ddl_scan_no_min_leaves,parallel_reader_range_per_leaf,parallel_reader_join_tail_ranges';
 SET SESSION innodb_parallel_read_threads = 4;
 OPTIMIZE TABLE t1;
+SET SESSION debug = '-d,ddl_scan_no_min_leaves,parallel_reader_range_per_leaf,parallel_reader_join_tail_ranges';
 SET GLOBAL innodb_fill_factor = @old_fill_factor;
+
+--let $assert_text = A level was added above the root of a sub-tree whose leftmost page was full
+--let $assert_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $assert_only_after = CURRENT_TEST: innodb.alter_rebuild_merge_subtrees
+--let $assert_select = Creating node_ptr with child \(old_root\)
+--let $assert_count = 1
+--source include/assert_grep.inc
 
 CHECK TABLE t1;
 SELECT COUNT(*) FROM t1 FORCE INDEX (kb);
-SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b < CONCAT(LPAD(5000, 8, '0'), 'x');
-SELECT id FROM t1 FORCE INDEX (kb) WHERE b = CONCAT(LPAD(9999, 8, '0'), REPEAT('x', 2900));
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b < CONCAT(LPAD(15, 8, '0'), 'x');
+SELECT id FROM t1 FORCE INDEX (kb) WHERE b = CONCAT(LPAD(29, 8, '0'), REPEAT('x', 2900));
 
 DROP TABLE t1;
 
@@ -40,6 +49,7 @@ CHECK TABLE t2;
 INSERT INTO t2 VALUES (1, 1);
 OPTIMIZE TABLE t2;
 CHECK TABLE t2;
+SET SESSION cte_max_recursion_depth = 10000;
 INSERT INTO t2
   WITH RECURSIVE seq(n) AS (SELECT 2 UNION ALL SELECT n + 1 FROM seq WHERE n < 3000)
   SELECT n, 3000 - n FROM seq;

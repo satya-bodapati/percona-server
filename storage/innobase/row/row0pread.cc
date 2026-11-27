@@ -31,6 +31,7 @@ Parallel read implementation
 Created 2018-01-27 by Sunny Bains */
 
 #include <array>
+#include <tuple>
 
 #include "btr0pcur.h"
 #include "dict0dict.h"
@@ -1375,8 +1376,8 @@ dberr_t Parallel_reader::Scan_ctx::create_ranges(
         continue;
       }
 
-      if (at_level == 1 && n_leaves < min_leaves && !ranges.empty()) {
-        /* The last range reads this leaf page too, so it is not read here. */
+      if (n_leaves < min_leaves && !ranges.empty()) {
+        /* The last range reads this sub-tree too, so it is not read here. */
         ++n_leaves;
         page_cur_move_to_next(&page_cursor);
         continue;
@@ -1406,23 +1407,12 @@ dberr_t Parallel_reader::Scan_ctx::create_ranges(
     }
 
     if (!page_rec_is_supremum(page_cur_get_rec(&level_page_cursor))) {
-      /* The first page that start_range() latched is the root of the range's
-      sub-tree. A sub-tree whose root is above level 1 is taken to cover the
-      minimum. */
-      const auto sub_root =
-          savepoints.empty() ? block : savepoints.front().second;
-      const auto sub_level = btr_page_get_level(buf_block_get_frame(sub_root));
-      const size_t sub_leaves =
-          sub_level == 0   ? 1
-          : sub_level == 1 ? page_get_n_recs(buf_block_get_frame(sub_root))
-                           : min_leaves;
-
       if (n_leaves < min_leaves && !ranges.empty()) {
-        /* Extend the last range over this sub-tree. */
-        n_leaves += sub_leaves;
+        /* Extend the last range over this leaf page. */
+        ++n_leaves;
       } else {
         create_range(ranges, level_page_cursor, mtr);
-        n_leaves = sub_leaves;
+        n_leaves = 1;
       }
     }
 
@@ -1474,7 +1464,7 @@ dberr_t Parallel_reader::Scan_ctx::partition(
 
   dberr_t err{DB_SUCCESS};
 
-  /* Leaf pages in the last range, for min_leaves. */
+  /* Sub-trees in the last range, for min_leaves. */
   size_t n_leaves{};
 
   /* Partition down to the leaf pages. */
@@ -1522,90 +1512,152 @@ dberr_t Parallel_reader::Scan_ctx::partition(
   return (err);
 }
 
-size_t Parallel_reader::Scan_ctx::count_leaf_pages(size_t &root_level) const {
+size_t Parallel_reader::Scan_ctx::count_units(const buf_block_t *block,
+                                              size_t unit_level,
+                                              Leaf_sample &sample,
+                                              mtr_t *mtr) const {
   const auto index = m_config.m_index;
+  const auto frame = buf_block_get_frame(block);
+  const size_t level = btr_page_get_level(frame);
 
-  mtr_t mtr;
-  mtr.start();
+  ut_ad(level > unit_level);
 
-  auto block =
-      block_get_s_latched(page_id_t(index->space, index->page), &mtr, __LINE__);
+  ulint offsets_[REC_OFFS_NORMAL_SIZE];
+  rec_offs_init(offsets_);
+  mem_heap_t *heap{};
+  size_t n_units{};
 
-  root_level = btr_page_get_level(buf_block_get_frame(block));
+  /* On the level above the units, sample units of every m_page_stride-th
+  page, spread over the page. */
+  size_t rec_stride{};
 
-  if (root_level == 0) {
-    mtr.commit();
-    return 1;
+  if (level == unit_level + 1 && unit_level == 1 &&
+      sample.m_n_above_seen++ % sample.m_page_stride == 0) {
+    rec_stride = std::max(page_get_n_recs(frame) / sample.m_per_page, ulint{1});
   }
 
-  /* Go down the leftmost node pointers to level 1, one page per
-  mini-transaction. The caller holds the index S-lock, so the tree does not
-  change. */
-  mem_heap_t *heap{};
+  size_t i{};
 
-  while (btr_page_get_level(buf_block_get_frame(block)) > 1) {
-    const auto rec =
-        page_rec_get_next(page_get_infimum_rec(buf_block_get_frame(block)));
+  for (auto rec = page_rec_get_next(page_get_infimum_rec(frame));
+       !page_rec_is_supremum(rec); rec = page_rec_get_next(rec), ++i) {
+    if (level == unit_level + 1) {
+      ++n_units;
 
-    const auto offsets = rec_get_offsets(rec, index, nullptr, ULINT_UNDEFINED,
+      if (rec_stride == 0 || i % rec_stride != 0 ||
+          i / rec_stride >= sample.m_per_page) {
+        continue;
+      }
+    }
+
+    /* Latch the child while the page above it is latched. */
+    const auto offsets = rec_get_offsets(rec, index, offsets_, ULINT_UNDEFINED,
                                          UT_LOCATION_HERE, &heap);
+    const auto savepoint = mtr->get_savepoint();
+    const auto child = block_get_s_latched(
+        page_id_t(index->space, btr_node_ptr_get_child_page_no(rec, offsets)),
+        mtr, __LINE__);
 
-    const auto child = btr_node_ptr_get_child_page_no(rec, offsets);
+    if (level == unit_level + 1) {
+      /* This unit is a sample of the leaf pages of a unit. */
+      sample.m_n_leaves += page_get_n_recs(buf_block_get_frame(child));
+      ++sample.m_n_pages;
+    } else {
+      n_units += count_units(child, unit_level, sample, mtr);
+    }
 
-    mtr.commit();
-    mtr.start();
-
-    block = block_get_s_latched(page_id_t(index->space, child), &mtr, __LINE__);
+    mtr->release_block_at_savepoint(savepoint, child);
   }
 
   if (heap != nullptr) {
     mem_heap_free(heap);
   }
 
-  /* Each node pointer on level 1 points to one leaf page. */
-  size_t n_leaves{};
-
-  for (;;) {
-    const auto frame = buf_block_get_frame(block);
-    const auto next = btr_page_get_next(frame, &mtr);
-
-    n_leaves += page_get_n_recs(frame);
-
-    mtr.commit();
-
-    if (next == FIL_NULL) {
-      break;
-    }
-
-    mtr.start();
-
-    block = block_get_s_latched(page_id_t(index->space, next), &mtr, __LINE__);
-  }
-
-  return n_leaves;
+  return n_units;
 }
 
 dberr_t Parallel_reader::Scan_ctx::partition_for_subtrees(
     const Scan_range &scan_range, Ranges &ranges) {
   ut_ad(m_config.m_min_leaves > 0);
   ut_ad(m_config.m_read_level == 0);
-  /* count_leaf_pages() counts the leaf pages of the whole index. */
+  /* The units are counted over the whole index. */
   ut_ad(scan_range.m_start == nullptr && scan_range.m_end == nullptr);
   ut_ad(index_s_own());
 
-  size_t root_level{};
+  const auto index = m_config.m_index;
 
-  const auto n_leaves = count_leaf_pages(root_level);
+  /* The root stays latched while the units are counted, so that the levels
+  of the tree do not change while they are counted. If the root is raised
+  before partition() latches it again, the ranges are only larger. */
+  mtr_t mtr;
+  mtr.start();
+  mtr.set_log_mode(MTR_LOG_NO_REDO);
+
+  const auto root =
+      block_get_s_latched(page_id_t(index->space, index->page), &mtr, __LINE__);
+  const size_t root_level = btr_page_get_level(buf_block_get_frame(root));
+
+  if (root_level == 0) {
+    mtr.commit();
+    return partition(scan_range, ranges, 0, m_config.m_min_leaves);
+  }
 
   const size_t n_wanted =
       SUBTREE_RANGES_PER_THREAD * std::max(max_threads(), size_t{1});
 
-  /* The ranges start at leaf pages that the pages on level 1 point to, and
-  each range has about the same number of leaf pages. */
-  const auto min_leaves = std::max(m_config.m_min_leaves, n_leaves / n_wanted);
+  /* A range is a run of units: the pages of the highest level that has at
+  least 2 * n_wanted pages, or the leaf pages. Each level above it has fewer
+  pages, so that counting reads fewer than 2 * n_wanted pages per level. */
+  size_t unit_level = root_level - 1;
+  size_t n_units = page_get_n_recs(buf_block_get_frame(root));
+  /* Pages on the level above the units. */
+  size_t n_above = 1;
+  Leaf_sample sample(n_above);
 
-  return partition(scan_range, ranges, root_level == 0 ? 0 : root_level - 1,
-                   min_leaves);
+  /* partition() reads each leaf page as a range: count leaf pages. */
+  bool per_leaf{};
+  DBUG_EXECUTE_IF("parallel_reader_range_per_leaf", per_leaf = true;);
+
+  /* With fewer than 2 * n_wanted units, the units of a range would be too
+  large: go down a level. */
+  while (unit_level > 0 && (n_units < 2 * n_wanted || per_leaf)) {
+    --unit_level;
+    n_above = n_units;
+    sample = Leaf_sample(n_above);
+    n_units = count_units(root, unit_level, sample, &mtr);
+  }
+
+  if (unit_level == 1 && sample.m_n_pages == 0) {
+    /* The root is on level 2: sample the leaf pages of its units. */
+    sample = Leaf_sample(n_above);
+    std::ignore = count_units(root, unit_level, sample, &mtr);
+  }
+
+  mtr.commit();
+
+  /* The leaf pages of a unit: one for a leaf page and the average of the
+  sample for a page on level 1. Above, the node pointers per page on the
+  level of the units, to the power of the level, up to Config::m_min_leaves.
+  */
+  size_t leaves_per_unit = 1;
+
+  if (unit_level == 1) {
+    leaves_per_unit = std::max(sample.m_n_leaves / sample.m_n_pages, size_t{1});
+  } else if (unit_level > 1) {
+    const auto fanout = std::max(n_units / n_above, size_t{2});
+
+    for (size_t i = 0;
+         i < unit_level && leaves_per_unit < m_config.m_min_leaves; ++i) {
+      leaves_per_unit *= fanout;
+    }
+  }
+
+  /* A range has about Config::m_min_leaves leaf pages or more, and there are
+  at most n_wanted ranges. */
+  const auto min_units =
+      std::max((m_config.m_min_leaves + leaves_per_unit - 1) / leaves_per_unit,
+               (n_units + n_wanted - 1) / n_wanted);
+
+  return partition(scan_range, ranges, root_level - unit_level - 1, min_units);
 }
 
 dberr_t Parallel_reader::Scan_ctx::create_context(const Range &range,

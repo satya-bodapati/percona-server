@@ -99,6 +99,8 @@ struct Parallel_cursor : public Cursor {
 dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
   ut_a(!builders.empty());
 
+  DEBUG_SYNC_C("ddl_parallel_scan_start");
+
   ut_a(!m_ctx.m_online || m_ctx.m_trx->isolation_level ==
                               trx_t::isolation_level_t::REPEATABLE_READ);
 
@@ -458,6 +460,7 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
     const auto old_index = builder->old_index_to_copy();
     Parallel_reader::Config copy_config(FULL_SCAN, old_index);
     copy_config.m_min_leaves = FSP_EXTENT_SIZE;
+    DBUG_EXECUTE_IF("ddl_scan_no_min_leaves", copy_config.m_min_leaves = 0;);
 
     err = reader.add_scan(
         m_ctx.m_online ? m_ctx.m_trx : nullptr, copy_config,
@@ -482,6 +485,9 @@ dberr_t Parallel_cursor::scan(Builders &builders) noexcept {
           return err;
         });
   }
+
+  /* The ranges of all scans are made, and no scan thread has started. */
+  DEBUG_SYNC_C("ddl_parallel_scan_partitioned");
 
   if (err == DB_SUCCESS) {
     err = reader.run(n_threads);

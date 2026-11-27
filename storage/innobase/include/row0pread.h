@@ -216,10 +216,9 @@ class Parallel_reader {
     size_t m_partition_id{std::numeric_limits<size_t>::max()};
 
     /** If not zero, the scan is a build of one sub-tree per range
-    (Scan_ctx::partition_for_subtrees()), and a range covers at least this
-    many leaf pages, as counted on the pages above the leaves, unless the
-    index has fewer. A build sets it so that the leaf pages of each sub-tree
-    fill at least one extent. */
+    (Scan_ctx::partition_for_subtrees()), and a range covers about this many
+    leaf pages or more, unless the index has fewer. A build sets it so that
+    the leaf pages of each sub-tree fill about one extent or more. */
     size_t m_min_leaves{0};
   };
 
@@ -565,23 +564,60 @@ class Parallel_reader::Scan_ctx {
   @param[in] scan_range Range for partitioning.
   @param[in,out]  ranges        Ranges to scan.
   @param[in] split_level  Sub-range required level (0 == root).
-  @param[in] min_leaves   If not zero, a range covers at least this many leaf
-                          pages, as counted on the pages above the leaves,
-                          unless the index has fewer.
+  @param[in] min_leaves   If not zero, a range covers at least this many
+                          children of the pages at split_level, and the
+                          children that only extend a range are not read.
   @return the partition scan ranges. */
   dberr_t partition(const Scan_range &scan_range, Ranges &ranges,
                     size_t split_level, size_t min_leaves);
 
-  /** Count the leaf pages of the index from the node pointers on level 1.
-  @param[out]  root_level  level of the root page
-  @return number of leaf pages */
-  [[nodiscard]] size_t count_leaf_pages(size_t &root_level) const;
+  /** Leaf pages of some pages on level 1, as a sample of the leaf pages
+  below a page on level 1, spread over the pages on level 2. */
+  struct Leaf_sample {
+    /** Pages on level 1 to sample, about. */
+    static constexpr size_t MAX_PAGES{16};
 
-  /** Partition the B+Tree for a build of one sub-tree per range: count the
-  leaf pages, and start a range at every leaf page that follows the leaf
-  pages of SUBTREE_RANGES_PER_THREAD ranges per thread, but at least
-  Config::m_min_leaves. Only the leaf pages that start a range are read. The
-  ranges are not split later.
+    /** @param[in] n_above  pages on level 2 */
+    explicit Leaf_sample(size_t n_above)
+        : m_page_stride(std::max(n_above / MAX_PAGES, size_t{1})),
+          m_per_page(
+              std::max(MAX_PAGES / std::max(n_above, size_t{1}), size_t{1})) {}
+
+    /** Sample below every m_page_stride-th page on level 2. */
+    size_t m_page_stride;
+
+    /** Pages on level 1 to sample below a page on level 2. */
+    size_t m_per_page;
+
+    /** Pages on level 2 seen. */
+    size_t m_n_above_seen{};
+
+    /** Pages on level 1 sampled. */
+    size_t m_n_pages{};
+
+    /** Leaf pages below them. */
+    size_t m_n_leaves{};
+  };
+
+  /** Count the pages on unit_level below a latched page from the node
+  pointers on the level above. Each child is latched while its parent is
+  latched, left to right. With unit_level 1, pages on level 1 spread over the
+  pages on level 2 are sampled.
+  @param[in]      block       latched page to count below
+  @param[in]      unit_level  level of the pages to count
+  @param[in,out]  sample      leaf pages of sampled pages on level 1
+  @param[in,out]  mtr         mini-transaction
+  @return number of pages on unit_level */
+  [[nodiscard]] size_t count_units(const buf_block_t *block, size_t unit_level,
+                                   Leaf_sample &sample, mtr_t *mtr) const;
+
+  /** Partition the B+Tree for a build of one sub-tree per range. A range is a
+  run of units: the pages of the highest level that has at least twice
+  SUBTREE_RANGES_PER_THREAD pages per thread, or the leaf pages. With the
+  root latched, count the units on the pages above them, and give each range
+  the units of SUBTREE_RANGES_PER_THREAD ranges per thread, but about
+  Config::m_min_leaves leaf pages or more. Only the units that start a range
+  are read. The ranges are not split later.
   @param[in]      scan_range    Range for partitioning.
   @param[in,out]  ranges        Ranges to scan.
   @return DB_SUCCESS or error code. */
@@ -620,10 +656,9 @@ class Parallel_reader::Scan_ctx {
   @param[in]      depth         Sub-range current level.
   @param[in]      split_level   Sub-range starting level (0 == root).
   @param[in,out]  ranges        Ranges to scan.
-  @param[in,out]  n_leaves      Leaf pages in the last range, for
-                                min_leaves.
+  @param[in,out]  n_leaves      Sub-trees in the last range, for min_leaves.
   @param[in]      min_leaves    If not zero, a range covers at least this many
-                                leaf pages.
+                                sub-trees.
   @param[in,out]  mtr           Mini-transaction */
   dberr_t create_ranges(const Scan_range &scan_range, page_no_t page_no,
                         size_t depth, const size_t split_level, Ranges &ranges,

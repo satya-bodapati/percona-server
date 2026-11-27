@@ -1,0 +1,50 @@
+#
+# A rebuild with parallel scan threads makes its ranges before any scan
+# thread starts. It reads only the pages above the units it counts and the
+# pages that start a range, not every leaf page or every page on level 1 of
+# the index. With keys of about 3000 bytes a page holds five records, so kb
+# has about 1600 pages on level 1.
+#
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/have_innodb_16k.inc
+
+CREATE TABLE t1 (id INT NOT NULL PRIMARY KEY,
+                 b VARCHAR(3000) CHARACTER SET latin1 NOT NULL, KEY kb (b))
+  ENGINE=InnoDB ROW_FORMAT=DYNAMIC STATS_AUTO_RECALC=0;
+
+SET SESSION cte_max_recursion_depth = 40000;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 40000)
+  SELECT n, CONCAT(LPAD(n, 8, '0'), REPEAT('x', 2900)) FROM seq;
+
+# Purge would add page requests to the measurement.
+SET GLOBAL innodb_purge_stop_now = ON;
+
+--connect (con1, localhost, root,,)
+SET SESSION innodb_parallel_read_threads = 8;
+SET DEBUG_SYNC = 'ddl_parallel_scan_start SIGNAL started WAIT_FOR scan';
+SET DEBUG_SYNC = 'ddl_parallel_scan_partitioned SIGNAL partitioned WAIT_FOR go';
+--send OPTIMIZE TABLE t1
+
+--connection default
+SET DEBUG_SYNC = 'now WAIT_FOR started';
+let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'Innodb_buffer_pool_read_requests', Value, 1);
+SET DEBUG_SYNC = 'now SIGNAL scan';
+SET DEBUG_SYNC = 'now WAIT_FOR partitioned';
+let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'Innodb_buffer_pool_read_requests', Value, 1);
+--let $assert_text = Making the ranges takes far fewer page requests than the pages on level 1 of kb
+--let $assert_cond = $after - $before < 1000
+--source include/assert.inc
+SET DEBUG_SYNC = 'now SIGNAL go';
+
+--connection con1
+--reap
+--disconnect con1
+
+--connection default
+CHECK TABLE t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb);
+DROP TABLE t1;
+SET DEBUG_SYNC = 'RESET';
+SET GLOBAL innodb_purge_run_now = ON;
