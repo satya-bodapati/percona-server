@@ -1,0 +1,67 @@
+#
+# An online rebuild that copies a secondary index reads it in the read view of
+# the rebuild, and checks a record of a row that the row log shows unchanged
+# by its delete mark. An update that changes b to a value that is equal in the
+# collation fails after it changed the clustered index record but before the
+# row log noted the row. Its rollback delete-marks the existing entry of kb
+# and later removes the delete mark, before the clustered index record is
+# rolled back. The rollback notes the row first, so that the scan, which reads
+# kb in between, checks the entry by the clustered index record and copies it.
+#
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/have_innodb_16k.inc
+--source include/count_sessions.inc
+
+SET SESSION innodb_parallel_read_threads = 4;
+SET SESSION cte_max_recursion_depth = 10000;
+
+CREATE TABLE t1 (
+  id INT NOT NULL PRIMARY KEY,
+  b VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL,
+  c LONGBLOB,
+  KEY kb (b)
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
+
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 3000)
+  SELECT n, CONCAT('k', LPAD(n, 5, '0')), 'x' FROM seq;
+
+SET DEBUG_SYNC = 'ddl_parallel_scan_start SIGNAL scan WAIT_FOR go';
+--send OPTIMIZE TABLE t1
+
+--connect (con1, localhost, root,,)
+SET DEBUG_SYNC = 'now WAIT_FOR scan';
+SET SESSION debug = '+d,row_upd_clust_rec_extern_fail';
+SET DEBUG_SYNC = 'row_undo_mod_upd_exist_sec_marked SIGNAL marked WAIT_FOR scanned';
+--echo # The update fails after the clustered index record was changed.
+--send UPDATE t1 SET b = UPPER(b), c = REPEAT('y', 200000) WHERE id = 1500
+
+--connect (con2, localhost, root,,)
+SET DEBUG_SYNC = 'now WAIT_FOR marked';
+--echo # The rollback delete-marked the entry of kb. Scan now.
+SET DEBUG_SYNC = 'now SIGNAL go';
+let $wait_condition =
+  SELECT COUNT(*) = 1 FROM information_schema.processlist
+  WHERE info = 'OPTIMIZE TABLE t1' AND state = 'Waiting for table metadata lock';
+--source include/wait_condition.inc
+SET DEBUG_SYNC = 'now SIGNAL scanned';
+--disconnect con2
+
+--connection con1
+--error ER_RECORD_FILE_FULL
+--reap
+SET SESSION debug = '-d,row_upd_clust_rec_extern_fail';
+--disconnect con1
+
+--connection default
+--reap
+SET DEBUG_SYNC = 'RESET';
+
+CHECK TABLE t1;
+SELECT COUNT(*) FROM t1 FORCE INDEX (kb);
+SELECT id, b FROM t1 FORCE INDEX (kb) WHERE b = 'k01500';
+SELECT id, b, LENGTH(c) FROM t1 WHERE id = 1500;
+
+DROP TABLE t1;
+--source include/wait_until_count_sessions.inc

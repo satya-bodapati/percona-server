@@ -496,6 +496,14 @@ introduced where a call to log_free_check() is bypassed. */
     err = btr_cur_del_mark_set_sec_rec(BTR_NO_LOCKING_FLAG, btr_cur, true, thr,
                                        &mtr);
     ut_ad(err == DB_SUCCESS);
+    /* Without locking, lock_sec_rec_modify_check_and_lock() does not update
+    PAGE_MAX_TRX_ID. A consistent read that sees an older PAGE_MAX_TRX_ID
+    trusts the delete mark, but the record can be one that the read view
+    sees: the rolled back update did not modify this index, and the entry
+    of its new value is the existing entry that is equal in the collation. */
+    page_update_max_trx_id(btr_cur_get_block(btr_cur),
+                           btr_cur_get_page_zip(btr_cur), thr_get_trx(thr)->id,
+                           &mtr);
   } else {
     /* Remove the index record */
 
@@ -1156,6 +1164,8 @@ static dberr_t row_undo_mod_upd_exist_multi_sec(undo_node_t *node,
         break;
       }
     }
+
+    DEBUG_SYNC_C("row_undo_mod_upd_exist_sec_marked");
 
     mem_heap_empty(heap);
     /* We may have to update the delete mark in the

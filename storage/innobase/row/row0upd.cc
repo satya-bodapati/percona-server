@@ -2957,6 +2957,8 @@ void upd_t::append(const upd_field_t &field) {
     err = lob::btr_store_big_rec_extern_fields(
         trx, pcur, node->update, offsets, big_rec, mtr, lob::OPCODE_UPDATE);
     DEBUG_SYNC_C("after_row_upd_extern");
+    DBUG_EXECUTE_IF("row_upd_clust_rec_extern_fail",
+                    err = DB_OUT_OF_FILE_SPACE;);
   }
 
   if (err == DB_SUCCESS) {
