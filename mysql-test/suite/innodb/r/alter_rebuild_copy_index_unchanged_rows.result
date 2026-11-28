@@ -1,0 +1,87 @@
+SET SESSION innodb_parallel_read_threads = 4;
+SET SESSION cte_max_recursion_depth = 100000;
+CREATE TABLE t1 (
+id INT NOT NULL PRIMARY KEY,
+a INT NOT NULL,
+b VARCHAR(200),
+u INT,
+t TEXT,
+KEY ka (a),
+KEY kb (b(20), a DESC),
+UNIQUE KEY ku (u),
+KEY kt (t(10))
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 30000)
+SELECT n, n % 1000, REPEAT(CHAR(97 + n % 26), n % 150),
+IF(n % 3 = 0, NULL, n),
+IF(n % 500 = 0, REPEAT(CHAR(65 + n % 26), 20000),
+REPEAT(CHAR(65 + n % 26), n % 40))
+FROM seq;
+CREATE TABLE t2 LIKE t1;
+INSERT INTO t2 SELECT * FROM t1;
+SET DEBUG_SYNC = 'ddl_parallel_scan_start SIGNAL scan WAIT_FOR dml_done';
+OPTIMIZE TABLE t1;
+SET DEBUG_SYNC = 'now WAIT_FOR scan';
+# DML on t1.
+# Key updates. The old entries are delete-marked.
+# Deletes.
+# Deletes and inserts of the same primary keys with other keys.
+# Unique keys set to NULL and from NULL.
+# A key update to a value that is equal in the collation.
+# Rows with an off-page column whose index entry is unchanged.
+# New rows.
+# DML on t2.
+# Key updates. The old entries are delete-marked.
+# Deletes.
+# Deletes and inserts of the same primary keys with other keys.
+# Unique keys set to NULL and from NULL.
+# A key update to a value that is equal in the collation.
+# Rows with an off-page column whose index entry is unchanged.
+# New rows.
+# Primary key updates.
+UPDATE t1 SET id = id + 100000 WHERE id BETWEEN 7000 AND 7050;
+UPDATE t2 SET id = id + 100000 WHERE id BETWEEN 7000 AND 7050;
+# A key changed and changed back: the old entry is delete-marked and
+# then no longer delete-marked.
+UPDATE t1 SET a = a + 5 WHERE id BETWEEN 8000 AND 8050;
+UPDATE t1 SET a = a - 5 WHERE id BETWEEN 8000 AND 8050;
+# A rollback.
+START TRANSACTION;
+UPDATE t1 SET a = a + 7, b = CONCAT('r', b) WHERE id BETWEEN 9000 AND 9100;
+DELETE FROM t1 WHERE id BETWEEN 9200 AND 9300;
+INSERT INTO t1
+WITH RECURSIVE seq(n) AS (SELECT 40001 UNION ALL SELECT n + 1 FROM seq WHERE n < 40100)
+SELECT n, n % 13, CONCAT('n', n), NULL, 'N' FROM seq;
+ROLLBACK;
+# A transaction that the read view does not see, open during the scan.
+START TRANSACTION;
+UPDATE t1 SET a = a + 11, u = NULL WHERE id BETWEEN 10000 AND 10100;
+DELETE FROM t1 WHERE id BETWEEN 10200 AND 10250;
+SET DEBUG_SYNC = 'now SIGNAL dml_done';
+# Wait until the scan is done and OPTIMIZE waits for con2.
+COMMIT;
+UPDATE t2 SET a = a + 11, u = NULL WHERE id BETWEEN 10000 AND 10100;
+DELETE FROM t2 WHERE id BETWEEN 10200 AND 10250;
+Table	Op	Msg_type	Msg_text
+test.t1	optimize	note	Table does not support optimize, doing recreate + analyze instead
+test.t1	optimize	status	OK
+SET DEBUG_SYNC = 'RESET';
+SELECT (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t1 FORCE INDEX (ka)) AS ka, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t1 FORCE INDEX (kb)) AS kb, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, IFNULL(u, -1))))) FROM t1 FORCE INDEX (ku)) AS ku, (SELECT COUNT(*) FROM t1 FORCE INDEX (kb) WHERE b BETWEEN 'k' AND 'p') AS kb_range, (SELECT COUNT(*) FROM t1 FORCE INDEX (kt) WHERE t BETWEEN 'K' AND 'P') AS kt_range, (SELECT COUNT(*) FROM t1 FORCE INDEX (ku) WHERE u IS NULL) AS ku_null;
+ka	kb	ku	kb_range	kt_range	ku_null
+30148:2015233625	30148:2015233625	30148:4004040812	6157	6075	10201
+SELECT (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t2 FORCE INDEX (ka)) AS ka, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, a)))) FROM t2 FORCE INDEX (kb)) AS kb, (SELECT CONCAT(COUNT(*), ':', BIT_XOR(CRC32(CONCAT_WS('#', id, IFNULL(u, -1))))) FROM t2 FORCE INDEX (ku)) AS ku, (SELECT COUNT(*) FROM t2 FORCE INDEX (kb) WHERE b BETWEEN 'k' AND 'p') AS kb_range, (SELECT COUNT(*) FROM t2 FORCE INDEX (kt) WHERE t BETWEEN 'K' AND 'P') AS kt_range, (SELECT COUNT(*) FROM t2 FORCE INDEX (ku) WHERE u IS NULL) AS ku_null;
+ka	kb	ku	kb_range	kt_range	ku_null
+30148:2015233625	30148:2015233625	30148:4004040812	6157	6075	10201
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+SELECT COUNT(*) FROM t1 LEFT JOIN t2 USING (id)
+WHERE t2.id IS NULL OR NOT (t1.a <=> t2.a AND t1.b <=> t2.b AND t1.u <=> t2.u
+AND t1.t <=> t2.t);
+COUNT(*)
+0
+SELECT COUNT(*) FROM t2 LEFT JOIN t1 USING (id) WHERE t1.id IS NULL;
+COUNT(*)
+0
+DROP TABLE t1, t2;

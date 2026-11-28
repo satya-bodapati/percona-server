@@ -37,6 +37,7 @@ Created 2018-01-27 by Sunny Bains */
 #include "dict0dict.h"
 #include "lock0lock.h"
 #include "os0thread-create.h"
+#include "row0log.h"
 #include "row0mysql.h"
 #include "row0pread.h"
 #include "row0row.h"
@@ -651,13 +652,14 @@ pages of the scan.
 @param[in]      rec             secondary index record, S-latched by the scan
 @param[in]      index           secondary index
 @param[in]      trx             transaction with the read view
+@param[in]      ref             PRIMARY KEY value of the record
+@param[in,out]  heap            memory heap
 @return true if the read view sees the record. */
-static bool sec_rec_is_visible(const rec_t *rec, dict_index_t *index,
-                               trx_t *trx) {
+static bool sec_rec_is_visible_in_clust(const rec_t *rec, dict_index_t *index,
+                                        trx_t *trx, const dtuple_t *ref,
+                                        mem_heap_t *heap) {
   auto clust_index = index->table->first_index();
   auto view = trx->read_view;
-  Scoped_heap heap(1024, UT_LOCATION_HERE);
-  auto ref = row_build_row_ref(ROW_COPY_POINTERS, index, rec, heap.get());
 
   mtr_t mtr;
   mtr.start();
@@ -673,7 +675,7 @@ static bool sec_rec_is_visible(const rec_t *rec, dict_index_t *index,
   record: the rollback of an insert removed it. */
   if (page_rec_is_user_rec(clust_rec) &&
       pcur.get_low_match() >= dict_index_get_n_unique(clust_index)) {
-    auto heap_ptr = heap.get();
+    auto heap_ptr = heap;
     auto offsets =
         rec_get_offsets(clust_rec, clust_index, nullptr, ULINT_UNDEFINED,
                         UT_LOCATION_HERE, &heap_ptr);
@@ -696,7 +698,7 @@ static bool sec_rec_is_visible(const rec_t *rec, dict_index_t *index,
     } else {
       /* The record may belong to another version of the row. Only a
       virtual column can fail the comparison. */
-      const auto err = row_sel_sec_rec_is_for_clust_rec(
+      [[maybe_unused]] const auto err = row_sel_sec_rec_is_for_clust_rec(
           rec, index, clust_rec, clust_index, trx, nullptr, is_visible);
       ut_ad(err == DB_SUCCESS);
     }
@@ -706,6 +708,32 @@ static bool sec_rec_is_visible(const rec_t *rec, dict_index_t *index,
   mtr.commit();
 
   return is_visible;
+}
+
+/** Check if a read view sees a secondary index record. When the table is
+being rebuilt online and its row log shows that the row was not modified
+since the log was allocated, before the read view was created, the read view
+sees the latest version of the row, and the record belongs to it unless it is
+delete-marked. Otherwise check the version of the clustered index record.
+@param[in]      rec             secondary index record, S-latched by the scan
+@param[in]      index           secondary index
+@param[in]      trx             transaction with the read view
+@return true if the read view sees the record. */
+static bool sec_rec_is_visible(const rec_t *rec, dict_index_t *index,
+                               trx_t *trx) {
+  Scoped_heap heap(1024, UT_LOCATION_HERE);
+  auto ref = row_build_row_ref(ROW_COPY_POINTERS, index, rec, heap.get());
+
+  if (row_log_table_row_unchanged(index->table->first_index(), ref,
+                                  trx->read_view)) {
+    const bool is_visible =
+        !rec_get_deleted_flag(rec, dict_table_is_comp(index->table));
+    ut_ad(is_visible ==
+          sec_rec_is_visible_in_clust(rec, index, trx, ref, heap.get()));
+    return is_visible;
+  }
+
+  return sec_rec_is_visible_in_clust(rec, index, trx, ref, heap.get());
 }
 
 bool Parallel_reader::Scan_ctx::check_visibility(const rec_t *&rec,

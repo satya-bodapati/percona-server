@@ -47,6 +47,8 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "row0types.h"
 #include "trx0types.h"
 
+class ReadView;
+
 class Alter_stage;
 
 /** Allocate the row log for an index and flag the index
@@ -96,6 +98,33 @@ void row_log_online_op(
 [[nodiscard]] dberr_t row_log_table_get_error(
     const dict_index_t *index); /*!< in: clustered index of a table
                                that is being rebuilt online */
+
+/** Note that a row of a table that is being rebuilt online is rolled back.
+The rollback of a row modifies its secondary index records before its
+clustered index record, which notes the row only then.
+@param[in]  index  clustered index of the table
+@param[in]  pk     PRIMARY KEY value of the row */
+void row_log_table_note_rollback(dict_index_t *index, const dtuple_t *pk);
+
+/** Check whether a row of a table that is being rebuilt online was not
+modified since the log of the rebuild was allocated, and whether a read view
+sees every transaction with an id that was assigned before. A transaction
+with a later id modifies the table only while the log notes its rows. Then
+the read view sees the latest version of the row, and the records of the row
+in the secondary indexes that are not delete-marked belong to that version.
+Modifications and rollbacks of the row are noted before its secondary index
+records are modified, so that a secondary index record that is read with its
+page latched shows no modification that this misses. A row can look modified
+when it was not. Only the rebuild that owns the log may call this, before it
+frees the log.
+@param[in]  index  clustered index of the table that is being rebuilt
+@param[in]  pk     PRIMARY KEY value of the row
+@param[in]  view   read view
+@return true if the row was not modified since the log was allocated and the
+read view sees every transaction that committed before */
+[[nodiscard]] bool row_log_table_row_unchanged(const dict_index_t *index,
+                                               const dtuple_t *pk,
+                                               const ReadView *view);
 
 /** Check whether a virtual column is indexed in the new table being
 created during alter table

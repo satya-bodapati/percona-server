@@ -47,6 +47,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "my_aes.h"
 #include "my_rnd.h"
 #include "que0que.h"
+#include "read0types.h"
 #include "row0ext.h"
 #include "row0ins.h"
 #include "row0mysql.h"
@@ -56,6 +57,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include "srv0mon.h"
 #include "srv0start.h"
 #include "trx0rec.h"
+#include "trx0sys.h"
 #include "ut0new.h"
 #include "ut0stage.h"
 
@@ -242,7 +244,170 @@ struct row_log_t {
 
   /** Where to create temporary file during log operation */
   const char *path;
+
+  /** Bits of the PRIMARY KEY values of the rows that row_log_table_delete()
+  and row_log_table_low() logged, two bits per value. A row with a bit that
+  is not set was not modified since the log was allocated. nullptr for a
+  secondary index, or if no memory was available. */
+  std::atomic<uint64_t> *pk_bits;
+
+  /** Number of pk_bits, a power of 2 */
+  uint64_t pk_n_bits;
+
+  /** trx_sys_get_next_trx_id_or_no() when the log was allocated: a transaction
+  with a smaller id was assigned it before, and a transaction with a bigger id
+  modifies the table only while the log notes its rows. */
+  trx_id_t pk_start_trx_id;
 };
+
+/** Hash a PRIMARY KEY field for row_log_t::pk_bits.
+@param[in]  data  field data
+@param[in]  len   field length
+@param[in]  hash  hash of the fields before
+@return hash of the fields up to this one */
+static uint64_t row_log_pk_hash_field(const byte *data, size_t len,
+                                      uint64_t hash) {
+  return ut::hash_binary(data, len, ut::hash_uint64(hash + len));
+}
+
+/** Get the two bits of a PRIMARY KEY value in row_log_t::pk_bits.
+@param[in]   log   row log of a table rebuild, with pk_bits
+@param[in]   hash  hash of the PRIMARY KEY value
+@param[out]  bits  bit numbers */
+static void row_log_pk_bits(const row_log_t *log, uint64_t hash,
+                            uint64_t bits[2]) {
+  bits[0] = hash & (log->pk_n_bits - 1);
+  bits[1] = ut::hash_uint64(hash) & (log->pk_n_bits - 1);
+}
+
+/** Check whether the PRIMARY KEY values of a clustered index compare byte for
+byte, so that equal values have the same hash in row_log_t::pk_bits.
+@param[in]  index  clustered index
+@return true if every PRIMARY KEY column compares byte for byte */
+static bool row_log_pk_is_binary(const dict_index_t *index) {
+  for (ulint i = 0; i < dict_index_get_n_unique(index); ++i) {
+    const auto col = index->get_col(i);
+
+    if (col->mtype != DATA_INT && col->mtype != DATA_SYS &&
+        !dtype_is_binary_string_type(col->mtype, col->prtype)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/** Hash a PRIMARY KEY value for row_log_t::pk_bits.
+@param[in]  pk  PRIMARY KEY value
+@return hash value */
+static uint64_t row_log_pk_hash(const dtuple_t *pk) {
+  uint64_t hash{};
+
+  for (ulint i = 0; i < dtuple_get_n_fields(pk); ++i) {
+    const auto field = dtuple_get_nth_field(pk, i);
+    hash =
+        row_log_pk_hash_field(static_cast<const byte *>(dfield_get_data(field)),
+                              dfield_get_len(field), hash);
+  }
+
+  return hash;
+}
+
+/** Set the bits of a PRIMARY KEY value in row_log_t::pk_bits. The latch of a
+secondary index page orders the bits that are set before a record of the
+page is modified with a later read of the page.
+@param[in,out]  log   row log of the clustered index, with pk_bits
+@param[in]      hash  hash of the PRIMARY KEY value */
+static void row_log_pk_set(row_log_t *log, uint64_t hash) {
+  uint64_t bits[2];
+  row_log_pk_bits(log, hash, bits);
+
+  for (const auto bit : bits) {
+    log->pk_bits[bit / 64].fetch_or(uint64_t{1} << (bit % 64),
+                                    std::memory_order_relaxed);
+  }
+}
+
+/** Note in row_log_t::pk_bits that a row of a table that is being rebuilt
+was modified. The modification of the clustered index record calls this
+before any secondary index record of the row is modified.
+@param[in,out]  log      row log of the clustered index
+@param[in]      rec      clustered index record of the row
+@param[in]      index    clustered index
+@param[in]      offsets  rec_get_offsets(rec, index) */
+static void row_log_table_note_pk(row_log_t *log, const rec_t *rec,
+                                  const dict_index_t *index,
+                                  const ulint *offsets) {
+  if (log->pk_bits == nullptr) {
+    return;
+  }
+
+  uint64_t hash{};
+
+  for (ulint i = 0; i < dict_index_get_n_unique(index); ++i) {
+    ulint len;
+    const auto field = rec_get_nth_field(index, rec, offsets, i, &len);
+    hash = row_log_pk_hash_field(field, len, hash);
+  }
+
+  row_log_pk_set(log, hash);
+}
+
+void row_log_table_note_rollback(dict_index_t *index, const dtuple_t *pk) {
+  ut_ad(index->is_clustered());
+  ut_ad(dtuple_get_n_fields(pk) == dict_index_get_n_unique(index));
+
+  /* As in row_undo_mod_clust(): the rollback holds a metadata lock that
+  prevents a rebuild from starting, and the index latch keeps the log from
+  being freed while the row is noted. */
+  if (!dict_index_is_online_ddl(index)) {
+    return;
+  }
+
+  rw_lock_s_lock(&index->lock, UT_LOCATION_HERE);
+
+  if (!index->is_corrupted() && dict_index_is_online_ddl(index) &&
+      index->online_log->error == DB_SUCCESS &&
+      index->online_log->pk_bits != nullptr) {
+    row_log_pk_set(index->online_log, row_log_pk_hash(pk));
+  }
+
+  rw_lock_s_unlock(&index->lock);
+}
+
+bool row_log_table_row_unchanged(const dict_index_t *index, const dtuple_t *pk,
+                                 const ReadView *view) {
+  ut_ad(index->is_clustered());
+  ut_ad(dtuple_get_n_fields(pk) == dict_index_get_n_unique(index));
+
+  /* The same conditions as in row_log_table_delete() and
+  row_log_table_low(), which note no row when one of them holds. */
+  if (index->is_corrupted() || !dict_index_is_online_ddl(index) ||
+      index->online_log->error != DB_SUCCESS) {
+    return false;
+  }
+
+  const auto log = index->online_log;
+
+  /* The read view must see every transaction with an id below
+  pk_start_trx_id. */
+  if (log->pk_bits == nullptr || view->up_limit_id() < log->pk_start_trx_id) {
+    return false;
+  }
+
+  uint64_t bits[2];
+  row_log_pk_bits(log, row_log_pk_hash(pk), bits);
+
+  for (const auto bit : bits) {
+    const auto word = log->pk_bits[bit / 64].load(std::memory_order_relaxed);
+
+    if ((word & (uint64_t{1} << (bit % 64))) == 0) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 struct crypt_info_t {
   /** Encryption algorithm */
@@ -711,6 +876,8 @@ void row_log_table_delete(
   ut_ad(rw_lock_own_flagged(&index->lock,
                             RW_LOCK_FLAG_S | RW_LOCK_FLAG_X | RW_LOCK_FLAG_SX));
 
+  row_log_table_note_pk(index->online_log, rec, index, offsets);
+
   dict_table_t *new_table = index->online_log->table;
   dict_index_t *new_index = new_table->first_index();
 
@@ -1025,6 +1192,9 @@ static void row_log_table_low(const rec_t *rec, const dtuple_t *ventry,
   ut_ad(fil_page_get_type(page_align(rec)) == FIL_PAGE_INDEX);
   ut_ad(page_is_leaf(page_align(rec)));
   ut_ad(page_is_comp(page_align(rec)) == rec_offs_comp(offsets));
+
+  row_log_table_note_pk(index->online_log, rec, index, offsets);
+
   /* old_pk=row_log_table_get_pk() [not needed in INSERT] is a prefix
   of the clustered index record (PRIMARY KEY,DB_TRX_ID,DB_ROLL_PTR),
   with no information on virtual columns */
@@ -3351,6 +3521,34 @@ bool row_log_allocate(dict_index_t *index, dict_table_t *table, bool same_pk,
   log->n_old_vcol = index->table->n_v_cols;
   log->crypt_tail = log->crypt_head = nullptr;
   log->index = index;
+  log->pk_bits = nullptr;
+  log->pk_n_bits = 0;
+  log->pk_start_trx_id = trx_sys_get_next_trx_id_or_no();
+
+  /* Only a rebuild that keeps the PRIMARY KEY copies the secondary indexes,
+  and reads them with row_log_table_row_unchanged(). */
+  if (table != nullptr && same_pk &&
+      UT_LIST_GET_LEN(index->table->indexes) > 1 &&
+      row_log_pk_is_binary(index)) {
+    /* About a byte per row, so that the bits of the rows that are modified
+    during the rebuild rarely make another row look modified. The estimate
+    of the number of rows is limited before it is rounded up. */
+    constexpr uint64_t max_bits = uint64_t{1} << 29;
+    const uint64_t n_rows =
+        std::min<uint64_t>(index->table->stat_n_rows, max_bits / 8);
+    const uint64_t n_bits = std::clamp<uint64_t>(ut_2_power_up(n_rows * 8 + 1),
+                                                 uint64_t{1} << 20, max_bits);
+    const auto mem = ut::malloc_withkey(UT_NEW_THIS_FILE_PSI_KEY, n_bits / 8);
+
+    if (mem != nullptr) {
+      log->pk_bits = static_cast<std::atomic<uint64_t> *>(mem);
+      log->pk_n_bits = n_bits;
+
+      for (uint64_t i = 0; i < n_bits / 64; ++i) {
+        new (&log->pk_bits[i]) std::atomic<uint64_t>{0};
+      }
+    }
+  }
 
   dict_index_set_online_status(index, ONLINE_INDEX_CREATION);
   index->online_log = log;
@@ -3394,6 +3592,8 @@ void row_log_free(row_log_t *&log) /*!< in,own: row log */
     ut::free_large_page(log->crypt_tail, ut::fallback_to_normal_page_t{});
     log->crypt_tail = nullptr;
   }
+
+  ut::free(log->pk_bits);
 
   mutex_free(&log->mutex);
   ut::free(log);

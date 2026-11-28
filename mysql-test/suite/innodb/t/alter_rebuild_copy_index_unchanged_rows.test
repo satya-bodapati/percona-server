@@ -1,0 +1,104 @@
+#
+# An online rebuild that copies the secondary indexes reads them in the read
+# view of the rebuild. On a page that was modified after the read view was
+# created, a record of a row that the row log of the rebuild shows unchanged
+# is checked by its delete mark, and the other records by the version of
+# their clustered index record. A debug build checks both ways for each such
+# record. The DML below runs after the read view was created and before the
+# scan: primary key updates, a key changed and changed back, a rollback, and
+# a transaction that commits only after the scan. t2 gets the committed DML
+# and is read to check t1.
+#
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/have_innodb_16k.inc
+--source include/count_sessions.inc
+
+SET SESSION innodb_parallel_read_threads = 4;
+SET SESSION cte_max_recursion_depth = 100000;
+
+CREATE TABLE t1 (
+  id INT NOT NULL PRIMARY KEY,
+  a INT NOT NULL,
+  b VARCHAR(200),
+  u INT,
+  t TEXT,
+  KEY ka (a),
+  KEY kb (b(20), a DESC),
+  UNIQUE KEY ku (u),
+  KEY kt (t(10))
+) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
+
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 30000)
+  SELECT n, n % 1000, REPEAT(CHAR(97 + n % 26), n % 150),
+         IF(n % 3 = 0, NULL, n),
+         IF(n % 500 = 0, REPEAT(CHAR(65 + n % 26), 20000),
+            REPEAT(CHAR(65 + n % 26), n % 40))
+  FROM seq;
+CREATE TABLE t2 LIKE t1;
+INSERT INTO t2 SELECT * FROM t1;
+
+SET DEBUG_SYNC = 'ddl_parallel_scan_start SIGNAL scan WAIT_FOR dml_done';
+--send OPTIMIZE TABLE t1
+
+--connect (con1, localhost, root,,)
+SET DEBUG_SYNC = 'now WAIT_FOR scan';
+--let $tbl= t1
+--source suite/innodb/include/alter_rebuild_copy_index_dml.inc
+--let $tbl= t2
+--source suite/innodb/include/alter_rebuild_copy_index_dml.inc
+
+--echo # Primary key updates.
+UPDATE t1 SET id = id + 100000 WHERE id BETWEEN 7000 AND 7050;
+UPDATE t2 SET id = id + 100000 WHERE id BETWEEN 7000 AND 7050;
+--echo # A key changed and changed back: the old entry is delete-marked and
+--echo # then no longer delete-marked.
+UPDATE t1 SET a = a + 5 WHERE id BETWEEN 8000 AND 8050;
+UPDATE t1 SET a = a - 5 WHERE id BETWEEN 8000 AND 8050;
+--echo # A rollback.
+START TRANSACTION;
+UPDATE t1 SET a = a + 7, b = CONCAT('r', b) WHERE id BETWEEN 9000 AND 9100;
+DELETE FROM t1 WHERE id BETWEEN 9200 AND 9300;
+INSERT INTO t1
+  WITH RECURSIVE seq(n) AS (SELECT 40001 UNION ALL SELECT n + 1 FROM seq WHERE n < 40100)
+  SELECT n, n % 13, CONCAT('n', n), NULL, 'N' FROM seq;
+ROLLBACK;
+
+--connect (con2, localhost, root,,)
+--echo # A transaction that the read view does not see, open during the scan.
+START TRANSACTION;
+UPDATE t1 SET a = a + 11, u = NULL WHERE id BETWEEN 10000 AND 10100;
+DELETE FROM t1 WHERE id BETWEEN 10200 AND 10250;
+
+--connection con1
+SET DEBUG_SYNC = 'now SIGNAL dml_done';
+--echo # Wait until the scan is done and OPTIMIZE waits for con2.
+let $wait_condition =
+  SELECT COUNT(*) = 1 FROM information_schema.processlist
+  WHERE info = 'OPTIMIZE TABLE t1' AND state = 'Waiting for table metadata lock';
+--source include/wait_condition.inc
+
+--connection con2
+COMMIT;
+UPDATE t2 SET a = a + 11, u = NULL WHERE id BETWEEN 10000 AND 10100;
+DELETE FROM t2 WHERE id BETWEEN 10200 AND 10250;
+--disconnect con2
+
+--connection default
+--reap
+SET DEBUG_SYNC = 'RESET';
+--disconnect con1
+
+--let $tbl= t1
+--source suite/innodb/include/alter_rebuild_copy_index.inc
+--let $tbl= t2
+--source suite/innodb/include/alter_rebuild_copy_index.inc
+CHECK TABLE t1;
+SELECT COUNT(*) FROM t1 LEFT JOIN t2 USING (id)
+  WHERE t2.id IS NULL OR NOT (t1.a <=> t2.a AND t1.b <=> t2.b AND t1.u <=> t2.u
+                              AND t1.t <=> t2.t);
+SELECT COUNT(*) FROM t2 LEFT JOIN t1 USING (id) WHERE t1.id IS NULL;
+
+DROP TABLE t1, t2;
+--source include/wait_until_count_sessions.inc

@@ -484,6 +484,7 @@ dberr_t row_undo_ins(undo_node_t *node, /*!< in: row undo node */
 
   node->index = node->table->first_index();
   ut_ad(node->index->is_clustered());
+  row_log_table_note_rollback(node->index, node->ref);
   /* Skip the clustered index (the first index) */
   node->index = node->index->next();
 
